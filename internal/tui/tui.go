@@ -1,8 +1,8 @@
 // Package tui hosts the orch terminal UI. The layout is a two-pane skeleton:
 // a left column listing agent sessions and a main panel showing a gallery of
-// project cards. Project cards reflect live state from one or more root
-// directories scanned by WatchProjects; sessions remain placeholder data
-// until a later task wires them up.
+// project cards. Both panes reflect live state — projects from the
+// .project.yaml files scanned by WatchProjects, sessions from a channel the
+// daemon feeds in via its WatchSessions adapter.
 package tui
 
 import (
@@ -24,42 +24,51 @@ const (
 	paneProjects
 )
 
-type sessionItem struct {
-	name string
-	kind string
-}
-
 type projectsMsg struct {
 	views []ProjectView
 }
 
-type model struct {
-	width    int
-	height   int
-	focus    pane
-	sessions []sessionItem
-	projects []ProjectView
-	projCh   <-chan []ProjectView
-	loaded   bool
+type sessionsMsg struct {
+	views []SessionView
 }
 
-func newModel(projCh <-chan []ProjectView) model {
+type model struct {
+	width      int
+	height     int
+	focus      pane
+	sessions   []SessionView
+	sessCh     <-chan []SessionView
+	sessLoaded bool
+	sessSel    string
+	projects   []ProjectView
+	projCh     <-chan []ProjectView
+	loaded     bool
+}
+
+func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView) model {
+	// When no sessions source is wired in (standalone tui mode), short-circuit
+	// to the empty state so the pane shows "(none)" instead of an endless
+	// "(loading…)".
 	return model{
-		focus:  paneSessions,
-		projCh: projCh,
-		sessions: []sessionItem{
-			{name: "orch-project-a1b2c3", kind: "project"},
-			{name: "orch-planning-tui", kind: "planning"},
-			{name: "orch-task-layout-skeleton", kind: "task"},
-		},
+		focus:      paneSessions,
+		projCh:     projCh,
+		sessCh:     sessCh,
+		sessLoaded: sessCh == nil,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	if m.projCh == nil {
+	var cmds []tea.Cmd
+	if m.projCh != nil {
+		cmds = append(cmds, waitForProjects(m.projCh))
+	}
+	if m.sessCh != nil {
+		cmds = append(cmds, waitForSessions(m.sessCh))
+	}
+	if len(cmds) == 0 {
 		return nil
 	}
-	return waitForProjects(m.projCh)
+	return tea.Batch(cmds...)
 }
 
 func waitForProjects(ch <-chan []ProjectView) tea.Cmd {
@@ -72,6 +81,16 @@ func waitForProjects(ch <-chan []ProjectView) tea.Cmd {
 	}
 }
 
+func waitForSessions(ch <-chan []SessionView) tea.Cmd {
+	return func() tea.Msg {
+		views, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return sessionsMsg{views: views}
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -81,19 +100,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projects = msg.views
 		m.loaded = true
 		return m, waitForProjects(m.projCh)
+	case sessionsMsg:
+		m.sessions = msg.views
+		m.sessLoaded = true
+		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
+		return m, waitForSessions(m.sessCh)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
-		case "tab", "shift+tab", "right", "left", "h", "l":
+		case "tab", "shift+tab":
+			m.focus = togglePane(m.focus)
+		case "right", "l":
+			m.focus = paneProjects
+		case "left", "h":
+			m.focus = paneSessions
+		case "up":
 			if m.focus == paneSessions {
-				m.focus = paneProjects
-			} else {
-				m.focus = paneSessions
+				m.sessSel = moveSelection(m.sessions, m.sessSel, -1)
+			}
+		case "down":
+			if m.focus == paneSessions {
+				m.sessSel = moveSelection(m.sessions, m.sessSel, 1)
 			}
 		}
 	}
 	return m, nil
+}
+
+func togglePane(p pane) pane {
+	if p == paneSessions {
+		return paneProjects
+	}
+	return paneSessions
 }
 
 var (
@@ -117,12 +156,24 @@ var (
 	statusWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	statusBlocked = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	statusDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+	statusRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	cardNameStyle = lipgloss.NewStyle().Bold(true)
 	cardBorder    = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1)
+	sessionRowSelectedStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("212"))
+)
+
+// Marker glyphs for the sessions pane. The selected row gets a filled marker;
+// other rows get whitespace of the same width so the agent-name column stays
+// aligned regardless of which row is selected.
+const (
+	sessionMarkerSelected = "▶ "
+	sessionMarkerIdle     = "  "
 )
 
 // Card sizing. Width is a target; the layout falls back to a single-column
@@ -165,20 +216,65 @@ func (m model) renderSessions(width, height int) string {
 	var b strings.Builder
 	b.WriteString(paneTitleStyle.Render("Sessions"))
 	b.WriteString("\n\n")
+	if !m.sessLoaded {
+		b.WriteString(dimStyle.Render("(loading…)"))
+		return style.Render(b.String())
+	}
 	if len(m.sessions) == 0 {
 		b.WriteString(dimStyle.Render("(none)"))
-	} else {
-		for _, s := range m.sessions {
-			line := fmt.Sprintf("• %s", s.name)
-			line = truncate(line, innerWidth)
-			kind := dimStyle.Render("  " + s.kind)
-			b.WriteString(line)
-			b.WriteString("\n")
-			b.WriteString(truncate(kind, innerWidth))
+		return style.Render(b.String())
+	}
+	for i, s := range m.sessions {
+		b.WriteString(renderSessionRow(s, s.ID == m.sessSel, innerWidth))
+		if i < len(m.sessions)-1 {
 			b.WriteString("\n")
 		}
 	}
 	return style.Render(b.String())
+}
+
+// renderSessionRow draws one session as a two-line block: the headline carries
+// the agent kind and project; the second line carries a colored status
+// indicator. Truncation happens on the raw text before any style is applied so
+// the byte-slice in truncate never tears an ANSI escape.
+func renderSessionRow(s SessionView, selected bool, width int) string {
+	marker := sessionMarkerIdle
+	if selected {
+		marker = sessionMarkerSelected
+	}
+	head := marker + s.AgentName
+	if s.Project != "" {
+		head += "  " + s.Project
+	}
+	head = truncate(head, width)
+	if selected {
+		head = sessionRowSelectedStyle.Render(head)
+	}
+
+	statusText := truncate("  "+sessionStatusGlyph(s.Status)+" "+s.Status, width)
+	statusStyled := sessionStatusStyle(s.Status).Render(statusText)
+	return head + "\n" + statusStyled
+}
+
+// sessionStatusGlyph returns a compact symbol that pairs with the status
+// label. It mirrors the colored dots used by terminal status lines so the
+// pane reads at a glance.
+func sessionStatusGlyph(status string) string {
+	switch status {
+	case "running":
+		return "●"
+	default:
+		return "○"
+	}
+}
+
+func sessionStatusStyle(status string) lipgloss.Style {
+	switch status {
+	case "running":
+		return statusRunning
+	default:
+		return dimStyle
+	}
 }
 
 func (m model) renderProjects(width, height int) string {
@@ -315,7 +411,7 @@ func (m model) View() string {
 	}
 
 	header := titleStyle.Render("orch")
-	footer := hintStyle.Render("tab: switch pane  •  q: quit  •  focus: " + paneName(m.focus))
+	footer := hintStyle.Render("tab: switch pane  •  ↑/↓: select session  •  q: quit  •  focus: " + paneName(m.focus))
 
 	bodyHeight := m.height - lipgloss.Height(header) - lipgloss.Height(footer) - 1
 	if bodyHeight < 3 {
@@ -355,9 +451,11 @@ func paneName(p pane) string {
 }
 
 // Run launches the TUI. It scans the given roots for projects and live-updates
-// the gallery as files change. It blocks until the user quits or ctx is
-// cancelled. Roots may be empty, in which case the gallery shows "(none)".
-func Run(ctx context.Context, roots []string) error {
+// the gallery as files change; the sessions pane is fed by sessCh, which the
+// caller wires up to a real source (the daemon's WatchSessions) or leaves nil
+// for standalone/demo mode. Run blocks until the user quits or ctx is
+// cancelled.
+func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView) error {
 	tuiCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -366,7 +464,7 @@ func Run(ctx context.Context, roots []string) error {
 		ch = WatchProjects(tuiCtx, roots, time.Second)
 	}
 
-	p := tea.NewProgram(newModel(ch), tea.WithAltScreen(), tea.WithContext(tuiCtx))
+	p := tea.NewProgram(newModel(ch, sessCh), tea.WithAltScreen(), tea.WithContext(tuiCtx))
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
 	}

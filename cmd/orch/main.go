@@ -116,7 +116,10 @@ func runTUI(args []string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := tui.Run(ctx, roots); err != nil {
+	// The standalone `orch tui` mode has no daemon to subscribe to, so the
+	// sessions pane gets a nil source — it will render "(loading…)" until the
+	// daemon-integration task wires up a real channel.
+	if err := tui.Run(ctx, roots, nil); err != nil {
 		log.Fatal(err)
 	}
 }
