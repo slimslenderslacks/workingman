@@ -107,6 +107,8 @@ func runDaemon(args []string) {
 
 func runTUI(args []string) {
 	fs := flag.NewFlagSet("orch tui", flag.ExitOnError)
+	var roots rootsFlag
+	fs.Var(&roots, "root", "directory to scan for .project.yaml files (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -114,7 +116,7 @@ func runTUI(args []string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := tui.Run(ctx); err != nil {
+	if err := tui.Run(ctx, roots); err != nil {
 		log.Fatal(err)
 	}
 }
