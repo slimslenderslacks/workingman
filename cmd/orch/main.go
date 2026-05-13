@@ -17,6 +17,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/notify"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
+	"github.com/slimslenderslacks/work/internal/tui"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
@@ -33,16 +34,28 @@ func (r *rootsFlag) Set(s string) error {
 }
 
 func main() {
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "tui" {
+		runTUI(args[1:])
+		return
+	}
+	runDaemon(args)
+}
+
+func runDaemon(args []string) {
+	fs := flag.NewFlagSet("orch", flag.ExitOnError)
 	var roots rootsFlag
-	flag.Var(&roots, "root", "directory to watch (repeatable)")
-	auditPath := flag.String("audit-log", "logs/audit.log", "path to the audit log")
-	workspaceMode := flag.String("workspace-manager", "wsp", `workspace manager: "wsp" (real) or "stub" (test/dev)`)
-	stubRoot := flag.String("stub-workspace-root", "", `when --workspace-manager=stub, directory where workspaces are created (default: $TMPDIR/orch-workspaces)`)
-	flag.Parse()
+	fs.Var(&roots, "root", "directory to watch (repeatable)")
+	auditPath := fs.String("audit-log", "logs/audit.log", "path to the audit log")
+	workspaceMode := fs.String("workspace-manager", "wsp", `workspace manager: "wsp" (real) or "stub" (test/dev)`)
+	stubRoot := fs.String("stub-workspace-root", "", `when --workspace-manager=stub, directory where workspaces are created (default: $TMPDIR/orch-workspaces)`)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
 
 	if len(roots) == 0 {
 		fmt.Fprintln(os.Stderr, "at least one --root is required")
-		flag.Usage()
+		fs.Usage()
 		os.Exit(2)
 	}
 
@@ -90,6 +103,20 @@ func main() {
 		log.Fatal(err)
 	}
 	a.Log("daemon_stop")
+}
+
+func runTUI(args []string) {
+	fs := flag.NewFlagSet("orch tui", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := tui.Run(ctx); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func buildWorkspaceManager(mode, stubRoot string) (workspace.Manager, error) {

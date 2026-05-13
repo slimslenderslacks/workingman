@@ -139,7 +139,40 @@ In-process is the more direct fit for the described feature.
 - External tools: `tmux`, `claude` (claude-code CLI), `wsp` (optional).
 - No Makefile or justfile.
 
-## 6. Notes from README.md / design.md
+## 6. Library Choice: bubbletea
+
+Picked **bubbletea** (`github.com/charmbracelet/bubbletea`), paired with
+**lipgloss** (`github.com/charmbracelet/lipgloss`) for styling.
+
+- Native Go — matches the daemon's runtime (`go.mod:1`), so the TUI can be
+  embedded in-process without an FFI boundary or sidecar process.
+- Elm-style `Model / Update / View` fits the read-only views described in §4:
+  the sessions pane and projects gallery are both pure projections of daemon
+  state, which maps cleanly onto `tea.Msg` ticks and re-renders.
+- `tea.WithContext` integrates with the existing `signal.NotifyContext`-driven
+  shutdown in `cmd/orch/main.go`, so the TUI shares the daemon's lifetime.
+- Mature ecosystem (`bubbles` widgets, `lipgloss` styling) for the gallery and
+  list rendering work that follows this task.
+
+Alternatives considered: `tview` (immediate-mode, less idiomatic for the
+projection-style updates we want), `gocui` (lower-level, more wiring per pane).
+
+### Wiring
+
+- `internal/tui/tui.go` hosts the bubbletea program. Current model renders a
+  centered "hello, TUI" screen and quits on `q` / `esc` / `ctrl+c`.
+- `cmd/orch/main.go` now dispatches on the first argument: `orch tui` runs the
+  TUI, anything else falls through to the existing daemon flag parsing. The
+  daemon invocation is unchanged.
+
+### Run
+
+```
+go build -o orch ./cmd/orch
+./orch tui
+```
+
+## 7. Notes from README.md / design.md
 
 Both confirm the state machine `ready → working → {done | blocked}` and the
 agent roster (project / planning / task / wolf / commit). `design.md` notes
