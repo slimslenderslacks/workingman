@@ -121,7 +121,7 @@ func (d *Daemon) startSession(key string, plan runner.Plan, onEnd func()) {
 		)
 		return
 	}
-	if !d.trackSession(key, sess, onEnd) {
+	if !d.trackSession(key, sess, plan.Kind, onEnd) {
 		_ = sess.Close()
 	}
 }

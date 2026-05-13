@@ -31,7 +31,16 @@ type Daemon struct {
 	ctx       context.Context // assigned at Run() entry; used by session goroutines
 
 	sessionsMu sync.Mutex
-	sessions   map[string]agent.Session // keyed by project file path
+	sessions   map[string]sessionEntry // keyed by project file path
+}
+
+// sessionEntry bundles a live agent.Session with the metadata the TUI's
+// sessions view needs. Stored under Daemon.sessions and exposed via
+// ListSessions / WatchSessions.
+type sessionEntry struct {
+	sess      agent.Session
+	kind      agent.Kind
+	startedAt time.Time
 }
 
 type Option func(*Daemon)
@@ -70,7 +79,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		audit:    a,
 		watcher:  w,
 		notifier: notify.Noop{},
-		sessions: map[string]agent.Session{},
+		sessions: map[string]sessionEntry{},
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -119,8 +128,8 @@ func (d *Daemon) shutdown() {
 	}
 	d.sessionsMu.Lock()
 	defer d.sessionsMu.Unlock()
-	for key, sess := range d.sessions {
-		if err := sess.Close(); err != nil {
+	for key, entry := range d.sessions {
+		if err := entry.sess.Close(); err != nil {
 			d.audit.Log("session_close_error", "key", key, "err", err.Error())
 		}
 		delete(d.sessions, key)
@@ -133,15 +142,22 @@ func (d *Daemon) shutdown() {
 // launch the next agent for the same key — task→commit and commit→next-task
 // transitions are chained this way.
 //
+// kind is stored alongside the session so ListSessions / WatchSessions can
+// surface it to the TUI without consulting the runner Plan.
+//
 // Returns false if a session is already running for key (caller should treat
 // the new launch as a duplicate).
-func (d *Daemon) trackSession(key string, sess agent.Session, onEnd func()) bool {
+func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, onEnd func()) bool {
 	d.sessionsMu.Lock()
 	if _, ok := d.sessions[key]; ok {
 		d.sessionsMu.Unlock()
 		return false
 	}
-	d.sessions[key] = sess
+	d.sessions[key] = sessionEntry{
+		sess:      sess,
+		kind:      kind,
+		startedAt: time.Now(),
+	}
 	d.sessionsMu.Unlock()
 
 	go func() {
