@@ -65,7 +65,7 @@ func TestMoveSelectionUnknownCurrent(t *testing.T) {
 }
 
 func TestSessionsMsgPopulatesPaneAndSelection(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView))
+	m := newModel(nil, make(<-chan []SessionView), nil)
 	if m.sessLoaded {
 		t.Fatal("model with non-nil sessCh should start unloaded")
 	}
@@ -86,7 +86,7 @@ func TestSessionsMsgPopulatesPaneAndSelection(t *testing.T) {
 }
 
 func TestSessionsMsgPreservesSelectionAcrossRefresh(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView))
+	m := newModel(nil, make(<-chan []SessionView), nil)
 	step1, _ := m.Update(sessionsMsg{views: []SessionView{
 		{ID: "a", AgentName: "task"},
 		{ID: "b", AgentName: "project"},
@@ -111,7 +111,7 @@ func TestSessionsMsgPreservesSelectionAcrossRefresh(t *testing.T) {
 }
 
 func TestSessionsMsgFallsBackWhenSelectionDisappears(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView))
+	m := newModel(nil, make(<-chan []SessionView), nil)
 	step1, _ := m.Update(sessionsMsg{views: []SessionView{
 		{ID: "a"}, {ID: "b"},
 	}})
@@ -130,7 +130,7 @@ func TestSessionsMsgFallsBackWhenSelectionDisappears(t *testing.T) {
 }
 
 func TestArrowKeysOnlyAffectSessionsWhenFocused(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView))
+	m := newModel(nil, make(<-chan []SessionView), nil)
 	step1, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a"}, {ID: "b"}}})
 	m = step1.(model)
 	// Focus the projects pane.
@@ -174,7 +174,7 @@ func TestRenderSessionRowSelectedHasMarker(t *testing.T) {
 }
 
 func TestRenderSessionsEmpty(t *testing.T) {
-	m := newModel(nil, nil)
+	m := newModel(nil, nil, nil)
 	out := m.renderSessions(30, 10)
 	if !strings.Contains(out, "(none)") {
 		t.Errorf("empty sessions should say '(none)'; got:\n%s", out)
@@ -182,7 +182,7 @@ func TestRenderSessionsEmpty(t *testing.T) {
 }
 
 func TestRenderSessionsLoadingState(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView))
+	m := newModel(nil, make(<-chan []SessionView), nil)
 	out := m.renderSessions(30, 10)
 	if !strings.Contains(out, "loading") {
 		t.Errorf("unloaded sessions should show loading hint; got:\n%s", out)
@@ -190,7 +190,7 @@ func TestRenderSessionsLoadingState(t *testing.T) {
 }
 
 func TestRenderSessionsShowsSelectedMarker(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView))
+	m := newModel(nil, make(<-chan []SessionView), nil)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
 		{ID: "a", AgentName: "task", Project: "alpha", Status: "running"},
 		{ID: "b", AgentName: "project", Project: "bravo", Status: "running"},

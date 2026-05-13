@@ -33,19 +33,22 @@ type sessionsMsg struct {
 }
 
 type model struct {
-	width      int
-	height     int
-	focus      pane
-	sessions   []SessionView
-	sessCh     <-chan []SessionView
-	sessLoaded bool
-	sessSel    string
-	projects   []ProjectView
-	projCh     <-chan []ProjectView
-	loaded     bool
+	width         int
+	height        int
+	focus         pane
+	sessions      []SessionView
+	sessCh        <-chan []SessionView
+	sessLoaded    bool
+	sessSel       string
+	sessionsWidth int
+	projects      []ProjectView
+	projCh        <-chan []ProjectView
+	loaded        bool
+	attacher      tmuxAttacher
+	statusMsg     string
 }
 
-func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView) model {
+func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, attacher tmuxAttacher) model {
 	// When no sessions source is wired in (standalone tui mode), short-circuit
 	// to the empty state so the pane shows "(none)" instead of an endless
 	// "(loading…)".
@@ -54,6 +57,7 @@ func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView) model {
 		projCh:     projCh,
 		sessCh:     sessCh,
 		sessLoaded: sessCh == nil,
+		attacher:   attacher,
 	}
 }
 
@@ -96,6 +100,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.sessionsWidth, _ = paneWidths(m.width)
 	case projectsMsg:
 		m.projects = msg.views
 		m.loaded = true
@@ -105,27 +110,145 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessLoaded = true
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, waitForSessions(m.sessCh)
+	case attachResultMsg:
+		if msg.err != nil {
+			m.statusMsg = fmt.Sprintf("attach %s: %v", msg.target, msg.err)
+		} else {
+			m.statusMsg = ""
+		}
+		return m, nil
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "tab", "shift+tab":
 			m.focus = togglePane(m.focus)
+			m.statusMsg = ""
 		case "right", "l":
 			m.focus = paneProjects
+			m.statusMsg = ""
 		case "left", "h":
 			m.focus = paneSessions
+			m.statusMsg = ""
 		case "up":
 			if m.focus == paneSessions {
 				m.sessSel = moveSelection(m.sessions, m.sessSel, -1)
+				m.statusMsg = ""
 			}
 		case "down":
 			if m.focus == paneSessions {
 				m.sessSel = moveSelection(m.sessions, m.sessSel, 1)
+				m.statusMsg = ""
+			}
+		case "enter":
+			if m.focus == paneSessions {
+				return m.attachSelected()
 			}
 		}
 	}
 	return m, nil
+}
+
+// handleMouse routes a mouse event to its pane. A left-button press inside
+// the sessions pane selects the row under the cursor and immediately attaches
+// to it — the task's "click to attach" UX trumps click-to-select-only.
+func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	if m.sessionsWidth <= 0 || msg.X < 0 || msg.X >= m.sessionsWidth {
+		return m, nil
+	}
+	idx := sessionRowAtY(msg.Y, len(m.sessions))
+	if idx < 0 {
+		m.focus = paneSessions
+		return m, nil
+	}
+	m.focus = paneSessions
+	m.sessSel = m.sessions[idx].ID
+	m.statusMsg = ""
+	return m.attachSelected()
+}
+
+// attachSelected dispatches the tmux-attach command for the currently
+// selected session row. The actual suspend/resume is owned by bubbletea via
+// tea.ExecProcess; this model just returns the Cmd.
+func (m model) attachSelected() (tea.Model, tea.Cmd) {
+	if m.attacher == nil {
+		m.statusMsg = "tmux attach disabled (no attacher wired)"
+		return m, nil
+	}
+	target, ok := selectedTmuxTarget(m.sessions, m.sessSel)
+	if !ok {
+		m.statusMsg = "no session selected"
+		return m, nil
+	}
+	m.statusMsg = ""
+	return m, m.attacher.Attach(target)
+}
+
+func selectedTmuxTarget(views []SessionView, id string) (string, bool) {
+	for _, v := range views {
+		if v.ID == id {
+			return v.TmuxTarget, true
+		}
+	}
+	return "", false
+}
+
+// sessionRowAtY maps an absolute y row to a session index using the same
+// layout constants View() renders with: header(1) + pane top border(1) +
+// "Sessions" title + blank(2) + per-session triplet of (head, status,
+// separator). The separator row is intentionally a dead zone so clicking
+// between rows doesn't pick the wrong session.
+func sessionRowAtY(y, count int) int {
+	const (
+		headerLines    = 1
+		paneTopBorder  = 1
+		paneTitleLines = 2
+		rowsPerSession = 3
+	)
+	rel := y - (headerLines + paneTopBorder + paneTitleLines)
+	if rel < 0 {
+		return -1
+	}
+	idx := rel / rowsPerSession
+	if rel%rowsPerSession == 2 {
+		return -1
+	}
+	if idx < 0 || idx >= count {
+		return -1
+	}
+	return idx
+}
+
+// paneWidths reproduces View()'s sessions/projects split so handleMouse can
+// decide whether a click landed in the sessions pane without re-rendering.
+// Keep this in lockstep with the width clamps used at the top of View().
+func paneWidths(width int) (sessionsWidth, projectsWidth int) {
+	if width <= 0 {
+		return 0, 0
+	}
+	sessionsWidth = width / 3
+	if sessionsWidth < 20 {
+		sessionsWidth = 20
+	}
+	if sessionsWidth > 40 {
+		sessionsWidth = 40
+	}
+	if sessionsWidth > width-10 {
+		sessionsWidth = width - 10
+		if sessionsWidth < 10 {
+			sessionsWidth = width
+		}
+	}
+	projectsWidth = width - sessionsWidth
+	if projectsWidth < 1 {
+		projectsWidth = 1
+	}
+	return sessionsWidth, projectsWidth
 }
 
 func togglePane(p pane) pane {
@@ -166,6 +289,8 @@ var (
 	sessionRowSelectedStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("212"))
+	statusErrStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196"))
 )
 
 // Marker glyphs for the sessions pane. The selected row gets a filled marker;
@@ -411,36 +536,30 @@ func (m model) View() string {
 	}
 
 	header := titleStyle.Render("orch")
-	footer := hintStyle.Render("tab: switch pane  •  ↑/↓: select session  •  q: quit  •  focus: " + paneName(m.focus))
+	footer := m.renderFooter()
 
 	bodyHeight := m.height - lipgloss.Height(header) - lipgloss.Height(footer) - 1
 	if bodyHeight < 3 {
 		bodyHeight = 3
 	}
 
-	sessionsWidth := m.width / 3
-	if sessionsWidth < 20 {
-		sessionsWidth = 20
-	}
-	if sessionsWidth > 40 {
-		sessionsWidth = 40
-	}
-	if sessionsWidth > m.width-10 {
-		sessionsWidth = m.width - 10
-		if sessionsWidth < 10 {
-			sessionsWidth = m.width
-		}
-	}
-	projectsWidth := m.width - sessionsWidth
-	if projectsWidth < 1 {
-		projectsWidth = 1
-	}
+	sessionsWidth, projectsWidth := paneWidths(m.width)
 
 	left := m.renderSessions(sessionsWidth, bodyHeight)
 	right := m.renderProjects(projectsWidth, bodyHeight)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+// renderFooter draws the bottom hint line. When statusMsg is set (typically a
+// tmux-attach failure), it replaces the keybinding hint so the error is
+// front-and-centre instead of buried.
+func (m model) renderFooter() string {
+	if m.statusMsg != "" {
+		return statusErrStyle.Render(m.statusMsg)
+	}
+	return hintStyle.Render("tab: switch pane  •  ↑/↓: select session  •  enter/click: attach  •  q: quit  •  focus: " + paneName(m.focus))
 }
 
 func paneName(p pane) string {
@@ -455,6 +574,10 @@ func paneName(p pane) string {
 // caller wires up to a real source (the daemon's WatchSessions) or leaves nil
 // for standalone/demo mode. Run blocks until the user quits or ctx is
 // cancelled.
+//
+// Mouse cell-motion is enabled so the sessions pane responds to clicks; the
+// tmux-attach plumbing uses tea.ExecProcess, which suspends and restores the
+// alt-screen automatically.
 func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView) error {
 	tuiCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -464,7 +587,12 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView) error
 		ch = WatchProjects(tuiCtx, roots, time.Second)
 	}
 
-	p := tea.NewProgram(newModel(ch, sessCh), tea.WithAltScreen(), tea.WithContext(tuiCtx))
+	p := tea.NewProgram(
+		newModel(ch, sessCh, newTmuxAttacher()),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+		tea.WithContext(tuiCtx),
+	)
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
 	}
