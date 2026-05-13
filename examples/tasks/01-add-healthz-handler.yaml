@@ -1,0 +1,24 @@
+# tasks/*.yaml — written by the planning agent, mutated by task/wolf/commit
+# agents and the daemon. The daemon computes the ready set from `depends_on`.
+
+name: add-healthz-handler
+
+description: |
+  Add an HTTP handler at GET /healthz in the gateway repo that returns 200 OK
+  with a small JSON body { "status": "ok" }. Wire it into the existing router.
+
+# Names of other tasks that must reach status=committed before this one is ready.
+depends_on: []
+
+# One of: ready | running | success | failed | blocked | committed
+status: ready
+
+# Incremented each time the daemon restarts the task after a failure.
+# At >= 3 the daemon stops restarting and marks the project blocked.
+attempts: 0
+
+# Populated only when status=failed.
+failure_reason: ""
+
+# Populated only when status=blocked.
+blocked_reason: ""

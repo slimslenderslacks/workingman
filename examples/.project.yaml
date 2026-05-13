@@ -1,0 +1,28 @@
+# .project.yaml — populated by the project agent, mutated by the daemon and
+# subsequent agents. The daemon ignores fsnotify events where updated_by=daemon
+# so it does not loop on its own writes.
+
+description: |
+  Add a /healthz endpoint to the gateway and a matching probe in the deploy
+  manifest so the new k8s readiness check has something to hit.
+
+# Repos the workspace needs. Passed to `wsp` when the workspace is created.
+repos:
+  - org: docker
+    name: gateway
+  - org: docker
+    name: deploy-manifests
+
+# Target branch — also used as the workspace name.
+branch: feat/healthz-probe
+
+# One of: ready | working | blocked | done
+status: ready
+
+# Cron schedule for daemon-driven wake-ups. Standard 5-field cron.
+# Empty / omitted means "no scheduled wake-ups, event-driven only".
+cron: "*/15 * * * *"
+
+# Who last wrote this file. Daemon ignores fsnotify events where this is "daemon".
+# Values: agent | daemon
+updated_by: agent

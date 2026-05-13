@@ -1,0 +1,13 @@
+name: add-readiness-probe
+
+description: |
+  In the deploy-manifests repo, add a readinessProbe to the gateway Deployment
+  that GETs /healthz on the container's HTTP port every 10s.
+
+depends_on:
+  - add-healthz-handler
+
+status: ready
+attempts: 0
+failure_reason: ""
+blocked_reason: ""
