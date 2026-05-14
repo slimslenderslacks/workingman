@@ -16,6 +16,9 @@ type SessionView struct {
 	TmuxTarget string
 	Status     string
 	StartedAt  time.Time
+	// TaskName is the name of the task the agent is operating on. Set for
+	// task/commit agents; empty for project/planning/wolf.
+	TaskName string
 }
 
 // reconcileSelection returns the session ID the pane should keep highlighted

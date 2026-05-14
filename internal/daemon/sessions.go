@@ -38,6 +38,10 @@ type SessionInfo struct {
 	TmuxTarget string
 	Status     SessionStatus
 	StartedAt  time.Time
+	// TaskName is the task this agent is operating on. Populated only for
+	// task and commit agents — empty for project/planning/wolf agents,
+	// which don't own a single task.
+	TaskName string
 }
 
 // ListSessions returns a snapshot of every session the daemon is currently
@@ -55,6 +59,7 @@ func (d *Daemon) ListSessions() []SessionInfo {
 			TmuxTarget: entry.sess.Name(),
 			Status:     SessionStatusRunning,
 			StartedAt:  entry.startedAt,
+			TaskName:   entry.taskName,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -130,5 +135,6 @@ func sessionInfoEqual(a, b SessionInfo) bool {
 		a.Project == b.Project &&
 		a.TmuxTarget == b.TmuxTarget &&
 		a.Status == b.Status &&
-		a.StartedAt.Equal(b.StartedAt)
+		a.StartedAt.Equal(b.StartedAt) &&
+		a.TaskName == b.TaskName
 }

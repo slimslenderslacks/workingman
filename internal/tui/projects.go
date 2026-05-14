@@ -31,10 +31,24 @@ type ProjectView struct {
 	// TaskCounts holds the number of tasks observed in each task.Status. A
 	// status with zero tasks is omitted from the map.
 	TaskCounts map[task.Status]int
+	// Tasks is the full list of tasks for the project, in the order
+	// taskgraph.Tasks returns them (alphabetical by name). Populated in
+	// the same scan pass that computes TaskCounts so the Tasks pane
+	// doesn't have to re-walk disk.
+	Tasks []TaskView
 	// LastUpdate is the mtime of the .project.yaml file at scan time. Diff
 	// logic uses it to detect changes even if the project's structured
 	// fields are unchanged.
 	LastUpdate time.Time
+}
+
+// TaskView is the minimal snapshot the Tasks pane renders: a task's name
+// and its current status. Kept narrow so the diff logic in projectViewEqual
+// stays cheap and a future "skipped" status (see workingman#1) plugs in
+// without churn.
+type TaskView struct {
+	Name   string
+	Status task.Status
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
@@ -88,6 +102,7 @@ func loadProjectView(path string) (ProjectView, bool) {
 	if info, err := os.Stat(path); err == nil {
 		mtime = info.ModTime()
 	}
+	counts, tasks := tasksFor(filepath.Join(filepath.Dir(path), "tasks"))
 	return ProjectView{
 		Name:        filepath.Base(filepath.Dir(path)),
 		Path:        path,
@@ -95,21 +110,28 @@ func loadProjectView(path string) (ProjectView, bool) {
 		Branch:      pr.Branch,
 		Status:      pr.Status,
 		Repos:       append([]project.Repo(nil), pr.Repos...),
-		TaskCounts:  taskCountsFor(filepath.Join(filepath.Dir(path), "tasks")),
+		TaskCounts:  counts,
+		Tasks:       tasks,
 		LastUpdate:  mtime,
 	}, true
 }
 
-func taskCountsFor(tasksDir string) map[task.Status]int {
+// tasksFor loads the taskgraph and returns both the per-status counts and
+// the ordered list of task views. Both are derived from the same scan so a
+// project that has 12 tasks doesn't pay for the YAML decode twice.
+func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 	counts := map[task.Status]int{}
 	g, err := taskgraph.Load(tasksDir)
 	if err != nil || g.Empty() {
-		return counts
+		return counts, nil
 	}
-	for _, t := range g.Tasks() {
+	gTasks := g.Tasks()
+	tasks := make([]TaskView, 0, len(gTasks))
+	for _, t := range gTasks {
 		counts[t.Status]++
+		tasks = append(tasks, TaskView{Name: t.Name, Status: t.Status})
 	}
-	return counts
+	return counts, tasks
 }
 
 // WatchProjects polls roots on interval and emits a snapshot whenever the
@@ -175,6 +197,52 @@ func projectViewsEqual(a, b []ProjectView) bool {
 	return true
 }
 
+// reconcileProjectSelection returns the project path the gallery should keep
+// highlighted after a snapshot refresh. Mirrors reconcileSelection (sessions)
+// so the projects pane stays stable across live updates.
+func reconcileProjectSelection(views []ProjectView, prevPath string) string {
+	if len(views) == 0 {
+		return ""
+	}
+	if prevPath != "" {
+		for _, v := range views {
+			if v.Path == prevPath {
+				return prevPath
+			}
+		}
+	}
+	return views[0].Path
+}
+
+// moveProjectSelection shifts the project selection by delta cards, clamped
+// to the list bounds.
+func moveProjectSelection(views []ProjectView, currentPath string, delta int) string {
+	if len(views) == 0 {
+		return ""
+	}
+	idx := -1
+	for i, v := range views {
+		if v.Path == currentPath {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		if delta >= 0 {
+			return views[0].Path
+		}
+		return views[len(views)-1].Path
+	}
+	idx += delta
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(views) {
+		idx = len(views) - 1
+	}
+	return views[idx].Path
+}
+
 func projectViewEqual(a, b ProjectView) bool {
 	if a.Name != b.Name || a.Path != b.Path ||
 		a.Description != b.Description || a.Branch != b.Branch ||
@@ -194,6 +262,14 @@ func projectViewEqual(a, b ProjectView) bool {
 	}
 	for k, v := range a.TaskCounts {
 		if b.TaskCounts[k] != v {
+			return false
+		}
+	}
+	if len(a.Tasks) != len(b.Tasks) {
+		return false
+	}
+	for i := range a.Tasks {
+		if a.Tasks[i] != b.Tasks[i] {
 			return false
 		}
 	}

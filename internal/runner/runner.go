@@ -57,14 +57,32 @@ type Plan struct {
 // `sleep 1` or similar.
 type CommandBuilder func(kind agent.Kind, workingDir string) []string
 
+const initialPrompt = "Read .orch/instructions.md and .orch/context.yaml, then follow the instructions."
+
 // DefaultCommandBuilder returns the production command: claude-code, told to
 // read the instructions and context the orchestrator just wrote.
-func DefaultCommandBuilder(_ agent.Kind, _ string) []string {
-	return []string{
-		"claude",
-		"--dangerously-skip-permissions",
-		"Read .orch/instructions.md and .orch/context.yaml, then follow the instructions.",
+//
+// Autonomous kinds (planning, task, commit) use --print so claude executes
+// one turn — including any tool use needed to complete the task — and
+// exits. That exit is what closes the tmux session and lets the daemon's
+// session tracker chain to the next phase. Without --print, claude sits at
+// an interactive prompt after finishing its work and the session never
+// terminates on its own.
+//
+// Interactive kinds (project, wolf) omit --print: the human is expected to
+// attach via tmux and drive the conversation, so claude must remain at the
+// prompt between turns.
+func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
+	cmd := []string{"claude", "--dangerously-skip-permissions"}
+	if !isInteractiveKind(kind) {
+		cmd = append(cmd, "--print")
 	}
+	cmd = append(cmd, initialPrompt)
+	return cmd
+}
+
+func isInteractiveKind(kind agent.Kind) bool {
+	return kind == agent.ProjectAgent || kind == agent.WolfAgent
 }
 
 type Runner struct {

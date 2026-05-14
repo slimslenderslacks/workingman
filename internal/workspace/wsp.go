@@ -38,6 +38,12 @@ func (m *WspManager) Create(ctx context.Context, branch string, repos []Repo) (s
 	if branch == "" {
 		return "", fmt.Errorf("workspace: branch is required")
 	}
+	// Bootstrap: a task or commit agent's workspace cannot be created
+	// until its repos are present in wsp's global registry. Auto-register
+	// any that aren't already there before calling `wsp new`.
+	if err := m.ensureRegistered(ctx, repos); err != nil {
+		return "", err
+	}
 	args := []string{"new", "--json"}
 	if len(repos) == 0 {
 		args = append(args, "--empty")
@@ -110,6 +116,97 @@ func (m *WspManager) Remove(ctx context.Context, branch string) error {
 	return fmt.Errorf("wsp rm %s: %s", branch, errMsg)
 }
 
+// ensureRegistered makes sure every repo in repos is present in wsp's
+// global registry. Missing repos are added via `wsp registry add` with an
+// SSH URL derived from their identity. Repos given by shortname only are
+// trusted to be resolvable by wsp itself.
+func (m *WspManager) ensureRegistered(ctx context.Context, repos []Repo) error {
+	if len(repos) == 0 {
+		return nil
+	}
+	var needIdent bool
+	for _, r := range repos {
+		if r.Identity != "" {
+			needIdent = true
+			break
+		}
+	}
+	if !needIdent {
+		return nil
+	}
+	known, err := m.registeredIdentities(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range repos {
+		if r.Identity == "" {
+			continue
+		}
+		if _, ok := known[r.Identity]; ok {
+			continue
+		}
+		url := sshURLFromIdentity(r.Identity)
+		if url == "" {
+			return fmt.Errorf("wsp: cannot derive URL from identity %q", r.Identity)
+		}
+		if err := m.registryAdd(ctx, url); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *WspManager) registeredIdentities(ctx context.Context) (map[string]struct{}, error) {
+	out, runErr := exec.CommandContext(ctx, m.binary(), "registry", "ls", "--json").Output()
+	entries, parseErr := parseRegistryListResult(out)
+	if parseErr != nil {
+		if runErr != nil {
+			return nil, wspExecError("wsp registry ls", runErr)
+		}
+		return nil, parseErr
+	}
+	known := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		known[e.Identity] = struct{}{}
+	}
+	return known, nil
+}
+
+func (m *WspManager) registryAdd(ctx context.Context, url string) error {
+	out, runErr := exec.CommandContext(ctx, m.binary(), "registry", "add", "--json", url).Output()
+	ok, errMsg, parseErr := parseRegistryAddResult(out)
+	if parseErr != nil {
+		if runErr != nil {
+			return wspExecError("wsp registry add", runErr)
+		}
+		return parseErr
+	}
+	if ok {
+		return nil
+	}
+	if errMsg == "" && runErr != nil {
+		return wspExecError("wsp registry add", runErr)
+	}
+	return fmt.Errorf("wsp registry add %s: %s", url, errMsg)
+}
+
+// sshURLFromIdentity converts a wsp identity ("github.com/<org>/<name>") to
+// the SSH clone URL wsp's registry-add accepts. Works for any provider that
+// uses the standard git@host:org/repo.git format (github, gitlab, bitbucket).
+// Returns "" for identities that don't have a host/org/name shape.
+func sshURLFromIdentity(identity string) string {
+	first := strings.Index(identity, "/")
+	if first <= 0 || first == len(identity)-1 {
+		return ""
+	}
+	host := identity[:first]
+	rest := identity[first+1:]
+	if !strings.Contains(rest, "/") {
+		return ""
+	}
+	return "git@" + host + ":" + rest + ".git"
+}
+
 // wspExecError unwraps exec.ExitError so the message includes wsp's stderr.
 func wspExecError(prefix string, err error) error {
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -145,6 +242,21 @@ type wspRmResult struct {
 	Error string `json:"error"`
 }
 
+type wspRegistryListResult struct {
+	Repos []wspRegistryEntry `json:"repos"`
+}
+
+type wspRegistryEntry struct {
+	Identity  string `json:"identity"`
+	Shortname string `json:"shortname"`
+	URL       string `json:"url"`
+}
+
+type wspRegistryAddResult struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error"`
+}
+
 // parseNewResult returns (path, errMsg, parseErr).
 //
 // `wsp new --json` prints a human "Creating workspace…" line to stdout before
@@ -171,6 +283,34 @@ func parseLsResult(out []byte) ([]wspListEntry, error) {
 		return nil, fmt.Errorf("wsp ls: parse JSON: %w", err)
 	}
 	return r.Workspaces, nil
+}
+
+// parseRegistryListResult extracts the {identity, shortname, url} entries
+// from `wsp registry ls --json` output.
+func parseRegistryListResult(out []byte) ([]wspRegistryEntry, error) {
+	body := jsonBody(out)
+	if body == nil {
+		return nil, fmt.Errorf("wsp registry ls: no JSON in output: %s", strings.TrimSpace(string(out)))
+	}
+	var r wspRegistryListResult
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, fmt.Errorf("wsp registry ls: parse JSON: %w", err)
+	}
+	return r.Repos, nil
+}
+
+// parseRegistryAddResult returns (ok, errMsg, parseErr) — same shape as the
+// other `{ok, error}` wsp responses.
+func parseRegistryAddResult(out []byte) (bool, string, error) {
+	body := jsonBody(out)
+	if body == nil {
+		return false, "", fmt.Errorf("wsp registry add: no JSON in output")
+	}
+	var r wspRegistryAddResult
+	if err := json.Unmarshal(body, &r); err != nil {
+		return false, "", fmt.Errorf("wsp registry add: parse JSON: %w", err)
+	}
+	return r.OK, r.Error, nil
 }
 
 // parseRmResult returns (ok, errMsg, parseErr).

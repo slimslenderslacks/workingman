@@ -46,6 +46,39 @@ func (s *fakeSession) Close() error {
 	return nil
 }
 
+func TestDefaultCommandBuilderModes(t *testing.T) {
+	autonomous := []agent.Kind{agent.PlanningAgent, agent.TaskAgent, agent.CommitAgent}
+	interactive := []agent.Kind{agent.ProjectAgent, agent.WolfAgent}
+
+	for _, k := range autonomous {
+		cmd := DefaultCommandBuilder(k, "/ws")
+		if !contains(cmd, "--print") {
+			t.Errorf("%s should use --print (non-interactive), got %v", k, cmd)
+		}
+		if !contains(cmd, "--dangerously-skip-permissions") {
+			t.Errorf("%s missing --dangerously-skip-permissions: %v", k, cmd)
+		}
+	}
+	for _, k := range interactive {
+		cmd := DefaultCommandBuilder(k, "/ws")
+		if contains(cmd, "--print") {
+			t.Errorf("%s must NOT use --print (interactive needs the prompt), got %v", k, cmd)
+		}
+		if !contains(cmd, "--dangerously-skip-permissions") {
+			t.Errorf("%s missing --dangerously-skip-permissions: %v", k, cmd)
+		}
+	}
+}
+
+func contains(s []string, want string) bool {
+	for _, v := range s {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestProjectAgentSkipsWorkspaceCreate(t *testing.T) {
 	workingDir := t.TempDir()
 	projectPath := filepath.Join(workingDir, ".project.yaml")

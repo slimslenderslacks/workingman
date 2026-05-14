@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,34 @@ func (d *Daemon) addTree(root string) error {
 		}
 		return nil
 	})
+}
+
+// startupScan re-evaluates every .project.yaml under each watched root.
+// fsnotify only fires on changes-from-now, so without this call a daemon
+// restart strands any project whose file is already on disk in a
+// non-terminal state (e.g. status=ready that the previous daemon hadn't
+// gotten around to dispatching). Running handleProject for each file is
+// safe — it's the same code path fsnotify events drive, including the
+// daemon-writer self-filter and session dedup.
+func (d *Daemon) startupScan() {
+	for _, root := range d.roots {
+		var found int
+		_ = filepath.WalkDir(root, func(p string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			if filepath.Base(p) != ".project.yaml" {
+				return nil
+			}
+			found++
+			d.handleProject(p)
+			return nil
+		})
+		d.audit.Log("startup_scan", "root", root, "projects", strconv.Itoa(found))
+	}
 }
 
 func (d *Daemon) maybeWatchNewDir(path string) bool {

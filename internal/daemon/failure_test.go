@@ -199,6 +199,84 @@ func TestTaskFailureExhaustsRetriesAndBlocks(t *testing.T) {
 	}
 }
 
+// erroringLauncher returns a Launch error for every call. Used to simulate
+// workspace-creation or tmux failures so the daemon's "session_start_error
+// blocks the project" path is exercised without needing a real broken
+// environment.
+type erroringLauncher struct{ msg string }
+
+func (e *erroringLauncher) Launch(_ context.Context, _ agent.Spec) (agent.Session, error) {
+	return nil, fmt.Errorf("%s", e.msg)
+}
+
+func TestTaskAgentStartFailureBlocksProject(t *testing.T) {
+	root := t.TempDir()
+	buf := &safeBuf{}
+	a := audit.New(buf)
+	rec := &notify.Recorder{}
+	r := &runner.Runner{
+		Workspaces: workspace.NewStub(t.TempDir()),
+		Launcher:   &erroringLauncher{msg: `wsp new tui: repo "github.com/foo/bar" not found`},
+		Audit:      a,
+		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "true"} },
+	}
+	d, err := New([]string{root}, a, WithRunner(r), WithNotifier(rec))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = d.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	if ok, snap := waitFor(t, buf, "watch_root"); !ok {
+		t.Fatalf("daemon never ready: %s", snap)
+	}
+
+	// Seed a ready task.
+	tasksDir := filepath.Join(root, "tasks")
+	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
+		t.Fatalf("mkdir tasks: %v", err)
+	}
+	taskPath := filepath.Join(tasksDir, "the-task.yaml")
+	mustSaveTask(t, taskPath, &task.Task{Name: "the-task", Status: task.StatusReady})
+
+	projectPath := filepath.Join(root, ".project.yaml")
+	if err := project.SaveAs(projectPath, &project.Project{
+		Description: "test",
+		Branch:      "feat/no-repos",
+		Status:      project.StatusWorking,
+		Repos:       []project.Repo{{Org: "foo", Name: "bar"}},
+	}, project.WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+
+	if ok, snap := waitForWithin(t, buf, "session_start_error", 3*time.Second); !ok {
+		t.Fatalf("no session_start_error: %s", snap)
+	}
+	if ok, snap := waitForWithin(t, buf, "project_blocked", 3*time.Second); !ok {
+		t.Fatalf("no project_blocked after start failure: %s", snap)
+	}
+
+	// Notification sent.
+	if calls := rec.Calls(); len(calls) == 0 {
+		t.Fatalf("notifier never called")
+	} else if !strings.Contains(calls[0].Message, "the-task") {
+		t.Errorf("notification missing task name: %+v", calls[0])
+	}
+
+	// Persisted state.
+	reloaded, err := project.Load(projectPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Status != project.StatusBlocked {
+		t.Errorf("status = %q, want blocked", reloaded.Status)
+	}
+	if reloaded.UpdatedBy != project.WriterDaemon {
+		t.Errorf("updated_by = %q, want daemon", reloaded.UpdatedBy)
+	}
+}
+
 func TestTaskBlockedStatusBlocksProject(t *testing.T) {
 	buf, root, rec := setupRunnable(t)
 

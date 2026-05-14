@@ -93,6 +93,76 @@ func TestParseRmResultNotFound(t *testing.T) {
 	}
 }
 
+func TestSSHURLFromIdentity(t *testing.T) {
+	cases := []struct {
+		identity, want string
+	}{
+		{"github.com/foo/bar", "git@github.com:foo/bar.git"},
+		{"github.com/slimslenderslacks/workingman", "git@github.com:slimslenderslacks/workingman.git"},
+		{"gitlab.example.com/team/repo", "git@gitlab.example.com:team/repo.git"},
+		{"", ""},
+		{"foo", ""},
+		{"foo/", ""},
+		{"foo/bar", ""},
+		{"github.com/onlyone", ""},
+		{"/leading-slash/x", ""},
+	}
+	for _, c := range cases {
+		if got := sshURLFromIdentity(c.identity); got != c.want {
+			t.Errorf("sshURLFromIdentity(%q) = %q, want %q", c.identity, got, c.want)
+		}
+	}
+}
+
+func TestParseRegistryListResult(t *testing.T) {
+	out := []byte(`{
+  "repos": [
+    {
+      "identity": "github.com/docker/dash",
+      "shortname": "dash",
+      "url": "git@github.com:docker/dash.git"
+    },
+    {
+      "identity": "github.com/docker/gantry",
+      "shortname": "gantry",
+      "url": "https://github.com/docker/gantry.git"
+    }
+  ]
+}`)
+	entries, err := parseRegistryListResult(out)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	if entries[0].Identity != "github.com/docker/dash" || entries[1].URL != "https://github.com/docker/gantry.git" {
+		t.Errorf("entries = %+v", entries)
+	}
+}
+
+func TestParseRegistryAddResultSuccess(t *testing.T) {
+	out := []byte(`{"ok": true, "message": "added"}`)
+	ok, errMsg, err := parseRegistryAddResult(out)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !ok || errMsg != "" {
+		t.Errorf("ok=%v errMsg=%q", ok, errMsg)
+	}
+}
+
+func TestParseRegistryAddResultError(t *testing.T) {
+	out := []byte(`{"error": "could not clone: Permission denied (publickey)"}`)
+	ok, errMsg, err := parseRegistryAddResult(out)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if ok || errMsg == "" {
+		t.Errorf("expected error: ok=%v errMsg=%q", ok, errMsg)
+	}
+}
+
 func TestParseNewRejectsNonJSON(t *testing.T) {
 	out := []byte("totally not json")
 	if _, _, err := parseNewResult(out); err == nil {

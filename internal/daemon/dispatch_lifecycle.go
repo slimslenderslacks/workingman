@@ -134,6 +134,11 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		d.transitionProjectDone(projectPath, p)
 		return
 	}
+	if next := firstUncommittedSuccess(g); next != nil {
+		d.audit.Log("resume_pending_commit", "task", next.Name)
+		d.launchCommitAgent(projectPath, p, next)
+		return
+	}
 	ready := g.Ready()
 	if len(ready) == 0 {
 		// No ready tasks but not all committed — something is stuck (a
@@ -164,12 +169,16 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		Repos:       toWorkspaceRepos(p.Repos),
 		ProjectPath: projectPath,
 		TasksDir:    filepath.Join(root, "tasks"),
-		TaskPath:    filepath.Join(root, "tasks", t.Name+".yaml"),
+		TaskPath:    t.Path,
 		TaskName:    t.Name,
 	}
-	d.startSession(projectPath, plan, func() {
+	err := d.startSession(projectPath, plan, func() {
 		d.afterCommitSession(projectPath, plan.TaskPath, p)
 	})
+	if err != nil {
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("commit agent failed to start for %q: %v", t.Name, err))
+	}
 }
 
 // transitionProjectDone writes the project file with status:done and
@@ -211,6 +220,10 @@ func (d *Daemon) transitionProjectBlocked(projectPath string, p *project.Project
 // launchWolfAgent starts the wolf agent in the project's control directory.
 // It populates the FailedTasks slice in the Plan so the rendered prompt and
 // .orch/context.yaml both surface which tasks need attention.
+//
+// As with the other project-root agents, the session-end callback re-runs
+// handleProject so that if wolf flipped the project back to ready/working,
+// the daemon picks up where things left off.
 func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason string) {
 	if d.runner == nil {
 		return
@@ -231,7 +244,13 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 		FailedTasks: failedOrBlockedTaskPaths(tasksDir),
 	}
 	d.audit.Log("wolf_dispatch", "path", projectPath, "reason", reason)
-	d.startSession(projectPath, plan, nil)
+	// Ignore start error here: the project is already blocked, recursing
+	// into transitionProjectBlocked would loop. The session_start_error
+	// audit entry plus the notification we already sent are enough to
+	// surface the failure.
+	_ = d.startSession(projectPath, plan, func() {
+		d.handleProject(projectPath)
+	})
 }
 
 // failedOrBlockedTaskPaths returns absolute paths to every task in tasksDir

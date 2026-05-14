@@ -37,10 +37,15 @@ type Daemon struct {
 // sessionEntry bundles a live agent.Session with the metadata the TUI's
 // sessions view needs. Stored under Daemon.sessions and exposed via
 // ListSessions / WatchSessions.
+//
+// taskName is only set for task and commit agents — the other kinds
+// (project, planning, wolf) don't operate on a single task. The TUI uses
+// it to surface "what is this agent working on" in the sessions row.
 type sessionEntry struct {
 	sess      agent.Session
 	kind      agent.Kind
 	startedAt time.Time
+	taskName  string
 }
 
 type Option func(*Daemon)
@@ -101,6 +106,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		d.audit.Log("watch_root", "path", r)
 	}
+	d.startupScan()
 	for {
 		select {
 		case <-ctx.Done():
@@ -147,7 +153,7 @@ func (d *Daemon) shutdown() {
 //
 // Returns false if a session is already running for key (caller should treat
 // the new launch as a duplicate).
-func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, onEnd func()) bool {
+func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, taskName string, onEnd func()) bool {
 	d.sessionsMu.Lock()
 	if _, ok := d.sessions[key]; ok {
 		d.sessionsMu.Unlock()
@@ -157,6 +163,7 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, o
 		sess:      sess,
 		kind:      kind,
 		startedAt: time.Now(),
+		taskName:  taskName,
 	}
 	d.sessionsMu.Unlock()
 
@@ -166,9 +173,20 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, o
 		delete(d.sessions, key)
 		d.sessionsMu.Unlock()
 		d.audit.Log("session_ended", "key", key, "name", sess.Name())
-		if onEnd != nil {
-			onEnd()
+		if onEnd == nil {
+			return
 		}
+		// Skip onEnd when the daemon is shutting down. handleProject (used
+		// as onEnd by project-root agents) would otherwise re-dispatch
+		// against the still-on-disk state and cascade — every shutdown
+		// session-close spawns another launch, which is then immediately
+		// closed too, and so on until the test framework times out.
+		select {
+		case <-d.ctx.Done():
+			return
+		default:
+		}
+		onEnd()
 	}()
 	return true
 }

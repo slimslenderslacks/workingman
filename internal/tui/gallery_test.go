@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/slimslenderslacks/work/internal/project"
@@ -24,7 +25,7 @@ func TestRenderProjectCardIncludesNameStatusAndBreakdown(t *testing.T) {
 			task.StatusFailed:    1,
 		},
 	}
-	out := renderProjectCard(v, 32)
+	out := renderProjectCard(v, 32, false)
 	if !strings.Contains(out, "alpha") {
 		t.Errorf("card missing project name; got:\n%s", out)
 	}
@@ -43,7 +44,7 @@ func TestRenderProjectCardIncludesNameStatusAndBreakdown(t *testing.T) {
 
 func TestRenderProjectCardHandlesNoTasks(t *testing.T) {
 	v := ProjectView{Name: "bare", Status: project.StatusReady}
-	out := renderProjectCard(v, 32)
+	out := renderProjectCard(v, 32, false)
 	if !strings.Contains(out, "no tasks") {
 		t.Errorf("empty-task card should say 'no tasks'; got:\n%s", out)
 	}
@@ -57,8 +58,8 @@ func TestRenderProjectGridReflowsByWidth(t *testing.T) {
 		{Name: "delta", Status: project.StatusDone},
 	}
 
-	wide := renderProjectGrid(views, 200)
-	narrow := renderProjectGrid(views, 30)
+	wide := renderProjectGrid(views, "", 200)
+	narrow := renderProjectGrid(views, "", 30)
 
 	wideRows := strings.Count(wide, "\n")
 	narrowRows := strings.Count(narrow, "\n")
@@ -81,5 +82,97 @@ func TestRenderProjectGridReflowsByWidth(t *testing.T) {
 		if lipgloss.Width(line) > 200 {
 			t.Errorf("wide line exceeds requested width: %d", lipgloss.Width(line))
 		}
+	}
+}
+
+func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = sized.(model)
+	step, _ := m.Update(projectsMsg{views: []ProjectView{
+		{
+			Name:   "alpha",
+			Path:   "/x/alpha/.project.yaml",
+			Status: project.StatusWorking,
+			Tasks: []TaskView{
+				{Name: "register-repo", Status: task.StatusCommitted},
+				{Name: "survey", Status: task.StatusRunning},
+				{Name: "implement", Status: task.StatusReady},
+			},
+		},
+	}})
+	m = step.(model)
+
+	view := m.View()
+	for _, want := range []string{"Tasks", "register-repo", "survey", "implement", "committed", "running", "ready"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = sized.(model)
+	step, _ := m.Update(projectsMsg{views: []ProjectView{
+		{
+			Name: "alpha", Path: "/x/alpha/.project.yaml",
+			Status: project.StatusWorking,
+			Tasks:  []TaskView{{Name: "alpha-only", Status: task.StatusReady}},
+		},
+		{
+			Name: "bravo", Path: "/x/bravo/.project.yaml",
+			Status: project.StatusWorking,
+			Tasks:  []TaskView{{Name: "bravo-only", Status: task.StatusReady}},
+		},
+	}})
+	m = step.(model)
+
+	v1 := m.View()
+	if !strings.Contains(v1, "alpha-only") || strings.Contains(v1, "bravo-only") {
+		t.Errorf("initial view should show alpha-only and not bravo-only:\n%s", v1)
+	}
+
+	// Tab to projects pane, then down-arrow to select bravo.
+	tabbed, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = tabbed.(model)
+	down, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = down.(model)
+
+	v2 := m.View()
+	if !strings.Contains(v2, "bravo-only") || strings.Contains(v2, "alpha-only") {
+		t.Errorf("after selecting bravo, view should show bravo-only and not alpha-only:\n%s", v2)
+	}
+}
+
+func TestRenderTasksEmptyState(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = sized.(model)
+	step, _ := m.Update(projectsMsg{views: []ProjectView{
+		{Name: "empty", Path: "/x/empty/.project.yaml", Status: project.StatusReady},
+	}})
+	m = step.(model)
+	if !strings.Contains(m.View(), "Tasks") {
+		t.Errorf("tasks pane title missing")
+	}
+	if !strings.Contains(m.View(), "(none)") {
+		t.Errorf("empty tasks should show (none); got:\n%s", m.View())
+	}
+}
+
+func TestSelectedCardBorderUsesAccentColor(t *testing.T) {
+	// lipgloss strips colours in test environments (no TTY), so we can't
+	// compare rendered output. Verify the style values directly via the
+	// per-side getter (BorderForeground sets all four sides identically).
+	plain := cardBorder.GetBorderTopForeground()
+	sel := cardSelectedBorder.GetBorderTopForeground()
+	focused := focusedBorder.GetBorderTopForeground()
+	if plain == sel {
+		t.Errorf("cardSelectedBorder must use a different colour than cardBorder; both = %v", plain)
+	}
+	if sel != focused {
+		t.Errorf("cardSelectedBorder should share the focus accent colour; got %v, want %v", sel, focused)
 	}
 }

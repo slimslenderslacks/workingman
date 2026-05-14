@@ -72,13 +72,13 @@ func TestListSessionsReturnsTrackedSessions(t *testing.T) {
 	keyB := filepath.Join(t.TempDir(), "bravo", ".project.yaml")
 
 	sa := newStubSession("orch-task-alpha")
-	if !d.trackSession(keyA, sa, agent.TaskAgent, nil) {
+	if !d.trackSession(keyA, sa, agent.TaskAgent, "alpha-task", nil) {
 		t.Fatal("trackSession A returned false")
 	}
 	// Force distinct StartedAt so ordering is deterministic.
 	time.Sleep(2 * time.Millisecond)
 	sb := newStubSession("orch-project-bravo")
-	if !d.trackSession(keyB, sb, agent.ProjectAgent, nil) {
+	if !d.trackSession(keyB, sb, agent.ProjectAgent, "", nil) {
 		t.Fatal("trackSession B returned false")
 	}
 
@@ -121,7 +121,7 @@ func TestListSessionsRemovesEndedSessions(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
 	s := newStubSession("orch-task-alpha")
-	if !d.trackSession(key, s, agent.TaskAgent, nil) {
+	if !d.trackSession(key, s, agent.TaskAgent, "", nil) {
 		t.Fatal("trackSession returned false")
 	}
 	if got := d.ListSessions(); len(got) != 1 {
@@ -157,7 +157,7 @@ func TestWatchSessionsEmitsUpdates(t *testing.T) {
 
 	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
 	s := newStubSession("orch-task-alpha")
-	if !d.trackSession(key, s, agent.TaskAgent, nil) {
+	if !d.trackSession(key, s, agent.TaskAgent, "", nil) {
 		t.Fatal("trackSession returned false")
 	}
 

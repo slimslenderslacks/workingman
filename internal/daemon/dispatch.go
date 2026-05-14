@@ -59,7 +59,7 @@ func (d *Daemon) handleProject(path string) {
 	}
 	if p.Empty() {
 		d.audit.Log("project_empty", "path", path)
-		d.launchProjectRootAgent(path, agent.ProjectAgent, p, nil)
+		d.launchProjectRootAgent(path, agent.ProjectAgent, p)
 		return
 	}
 	d.audit.Log("project_updated",
@@ -70,7 +70,7 @@ func (d *Daemon) handleProject(path string) {
 	d.registerCronIfAny(path, p)
 	switch p.Status {
 	case project.StatusReady:
-		d.launchProjectRootAgent(path, agent.PlanningAgent, p, nil)
+		d.launchProjectRootAgent(path, agent.PlanningAgent, p)
 	case project.StatusWorking:
 		d.dispatchNextTask(path, p)
 	case project.StatusBlocked:
@@ -87,9 +87,13 @@ func (d *Daemon) handleProject(path string) {
 // directory (i.e. the dir holding the .project.yaml). The project, planning,
 // and wolf agents all use this path — they do not need a wsp workspace.
 //
-// onEnd is invoked after the agent's session exits and the entry is cleared
-// from the session map. Pass nil if no follow-up action is needed.
-func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *project.Project, onEnd func()) {
+// After the agent's session ends the daemon re-runs handleProject on the
+// same file. This is the *only* reliable trigger for the project→planning
+// and planning→working handoffs: the agent's file write almost always
+// arrives while its own session is still in the session map, so the
+// dispatch call it would have caused gets dedup-skipped. Re-handling on
+// session end re-reads whatever the agent left behind and advances state.
+func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *project.Project) {
 	if d.runner == nil {
 		return
 	}
@@ -106,12 +110,29 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 		Branch:      p.Branch,
 		Repos:       toWorkspaceRepos(p.Repos),
 	}
-	d.startSession(projectPath, plan, onEnd)
+	err := d.startSession(projectPath, plan, func() {
+		d.handleProject(projectPath)
+	})
+	// Project agent failure leaves an empty file — nothing to block.
+	// Wolf agent failure: the project is already blocked, recursing won't
+	// help. Planning agent failure should block so the project doesn't
+	// strand in status: ready forever.
+	if err != nil && kind == agent.PlanningAgent {
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("planning agent failed to start: %v", err))
+	}
 }
 
 // startSession is the single launching point: build a Spec via Runner, track
 // it, and arrange for onEnd to fire after it exits.
-func (d *Daemon) startSession(key string, plan runner.Plan, onEnd func()) {
+//
+// Returns the Runner error (and logs session_start_error) when the launch
+// itself fails. Callers decide how to recover: task and commit launches
+// transition the project to blocked so it doesn't strand; the wolf launch
+// only logs (we are already blocked, recursing won't help); the project
+// agent launch only logs (the file is empty, there is no project state to
+// block).
+func (d *Daemon) startSession(key string, plan runner.Plan, onEnd func()) error {
 	sess, err := d.runner.Start(d.ctx, plan)
 	if err != nil {
 		d.audit.Log("session_start_error",
@@ -119,11 +140,12 @@ func (d *Daemon) startSession(key string, plan runner.Plan, onEnd func()) {
 			"key", key,
 			"err", err.Error(),
 		)
-		return
+		return err
 	}
-	if !d.trackSession(key, sess, plan.Kind, onEnd) {
+	if !d.trackSession(key, sess, plan.Kind, plan.TaskName, onEnd) {
 		_ = sess.Close()
 	}
+	return nil
 }
 
 // handleTask logs every task-file change as a `task_file_updated` audit
@@ -184,11 +206,19 @@ func toWorkspaceRepos(in []project.Repo) []workspace.Repo {
 	return out
 }
 
-// dispatchNextTask loads the task graph for projectPath and launches a task
-// agent for the first ready task. If the graph is empty, the project is
-// freshly working but the planning agent hasn't written any tasks yet — we
-// log and wait for a tasks/*.yaml change to re-trigger evaluation. If every
-// task is already committed, we transition the project to done.
+// dispatchNextTask loads the task graph for projectPath and decides what to
+// run next. This is the single recovery point called from every angle —
+// status=working observation, startup_scan, cron firings — so it must be
+// idempotent and infer state purely from disk.
+//
+// Order of operations:
+//  1. All committed → transition to done.
+//  2. Any task stuck at status:success → resume its commit agent. This is
+//     the recovery for an interrupted task→commit handoff (daemon restart
+//     between task end and commit start, or a wolf-cycle that bypassed the
+//     normal afterTaskSession path).
+//  3. Any task in Ready() → launch task agent for the first.
+//  4. Nothing to do → log no_ready_tasks with the total count.
 func (d *Daemon) dispatchNextTask(projectPath string, p *project.Project) {
 	root := filepath.Dir(projectPath)
 	tasksDir := filepath.Join(root, "tasks")
@@ -202,12 +232,32 @@ func (d *Daemon) dispatchNextTask(projectPath string, p *project.Project) {
 		d.transitionProjectDone(projectPath, p)
 		return
 	}
+	if t := firstUncommittedSuccess(g); t != nil {
+		d.audit.Log("resume_pending_commit", "task", t.Name)
+		d.launchCommitAgent(projectPath, p, t)
+		return
+	}
 	ready := g.Ready()
 	if len(ready) == 0 {
-		d.audit.Log("no_ready_tasks", "path", projectPath, "tasks", "0")
+		d.audit.Log("no_ready_tasks",
+			"path", projectPath,
+			"total", fmt.Sprintf("%d", len(g.Tasks())),
+		)
 		return
 	}
 	d.launchTaskAgent(projectPath, p, ready[0])
+}
+
+// firstUncommittedSuccess returns the first task in deterministic order
+// whose status is success — i.e. the task agent finished but the commit
+// agent has not yet committed. nil if no such task exists.
+func firstUncommittedSuccess(g *taskgraph.Graph) *task.Task {
+	for _, t := range g.Tasks() {
+		if t.Status == task.StatusSuccess {
+			return t
+		}
+	}
+	return nil
 }
 
 // launchTaskAgent dispatches the first ready task to a task agent in a fresh
@@ -229,10 +279,16 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 		Repos:       toWorkspaceRepos(p.Repos),
 		ProjectPath: projectPath,
 		TasksDir:    filepath.Join(root, "tasks"),
-		TaskPath:    filepath.Join(root, "tasks", t.Name+".yaml"),
-		TaskName:    t.Name,
+		// Use the path the task was loaded from — filenames may carry
+		// sort prefixes ("00-register-repo.yaml") that don't match Name.
+		TaskPath: t.Path,
+		TaskName: t.Name,
 	}
-	d.startSession(projectPath, plan, func() {
+	err := d.startSession(projectPath, plan, func() {
 		d.afterTaskSession(projectPath, plan.TaskPath, p)
 	})
+	if err != nil {
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("task agent failed to start for %q: %v", t.Name, err))
+	}
 }

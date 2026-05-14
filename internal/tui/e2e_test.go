@@ -95,7 +95,7 @@ func TestEndToEndDaemonAndTUI(t *testing.T) {
 	defer tuiCancel()
 
 	prog := tea.NewProgram(
-		newModel(projects, sessions, att),
+		newModel(projects, sessions, nil, att),
 		tea.WithInput(nil),
 		tea.WithOutput(outBuf),
 		tea.WithContext(tuiCtx),
@@ -274,6 +274,7 @@ func adaptDaemonSessions(ctx context.Context, in <-chan []daemon.SessionInfo) <-
 						TmuxTarget: s.TmuxTarget,
 						Status:     string(s.Status),
 						StartedAt:  s.StartedAt,
+						TaskName:   s.TaskName,
 					}
 				}
 				select {

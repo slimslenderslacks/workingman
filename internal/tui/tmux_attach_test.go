@@ -2,7 +2,6 @@ package tui
 
 import (
 	"errors"
-	"os/exec"
 	"strings"
 	"testing"
 
@@ -33,11 +32,11 @@ func TestAttachReturnsErrorWhenTargetEmpty(t *testing.T) {
 
 func TestAttachReturnsErrorWhenBinaryMissing(t *testing.T) {
 	a := &defaultTmuxAttacher{
-		binary:   "tmux",
-		lookPath: func(string) (string, error) { return "", errors.New("not found") },
-		hasTTY:   func() bool { return true },
-		exists:   func(string, string) bool { return true },
-		build:    func(string, string) *exec.Cmd { return exec.Command("true") },
+		binary:       "tmux",
+		lookPath:     func(string) (string, error) { return "", errors.New("not found") },
+		exists:       func(string, string) bool { return true },
+		switchClient: func(string, string) bool { return false },
+		openInTerm:   func(string, string) error { return nil },
 	}
 	msg := runCmd(t, a.Attach("orch-task-alpha"))
 	res := msg.(attachResultMsg)
@@ -46,28 +45,13 @@ func TestAttachReturnsErrorWhenBinaryMissing(t *testing.T) {
 	}
 }
 
-func TestAttachReturnsErrorWhenNoTTY(t *testing.T) {
-	a := &defaultTmuxAttacher{
-		binary:   "tmux",
-		lookPath: func(string) (string, error) { return "/usr/bin/tmux", nil },
-		hasTTY:   func() bool { return false },
-		exists:   func(string, string) bool { return true },
-		build:    func(string, string) *exec.Cmd { return exec.Command("true") },
-	}
-	msg := runCmd(t, a.Attach("orch-task-alpha"))
-	res := msg.(attachResultMsg)
-	if res.err == nil || !strings.Contains(res.err.Error(), "TTY") {
-		t.Errorf("err = %v, want TTY error", res.err)
-	}
-}
-
 func TestAttachReturnsErrorWhenSessionDead(t *testing.T) {
 	a := &defaultTmuxAttacher{
-		binary:   "tmux",
-		lookPath: func(string) (string, error) { return "/usr/bin/tmux", nil },
-		hasTTY:   func() bool { return true },
-		exists:   func(string, string) bool { return false },
-		build:    func(string, string) *exec.Cmd { return exec.Command("true") },
+		binary:       "tmux",
+		lookPath:     func(string) (string, error) { return "/usr/bin/tmux", nil },
+		exists:       func(string, string) bool { return false },
+		switchClient: func(string, string) bool { return false },
+		openInTerm:   func(string, string) error { return nil },
 	}
 	msg := runCmd(t, a.Attach("orch-task-ghost"))
 	res := msg.(attachResultMsg)
@@ -76,6 +60,86 @@ func TestAttachReturnsErrorWhenSessionDead(t *testing.T) {
 	}
 	if res.target != "orch-task-ghost" {
 		t.Errorf("target = %q", res.target)
+	}
+}
+
+func TestAttachPrefersExistingClientOverNewWindow(t *testing.T) {
+	var switched, opened []string
+	a := &defaultTmuxAttacher{
+		binary:   "tmux",
+		lookPath: func(string) (string, error) { return "/usr/bin/tmux", nil },
+		exists:   func(string, string) bool { return true },
+		switchClient: func(_, target string) bool {
+			switched = append(switched, target)
+			return true
+		},
+		openInTerm: func(_, target string) error {
+			opened = append(opened, target)
+			return nil
+		},
+	}
+	msg := runCmd(t, a.Attach("orch-task-alpha"))
+	res := msg.(attachResultMsg)
+	if res.err != nil {
+		t.Errorf("unexpected err: %v", res.err)
+	}
+	if len(switched) != 1 || switched[0] != "orch-task-alpha" {
+		t.Errorf("switchClient called with %v, want [orch-task-alpha]", switched)
+	}
+	if len(opened) != 0 {
+		t.Errorf("openInTerm should not run when an existing client switched; got %v", opened)
+	}
+}
+
+func TestAttachFallsBackToOpenTerminalWhenNoClient(t *testing.T) {
+	var opened []string
+	a := &defaultTmuxAttacher{
+		binary:       "tmux",
+		lookPath:     func(string) (string, error) { return "/usr/bin/tmux", nil },
+		exists:       func(string, string) bool { return true },
+		switchClient: func(string, string) bool { return false },
+		openInTerm: func(_, target string) error {
+			opened = append(opened, target)
+			return nil
+		},
+	}
+	msg := runCmd(t, a.Attach("orch-task-alpha"))
+	res := msg.(attachResultMsg)
+	if res.err != nil {
+		t.Errorf("unexpected err: %v", res.err)
+	}
+	if len(opened) != 1 || opened[0] != "orch-task-alpha" {
+		t.Errorf("openInTerm called with %v, want [orch-task-alpha]", opened)
+	}
+}
+
+func TestAttachSurfaceErrorFromOpenInTerm(t *testing.T) {
+	a := &defaultTmuxAttacher{
+		binary:       "tmux",
+		lookPath:     func(string) (string, error) { return "/usr/bin/tmux", nil },
+		exists:       func(string, string) bool { return true },
+		switchClient: func(string, string) bool { return false },
+		openInTerm:   func(string, string) error { return errors.New("osascript exploded") },
+	}
+	msg := runCmd(t, a.Attach("orch-task-alpha"))
+	res := msg.(attachResultMsg)
+	if res.err == nil || !strings.Contains(res.err.Error(), "exploded") {
+		t.Errorf("err = %v, want it to mention 'exploded'", res.err)
+	}
+}
+
+func TestAppleScriptEscape(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"orch-task-tui", "orch-task-tui"},
+		{`weird"name`, `weird\"name`},
+		{`back\slash`, `back\\slash`},
+	}
+	for _, c := range cases {
+		if got := applescriptEscape(c.in); got != c.want {
+			t.Errorf("escape(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 
@@ -96,7 +160,7 @@ func (f *fakeAttacher) Attach(target string) tea.Cmd {
 
 func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), att)
+	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
 		{ID: "a", AgentName: "task", Project: "alpha", TmuxTarget: "orch-task-alpha"},
 		{ID: "b", AgentName: "task", Project: "bravo", TmuxTarget: "orch-task-bravo"},
@@ -114,7 +178,7 @@ func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 
 func TestEnterIgnoredWhenProjectsFocused(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), att)
+	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
 		{ID: "a", TmuxTarget: "orch-task-alpha"},
 	}})
@@ -133,7 +197,7 @@ func TestEnterIgnoredWhenProjectsFocused(t *testing.T) {
 
 func TestAttachResultErrorSetsStatusMsg(t *testing.T) {
 	att := &fakeAttacher{result: attachResultMsg{err: errors.New("boom")}}
-	m := newModel(nil, make(<-chan []SessionView), att)
+	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	// Width/height are needed so View() renders the footer.
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m = sized.(model)
@@ -154,7 +218,7 @@ func TestAttachResultErrorSetsStatusMsg(t *testing.T) {
 }
 
 func TestAttachResultSuccessClearsStatusMsg(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m.statusMsg = "leftover"
 	final, _ := m.Update(attachResultMsg{target: "x"})
 	m = final.(model)
@@ -165,7 +229,7 @@ func TestAttachResultSuccessClearsStatusMsg(t *testing.T) {
 
 func TestMouseClickAttachesSessionRow(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), att)
+	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	// Set window size first so paneWidths populates sessionsWidth.
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step.(model)
@@ -193,7 +257,7 @@ func TestMouseClickAttachesSessionRow(t *testing.T) {
 
 func TestMouseClickOutsideSessionsPaneIgnored(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), att)
+	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step.(model)
 	step2, _ := m.Update(sessionsMsg{views: []SessionView{

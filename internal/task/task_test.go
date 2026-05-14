@@ -48,8 +48,15 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if !reflect.DeepEqual(src, reloaded) {
-		t.Errorf("round-trip mismatch:\n src=%+v\n got=%+v", src, reloaded)
+	// Path is set from the load path and intentionally not persisted, so
+	// compare the rest of the struct after normalising it.
+	srcCopy := *src
+	srcCopy.Path = reloaded.Path
+	if !reflect.DeepEqual(&srcCopy, reloaded) {
+		t.Errorf("round-trip mismatch:\n src=%+v\n got=%+v", srcCopy, reloaded)
+	}
+	if reloaded.Path != dst {
+		t.Errorf("Path = %q, want %q", reloaded.Path, dst)
 	}
 }
 

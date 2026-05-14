@@ -80,9 +80,18 @@ func runDaemon(args []string) {
 		log.Fatal(err)
 	}
 
+	// A GUI-launched daemon inherits the bare macOS default PATH, missing
+	// the Nix profiles, Homebrew, etc. Augment so child shells (the tmux
+	// session running claude, git, wsp, ...) can find their binaries.
+	augmentedPATH := agent.AugmentSearchPath(agent.DefaultPATHCandidates())
+	tmuxBin, err := agent.ResolveTmux()
+	if err != nil {
+		log.Fatalf("locating tmux: %v\nPATH=%s", err, augmentedPATH)
+	}
+
 	r := &runner.Runner{
 		Workspaces: wsMgr,
-		Launcher:   &agent.TmuxLauncher{},
+		Launcher:   &agent.TmuxLauncher{Binary: tmuxBin},
 		Audit:      a,
 		// Command defaults to claude-code via runner.DefaultCommandBuilder.
 	}
@@ -104,6 +113,7 @@ func runDaemon(args []string) {
 		"workspace_manager", *workspaceMode,
 		"roots", strings.Join(roots, ","),
 		"headless", fmt.Sprintf("%t", *headless),
+		"tmux", tmuxBin,
 	)
 
 	if *headless {
@@ -136,7 +146,7 @@ func runDaemon(args []string) {
 
 	sessCh := adaptSessionFeed(ctx, d.WatchSessions(ctx, 0))
 
-	tuiErr := tui.Run(ctx, roots, sessCh)
+	tuiErr := tui.Run(ctx, roots, sessCh, *auditPath)
 
 	// TUI exited — either the user quit or ctx was already cancelled. Cancel
 	// to be sure, then wait for the daemon to wind down so its shutdown
@@ -186,6 +196,7 @@ func adaptSessionFeed(ctx context.Context, in <-chan []daemon.SessionInfo) <-cha
 						TmuxTarget: s.TmuxTarget,
 						Status:     string(s.Status),
 						StartedAt:  s.StartedAt,
+						TaskName:   s.TaskName,
 					}
 				}
 				select {
@@ -225,6 +236,7 @@ func runTUI(args []string) {
 	fs := flag.NewFlagSet("orch tui", flag.ExitOnError)
 	var roots rootsFlag
 	fs.Var(&roots, "root", "directory to scan for .project.yaml files (repeatable)")
+	auditPath := fs.String("audit-log", "", "path to an audit log file to tail in the bottom pane (optional)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -236,7 +248,7 @@ func runTUI(args []string) {
 	// sessions pane gets a nil source — the pane renders "(none)" in that
 	// case. To see live sessions, run `orch --root=...` (the integrated
 	// mode wires the daemon's WatchSessions into the TUI).
-	if err := tui.Run(ctx, roots, nil); err != nil {
+	if err := tui.Run(ctx, roots, nil, *auditPath); err != nil {
 		log.Fatal(err)
 	}
 }

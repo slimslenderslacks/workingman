@@ -47,6 +47,14 @@ type Task struct {
 	Attempts      int      `yaml:"attempts"`
 	FailureReason string   `yaml:"failure_reason"`
 	BlockedReason string   `yaml:"blocked_reason"`
+
+	// Path is the absolute file path the task was loaded from. It is set by
+	// Load and excluded from YAML so it round-trips cleanly. Callers use it
+	// when they need to read or write the task file again (e.g. the daemon
+	// reloading after a session ends), so they never have to reconstruct a
+	// path from Name — filenames may carry sort prefixes ("00-foo.yaml")
+	// that don't match the task's identity.
+	Path string `yaml:"-"`
 }
 
 func Load(path string) (*Task, error) {
@@ -58,6 +66,7 @@ func Load(path string) (*Task, error) {
 	if err := yaml.Unmarshal(data, &t); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	t.Path = path
 	return &t, nil
 }
 
