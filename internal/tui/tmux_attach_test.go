@@ -35,36 +35,34 @@ func TestAttachReturnsErrorWhenBinaryMissing(t *testing.T) {
 		binary:       "tmux",
 		lookPath:     func(string) (string, error) { return "", errors.New("not found") },
 		exists:       func(string, string) bool { return true },
-		switchClient: func(string, string) bool { return false },
-		openInTerm:   func(string, string) error { return nil },
+		switchClient: func(string, string) bool { return true },
 	}
-	msg := runCmd(t, a.Attach("orch-task-alpha"))
+	msg := runCmd(t, a.Attach("orch:task-alpha"))
 	res := msg.(attachResultMsg)
 	if res.err == nil || !strings.Contains(res.err.Error(), "tmux not found") {
 		t.Errorf("err = %v, want 'tmux not found'", res.err)
 	}
 }
 
-func TestAttachReturnsErrorWhenSessionDead(t *testing.T) {
+func TestAttachReturnsErrorWhenWindowDead(t *testing.T) {
 	a := &defaultTmuxAttacher{
 		binary:       "tmux",
 		lookPath:     func(string) (string, error) { return "/usr/bin/tmux", nil },
 		exists:       func(string, string) bool { return false },
-		switchClient: func(string, string) bool { return false },
-		openInTerm:   func(string, string) error { return nil },
+		switchClient: func(string, string) bool { return true },
 	}
-	msg := runCmd(t, a.Attach("orch-task-ghost"))
+	msg := runCmd(t, a.Attach("orch:task-ghost"))
 	res := msg.(attachResultMsg)
 	if res.err == nil || !strings.Contains(res.err.Error(), "not alive") {
 		t.Errorf("err = %v, want 'not alive' error", res.err)
 	}
-	if res.target != "orch-task-ghost" {
+	if res.target != "orch:task-ghost" {
 		t.Errorf("target = %q", res.target)
 	}
 }
 
-func TestAttachPrefersExistingClientOverNewWindow(t *testing.T) {
-	var switched, opened []string
+func TestAttachSwitchesAttachedClient(t *testing.T) {
+	var switched []string
 	a := &defaultTmuxAttacher{
 		binary:   "tmux",
 		lookPath: func(string) (string, error) { return "/usr/bin/tmux", nil },
@@ -73,72 +71,43 @@ func TestAttachPrefersExistingClientOverNewWindow(t *testing.T) {
 			switched = append(switched, target)
 			return true
 		},
-		openInTerm: func(_, target string) error {
-			opened = append(opened, target)
-			return nil
-		},
 	}
-	msg := runCmd(t, a.Attach("orch-task-alpha"))
+	msg := runCmd(t, a.Attach("orch:task-alpha"))
 	res := msg.(attachResultMsg)
 	if res.err != nil {
 		t.Errorf("unexpected err: %v", res.err)
 	}
-	if len(switched) != 1 || switched[0] != "orch-task-alpha" {
-		t.Errorf("switchClient called with %v, want [orch-task-alpha]", switched)
-	}
-	if len(opened) != 0 {
-		t.Errorf("openInTerm should not run when an existing client switched; got %v", opened)
+	if len(switched) != 1 || switched[0] != "orch:task-alpha" {
+		t.Errorf("switchClient called with %v, want [orch:task-alpha]", switched)
 	}
 }
 
-func TestAttachFallsBackToOpenTerminalWhenNoClient(t *testing.T) {
-	var opened []string
+func TestAttachWithoutClientReturnsHelpfulError(t *testing.T) {
 	a := &defaultTmuxAttacher{
 		binary:       "tmux",
 		lookPath:     func(string) (string, error) { return "/usr/bin/tmux", nil },
 		exists:       func(string, string) bool { return true },
 		switchClient: func(string, string) bool { return false },
-		openInTerm: func(_, target string) error {
-			opened = append(opened, target)
-			return nil
-		},
 	}
-	msg := runCmd(t, a.Attach("orch-task-alpha"))
+	msg := runCmd(t, a.Attach("orch:task-alpha"))
 	res := msg.(attachResultMsg)
-	if res.err != nil {
-		t.Errorf("unexpected err: %v", res.err)
+	if res.err == nil {
+		t.Fatalf("expected error explaining how to attach")
 	}
-	if len(opened) != 1 || opened[0] != "orch-task-alpha" {
-		t.Errorf("openInTerm called with %v, want [orch-task-alpha]", opened)
+	if !strings.Contains(res.err.Error(), "tmux attach -t orch") {
+		t.Errorf("error should suggest `tmux attach -t orch`; got %v", res.err)
 	}
 }
 
-func TestAttachSurfaceErrorFromOpenInTerm(t *testing.T) {
-	a := &defaultTmuxAttacher{
-		binary:       "tmux",
-		lookPath:     func(string) (string, error) { return "/usr/bin/tmux", nil },
-		exists:       func(string, string) bool { return true },
-		switchClient: func(string, string) bool { return false },
-		openInTerm:   func(string, string) error { return errors.New("osascript exploded") },
-	}
-	msg := runCmd(t, a.Attach("orch-task-alpha"))
-	res := msg.(attachResultMsg)
-	if res.err == nil || !strings.Contains(res.err.Error(), "exploded") {
-		t.Errorf("err = %v, want it to mention 'exploded'", res.err)
-	}
-}
-
-func TestAppleScriptEscape(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"orch-task-tui", "orch-task-tui"},
-		{`weird"name`, `weird\"name`},
-		{`back\slash`, `back\\slash`},
+func TestUmbrellaFromTargetExtractsSession(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"orch:task-alpha", "orch"},
+		{"customumbrella:task-x", "customumbrella"},
+		{"legacy-target", "orch"}, // falls back to default
 	}
 	for _, c := range cases {
-		if got := applescriptEscape(c.in); got != c.want {
-			t.Errorf("escape(%q) = %q, want %q", c.in, got, c.want)
+		if got := umbrellaFromTarget(c.in); got != c.want {
+			t.Errorf("umbrellaFromTarget(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -162,8 +131,8 @@ func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", AgentName: "task", Project: "alpha", TmuxTarget: "orch-task-alpha"},
-		{ID: "b", AgentName: "task", Project: "bravo", TmuxTarget: "orch-task-bravo"},
+		{ID: "a", AgentName: "task", Project: "alpha", TmuxTarget: "orch:task-alpha"},
+		{ID: "b", AgentName: "task", Project: "bravo", TmuxTarget: "orch:task-bravo"},
 	}})
 	m = step.(model)
 	// Move selection to b, then press Enter.
@@ -171,8 +140,8 @@ func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 	m = step2.(model)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	_ = runCmd(t, cmd)
-	if len(att.targets) != 1 || att.targets[0] != "orch-task-bravo" {
-		t.Errorf("targets = %v, want [orch-task-bravo]", att.targets)
+	if len(att.targets) != 1 || att.targets[0] != "orch:task-bravo" {
+		t.Errorf("targets = %v, want [orch:task-bravo]", att.targets)
 	}
 }
 
@@ -180,7 +149,7 @@ func TestEnterIgnoredWhenProjectsFocused(t *testing.T) {
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", TmuxTarget: "orch-task-alpha"},
+		{ID: "a", TmuxTarget: "orch:task-alpha"},
 	}})
 	m = step.(model)
 	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
@@ -202,7 +171,7 @@ func TestAttachResultErrorSetsStatusMsg(t *testing.T) {
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m = sized.(model)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", TmuxTarget: "orch-task-alpha"},
+		{ID: "a", TmuxTarget: "orch:task-alpha"},
 	}})
 	m = step.(model)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -234,8 +203,8 @@ func TestMouseClickAttachesSessionRow(t *testing.T) {
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step.(model)
 	step2, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", TmuxTarget: "orch-task-alpha"},
-		{ID: "b", TmuxTarget: "orch-task-bravo"},
+		{ID: "a", TmuxTarget: "orch:task-alpha"},
+		{ID: "b", TmuxTarget: "orch:task-bravo"},
 	}})
 	m = step2.(model)
 	// Click on row 1 (second session). sessionRowAtY: row 1 head is at y=7.
@@ -247,8 +216,8 @@ func TestMouseClickAttachesSessionRow(t *testing.T) {
 	})
 	m = final.(model)
 	_ = runCmd(t, cmd)
-	if len(att.targets) != 1 || att.targets[0] != "orch-task-bravo" {
-		t.Errorf("targets = %v, want [orch-task-bravo]", att.targets)
+	if len(att.targets) != 1 || att.targets[0] != "orch:task-bravo" {
+		t.Errorf("targets = %v, want [orch:task-bravo]", att.targets)
 	}
 	if m.sessSel != "b" {
 		t.Errorf("sessSel = %q, want %q", m.sessSel, "b")
@@ -261,7 +230,7 @@ func TestMouseClickOutsideSessionsPaneIgnored(t *testing.T) {
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step.(model)
 	step2, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", TmuxTarget: "orch-task-alpha"},
+		{ID: "a", TmuxTarget: "orch:task-alpha"},
 	}})
 	m = step2.(model)
 	// Click well to the right of the sessions pane.

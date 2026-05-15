@@ -12,39 +12,33 @@ import (
 )
 
 // attachResultMsg is delivered after a tmux attach attempt finishes. err is
-// nil when the requested session was made visible to the user (either by
-// switching an existing tmux client or by opening a new Terminal window);
-// otherwise it carries the pre-flight or process error so the model can
-// surface it in the footer.
+// nil when at least one tmux client was successfully switched to the target
+// window; otherwise it carries the pre-flight or switch error so the model
+// can surface it in the footer.
 type attachResultMsg struct {
 	target string
 	err    error
 }
 
-// tmuxAttacher builds the tea.Cmd that takes the user from the TUI to the
-// requested tmux session. The interface lets tests stub out the exec layer
-// without spinning up a real tmux server or actually opening a window.
+// tmuxAttacher is the seam between the TUI and tmux. The default
+// implementation drives tmux directly; tests stub it out.
 type tmuxAttacher interface {
 	Attach(target string) tea.Cmd
 }
 
-// defaultTmuxAttacher routes through tmux in two stages:
+// defaultTmuxAttacher asks tmux to switch any currently-attached client to
+// the requested window. With orch's umbrella-session model the user is
+// expected to have a single tmux client attached to the umbrella; clicking
+// a session row in the TUI flips that client to the agent's window.
 //
-//  1. If any tmux client is already attached, send `switch-client -t <target>`
-//     to that client. The user's existing tmux instance flips to the
-//     target session — far less disruptive than spawning a new window.
-//  2. If no client is attached, open a new Terminal.app window running
-//     `tmux attach -t <target>` via osascript. macOS prompts once for
-//     Automation permission; approve and it's silent thereafter.
-//
-// Each hook is a function field so tests can drive every branch without
-// touching tmux or osascript.
+// If no tmux client is attached, the attach returns a friendly error
+// instead of trying to spawn a new terminal. The user can run
+// `tmux attach -t orch` themselves and click again.
 type defaultTmuxAttacher struct {
 	binary       string                              // resolved tmux binary; defaults to "tmux"
 	lookPath     func(string) (string, error)        // defaults to exec.LookPath
 	exists       func(binary, target string) bool    // defaults to tmuxSessionExists
 	switchClient func(binary, target string) bool    // defaults to tmuxSwitchClient
-	openInTerm   func(binary, target string) error   // defaults to openTerminalWithTmux
 }
 
 func newTmuxAttacher() *defaultTmuxAttacher {
@@ -57,7 +51,6 @@ func newTmuxAttacher() *defaultTmuxAttacher {
 		lookPath:     exec.LookPath,
 		exists:       tmuxSessionExists,
 		switchClient: tmuxSwitchClient,
-		openInTerm:   openTerminalWithTmux,
 	}
 }
 
@@ -74,32 +67,38 @@ func (a *defaultTmuxAttacher) Attach(target string) tea.Cmd {
 	}
 	if !a.exists(a.binary, target) {
 		return func() tea.Msg {
-			return attachResultMsg{target: target, err: fmt.Errorf("tmux session %q is not alive", target)}
+			return attachResultMsg{target: target, err: fmt.Errorf("tmux window %q is not alive", target)}
 		}
 	}
 	return func() tea.Msg {
-		// Prefer the existing-client path: zero-disruption, the user's
-		// current tmux window just changes session.
 		if a.switchClient != nil && a.switchClient(a.binary, target) {
 			return attachResultMsg{target: target, err: nil}
 		}
-		// No attached client → spawn a new Terminal window. Pass the
-		// resolved tmux binary so the new shell's PATH doesn't matter.
-		if err := a.openInTerm(a.binary, target); err != nil {
-			return attachResultMsg{target: target, err: err}
+		umbrella := umbrellaFromTarget(target)
+		return attachResultMsg{
+			target: target,
+			err:    fmt.Errorf("no tmux client attached; run `tmux attach -t %s` and click again", umbrella),
 		}
-		return attachResultMsg{target: target, err: nil}
 	}
 }
 
-// tmuxSwitchClient asks tmux to switch an already-attached client to the
-// requested session. Returns false (without erroring) if there's no
-// attached client to switch — that's the "no existing tmux" signal, which
-// the attacher uses to decide whether to spawn a new Terminal window.
+// umbrellaFromTarget extracts the umbrella session name from a "sess:window"
+// target. Returns the agent default if the target doesn't look like the
+// canonical form — the error message stays useful even for legacy targets.
+func umbrellaFromTarget(target string) string {
+	if sess, _, ok := strings.Cut(target, ":"); ok && sess != "" {
+		return sess
+	}
+	return agent.DefaultUmbrellaSession
+}
+
+// tmuxSwitchClient asks tmux to flip every attached client over to the
+// requested target window. Returns false (without erroring) if no client
+// is attached — the attacher uses that signal to surface a "run tmux
+// attach first" hint to the user.
 //
-// When multiple clients are attached we pick the first one returned by
-// list-clients; tmux orders them most-recently-active first, which is
-// almost always the right choice.
+// We switch every client rather than just the first so a user who has the
+// same umbrella session open in two terminals sees both update.
 func tmuxSwitchClient(binary, target string) bool {
 	out, err := exec.Command(binary, "list-clients", "-F", "#{client_tty}").Output()
 	if err != nil {
@@ -109,34 +108,17 @@ func tmuxSwitchClient(binary, target string) bool {
 	if len(trimmed) == 0 {
 		return false
 	}
-	tty := strings.SplitN(string(trimmed), "\n", 2)[0]
-	tty = strings.TrimSpace(tty)
-	if tty == "" {
-		return false
+	var any bool
+	for _, tty := range strings.Split(string(trimmed), "\n") {
+		tty = strings.TrimSpace(tty)
+		if tty == "" {
+			continue
+		}
+		if err := exec.Command(binary, "switch-client", "-c", tty, "-t", target).Run(); err == nil {
+			any = true
+		}
 	}
-	return exec.Command(binary, "switch-client", "-c", tty, "-t", target).Run() == nil
-}
-
-// openTerminalWithTmux runs osascript to ask Terminal.app to open a new
-// window that runs `<binary> attach -t <target>`. binary is the resolved
-// absolute path to tmux, so the new shell does not need tmux in its PATH.
-func openTerminalWithTmux(binary, target string) error {
-	cmd := fmt.Sprintf("%s attach -t %s", applescriptEscape(binary), applescriptEscape(target))
-	script := fmt.Sprintf(`tell application "Terminal" to do script "%s"`, cmd)
-	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("osascript Terminal: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// applescriptEscape escapes a string for embedding inside an AppleScript
-// double-quoted literal. Backslash and double-quote are the only
-// metacharacters that need quoting.
-func applescriptEscape(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return s
+	return any
 }
 
 // tmuxSessionExists reports whether the given tmux target is currently
