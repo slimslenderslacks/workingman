@@ -136,8 +136,11 @@ func TestEndToEndDaemonAndTUI(t *testing.T) {
 			auditBuf.String(), outBuf.String())
 	}
 
-	// Session name is derived by runner.sessionName: "orch-<kind>-<branch>".
-	if got, want := att.firstTarget(), "orch-planning-feat/smoke"; got != want {
+	// runner.sessionName produces "<kind>-<branch>"; the real TmuxLauncher
+	// prepends the umbrella session, giving the canonical "session:window"
+	// target. The e2eFakeLauncher mirrors that so the TUI's click-to-attach
+	// path is exercised end-to-end.
+	if got, want := att.firstTarget(), agent.DefaultUmbrellaSession+":planning-feat/smoke"; got != want {
 		t.Errorf("attach target = %q, want %q", got, want)
 	}
 }
@@ -183,7 +186,9 @@ type e2eFakeLauncher struct {
 }
 
 func (l *e2eFakeLauncher) Launch(_ context.Context, spec agent.Spec) (agent.Session, error) {
-	s := newE2EFakeSession(spec.Name)
+	// Mirror the real TmuxLauncher's Name format ("session:window") so the
+	// TUI's TmuxTarget plumbing exercises the same shape it sees in prod.
+	s := newE2EFakeSession(agent.DefaultUmbrellaSession + ":" + spec.Name)
 	l.mu.Lock()
 	l.sessions = append(l.sessions, s)
 	l.mu.Unlock()
@@ -268,13 +273,14 @@ func adaptDaemonSessions(ctx context.Context, in <-chan []daemon.SessionInfo) <-
 				views := make([]SessionView, len(infos))
 				for i, s := range infos {
 					views[i] = SessionView{
-						ID:         s.ID,
-						AgentName:  s.AgentName,
-						Project:    s.Project,
-						TmuxTarget: s.TmuxTarget,
-						Status:     string(s.Status),
-						StartedAt:  s.StartedAt,
-						TaskName:   s.TaskName,
+						ID:          s.ID,
+						AgentName:   s.AgentName,
+						Project:     s.Project,
+						TmuxTarget:  s.TmuxTarget,
+						Status:      string(s.Status),
+						StartedAt:   s.StartedAt,
+						TaskName:    s.TaskName,
+						Interactive: s.Interactive,
 					}
 				}
 				select {

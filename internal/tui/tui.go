@@ -469,6 +469,13 @@ var (
 				Background(lipgloss.Color("236"))
 	sessionRowSelectedStatusStyle = lipgloss.NewStyle().
 					Background(lipgloss.Color("236"))
+	// sessionRowInteractiveStyle marks a row whose agent kind waits for a
+	// human (project / wolf). Yellow is chosen so it doesn't collide with
+	// the selection-pink or any of the status colours, and so it reads as
+	// "your attention is needed" at a glance.
+	sessionRowInteractiveStyle = lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("220"))
 	statusErrStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196"))
 )
@@ -479,6 +486,10 @@ var (
 const (
 	sessionMarkerSelected = "▶ "
 	sessionMarkerIdle     = "  "
+	// interactiveBadge is appended to the agent name on rows whose kind
+	// waits for a human. Single-column glyph so the alignment of
+	// surrounding columns stays consistent.
+	interactiveBadge = " ◆"
 )
 
 // Card sizing. Width is a target; the layout falls back to a single-column
@@ -548,20 +559,28 @@ func (m model) renderSessions(width, height int) string {
 }
 
 // renderSessionRow draws one session as a two-line block: the headline carries
-// the agent kind and project; the second line carries a colored status
-// indicator and (for task/commit agents) the task name. Truncation happens on
-// the raw text before any style is applied so the byte-slice in truncate
-// never tears an ANSI escape.
+// the agent kind, an interactive badge (when the kind waits for a human),
+// and the project; the second line carries a colored status indicator and
+// (for task/commit agents) the task name. Truncation happens on the raw
+// text before any style is applied so the byte-slice in truncate never
+// tears an ANSI escape.
 //
-// When selected, both lines are wrapped in a background-coloured block that
-// extends to the full inner pane width — that's what makes the selected
-// session stand out at a glance even when the sessions pane isn't focused.
+// Three row styles, in precedence order:
+//   - selected: bold pink on dark background, both lines highlighted.
+//   - interactive (not selected): bold yellow on the headline so the row
+//     stands out even when another pane is focused.
+//   - autonomous (not selected): plain headline, status-coloured second
+//     line.
 func renderSessionRow(s SessionView, selected bool, width int) string {
 	marker := sessionMarkerIdle
 	if selected {
 		marker = sessionMarkerSelected
 	}
-	head := marker + s.AgentName
+	agentName := s.AgentName
+	if s.Interactive {
+		agentName += interactiveBadge
+	}
+	head := marker + agentName
 	if s.Project != "" {
 		head += "  " + s.Project
 	}
@@ -573,10 +592,14 @@ func renderSessionRow(s SessionView, selected bool, width int) string {
 	}
 	statusText := padToWidth(truncate(statusLine, width), width)
 
-	if selected {
+	switch {
+	case selected:
 		head = sessionRowSelectedStyle.Render(head)
 		statusText = sessionRowSelectedStatusStyle.Inherit(sessionStatusStyle(s.Status)).Render(statusText)
-	} else {
+	case s.Interactive:
+		head = sessionRowInteractiveStyle.Render(head)
+		statusText = sessionStatusStyle(s.Status).Render(statusText)
+	default:
 		statusText = sessionStatusStyle(s.Status).Render(statusText)
 	}
 	return head + "\n" + statusText

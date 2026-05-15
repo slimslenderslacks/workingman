@@ -19,6 +19,10 @@ type SessionView struct {
 	// TaskName is the name of the task the agent is operating on. Set for
 	// task/commit agents; empty for project/planning/wolf.
 	TaskName string
+	// Interactive is true for agent kinds that wait for a human at the
+	// tmux prompt (project, wolf). The sessions pane highlights these
+	// rows so the user can see at a glance which sessions need attention.
+	Interactive bool
 }
 
 // reconcileSelection returns the session ID the pane should keep highlighted

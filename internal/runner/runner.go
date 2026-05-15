@@ -74,15 +74,11 @@ const initialPrompt = "Read .orch/instructions.md and .orch/context.yaml, then f
 // prompt between turns.
 func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
 	cmd := []string{"claude", "--dangerously-skip-permissions"}
-	if !isInteractiveKind(kind) {
+	if !kind.Interactive() {
 		cmd = append(cmd, "--print")
 	}
 	cmd = append(cmd, initialPrompt)
 	return cmd
-}
-
-func isInteractiveKind(kind agent.Kind) bool {
-	return kind == agent.ProjectAgent || kind == agent.WolfAgent
 }
 
 type Runner struct {
@@ -175,7 +171,9 @@ func sessionName(p Plan) string {
 	if tail == "" {
 		tail = shortID(p.WorkingDir)
 	}
-	return fmt.Sprintf("orch-%s-%s", p.Kind, tail)
+	// No "orch-" prefix — the umbrella tmux session carries that brand.
+	// Window names show up bare in tmux's status bar.
+	return fmt.Sprintf("%s-%s", p.Kind, tail)
 }
 
 // shortID hashes a path to a short stable suffix. Used for session names when

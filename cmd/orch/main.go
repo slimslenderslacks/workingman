@@ -54,6 +54,7 @@ func runDaemon(args []string) {
 	auditPath := fs.String("audit-log", "logs/audit.log", "path to the audit log")
 	workspaceMode := fs.String("workspace-manager", "wsp", `workspace manager: "wsp" (real) or "stub" (test/dev)`)
 	stubRoot := fs.String("stub-workspace-root", "", `when --workspace-manager=stub, directory where workspaces are created (default: $TMPDIR/orch-workspaces)`)
+	tmuxSession := fs.String("tmux-session", agent.DefaultUmbrellaSession, "name of the umbrella tmux session every agent's window lives in")
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -91,8 +92,11 @@ func runDaemon(args []string) {
 
 	r := &runner.Runner{
 		Workspaces: wsMgr,
-		Launcher:   &agent.TmuxLauncher{Binary: tmuxBin},
-		Audit:      a,
+		Launcher: &agent.TmuxLauncher{
+			Binary:      tmuxBin,
+			SessionName: *tmuxSession,
+		},
+		Audit: a,
 		// Command defaults to claude-code via runner.DefaultCommandBuilder.
 	}
 
@@ -114,6 +118,7 @@ func runDaemon(args []string) {
 		"roots", strings.Join(roots, ","),
 		"headless", fmt.Sprintf("%t", *headless),
 		"tmux", tmuxBin,
+		"tmux_session", *tmuxSession,
 	)
 
 	if *headless {
@@ -190,13 +195,14 @@ func adaptSessionFeed(ctx context.Context, in <-chan []daemon.SessionInfo) <-cha
 				views := make([]tui.SessionView, len(infos))
 				for i, s := range infos {
 					views[i] = tui.SessionView{
-						ID:         s.ID,
-						AgentName:  s.AgentName,
-						Project:    s.Project,
-						TmuxTarget: s.TmuxTarget,
-						Status:     string(s.Status),
-						StartedAt:  s.StartedAt,
-						TaskName:   s.TaskName,
+						ID:          s.ID,
+						AgentName:   s.AgentName,
+						Project:     s.Project,
+						TmuxTarget:  s.TmuxTarget,
+						Status:      string(s.Status),
+						StartedAt:   s.StartedAt,
+						TaskName:    s.TaskName,
+						Interactive: s.Interactive,
 					}
 				}
 				select {

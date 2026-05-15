@@ -42,6 +42,10 @@ type SessionInfo struct {
 	// task and commit agents — empty for project/planning/wolf agents,
 	// which don't own a single task.
 	TaskName string
+	// Interactive is true for agent kinds whose tmux session waits for a
+	// human (project, wolf). The TUI uses it to flag sessions that won't
+	// make progress on their own.
+	Interactive bool
 }
 
 // ListSessions returns a snapshot of every session the daemon is currently
@@ -53,13 +57,14 @@ func (d *Daemon) ListSessions() []SessionInfo {
 	out := make([]SessionInfo, 0, len(d.sessions))
 	for key, entry := range d.sessions {
 		out = append(out, SessionInfo{
-			ID:         key,
-			AgentName:  entry.kind.String(),
-			Project:    filepath.Base(filepath.Dir(key)),
-			TmuxTarget: entry.sess.Name(),
-			Status:     SessionStatusRunning,
-			StartedAt:  entry.startedAt,
-			TaskName:   entry.taskName,
+			ID:          key,
+			AgentName:   entry.kind.String(),
+			Project:     filepath.Base(filepath.Dir(key)),
+			TmuxTarget:  entry.sess.Name(),
+			Status:      SessionStatusRunning,
+			StartedAt:   entry.startedAt,
+			TaskName:    entry.taskName,
+			Interactive: entry.kind.Interactive(),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -136,5 +141,6 @@ func sessionInfoEqual(a, b SessionInfo) bool {
 		a.TmuxTarget == b.TmuxTarget &&
 		a.Status == b.Status &&
 		a.StartedAt.Equal(b.StartedAt) &&
-		a.TaskName == b.TaskName
+		a.TaskName == b.TaskName &&
+		a.Interactive == b.Interactive
 }

@@ -139,9 +139,26 @@ func applescriptEscape(s string) string {
 	return s
 }
 
-// tmuxSessionExists asks tmux whether a session with the given name is alive.
-// Any non-zero exit (including "session not found") is treated as dead, which
-// matches what the user would see if they tried `tmux attach` manually.
+// tmuxSessionExists reports whether the given tmux target is currently
+// alive. The target is the canonical "session:window" form produced by
+// agent.tmuxSession.Name; we check window-level existence with
+// list-windows so an attach attempt can't race against a window that
+// already closed even though its umbrella session is still up. A bare
+// session name (no colon) falls back to has-session for callers that pass
+// the legacy form.
 func tmuxSessionExists(binary, target string) bool {
-	return exec.Command(binary, "has-session", "-t", target).Run() == nil
+	sess, win, hasWin := strings.Cut(target, ":")
+	if !hasWin || win == "" {
+		return exec.Command(binary, "has-session", "-t", sess).Run() == nil
+	}
+	out, err := exec.Command(binary, "list-windows", "-t", sess, "-F", "#W").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == win {
+			return true
+		}
+	}
+	return false
 }

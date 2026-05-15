@@ -213,3 +213,32 @@ func TestSessionViewZeroTime(t *testing.T) {
 		t.Errorf("zero SessionView.StartedAt = %v, want zero time", v.StartedAt)
 	}
 }
+
+func TestRenderSessionRowInteractiveBadge(t *testing.T) {
+	auto := SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}
+	intr := SessionView{ID: "b", AgentName: "project", Project: "bravo", Status: "running", Interactive: true}
+
+	autoOut := renderSessionRow(auto, false, 40)
+	intrOut := renderSessionRow(intr, false, 40)
+
+	if strings.Contains(autoOut, interactiveBadge) {
+		t.Errorf("autonomous row should not show the interactive badge; got:\n%s", autoOut)
+	}
+	if !strings.Contains(intrOut, interactiveBadge) {
+		t.Errorf("interactive row should include the badge %q; got:\n%s", interactiveBadge, intrOut)
+	}
+}
+
+func TestInteractiveStyleDiffersFromAutonomous(t *testing.T) {
+	// Render-output comparison is unreliable in test environments because
+	// lipgloss strips colour without a TTY. Verify the style values
+	// directly: the interactive style's foreground must differ from the
+	// dim status / selected styles.
+	intr := sessionRowInteractiveStyle.GetForeground()
+	sel := sessionRowSelectedStyle.GetForeground()
+	dim := dimStyle.GetForeground()
+	if intr == sel || intr == dim {
+		t.Errorf("interactive foreground %v should differ from selected (%v) and dim (%v)",
+			intr, sel, dim)
+	}
+}
