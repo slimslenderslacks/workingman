@@ -206,3 +206,84 @@ func TestSessionNameOverride(t *testing.T) {
 	}
 	_ = sess.Close()
 }
+
+// TestLaunchRecreatesAfterUmbrellaDeath simulates the production scenario
+// that wedged opencode_dmr: the umbrella session's last window dies, and
+// the daemon launches the next agent before tmux has finished cleaning
+// up. The old has-session/new-session sequence raced — has-session said
+// "gone", new-session said "duplicate". The new code skips the pre-check
+// and falls back on the actual error, so an agent launched into an
+// umbrella that was just destroyed must still come up.
+func TestLaunchRecreatesAfterUmbrellaDeath(t *testing.T) {
+	l, socket := newTestLauncher(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	first, err := l.Launch(ctx, Spec{
+		Kind:    ProjectAgent,
+		Name:    "first",
+		Command: []string{"sh", "-c", "sleep 30"},
+	})
+	if err != nil {
+		t.Fatalf("Launch first: %v", err)
+	}
+	// Kill the only window — tmux will also destroy the umbrella because
+	// it has nothing left to host.
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close first: %v", err)
+	}
+	if err := exec.Command("tmux", "-L", socket, "has-session", "-t", DefaultUmbrellaSession).Run(); err == nil {
+		t.Fatalf("umbrella session should be gone after killing its only window")
+	}
+
+	// Launching again must succeed by re-creating the umbrella.
+	second, err := l.Launch(ctx, Spec{
+		Kind:    PlanningAgent,
+		Name:    "second",
+		Command: []string{"sh", "-c", "sleep 30"},
+	})
+	if err != nil {
+		t.Fatalf("Launch second after umbrella death: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+
+	if !second.(*tmuxSession).exists() {
+		t.Errorf("second window should be live after umbrella re-creation")
+	}
+}
+
+func TestSessionMissingMatcher(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"can't find session: orch", true},
+		{"no server running on /tmp/tmux-502/default", true},
+		{"error connecting to /tmp/tmux-502/test-socket (No such file or directory)", true},
+		{"duplicate session: orch", false},
+		{"command not found: claude", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isSessionMissing([]byte(c.in)); got != c.want {
+			t.Errorf("isSessionMissing(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestDuplicateSessionMatcher(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"duplicate session: orch", true},
+		{"Duplicate Session: orch", true},
+		{"can't find session: orch", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isDuplicateSession([]byte(c.in)); got != c.want {
+			t.Errorf("isDuplicateSession(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
