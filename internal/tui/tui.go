@@ -125,12 +125,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projects = msg.views
 		m.loaded = true
 		m.projSel = reconcileProjectSelection(m.projects, m.projSel)
-		m.sessSel = reconcileSelection(m.visibleSessions(), m.sessSel)
+		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, waitForProjects(m.projCh)
 	case sessionsMsg:
 		m.sessions = msg.views
 		m.sessLoaded = true
-		m.sessSel = reconcileSelection(m.visibleSessions(), m.sessSel)
+		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, waitForSessions(m.sessCh)
 	case auditMsg:
 		m.auditLines = msg.lines
@@ -160,19 +160,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up":
 			switch m.focus {
 			case paneSessions:
-				m.sessSel = moveSelection(m.visibleSessions(), m.sessSel, -1)
+				m.sessSel = moveSelection(m.sessions, m.sessSel, -1)
 			case paneProjects:
 				m.projSel = moveProjectSelection(m.projects, m.projSel, -1)
-				m.sessSel = reconcileSelection(m.visibleSessions(), m.sessSel)
+				m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 			}
 			m.statusMsg = ""
 		case "down":
 			switch m.focus {
 			case paneSessions:
-				m.sessSel = moveSelection(m.visibleSessions(), m.sessSel, 1)
+				m.sessSel = moveSelection(m.sessions, m.sessSel, 1)
 			case paneProjects:
 				m.projSel = moveProjectSelection(m.projects, m.projSel, 1)
-				m.sessSel = reconcileSelection(m.visibleSessions(), m.sessSel)
+				m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 			}
 			m.statusMsg = ""
 		case "enter":
@@ -203,13 +203,13 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	// Sessions pane: clicks in the left column.
 	if msg.X < l.sessionsW {
-		idx := sessionRowAtY(msg.Y, len(m.visibleSessions()))
+		idx := sessionRowAtY(msg.Y, len(m.sessions))
 		if idx < 0 {
 			m.focus = paneSessions
 			return m, nil
 		}
 		m.focus = paneSessions
-		m.sessSel = m.visibleSessions()[idx].ID
+		m.sessSel = m.sessions[idx].ID
 		m.statusMsg = ""
 		return m.attachSelected()
 	}
@@ -229,7 +229,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.projSel = m.projects[idx].Path
-		m.sessSel = reconcileSelection(m.visibleSessions(), m.sessSel)
+		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, nil
 	}
 	// Click below the projects pane → tasks area (or audit). Treat as
@@ -246,7 +246,7 @@ func (m model) attachSelected() (tea.Model, tea.Cmd) {
 		m.statusMsg = "tmux attach disabled (no attacher wired)"
 		return m, nil
 	}
-	target, ok := selectedTmuxTarget(m.visibleSessions(), m.sessSel)
+	target, ok := selectedTmuxTarget(m.sessions, m.sessSel)
 	if !ok {
 		m.statusMsg = "no session selected"
 		return m, nil
@@ -264,37 +264,6 @@ func selectedTmuxTarget(views []SessionView, id string) (string, bool) {
 	return "", false
 }
 
-// visibleSessions returns the slice of sessions the pane should display,
-// filtered by the currently-selected project. When no project is selected
-// (e.g. there are no projects yet), all sessions are returned so the user
-// still sees activity. When a project is selected but no session matches,
-// an empty slice is returned and the pane renders "(none)".
-//
-// Filtering by Project (a short label like "my-feature") rather than by
-// path keeps the daemon's SessionInfo decoupled from the project file's
-// absolute path on disk.
-func (m model) visibleSessions() []SessionView {
-	if m.projSel == "" || len(m.projects) == 0 {
-		return m.sessions
-	}
-	var selName string
-	for _, p := range m.projects {
-		if p.Path == m.projSel {
-			selName = p.Name
-			break
-		}
-	}
-	if selName == "" {
-		return m.sessions
-	}
-	out := make([]SessionView, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		if s.Project == selName {
-			out = append(out, s)
-		}
-	}
-	return out
-}
 
 // projectCardAtPoint maps a click inside the projects pane to a card index.
 // The arithmetic mirrors renderProjectGrid: cards are cardWidth wide with a
@@ -544,14 +513,13 @@ func (m model) renderSessions(width, height int) string {
 		b.WriteString(dimStyle.Render("(loading…)"))
 		return style.Render(b.String())
 	}
-	visible := m.visibleSessions()
-	if len(visible) == 0 {
+	if len(m.sessions) == 0 {
 		b.WriteString(dimStyle.Render("(none)"))
 		return style.Render(b.String())
 	}
-	for i, s := range visible {
+	for i, s := range m.sessions {
 		b.WriteString(renderSessionRow(s, s.ID == m.sessSel, innerWidth))
-		if i < len(visible)-1 {
+		if i < len(m.sessions)-1 {
 			b.WriteString("\n")
 		}
 	}
