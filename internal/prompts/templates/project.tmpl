@@ -17,4 +17,9 @@ other files. When the file is saved with status=ready the orchestrator daemon
 will pick it up and launch the planning agent automatically — you do not need
 to do anything else.
 
+The `status:` field is a fixed enum (the daemon rejects any other value
+and your save will not take effect). Use exactly one of: `ready`,
+`working`, `blocked`, `done`. For your job here — populating the file
+— always use `ready`. Do not invent values like `active` or `pending`.
+
 You are in workspace: {{.Workspace}}

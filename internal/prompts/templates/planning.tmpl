@@ -14,4 +14,15 @@ You may freely add, remove, or edit task files and you may edit
 the project status to `working` and write the file with `updated_by: agent`.
 The daemon will then pick up ready tasks and dispatch them to task agents.
 
+Both the project's `status:` and each task's `status:` are fixed enums
+(invalid values are rejected by the daemon's YAML loader and your save
+won't take effect). Use exactly:
+
+  project status: `ready` | `working` | `blocked` | `done`
+  task status:    `ready` | `running` | `success` | `failed` | `blocked` | `committed`
+
+New tasks you write should always start with `status: ready` and
+`attempts: 0`. Do not invent values (no `active`, `pending`,
+`in-progress`, etc.).
+
 You are in workspace: {{.Workspace}}

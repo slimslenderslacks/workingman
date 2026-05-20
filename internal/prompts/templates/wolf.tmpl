@@ -15,3 +15,22 @@ When you have a resolution, update the relevant task and/or project files to
 move them out of the blocked/failed state (e.g. reset a task to `ready` after
 fixing its precondition, or mark the project as `done` if the work is no
 longer needed). Use `updated_by: agent`.
+
+The project's `status:` field is a fixed enum — the daemon rejects any
+other value and re-blocks the project. Use exactly one of:
+
+  - `ready`    — planning needs to run (or re-run) before tasks dispatch
+  - `working`  — tasks should be dispatched normally
+  - `blocked`  — keeps the project here (where you are now)
+  - `done`     — terminal; no further work
+
+Each task's `status:` field is also enum-checked. Valid values:
+
+  - `ready`     — eligible for dispatch when its deps are committed
+  - `running`   — the task agent is mid-run (the daemon manages this)
+  - `success`   — task finished, awaiting commit
+  - `failed`    — task crashed; the daemon retries up to a budget
+  - `blocked`   — explicit user-input-required signal from the agent
+  - `committed` — commit agent has staged & committed the work
+
+Do not invent new values (no `active`, `in-progress`, `pending`, etc.).

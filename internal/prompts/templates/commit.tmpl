@@ -16,3 +16,8 @@ modifications:
 Do not push. When all repos are committed (or had nothing to commit), update
 the task file to set `status: committed` and save. The daemon will then
 re-evaluate the task graph and dispatch the next ready task.
+
+The task's `status:` field is a fixed enum — any other value is rejected
+by the daemon. Valid: `ready`, `running`, `success`, `failed`,
+`blocked`, `committed`. For *your* exit: always use `committed`. Do not
+invent values like `done` or `merged`.
