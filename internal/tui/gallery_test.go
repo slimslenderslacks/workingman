@@ -58,8 +58,10 @@ func TestRenderProjectGridReflowsByWidth(t *testing.T) {
 		{Name: "delta", Status: project.StatusDone},
 	}
 
-	wide := renderProjectGrid(views, "", 200)
-	narrow := renderProjectGrid(views, "", 30)
+	// Pass a large row budget so the grid renders every project; this test
+	// only exercises the width-based reflow.
+	wide := renderProjectGrid(views, "", 200, 100)
+	narrow := renderProjectGrid(views, "", 30, 100)
 
 	wideRows := strings.Count(wide, "\n")
 	narrowRows := strings.Count(narrow, "\n")

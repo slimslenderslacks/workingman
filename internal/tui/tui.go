@@ -366,6 +366,12 @@ func sessionRowAtY(y, count int) int {
 // paneWidths reproduces View()'s sessions/projects split so handleMouse can
 // decide whether a click landed in the sessions pane without re-rendering.
 // Keep this in lockstep with the width clamps used at the top of View().
+//
+// Returned widths always sum to ≤ width. When the terminal is too narrow to
+// fit both panes side by side, projectsWidth is 0 and the caller is expected
+// to skip the right column entirely — keeping projects ≥ 1 in that regime
+// would force the body to overflow the terminal and clip the rightmost
+// border off the screen.
 func paneWidths(width int) (sessionsWidth, projectsWidth int) {
 	if width <= 0 {
 		return 0, 0
@@ -377,18 +383,16 @@ func paneWidths(width int) (sessionsWidth, projectsWidth int) {
 	if sessionsWidth > 40 {
 		sessionsWidth = 40
 	}
-	if sessionsWidth > width-10 {
-		sessionsWidth = width - 10
-		if sessionsWidth < 10 {
-			sessionsWidth = width
-		}
+	if width-sessionsWidth < minProjectsPaneWidth {
+		return width, 0
 	}
-	projectsWidth = width - sessionsWidth
-	if projectsWidth < 1 {
-		projectsWidth = 1
-	}
-	return sessionsWidth, projectsWidth
+	return sessionsWidth, width - sessionsWidth
 }
+
+// minProjectsPaneWidth is the smallest projects pane that's still usable —
+// enough cols to render the "Projects" title plus a one-col card. Below
+// this, paneWidths gives everything to the sessions pane.
+const minProjectsPaneWidth = 12
 
 func togglePane(p pane) pane {
 	if p == paneSessions {
@@ -463,10 +467,14 @@ const (
 
 // Card sizing. Width is a target; the layout falls back to a single-column
 // stack when the projects pane is too narrow to fit a card at this size.
+// cardDisplayRows is the rendered height of a card: top border + name +
+// status + breakdown + bottom border = 5 rows. The grid uses it to decide
+// how many full card rows fit in the projects pane.
 const (
 	cardTargetWidth = 30
 	cardMinWidth    = 20
 	cardGap         = 1
+	cardDisplayRows = 5
 )
 
 func (m model) borderStyle(p pane) lipgloss.Style {
@@ -492,15 +500,23 @@ func renderStatus(s string) string {
 }
 
 func (m model) renderSessions(width, height int) string {
-	// lipgloss.Height(N) sets *content* height; borders add another 2 rows.
-	// Caller passes the total rows we want the pane to occupy, so we have
-	// to subtract the frame size before handing it to Height().
-	base := m.borderStyle(paneSessions).Width(width)
+	// lipgloss.Width/Height(N) set the *content+padding* size; borders are
+	// added outside. Caller passes the total cols/rows we want the pane to
+	// occupy, so we subtract the border size before handing dimensions to
+	// Width()/Height(). Without the Width adjustment the pane overflows by
+	// 2 cols on the right, which clips the rightmost border off the screen
+	// once both body panes are joined horizontally.
+	bs := m.borderStyle(paneSessions)
+	base := bs.Width(width - bs.GetHorizontalBorderSize())
 	innerHeight := height - base.GetVerticalFrameSize()
 	if innerHeight < 0 {
 		innerHeight = 0
 	}
-	style := base.Height(innerHeight)
+	// MaxWidth is a hard cap lipgloss applies after the border so a long
+	// line can't push the pane past the terminal edge. Vertical overflow is
+	// handled by clamping the content lines below (clipping after the
+	// border would erase the bottom border).
+	style := base.Height(innerHeight).MaxWidth(width)
 	innerWidth := width - style.GetHorizontalFrameSize()
 	if innerWidth < 0 {
 		innerWidth = 0
@@ -511,11 +527,11 @@ func (m model) renderSessions(width, height int) string {
 	b.WriteString("\n\n")
 	if !m.sessLoaded {
 		b.WriteString(dimStyle.Render("(loading…)"))
-		return style.Render(b.String())
+		return style.Render(clampLines(b.String(), innerHeight))
 	}
 	if len(m.sessions) == 0 {
 		b.WriteString(dimStyle.Render("(none)"))
-		return style.Render(b.String())
+		return style.Render(clampLines(b.String(), innerHeight))
 	}
 	for i, s := range m.sessions {
 		b.WriteString(renderSessionRow(s, s.ID == m.sessSel, innerWidth))
@@ -523,7 +539,7 @@ func (m model) renderSessions(width, height int) string {
 			b.WriteString("\n")
 		}
 	}
-	return style.Render(b.String())
+	return style.Render(clampLines(b.String(), innerHeight))
 }
 
 // renderSessionRow draws one session as a two-line block: the headline carries
@@ -585,6 +601,21 @@ func padToWidth(s string, width int) string {
 	return s + strings.Repeat(" ", width-w)
 }
 
+// clampLines returns s truncated to at most max lines. Used by the pane
+// renderers to keep content from overflowing the box vertically — clipping
+// before the border is applied keeps the bottom border intact, unlike
+// lipgloss's MaxHeight which clips after the border and would erase it.
+func clampLines(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= max {
+		return s
+	}
+	return strings.Join(lines[:max], "\n")
+}
+
 // sessionStatusGlyph returns a compact symbol that pairs with the status
 // label. It mirrors the colored dots used by terminal status lines so the
 // pane reads at a glance.
@@ -607,12 +638,13 @@ func sessionStatusStyle(status string) lipgloss.Style {
 }
 
 func (m model) renderProjects(width, height int) string {
-	base := m.borderStyle(paneProjects).Width(width)
+	bs := m.borderStyle(paneProjects)
+	base := bs.Width(width - bs.GetHorizontalBorderSize())
 	innerHeight := height - base.GetVerticalFrameSize()
 	if innerHeight < 0 {
 		innerHeight = 0
 	}
-	style := base.Height(innerHeight)
+	style := base.Height(innerHeight).MaxWidth(width)
 	innerWidth := width - style.GetHorizontalFrameSize()
 	if innerWidth < 0 {
 		innerWidth = 0
@@ -623,23 +655,34 @@ func (m model) renderProjects(width, height int) string {
 	b.WriteString("\n\n")
 	if !m.loaded {
 		b.WriteString(dimStyle.Render("(loading…)"))
-		return style.Render(b.String())
+		return style.Render(clampLines(b.String(), innerHeight))
 	}
 	if len(m.projects) == 0 {
 		b.WriteString(dimStyle.Render("(none)"))
-		return style.Render(b.String())
+		return style.Render(clampLines(b.String(), innerHeight))
 	}
 
-	b.WriteString(renderProjectGrid(m.projects, m.projSel, innerWidth))
-	return style.Render(b.String())
+	// Two rows are already consumed by the title and the blank line that
+	// follows it, so cards have innerHeight-2 rows to play with.
+	cardsBudget := innerHeight - 2
+	if cardsBudget < 0 {
+		cardsBudget = 0
+	}
+	b.WriteString(renderProjectGrid(m.projects, m.projSel, innerWidth, cardsBudget))
+	return style.Render(clampLines(b.String(), innerHeight))
 }
 
 // renderProjectGrid lays project cards out left-to-right, wrapping to a new
 // row whenever the next card wouldn't fit in innerWidth. Cards shrink to the
 // available width when the pane can't hold one at the target width. The card
 // matching selPath gets the highlighted-border treatment.
-func renderProjectGrid(views []ProjectView, selPath string, innerWidth int) string {
-	if innerWidth <= 0 || len(views) == 0 {
+//
+// rowBudget is the number of terminal rows available for cards (i.e. the
+// projects pane's inner height minus title and blank). The grid renders
+// only the card rows that fit entirely — a partial card with a missing
+// bottom border looks broken, so we drop the row instead.
+func renderProjectGrid(views []ProjectView, selPath string, innerWidth, rowBudget int) string {
+	if innerWidth <= 0 || len(views) == 0 || rowBudget < cardDisplayRows {
 		return ""
 	}
 
@@ -654,6 +697,12 @@ func renderProjectGrid(views []ProjectView, selPath string, innerWidth int) stri
 	perRow := (innerWidth + cardGap) / (cardWidth + cardGap)
 	if perRow < 1 {
 		perRow = 1
+	}
+
+	// Cap the number of cards to the row budget: only whole card rows fit.
+	maxCardRowsTotal := rowBudget / cardDisplayRows
+	if maxViews := maxCardRowsTotal * perRow; len(views) > maxViews {
+		views = views[:maxViews]
 	}
 
 	var rows []string
@@ -688,7 +737,11 @@ func renderProjectCard(v ProjectView, width int, selected bool) string {
 	if selected {
 		border = cardSelectedBorder
 	}
-	style := border.Width(width)
+	// width is the desired display width on screen; lipgloss .Width(N) sets
+	// the content+padding size and adds borders outside, so subtract the
+	// border size before handing it over. Skipping this fragments the
+	// rounded border into two lines when cardWidth ≈ inner pane width.
+	style := border.Width(width - border.GetHorizontalBorderSize())
 	inner := width - style.GetHorizontalFrameSize()
 	if inner < 1 {
 		inner = 1
@@ -750,8 +803,13 @@ func truncate(s string, width int) string {
 const auditPaneHeight = 10
 
 // projectsMinHeight is the floor for the projects pane when the body height
-// is large enough to split. Two rows of cards fit comfortably at this size.
+// is large enough to split. Sized so exactly one row of cards fits cleanly:
+// 2 border + 1 title + 1 blank + 5 card = 9 rows.
 const projectsMinHeight = 9
+
+// tasksMinHeight is the floor for the tasks pane below the projects pane.
+// 3 rows = top border + 1 line of content + bottom border.
+const tasksMinHeight = 3
 
 // uiLayout caches the computed dimensions of every pane for a given window
 // size. View() and handleMouse() both use it so the rendering and the
@@ -764,43 +822,66 @@ type uiLayout struct {
 
 func (m model) computeLayout() uiLayout {
 	sessW, projW := paneWidths(m.width)
+
+	// Reserve audit space only when there's room for it without squashing
+	// the body below a usable minimum. Otherwise the audit pane forces the
+	// body to overflow the terminal and the footer disappears off-screen.
+	const (
+		headerH    = 1
+		footerH    = 1
+		minBodyH   = 4
+		minAuditH  = 5
+	)
 	audit := 0
 	if m.auditCh != nil {
-		audit = auditPaneHeight
-		if audit > m.height/3 {
-			audit = m.height / 3
+		candidate := auditPaneHeight
+		if candidate > m.height/3 {
+			candidate = m.height / 3
 		}
-		if audit < 5 {
-			audit = 5
+		if candidate >= minAuditH && m.height-headerH-footerH-candidate >= minBodyH {
+			audit = candidate
 		}
 	}
-	bodyH := m.height - 1 /*header*/ - 1 /*footer*/ - audit - 1 /*buffer*/
-	if bodyH < 6 {
-		bodyH = 6
+	bodyH := m.height - headerH - footerH - audit
+	if bodyH < 1 {
+		bodyH = 1
 	}
-	// Split the right column: projects gets the smaller half so the tasks
-	// list, which can be long, takes the remainder. Clamp to a sensible
-	// minimum for the projects pane.
+
+	// Split the right column: projects gets a minimum that fits one card row,
+	// tasks gets whatever's left. The clamps here favour fitting within
+	// bodyH over hitting projectsMinHeight — exceeding bodyH would push the
+	// right column past the audit pane below.
 	projH := bodyH / 3
 	if projH < projectsMinHeight {
 		projH = projectsMinHeight
 	}
-	if projH > bodyH-projectsMinHeight {
-		projH = bodyH - projectsMinHeight
+	if projH > bodyH-tasksMinHeight {
+		projH = bodyH - tasksMinHeight
 	}
-	if projH < 3 {
-		projH = 3
+	if projH < 1 {
+		projH = 1
 	}
 	tasksH := bodyH - projH
-	if tasksH < 3 {
-		tasksH = 3
+	if tasksH < 0 {
+		tasksH = 0
 	}
 	return uiLayout{sessW, projW, bodyH, projH, tasksH, audit}
 }
 
+// Minimum terminal dimensions below which we don't try to lay out the full
+// UI — the panes' titles and a single row of content can't fit, so we show
+// a one-line "terminal too small" message instead of a garbled grid.
+const (
+	minTerminalWidth  = 24
+	minTerminalHeight = 6
+)
+
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "starting orch tui…"
+	}
+	if m.width < minTerminalWidth || m.height < minTerminalHeight {
+		return fmt.Sprintf("terminal too small (need ≥ %d×%d)", minTerminalWidth, minTerminalHeight)
 	}
 
 	l := m.computeLayout()
@@ -809,11 +890,18 @@ func (m model) View() string {
 
 	left := m.renderSessions(l.sessionsW, l.bodyH)
 
-	projects := m.renderProjects(l.projectsW, l.projectsH)
-	tasks := m.renderTasks(l.projectsW, l.tasksH)
-	right := lipgloss.JoinVertical(lipgloss.Left, projects, tasks)
-
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	var body string
+	if l.projectsW > 0 {
+		projects := m.renderProjects(l.projectsW, l.projectsH)
+		tasks := m.renderTasks(l.projectsW, l.tasksH)
+		right := lipgloss.JoinVertical(lipgloss.Left, projects, tasks)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	} else {
+		// Terminal is too narrow for two columns. Sessions takes the full
+		// width and the projects/tasks panes are dropped — the user can
+		// still see and click sessions, which is the primary action.
+		body = left
+	}
 
 	if l.auditH > 0 {
 		audit := m.renderAudit(m.width, l.auditH)
@@ -829,12 +917,12 @@ func (m model) View() string {
 //
 // `height` is the total rows the pane should occupy. Borders eat 2 of them.
 func (m model) renderTasks(width, height int) string {
-	base := unfocusedBorder.Width(width)
+	base := unfocusedBorder.Width(width - unfocusedBorder.GetHorizontalBorderSize())
 	innerHeight := height - base.GetVerticalFrameSize()
 	if innerHeight < 0 {
 		innerHeight = 0
 	}
-	style := base.Height(innerHeight)
+	style := base.Height(innerHeight).MaxWidth(width)
 	innerWidth := width - style.GetHorizontalFrameSize()
 	if innerWidth < 0 {
 		innerWidth = 0
@@ -847,7 +935,7 @@ func (m model) renderTasks(width, height int) string {
 	tasks := m.selectedProjectTasks()
 	if len(tasks) == 0 {
 		b.WriteString(dimStyle.Render("(none)"))
-		return style.Render(b.String())
+		return style.Render(clampLines(b.String(), innerHeight))
 	}
 
 	maxRows := innerHeight - 2 // title + blank
@@ -863,7 +951,7 @@ func (m model) renderTasks(width, height int) string {
 			b.WriteString("\n")
 		}
 	}
-	return style.Render(b.String())
+	return style.Render(clampLines(b.String(), innerHeight))
 }
 
 // selectedProjectTasks returns the task slice for the currently-selected
@@ -928,12 +1016,12 @@ func taskStatusStyle(s task.Status) lipgloss.Style {
 // content height (borders add 2), so we subtract the frame size before
 // handing it to .Height().
 func (m model) renderAudit(width, height int) string {
-	base := unfocusedBorder.Width(width)
+	base := unfocusedBorder.Width(width - unfocusedBorder.GetHorizontalBorderSize())
 	innerHeight := height - base.GetVerticalFrameSize()
 	if innerHeight < 0 {
 		innerHeight = 0
 	}
-	style := base.Height(innerHeight)
+	style := base.Height(innerHeight).MaxWidth(width)
 	innerWidth := width - style.GetHorizontalFrameSize()
 	if innerWidth < 0 {
 		innerWidth = 0
@@ -949,7 +1037,7 @@ func (m model) renderAudit(width, height int) string {
 	b.WriteString("\n\n")
 	if len(m.auditLines) == 0 {
 		b.WriteString(dimStyle.Render("(empty)"))
-		return style.Render(b.String())
+		return style.Render(clampLines(b.String(), innerHeight))
 	}
 	lines := m.auditLines
 	if len(lines) > maxLines {
@@ -961,17 +1049,26 @@ func (m model) renderAudit(width, height int) string {
 			b.WriteString("\n")
 		}
 	}
-	return style.Render(b.String())
+	return style.Render(clampLines(b.String(), innerHeight))
 }
 
 // renderFooter draws the bottom hint line. When statusMsg is set (typically a
 // tmux-attach failure), it replaces the keybinding hint so the error is
-// front-and-centre instead of buried.
+// front-and-centre instead of buried. Both variants are truncated to the
+// terminal width so a long string can't push the line past the screen edge
+// (which on bubbletea altscreen wraps it onto a phantom row that scrolls the
+// rest of the UI up).
 func (m model) renderFooter() string {
-	if m.statusMsg != "" {
-		return statusErrStyle.Render(m.statusMsg)
+	text := m.statusMsg
+	style := statusErrStyle
+	if text == "" {
+		text = "tab: switch pane  •  ↑/↓: select session  •  enter/click: attach  •  q: quit  •  focus: " + paneName(m.focus)
+		style = hintStyle
 	}
-	return hintStyle.Render("tab: switch pane  •  ↑/↓: select session  •  enter/click: attach  •  q: quit  •  focus: " + paneName(m.focus))
+	if m.width > 0 {
+		text = truncate(text, m.width)
+	}
+	return style.Render(text)
 }
 
 func paneName(p pane) string {
