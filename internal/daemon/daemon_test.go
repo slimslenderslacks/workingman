@@ -172,3 +172,25 @@ func TestNewDirectoryIsPickedUp(t *testing.T) {
 		t.Fatalf("daemon did not pick up file in new dir.\naudit:\n%s", snap)
 	}
 }
+
+// TestNewDirWithFileIsPickedUp exercises the TUI's :new flow: mkdir + write
+// an empty .project.yaml back-to-back. The directory watch is installed
+// after the file already exists on disk, so without the post-watch scan the
+// file's Create event is missed and the project agent never fires.
+func TestNewDirWithFileIsPickedUp(t *testing.T) {
+	root := t.TempDir()
+	buf, _ := startDaemon(t, root)
+
+	sub := filepath.Join(root, "newproj")
+	if err := mkdirAll(sub); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(sub, ".project.yaml")
+	if err := writeFile(path, nil); err != nil {
+		t.Fatalf("writeFile: %v", err)
+	}
+
+	if ok, snap := waitFor(t, buf, "project_empty"); !ok {
+		t.Fatalf("daemon did not observe empty .project.yaml in new dir.\naudit:\n%s", snap)
+	}
+}

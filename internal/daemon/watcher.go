@@ -56,11 +56,30 @@ func (d *Daemon) maybeWatchNewDir(path string) bool {
 	if err != nil || !info.IsDir() {
 		return false
 	}
-	if err := d.watcher.Add(path); err != nil {
-		d.audit.Log("watch_add_error", "path", path, "err", err.Error())
-		return true
-	}
-	d.audit.Log("watch_added", "path", path)
+	// Walk the new subtree: install watches on every directory and dispatch
+	// any handler-matching files found within. Callers (the TUI's :new
+	// command, an agent scaffolding a project) commonly do mkdir+write
+	// back-to-back, so by the time we see the directory's Create event the
+	// .project.yaml inside has often already landed. Without this scan the
+	// file's own Create event is missed (the watch wasn't installed yet)
+	// and the project never gets dispatched.
+	_ = filepath.WalkDir(path, func(p string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if err := d.watcher.Add(p); err != nil {
+				d.audit.Log("watch_add_error", "path", p, "err", err.Error())
+				return nil
+			}
+			d.audit.Log("watch_added", "path", p)
+			return nil
+		}
+		if h := d.handlerFor(p); h != nil {
+			h(p)
+		}
+		return nil
+	})
 	return true
 }
 
