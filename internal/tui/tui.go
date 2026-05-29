@@ -21,7 +21,33 @@ type pane int
 
 const (
 	paneSessions pane = iota
+	paneProjectYAML
 	paneProjects
+	paneTasks
+)
+
+// uiMode is the input mode the TUI is currently capturing keystrokes for.
+// Modes don't change pane focus — they layer a text-entry overlay on top of
+// it. modeCommandLine is vim-style: the user has pressed `:` and is typing a
+// command at the bottom of the screen. modeNewProject is the modal dialog
+// that prompts for a project name after `:new` is executed.
+type uiMode int
+
+const (
+	modeNormal uiMode = iota
+	modeCommandLine
+	modeNewProject
+)
+
+// yamlSource picks what the YAML viewer pane renders: the selected
+// project's .project.yaml or the selected task's YAML file. The user
+// flips this with the p / t keys; focus changes do NOT — moving focus
+// elsewhere lets the viewer keep showing what the user asked for.
+type yamlSource int
+
+const (
+	yamlSourceProject yamlSource = iota
+	yamlSourceTask
 )
 
 type projectsMsg struct {
@@ -50,6 +76,37 @@ type model struct {
 	loaded        bool
 	attacher      tmuxAttacher
 	statusMsg     string
+
+	// yamlScroll is the index of the first visible wrapped line of the
+	// project-YAML viewer. Reset to 0 whenever projSel or taskSel changes
+	// so a fresh selection opens from the top of the file.
+	yamlScroll int
+
+	// taskSel is the file path of the currently-selected task. Drives the
+	// Tasks pane's row highlight and feeds the YAML viewer when yamlSrc is
+	// yamlSourceTask. Empty when no task is selected (e.g. the project has
+	// no tasks yet); reconciled against the current task list the same way
+	// projSel is reconciled against the project list.
+	taskSel string
+
+	// yamlSrc picks which file the YAML viewer renders. Toggled via the p
+	// / t keys; defaults to yamlSourceProject so a fresh model opens on
+	// the project view that existed before the task viewer was added.
+	yamlSrc yamlSource
+
+	// projectRoot is the directory where the `:new` command creates a new
+	// project's empty .project.yaml. Set by Run() from the first --root the
+	// caller passed in; empty in standalone test models.
+	projectRoot string
+
+	// Input-mode state. mode gates which key handler the Update loop hands
+	// the next keystroke to. cmdInput holds the characters typed after `:`
+	// in command-line mode; newProjName / newProjErr drive the new-project
+	// modal's input field and its inline error line.
+	mode        uiMode
+	cmdInput    string
+	newProjName string
+	newProjErr  string
 
 	auditLines []string
 	auditCh    <-chan []string
@@ -124,7 +181,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case projectsMsg:
 		m.projects = msg.views
 		m.loaded = true
+		prevProjSel := m.projSel
 		m.projSel = reconcileProjectSelection(m.projects, m.projSel)
+		if m.projSel != prevProjSel && m.yamlSrc == yamlSourceProject {
+			m.yamlScroll = 0
+		}
+		prevTaskSel := m.taskSel
+		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
+		if m.taskSel != prevTaskSel && m.yamlSrc == yamlSourceTask {
+			m.yamlScroll = 0
+		}
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, waitForProjects(m.projCh)
 	case sessionsMsg:
@@ -143,42 +209,122 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
+		// Mouse events get suspended while a modal is open — the user is
+		// committed to the text-entry flow until they confirm or cancel.
+		if m.mode != modeNormal {
+			return m, nil
+		}
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
+		// ctrl+c always quits, regardless of mode, so the user can't get
+		// trapped in a modal they don't know how to exit.
+		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
-		case "tab", "shift+tab":
-			m.focus = togglePane(m.focus)
+		}
+		switch m.mode {
+		case modeCommandLine:
+			return m.handleCommandLineKey(msg)
+		case modeNewProject:
+			return m.handleNewProjectKey(msg)
+		}
+		return m.handleNormalKey(msg)
+	}
+	return m, nil
+}
+
+// handleNormalKey processes a keystroke when no modal is open. It is the
+// original key dispatcher, refactored into its own function so the Update
+// loop can route keys to mode-specific handlers when a modal takes over.
+func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		return m, tea.Quit
+	case ":":
+		// Vim-style command-line entry, but only when the projects pane is
+		// focused — `:new` is currently the only command and it's a
+		// project-pane action. Future commands could relax this.
+		if m.focus == paneProjects {
+			m.mode = modeCommandLine
+			m.cmdInput = ""
 			m.statusMsg = ""
-		case "right", "l":
-			m.focus = paneProjects
-			m.statusMsg = ""
-		case "left", "h":
-			m.focus = paneSessions
-			m.statusMsg = ""
-		case "up":
-			switch m.focus {
-			case paneSessions:
-				m.sessSel = moveSelection(m.sessions, m.sessSel, -1)
-			case paneProjects:
-				m.projSel = moveProjectSelection(m.projects, m.projSel, -1)
-				m.sessSel = reconcileSelection(m.sessions, m.sessSel)
+		}
+	case "tab":
+		m.focus = togglePane(m.focus)
+		m.statusMsg = ""
+	case "shift+tab":
+		m.focus = shiftTogglePane(m.focus)
+		m.statusMsg = ""
+	case "right", "l":
+		m.focus = paneRight(m.focus)
+		m.statusMsg = ""
+	case "left", "h":
+		m.focus = paneLeft(m.focus)
+		m.statusMsg = ""
+	case "p":
+		// Switch the YAML viewer to project content. Independent of pane
+		// focus — the user can keep navigating tasks while the viewer
+		// stays on the project file.
+		if m.yamlSrc != yamlSourceProject {
+			m.yamlSrc = yamlSourceProject
+			m.yamlScroll = 0
+		}
+		m.statusMsg = ""
+	case "t":
+		// Switch the YAML viewer to task content.
+		if m.yamlSrc != yamlSourceTask {
+			m.yamlSrc = yamlSourceTask
+			m.yamlScroll = 0
+		}
+		m.statusMsg = ""
+	case "up":
+		switch m.focus {
+		case paneSessions:
+			m.sessSel = moveSelection(m.sessions, m.sessSel, -1)
+		case paneProjects:
+			prev := m.projSel
+			m.projSel = moveProjectSelection(m.projects, m.projSel, -1)
+			if m.projSel != prev && m.yamlSrc == yamlSourceProject {
+				m.yamlScroll = 0
 			}
-			m.statusMsg = ""
-		case "down":
-			switch m.focus {
-			case paneSessions:
-				m.sessSel = moveSelection(m.sessions, m.sessSel, 1)
-			case paneProjects:
-				m.projSel = moveProjectSelection(m.projects, m.projSel, 1)
-				m.sessSel = reconcileSelection(m.sessions, m.sessSel)
+			m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
+			m.sessSel = reconcileSelection(m.sessions, m.sessSel)
+		case paneProjectYAML:
+			if m.yamlScroll > 0 {
+				m.yamlScroll--
 			}
-			m.statusMsg = ""
-		case "enter":
-			if m.focus == paneSessions {
-				return m.attachSelected()
+		case paneTasks:
+			prev := m.taskSel
+			m.taskSel = moveTaskSelection(m.selectedProjectTasks(), m.taskSel, -1)
+			if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
+				m.yamlScroll = 0
 			}
+		}
+		m.statusMsg = ""
+	case "down":
+		switch m.focus {
+		case paneSessions:
+			m.sessSel = moveSelection(m.sessions, m.sessSel, 1)
+		case paneProjects:
+			prev := m.projSel
+			m.projSel = moveProjectSelection(m.projects, m.projSel, 1)
+			if m.projSel != prev && m.yamlSrc == yamlSourceProject {
+				m.yamlScroll = 0
+			}
+			m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
+			m.sessSel = reconcileSelection(m.sessions, m.sessSel)
+		case paneProjectYAML:
+			m.yamlScroll++
+		case paneTasks:
+			prev := m.taskSel
+			m.taskSel = moveTaskSelection(m.selectedProjectTasks(), m.taskSel, 1)
+			if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
+				m.yamlScroll = 0
+			}
+		}
+		m.statusMsg = ""
+	case "enter":
+		if m.focus == paneSessions {
+			return m.attachSelected()
 		}
 	}
 	return m, nil
@@ -188,10 +334,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 //
 //   - Sessions pane (left column): left-button press selects the row under
 //     the cursor and immediately attaches to it (click-to-attach UX).
-//   - Projects pane (right column, upper area): left-button press focuses
-//     the pane and selects the card under the cursor. No attach.
-//   - Tasks pane (right column, lower area): focus only; tasks are display
-//     today.
+//   - Projects pane (right column, top): left-button press focuses the
+//     pane and selects the card under the cursor. No attach.
+//   - Tasks pane (right column, middle): left-button press focuses the
+//     pane and selects the task row under the cursor.
+//   - Project-YAML / Task-YAML pane (right column, bottom): focus only;
+//     the body is read-only and scrolled via keyboard.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
@@ -214,10 +362,17 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.attachSelected()
 	}
 
-	// Right column: split between projects (top) and tasks (bottom). Header
-	// is row 0; projects pane occupies rows [1, 1+projectsH); tasks below.
+	// Right column. Vertical layout (top → bottom): header (1 row), projects
+	// pane, tasks pane, optional YAML pane. The bands here mirror the View()
+	// stacking so click routing and rendering can't drift.
 	const headerRows = 1
-	if msg.Y >= headerRows && msg.Y < headerRows+l.projectsH {
+	projectsEnd := headerRows + l.projectsH
+	tasksStart := projectsEnd
+	tasksEnd := tasksStart + l.tasksH
+	yamlStart := tasksEnd
+	yamlEnd := yamlStart + l.yamlH
+
+	if msg.Y >= headerRows && msg.Y < projectsEnd {
 		innerW := l.projectsW - unfocusedBorder.GetHorizontalFrameSize()
 		if innerW < 0 {
 			innerW = 0
@@ -228,14 +383,53 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if idx < 0 || idx >= len(m.projects) {
 			return m, nil
 		}
+		prev := m.projSel
 		m.projSel = m.projects[idx].Path
+		if m.projSel != prev && m.yamlSrc == yamlSourceProject {
+			m.yamlScroll = 0
+		}
+		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, nil
 	}
-	// Click below the projects pane → tasks area (or audit). Treat as
-	// focus-only on projects so up/down keys keep navigating the cards.
+	if msg.Y >= tasksStart && msg.Y < tasksEnd {
+		m.focus = paneTasks
+		m.statusMsg = ""
+		tasks := m.selectedProjectTasks()
+		idx := taskRowAtY(msg.Y, tasksStart, len(tasks))
+		if idx >= 0 {
+			prev := m.taskSel
+			m.taskSel = tasks[idx].Path
+			if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
+				m.yamlScroll = 0
+			}
+		}
+		return m, nil
+	}
+	if l.yamlH > 0 && msg.Y >= yamlStart && msg.Y < yamlEnd {
+		m.focus = paneProjectYAML
+		m.statusMsg = ""
+		return m, nil
+	}
+	// Click below every pane (audit area or empty). Focus projects as a
+	// safe default so up/down still does something sensible.
 	m.focus = paneProjects
 	return m, nil
+}
+
+// taskRowAtY maps an absolute y row to a task index using the tasks pane's
+// layout: top border (1) + title (1) + blank (1) + one row per task. Returns
+// -1 for clicks on the chrome or beyond the last task.
+func taskRowAtY(y, paneTop, count int) int {
+	const (
+		topBorder = 1
+		titleRows = 2 // "Tasks" + blank
+	)
+	rel := y - paneTop - topBorder - titleRows
+	if rel < 0 || rel >= count {
+		return -1
+	}
+	return rel
 }
 
 // attachSelected dispatches the tmux-attach command for the currently
@@ -394,10 +588,50 @@ func paneWidths(width int) (sessionsWidth, projectsWidth int) {
 // this, paneWidths gives everything to the sessions pane.
 const minProjectsPaneWidth = 12
 
+// togglePane cycles forward through the focusable panes in the order they
+// appear on screen, top-to-bottom for the right column: sessions (left)
+// → projects (right top) → tasks (right middle) → project-YAML (right
+// bottom) → sessions. shiftTogglePane is the inverse cycle.
 func togglePane(p pane) pane {
+	switch p {
+	case paneSessions:
+		return paneProjects
+	case paneProjects:
+		return paneTasks
+	case paneTasks:
+		return paneProjectYAML
+	default:
+		return paneSessions
+	}
+}
+
+func shiftTogglePane(p pane) pane {
+	switch p {
+	case paneSessions:
+		return paneProjectYAML
+	case paneProjectYAML:
+		return paneTasks
+	case paneTasks:
+		return paneProjects
+	default:
+		return paneSessions
+	}
+}
+
+// paneRight / paneLeft move focus toward / away from the right column.
+// Sessions is the only pane in the left column; the right column holds
+// projects, YAML viewer, and tasks stacked vertically. Right from sessions
+// lands on projects (top of the stack); left from any right-column pane
+// returns to sessions. Vertical movement within the right column is
+// driven by tab / shift+tab.
+func paneRight(p pane) pane {
 	if p == paneSessions {
 		return paneProjects
 	}
+	return p
+}
+
+func paneLeft(p pane) pane {
 	return paneSessions
 }
 
@@ -811,13 +1045,24 @@ const projectsMinHeight = 9
 // 3 rows = top border + 1 line of content + bottom border.
 const tasksMinHeight = 3
 
+// yamlMinHeight is the floor for the project-YAML pane stacked between
+// projects and tasks. 5 rows = top border + title + blank + 1 content line +
+// bottom border. Below this we drop the pane entirely and fall back to
+// projects + tasks the way it was before the YAML viewer existed.
+const yamlMinHeight = 5
+
 // uiLayout caches the computed dimensions of every pane for a given window
 // size. View() and handleMouse() both use it so the rendering and the
 // click-routing math stay in lockstep.
+//
+// The right column stacks three panes vertically: projects (top), tasks
+// (middle), and the project/task YAML viewer (bottom). yamlH is 0 when the
+// terminal is too short to fit all three; in that regime the layout falls
+// back to projects + tasks the way it did before the YAML pane existed.
 type uiLayout struct {
-	sessionsW, projectsW       int
-	bodyH                      int
-	projectsH, tasksH, auditH  int
+	sessionsW, projectsW             int
+	bodyH                            int
+	projectsH, yamlH, tasksH, auditH int
 }
 
 func (m model) computeLayout() uiLayout {
@@ -847,26 +1092,118 @@ func (m model) computeLayout() uiLayout {
 		bodyH = 1
 	}
 
-	// Split the right column: projects gets a minimum that fits one card row,
-	// tasks gets whatever's left. The clamps here favour fitting within
-	// bodyH over hitting projectsMinHeight — exceeding bodyH would push the
-	// right column past the audit pane below.
-	projH := bodyH / 3
-	if projH < projectsMinHeight {
-		projH = projectsMinHeight
-	}
-	if projH > bodyH-tasksMinHeight {
-		projH = bodyH - tasksMinHeight
-	}
-	if projH < 1 {
-		projH = 1
-	}
-	tasksH := bodyH - projH
-	if tasksH < 0 {
-		tasksH = 0
-	}
-	return uiLayout{sessW, projW, bodyH, projH, tasksH, audit}
+	projH, yamlH, tasksH := splitRightColumn(bodyH, projW, len(m.projects))
+	return uiLayout{sessW, projW, bodyH, projH, yamlH, tasksH, audit}
 }
+
+// splitRightColumn divides the right column's bodyH rows between projects
+// (top), tasks (middle), and the YAML viewer (bottom).
+//
+// Sizing strategy:
+//   - When all three fit, projects grows to whatever height it would need
+//     to render every card without truncation (see desiredProjectsHeight),
+//     capped so yaml and tasks still get at least their minimums. The
+//     leftover rows are split roughly 55/45 between yaml and tasks. YAML
+//     gets a hair more because a long .project.yaml is the reason the
+//     pane was added.
+//   - When only two fit, drop the YAML middle and revert to the older
+//     projects+tasks split. Projects still grows up to whatever rows are
+//     available beyond tasksMinHeight so a long gallery isn't artificially
+//     clipped to one row in the narrow regime either.
+//
+// All clamps prefer fitting within bodyH over hitting the per-pane minimums
+// so the right column never overflows the audit footer below it.
+func splitRightColumn(bodyH, projW, projCount int) (proj, yaml, tasks int) {
+	if bodyH <= 0 {
+		return 0, 0, 0
+	}
+	desired := desiredProjectsHeight(projW, projCount)
+	if desired < projectsMinHeight {
+		desired = projectsMinHeight
+	}
+	// Can we fit all three at their minimums?
+	if bodyH >= projectsMinHeight+yamlMinHeight+tasksMinHeight {
+		maxProj := bodyH - yamlMinHeight - tasksMinHeight
+		proj = desired
+		if proj > maxProj {
+			proj = maxProj
+		}
+		if proj < projectsMinHeight {
+			proj = projectsMinHeight
+		}
+		remaining := bodyH - proj
+		yaml = remaining * 11 / 20
+		if yaml < yamlMinHeight {
+			yaml = yamlMinHeight
+		}
+		tasks = remaining - yaml
+		if tasks < tasksMinHeight {
+			tasks = tasksMinHeight
+			yaml = remaining - tasks
+		}
+		return proj, yaml, tasks
+	}
+	// Not enough room for the YAML middle pane; fall back to the original
+	// projects+tasks split so existing callers see the same behaviour they
+	// did before the viewer was added.
+	proj = desired
+	if proj > bodyH-tasksMinHeight {
+		proj = bodyH - tasksMinHeight
+	}
+	if proj < projectsMinHeight {
+		proj = projectsMinHeight
+	}
+	if proj > bodyH {
+		proj = bodyH
+	}
+	if proj < 1 {
+		proj = 1
+	}
+	tasks = bodyH - proj
+	if tasks < 0 {
+		tasks = 0
+	}
+	return proj, 0, tasks
+}
+
+// desiredProjectsHeight returns the row count the projects pane would need
+// to render every project card without truncation, given the pane's outer
+// width and the number of projects. The math mirrors renderProjectGrid's
+// own layout so a pane sized this tall holds the same grid the renderer
+// would draw at bodyH ≫ enough.
+//
+// Returns projectsMinHeight when projW or projCount is too small to compute
+// a meaningful answer — the caller still floors at projectsMinHeight, but
+// returning it directly here avoids a divide-by-zero in the per-row math.
+func desiredProjectsHeight(projW, projCount int) int {
+	if projCount <= 0 || projW <= 0 {
+		return projectsMinHeight
+	}
+	innerWidth := projW - unfocusedBorder.GetHorizontalFrameSize()
+	if innerWidth < 1 {
+		return projectsMinHeight
+	}
+	cardWidth := cardTargetWidth
+	if cardWidth > innerWidth {
+		cardWidth = innerWidth
+	}
+	if cardWidth < cardMinWidth {
+		cardWidth = innerWidth
+	}
+	perRow := (innerWidth + cardGap) / (cardWidth + cardGap)
+	if perRow < 1 {
+		perRow = 1
+	}
+	totalRows := (projCount + perRow - 1) / perRow
+	// Pane chrome: top border + title + blank + bottom border = 4 rows. Each
+	// card row is cardDisplayRows tall.
+	return paneChromeRows + totalRows*cardDisplayRows
+}
+
+// paneChromeRows is the non-content height every pane carries: two border
+// rows plus the title + blank header. Used by sizing math that needs to ask
+// "how many rows does N rows of content cost?".
+const paneChromeRows = 4
 
 // Minimum terminal dimensions below which we don't try to lay out the full
 // UI — the panes' titles and a single row of content can't fit, so we show
@@ -884,6 +1221,14 @@ func (m model) View() string {
 		return fmt.Sprintf("terminal too small (need ≥ %d×%d)", minTerminalWidth, minTerminalHeight)
 	}
 
+	// Modal mode replaces the entire screen with the centered dialog.
+	// Bubbletea has no native overlay primitive, so blanking the body is
+	// the simplest reliable approach — the user dismisses the modal with
+	// esc/enter and the regular UI returns intact.
+	if m.mode == modeNewProject {
+		return m.renderNewProjectModal()
+	}
+
 	l := m.computeLayout()
 	header := titleStyle.Render("orch")
 	footer := m.renderFooter()
@@ -894,11 +1239,17 @@ func (m model) View() string {
 	if l.projectsW > 0 {
 		projects := m.renderProjects(l.projectsW, l.projectsH)
 		tasks := m.renderTasks(l.projectsW, l.tasksH)
-		right := lipgloss.JoinVertical(lipgloss.Left, projects, tasks)
+		var right string
+		if l.yamlH > 0 {
+			yaml := m.renderProjectYAML(l.projectsW, l.yamlH)
+			right = lipgloss.JoinVertical(lipgloss.Left, projects, tasks, yaml)
+		} else {
+			right = lipgloss.JoinVertical(lipgloss.Left, projects, tasks)
+		}
 		body = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	} else {
 		// Terminal is too narrow for two columns. Sessions takes the full
-		// width and the projects/tasks panes are dropped — the user can
+		// width and the projects/yaml/tasks panes are dropped — the user can
 		// still see and click sessions, which is the primary action.
 		body = left
 	}
@@ -915,9 +1266,16 @@ func (m model) View() string {
 // status on the right. The list is bound to whichever project projSel
 // currently points at; switching project swaps the content.
 //
+// The row matching taskSel gets the highlighted treatment (same pink
+// accent used by the session row selection) so the user can see which
+// task the YAML viewer is currently pointing at when this pane is
+// focused. The Tasks pane uses the focused border when m.focus == paneTasks
+// so the user knows the pane accepts up/down input.
+//
 // `height` is the total rows the pane should occupy. Borders eat 2 of them.
 func (m model) renderTasks(width, height int) string {
-	base := unfocusedBorder.Width(width - unfocusedBorder.GetHorizontalBorderSize())
+	bs := m.borderStyle(paneTasks)
+	base := bs.Width(width - bs.GetHorizontalBorderSize())
 	innerHeight := height - base.GetVerticalFrameSize()
 	if innerHeight < 0 {
 		innerHeight = 0
@@ -946,7 +1304,7 @@ func (m model) renderTasks(width, height int) string {
 		tasks = tasks[:maxRows]
 	}
 	for i, t := range tasks {
-		b.WriteString(renderTaskRow(t, innerWidth))
+		b.WriteString(renderTaskRow(t, innerWidth, t.Path == m.taskSel))
 		if i < len(tasks)-1 {
 			b.WriteString("\n")
 		}
@@ -973,7 +1331,11 @@ func (m model) selectedProjectTasks() []TaskView {
 // status to the inner width so the colored statuses form a tidy column. The
 // task status colour matches the project-status palette so the eye learns
 // one mapping across the UI.
-func renderTaskRow(t TaskView, width int) string {
+//
+// When selected, the entire row is rendered with the accent
+// background/foreground used elsewhere for "active selection", so the user
+// can see at a glance which task the YAML viewer is mirroring.
+func renderTaskRow(t TaskView, width int, selected bool) string {
 	status := string(t.Status)
 	statusW := lipgloss.Width(status)
 	nameW := width - statusW - 1 // 1 col gap
@@ -984,6 +1346,10 @@ func renderTaskRow(t TaskView, width int) string {
 	pad := width - lipgloss.Width(name) - statusW
 	if pad < 1 {
 		pad = 1
+	}
+	plain := name + strings.Repeat(" ", pad) + status
+	if selected {
+		return sessionRowSelectedStyle.Render(padToWidth(plain, width))
 	}
 	statusStyled := taskStatusStyle(t.Status).Render(status)
 	return name + strings.Repeat(" ", pad) + statusStyled
@@ -1052,17 +1418,35 @@ func (m model) renderAudit(width, height int) string {
 	return style.Render(clampLines(b.String(), innerHeight))
 }
 
-// renderFooter draws the bottom hint line. When statusMsg is set (typically a
-// tmux-attach failure), it replaces the keybinding hint so the error is
-// front-and-centre instead of buried. Both variants are truncated to the
-// terminal width so a long string can't push the line past the screen edge
-// (which on bubbletea altscreen wraps it onto a phantom row that scrolls the
-// rest of the UI up).
+// renderFooter draws the bottom hint line. Four variants, in precedence
+// order:
+//
+//   - Command-line mode: shows the vim-style `:cmd` prompt with a cursor so
+//     the user sees what they're typing.
+//   - statusMsg set (e.g. tmux-attach failure, "created project foo"): the
+//     message replaces the hint so the user can't miss it.
+//   - Projects pane focused: hint includes the `:new` discovery affordance.
+//   - Default: the regular keybinding hint.
+//
+// All variants are truncated to the terminal width so a long string can't
+// push the line past the screen edge (which on bubbletea altscreen wraps it
+// onto a phantom row that scrolls the rest of the UI up).
 func (m model) renderFooter() string {
+	if m.mode == modeCommandLine {
+		text := ":" + m.cmdInput + "▌"
+		if m.width > 0 {
+			text = truncate(text, m.width)
+		}
+		return hintStyle.Render(text)
+	}
 	text := m.statusMsg
 	style := statusErrStyle
 	if text == "" {
-		text = "tab: switch pane  •  ↑/↓: select session  •  enter/click: attach  •  q: quit  •  focus: " + paneName(m.focus)
+		base := "tab: switch pane  •  ↑/↓: select  •  p/t: project/task yaml  •  enter/click: attach  •  q: quit"
+		if m.focus == paneProjects {
+			base += "  •  :new: create project"
+		}
+		text = base + "  •  focus: " + paneName(m.focus)
 		style = hintStyle
 	}
 	if m.width > 0 {
@@ -1072,10 +1456,16 @@ func (m model) renderFooter() string {
 }
 
 func paneName(p pane) string {
-	if p == paneSessions {
+	switch p {
+	case paneSessions:
 		return "sessions"
+	case paneProjectYAML:
+		return "yaml"
+	case paneTasks:
+		return "tasks"
+	default:
+		return "projects"
 	}
-	return "projects"
 }
 
 // Run launches the TUI. It scans the given roots for projects and live-updates
@@ -1100,8 +1490,16 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, audit
 		auditCh = TailAudit(tuiCtx, auditPath, 250*time.Millisecond, 0)
 	}
 
+	m := newModel(ch, sessCh, auditCh, newTmuxAttacher())
+	// `:new` writes the empty .project.yaml into the first --root the caller
+	// passed in. Standalone tui mode without any --root has no place to
+	// create projects; the command-line handler reports that gracefully.
+	if len(roots) > 0 {
+		m.projectRoot = roots[0]
+	}
+
 	p := tea.NewProgram(
-		newModel(ch, sessCh, auditCh, newTmuxAttacher()),
+		m,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 		tea.WithContext(tuiCtx),

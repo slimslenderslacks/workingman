@@ -62,23 +62,20 @@ const initialPrompt = "Read .orch/instructions.md and .orch/context.yaml, then f
 // DefaultCommandBuilder returns the production command: claude-code, told to
 // read the instructions and context the orchestrator just wrote.
 //
-// Autonomous kinds (planning, task, commit) use --print so claude executes
-// one turn — including any tool use needed to complete the task — and
-// exits. That exit is what closes the tmux session and lets the daemon's
-// session tracker chain to the next phase. Without --print, claude sits at
-// an interactive prompt after finishing its work and the session never
-// terminates on its own.
+// Every kind runs interactively (without --print) so a human attached to
+// the tmux window can watch the agent stream its output and respond to any
+// prompts. The initial prompt is still passed on argv so claude starts work
+// immediately — the human only needs to step in when there's something to
+// respond to or review. The session ends when the human closes the tmux
+// window, which is what triggers the daemon to advance the project's state.
 //
-// Interactive kinds (project, wolf) omit --print: the human is expected to
-// attach via tmux and drive the conversation, so claude must remain at the
-// prompt between turns.
+// Historically planning / task / commit were autonomous (used --print and
+// auto-exited); we kept the kind-aware shape of this function because the
+// runner's tests pin the contract per kind, and a future kind might need a
+// different mode.
 func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
-	cmd := []string{"claude", "--dangerously-skip-permissions"}
-	if !kind.Interactive() {
-		cmd = append(cmd, "--print")
-	}
-	cmd = append(cmd, initialPrompt)
-	return cmd
+	_ = kind
+	return []string{"claude", "--dangerously-skip-permissions", initialPrompt}
 }
 
 type Runner struct {
@@ -163,11 +160,24 @@ func (r *Runner) resolveWorkingDir(ctx context.Context, p Plan) (string, error) 
 	return r.Workspaces.Create(ctx, p.Branch, p.Repos)
 }
 
+// sessionName builds the tmux window name in the form "<kind>-<tail>". The
+// tail picks the most specific identifier the Plan carries: a task name
+// when the agent is working a specific task (task / commit agents), the
+// branch otherwise (project / planning / wolf), and as a last resort a
+// hash of WorkingDir so we still produce something unique.
+//
+// Preferring TaskName for task-bound kinds is the whole point of this
+// function — without it, every task on the same branch would land in a
+// window called "task-<branch>" and a glance at tmux's status bar wouldn't
+// tell you which task is actually running.
 func sessionName(p Plan) string {
 	if p.SessionName != "" {
 		return p.SessionName
 	}
-	tail := p.Branch
+	tail := p.TaskName
+	if tail == "" {
+		tail = p.Branch
+	}
 	if tail == "" {
 		tail = shortID(p.WorkingDir)
 	}

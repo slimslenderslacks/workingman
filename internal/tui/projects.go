@@ -42,13 +42,15 @@ type ProjectView struct {
 	LastUpdate time.Time
 }
 
-// TaskView is the minimal snapshot the Tasks pane renders: a task's name
-// and its current status. Kept narrow so the diff logic in projectViewEqual
-// stays cheap and a future "skipped" status (see workingman#1) plugs in
-// without churn.
+// TaskView is the minimal snapshot the Tasks pane renders: a task's name,
+// its current status, and the path to its source YAML file (so the YAML
+// viewer can render the file when the Tasks pane is focused). Kept narrow
+// so the diff logic in projectViewEqual stays cheap and a future "skipped"
+// status (see workingman#1) plugs in without churn.
 type TaskView struct {
 	Name   string
 	Status task.Status
+	Path   string
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
@@ -129,7 +131,7 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 	tasks := make([]TaskView, 0, len(gTasks))
 	for _, t := range gTasks {
 		counts[t.Status]++
-		tasks = append(tasks, TaskView{Name: t.Name, Status: t.Status})
+		tasks = append(tasks, TaskView{Name: t.Name, Status: t.Status, Path: t.Path})
 	}
 	return counts, tasks
 }
@@ -241,6 +243,53 @@ func moveProjectSelection(views []ProjectView, currentPath string, delta int) st
 		idx = len(views) - 1
 	}
 	return views[idx].Path
+}
+
+// reconcileTaskSelection mirrors reconcileProjectSelection for the Tasks
+// pane: it keeps prevPath highlighted across snapshot refreshes when the
+// task still exists, falls back to the first task when it doesn't, and
+// returns "" when the list is empty.
+func reconcileTaskSelection(tasks []TaskView, prevPath string) string {
+	if len(tasks) == 0 {
+		return ""
+	}
+	if prevPath != "" {
+		for _, t := range tasks {
+			if t.Path == prevPath {
+				return prevPath
+			}
+		}
+	}
+	return tasks[0].Path
+}
+
+// moveTaskSelection shifts the task selection by delta rows, clamped to the
+// list bounds. Mirrors moveProjectSelection.
+func moveTaskSelection(tasks []TaskView, currentPath string, delta int) string {
+	if len(tasks) == 0 {
+		return ""
+	}
+	idx := -1
+	for i, t := range tasks {
+		if t.Path == currentPath {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		if delta >= 0 {
+			return tasks[0].Path
+		}
+		return tasks[len(tasks)-1].Path
+	}
+	idx += delta
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(tasks) {
+		idx = len(tasks) - 1
+	}
+	return tasks[idx].Path
 }
 
 func projectViewEqual(a, b ProjectView) bool {

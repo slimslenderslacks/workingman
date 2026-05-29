@@ -164,6 +164,63 @@ func TestRenderTasksEmptyState(t *testing.T) {
 	}
 }
 
+func TestProjectsPaneSpillsOverMultipleRows(t *testing.T) {
+	// Eight projects at width=160 fits two cards per row (innerWidth ≈ 100,
+	// cardTargetWidth=30 → perRow=3), so the gallery needs three rows to
+	// show every card. With a generous height the layout must grow the
+	// projects pane to fit them all instead of clipping to the historical
+	// one-row default.
+	views := make([]ProjectView, 0, 8)
+	for _, name := range []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"} {
+		views = append(views, ProjectView{
+			Name:   name,
+			Path:   "/x/" + name + "/.project.yaml",
+			Status: project.StatusReady,
+		})
+	}
+
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 80})
+	m = sized.(model)
+	step, _ := m.Update(projectsMsg{views: views})
+	m = step.(model)
+
+	view := m.View()
+	for _, v := range views {
+		if !strings.Contains(view, v.Name) {
+			t.Errorf("expected every project to render; missing %q in view", v.Name)
+		}
+	}
+
+	// Sanity: the projects pane must have grown beyond the one-card-row
+	// minimum so the spill-over is actually layout-driven and not just the
+	// renderer overrunning its allocation.
+	l := m.computeLayout()
+	if l.projectsH <= projectsMinHeight {
+		t.Errorf("projectsH = %d, want > projectsMinHeight(%d) to confirm spill-over",
+			l.projectsH, projectsMinHeight)
+	}
+}
+
+func TestDesiredProjectsHeightGrowsWithCount(t *testing.T) {
+	one := desiredProjectsHeight(80, 1)
+	many := desiredProjectsHeight(80, 8)
+	if one != projectsMinHeight {
+		t.Errorf("one project: desiredProjectsHeight = %d, want %d", one, projectsMinHeight)
+	}
+	if many <= one {
+		t.Errorf("eight projects (%d rows) should need more height than one (%d)", many, one)
+	}
+	// Empty + zero-width edge cases must return the floor without dividing
+	// by zero or producing nonsense values.
+	if got := desiredProjectsHeight(80, 0); got != projectsMinHeight {
+		t.Errorf("zero projects: desiredProjectsHeight = %d, want %d", got, projectsMinHeight)
+	}
+	if got := desiredProjectsHeight(0, 5); got != projectsMinHeight {
+		t.Errorf("zero width: desiredProjectsHeight = %d, want %d", got, projectsMinHeight)
+	}
+}
+
 func TestSelectedCardBorderUsesAccentColor(t *testing.T) {
 	// lipgloss strips colours in test environments (no TTY), so we can't
 	// compare rendered output. Verify the style values directly via the

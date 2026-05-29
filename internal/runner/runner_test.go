@@ -47,25 +47,27 @@ func (s *fakeSession) Close() error {
 }
 
 func TestDefaultCommandBuilderModes(t *testing.T) {
-	autonomous := []agent.Kind{agent.PlanningAgent, agent.TaskAgent, agent.CommitAgent}
-	interactive := []agent.Kind{agent.ProjectAgent, agent.WolfAgent}
-
-	for _, k := range autonomous {
-		cmd := DefaultCommandBuilder(k, "/ws")
-		if !contains(cmd, "--print") {
-			t.Errorf("%s should use --print (non-interactive), got %v", k, cmd)
-		}
-		if !contains(cmd, "--dangerously-skip-permissions") {
-			t.Errorf("%s missing --dangerously-skip-permissions: %v", k, cmd)
-		}
+	// Every kind now runs claude interactively so a human can attach to the
+	// tmux window, watch the output stream, and respond if claude prompts.
+	// --print is never added; the initial prompt is passed on argv either way
+	// so the agent starts work immediately.
+	allKinds := []agent.Kind{
+		agent.ProjectAgent,
+		agent.PlanningAgent,
+		agent.TaskAgent,
+		agent.WolfAgent,
+		agent.CommitAgent,
 	}
-	for _, k := range interactive {
+	for _, k := range allKinds {
 		cmd := DefaultCommandBuilder(k, "/ws")
 		if contains(cmd, "--print") {
-			t.Errorf("%s must NOT use --print (interactive needs the prompt), got %v", k, cmd)
+			t.Errorf("%s must NOT use --print (every kind is now interactive), got %v", k, cmd)
 		}
 		if !contains(cmd, "--dangerously-skip-permissions") {
 			t.Errorf("%s missing --dangerously-skip-permissions: %v", k, cmd)
+		}
+		if !contains(cmd, initialPrompt) {
+			t.Errorf("%s missing initial prompt: %v", k, cmd)
 		}
 	}
 }
@@ -157,6 +159,47 @@ func TestTaskAgentUsesWorkspaceManager(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(want, ".orch", "context.yaml")); err != nil {
 		t.Errorf("context.yaml not written in workspace: %v", err)
+	}
+}
+
+func TestSessionNamePrefersTaskNameForTaskKinds(t *testing.T) {
+	cases := []struct {
+		desc string
+		plan Plan
+		want string
+	}{
+		{
+			desc: "task agent with task name beats branch in the window name",
+			plan: Plan{Kind: agent.TaskAgent, Branch: "feat/self-contained", TaskName: "explore-self-contained"},
+			want: "task-explore-self-contained",
+		},
+		{
+			desc: "commit agent with task name",
+			plan: Plan{Kind: agent.CommitAgent, Branch: "feat/x", TaskName: "wire-it-up"},
+			want: "commit-wire-it-up",
+		},
+		{
+			desc: "planning agent has no task name so branch wins",
+			plan: Plan{Kind: agent.PlanningAgent, Branch: "feat/x"},
+			want: "planning-feat/x",
+		},
+		{
+			desc: "task agent without task name falls back to branch",
+			plan: Plan{Kind: agent.TaskAgent, Branch: "feat/x"},
+			want: "task-feat/x",
+		},
+		{
+			desc: "explicit SessionName overrides everything",
+			plan: Plan{Kind: agent.TaskAgent, Branch: "feat/x", TaskName: "wire", SessionName: "task-custom"},
+			want: "task-custom",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			if got := sessionName(tc.plan); got != tc.want {
+				t.Errorf("sessionName = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
