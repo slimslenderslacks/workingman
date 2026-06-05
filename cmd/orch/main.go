@@ -98,6 +98,7 @@ func runDaemon(args []string) {
 		},
 		Audit: a,
 		// Command defaults to claude-code via runner.DefaultCommandBuilder.
+		Sandbox: runner.DefaultSandboxCreator,
 	}
 
 	d, err := daemon.New(roots, a,

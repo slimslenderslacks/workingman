@@ -8,6 +8,22 @@ import (
 	"testing"
 )
 
+func TestRepoDirName(t *testing.T) {
+	cases := []struct {
+		repo Repo
+		want string
+	}{
+		{Repo{Identity: "github.com/docker/mcpruntime"}, "mcpruntime"},
+		{Repo{Shortname: "gateway"}, "gateway"},
+		{Repo{Identity: "github.com/foo/bar", Shortname: "bar-alias"}, "bar-alias"},
+	}
+	for _, tc := range cases {
+		if got := tc.repo.DirName(); got != tc.want {
+			t.Errorf("DirName(%+v) = %q, want %q", tc.repo, got, tc.want)
+		}
+	}
+}
+
 func TestStubCreateAndPath(t *testing.T) {
 	root := t.TempDir()
 	m := NewStub(root)

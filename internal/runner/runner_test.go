@@ -47,28 +47,182 @@ func (s *fakeSession) Close() error {
 }
 
 func TestDefaultCommandBuilderModes(t *testing.T) {
-	// Every kind now runs claude interactively so a human can attach to the
-	// tmux window, watch the output stream, and respond if claude prompts.
-	// --print is never added; the initial prompt is passed on argv either way
-	// so the agent starts work immediately.
-	allKinds := []agent.Kind{
-		agent.ProjectAgent,
-		agent.PlanningAgent,
-		agent.TaskAgent,
-		agent.WolfAgent,
-		agent.CommitAgent,
+	// Autonomous kinds (planning/task/commit) run with --print so claude
+	// executes one turn and exits, closing the tmux window and letting the
+	// daemon advance project state. Interactive kinds (project/wolf) omit
+	// --print so the human can drive the conversation. Every kind carries
+	// --dangerously-skip-permissions and the initial prompt on argv.
+	cases := []struct {
+		kind        agent.Kind
+		wantPrint   bool
+		description string
+	}{
+		{agent.ProjectAgent, false, "project agent interviews the user"},
+		{agent.WolfAgent, false, "wolf agent asks for guidance"},
+		{agent.PlanningAgent, true, "planning agent runs one autonomous turn"},
+		{agent.TaskAgent, true, "task agent runs one autonomous turn"},
+		{agent.CommitAgent, true, "commit agent runs one autonomous turn"},
 	}
-	for _, k := range allKinds {
-		cmd := DefaultCommandBuilder(k, "/ws")
-		if contains(cmd, "--print") {
-			t.Errorf("%s must NOT use --print (every kind is now interactive), got %v", k, cmd)
+	for _, tc := range cases {
+		t.Run(tc.kind.String(), func(t *testing.T) {
+			cmd := DefaultCommandBuilder(tc.kind, "/ws")
+			got := contains(cmd, "--print")
+			if got != tc.wantPrint {
+				t.Errorf("--print=%v, want %v (%s): %v", got, tc.wantPrint, tc.description, cmd)
+			}
+			if !contains(cmd, "--dangerously-skip-permissions") {
+				t.Errorf("missing --dangerously-skip-permissions: %v", cmd)
+			}
+			if !contains(cmd, initialPrompt) {
+				t.Errorf("missing initial prompt: %v", cmd)
+			}
+		})
+	}
+}
+
+func TestSandboxNameFor(t *testing.T) {
+	const projectPath = "/orch/myproj/.project.yaml"
+	cases := []struct {
+		kind agent.Kind
+		want string
+	}{
+		{agent.ProjectAgent, ""},
+		{agent.PlanningAgent, "myproj"},
+		{agent.WolfAgent, ""},
+		{agent.TaskAgent, "myproj-worktree"},
+		{agent.CommitAgent, "myproj-worktree"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.kind.String(), func(t *testing.T) {
+			if got := sandboxNameFor(tc.kind, projectPath); got != tc.want {
+				t.Errorf("sandboxNameFor = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := sandboxNameFor(agent.PlanningAgent, ""); got != "" {
+		t.Errorf("empty projectPath should produce empty name, got %q", got)
+	}
+}
+
+func TestSandboxCreatorInvokedAndWraps(t *testing.T) {
+	workingDir := t.TempDir()
+	projectPath := filepath.Join(workingDir, ".project.yaml")
+	_ = os.WriteFile(projectPath, nil, 0o644)
+
+	type call struct {
+		name       string
+		workspaces []string
+	}
+	var sbCalls []call
+	launcher := &fakeLauncher{}
+	r := &Runner{
+		Launcher: launcher,
+		Command:  func(_ agent.Kind, _ string) []string { return []string{"claude", "--print", "hi"} },
+		Sandbox: func(_ context.Context, name string, workspaces []string) error {
+			sbCalls = append(sbCalls, call{name, append([]string(nil), workspaces...)})
+			return nil
+		},
+	}
+	_, err := r.Start(context.Background(), Plan{
+		Kind:        agent.PlanningAgent,
+		WorkingDir:  workingDir,
+		ProjectPath: projectPath,
+		Branch:      "feat/x",
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	wantName := filepath.Base(workingDir)
+	if len(sbCalls) != 1 || sbCalls[0].name != wantName ||
+		len(sbCalls[0].workspaces) != 1 || sbCalls[0].workspaces[0] != workingDir {
+		t.Fatalf("sandbox creator calls = %+v; want one with name=%q workspaces=[%q]", sbCalls, wantName, workingDir)
+	}
+
+	cmd := launcher.last.Command
+	wantPrefix := []string{"sbx", "exec", "-it", "-w", workingDir, wantName}
+	if len(cmd) < len(wantPrefix) {
+		t.Fatalf("wrapped command too short: %v", cmd)
+	}
+	for i, w := range wantPrefix {
+		if cmd[i] != w {
+			t.Errorf("cmd[%d] = %q, want %q (full cmd: %v)", i, cmd[i], w, cmd)
 		}
-		if !contains(cmd, "--dangerously-skip-permissions") {
-			t.Errorf("%s missing --dangerously-skip-permissions: %v", k, cmd)
-		}
-		if !contains(cmd, initialPrompt) {
-			t.Errorf("%s missing initial prompt: %v", k, cmd)
-		}
+	}
+	if !contains(cmd, "claude") {
+		t.Errorf("wrapped command should still include claude: %v", cmd)
+	}
+}
+
+func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
+	wsRoot := t.TempDir()
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	_ = os.WriteFile(projectPath, nil, 0o644)
+
+	type call struct {
+		name       string
+		workspaces []string
+	}
+	var sbCalls []call
+	launcher := &fakeLauncher{}
+	r := &Runner{
+		Workspaces: workspace.NewStub(wsRoot),
+		Launcher:   launcher,
+		Command:    func(_ agent.Kind, _ string) []string { return []string{"claude", "--print", "hi"} },
+		Sandbox: func(_ context.Context, name string, workspaces []string) error {
+			sbCalls = append(sbCalls, call{name, append([]string(nil), workspaces...)})
+			return nil
+		},
+	}
+	_, err := r.Start(context.Background(), Plan{
+		Kind:        agent.TaskAgent,
+		Branch:      "feat-x",
+		ProjectPath: projectPath,
+		TaskPath:    filepath.Join(orchDir, "tasks", "first.yaml"),
+		TaskName:    "first",
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	wantName := filepath.Base(orchDir) + "-worktree"
+	wantWorktree := filepath.Join(wsRoot, "feat-x")
+	if len(sbCalls) != 1 {
+		t.Fatalf("expected one sandbox create, got %d: %+v", len(sbCalls), sbCalls)
+	}
+	got := sbCalls[0]
+	if got.name != wantName {
+		t.Errorf("sandbox name = %q, want %q", got.name, wantName)
+	}
+	if len(got.workspaces) != 2 || got.workspaces[0] != wantWorktree || got.workspaces[1] != orchDir {
+		t.Errorf("workspaces = %v, want [%q %q]", got.workspaces, wantWorktree, orchDir)
+	}
+}
+
+func TestProjectAgentSkipsSandbox(t *testing.T) {
+	workingDir := t.TempDir()
+	projectPath := filepath.Join(workingDir, ".project.yaml")
+	_ = os.WriteFile(projectPath, nil, 0o644)
+
+	launcher := &fakeLauncher{}
+	r := &Runner{
+		Launcher: launcher,
+		Command:  func(_ agent.Kind, _ string) []string { return []string{"claude", "hi"} },
+		Sandbox: func(_ context.Context, _ string, _ []string) error {
+			t.Fatal("sandbox creator must not be called for the project agent")
+			return nil
+		},
+	}
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.ProjectAgent,
+		WorkingDir:  workingDir,
+		ProjectPath: projectPath,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if launcher.last.Command[0] == "sbx" {
+		t.Errorf("project agent command must not be wrapped in sbx exec: %v", launcher.last.Command)
 	}
 }
 

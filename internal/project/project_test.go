@@ -69,6 +69,35 @@ func TestSaveAsAgent(t *testing.T) {
 	}
 }
 
+func TestBaseBranchRoundTrip(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	src := &Project{
+		Description: "x",
+		Branch:      "feat/y",
+		Status:      StatusReady,
+		Repos: []Repo{
+			{Org: "docker", Name: "mcpruntime", BaseBranch: "mcp-kit-hooks"},
+			{Org: "docker", Name: "sandboxes"}, // no BaseBranch → omitted
+		},
+	}
+	if err := SaveAs(dst, src, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	reloaded, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(reloaded.Repos) != 2 {
+		t.Fatalf("want 2 repos, got %d", len(reloaded.Repos))
+	}
+	if reloaded.Repos[0].BaseBranch != "mcp-kit-hooks" {
+		t.Errorf("repo[0].BaseBranch = %q, want mcp-kit-hooks", reloaded.Repos[0].BaseBranch)
+	}
+	if reloaded.Repos[1].BaseBranch != "" {
+		t.Errorf("repo[1].BaseBranch = %q, want empty", reloaded.Repos[1].BaseBranch)
+	}
+}
+
 func TestEmptyFile(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), ".project.yaml")
 	if err := Save(dst, &Project{}); err != nil {

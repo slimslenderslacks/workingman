@@ -15,7 +15,11 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
@@ -45,6 +49,13 @@ type Plan struct {
 	TaskName    string
 	FailedTasks []string
 
+	// BlockedReason, when set, is the message surfaced to the wolf agent
+	// describing why the project entered status:blocked. Ignored for any
+	// other Kind. Mirrors the project file's blocked_reason field but is
+	// passed in directly so the daemon doesn't depend on the agent
+	// re-parsing the YAML.
+	BlockedReason string
+
 	Skills []setup.Skill
 
 	// SessionName is the tmux session name. If empty, Runner derives one
@@ -62,20 +73,121 @@ const initialPrompt = "Read .orch/instructions.md and .orch/context.yaml, then f
 // DefaultCommandBuilder returns the production command: claude-code, told to
 // read the instructions and context the orchestrator just wrote.
 //
-// Every kind runs interactively (without --print) so a human attached to
-// the tmux window can watch the agent stream its output and respond to any
-// prompts. The initial prompt is still passed on argv so claude starts work
-// immediately — the human only needs to step in when there's something to
-// respond to or review. The session ends when the human closes the tmux
-// window, which is what triggers the daemon to advance the project's state.
+// Autonomous kinds (planning, task, commit) use --print so claude executes
+// one turn — including any tool use needed to complete the task — and exits.
+// That exit closes the tmux window and lets the daemon chain to the next
+// phase.
 //
-// Historically planning / task / commit were autonomous (used --print and
-// auto-exited); we kept the kind-aware shape of this function because the
-// runner's tests pin the contract per kind, and a future kind might need a
-// different mode.
+// Interactive kinds (project, wolf) omit --print: a human attaches via tmux
+// and drives the conversation, so claude must remain at the prompt.
+//
+// Sandbox wrapping (running claude inside an `sbx exec`) is layered on by
+// Runner.Start *after* this builder returns — keeping the builder pure of
+// sandbox concerns lets tests substitute their own commands without
+// reasoning about wrapping.
 func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
-	_ = kind
-	return []string{"claude", "--dangerously-skip-permissions", initialPrompt}
+	cmd := []string{"claude", "--dangerously-skip-permissions"}
+	if !kind.Interactive() {
+		cmd = append(cmd, "--print")
+	}
+	cmd = append(cmd, initialPrompt)
+	return cmd
+}
+
+// SandboxCreator ensures a sandbox named `name` exists with the given
+// workspaces mounted. The first workspace is the primary one (the dir
+// claude will `cd` into via `sbx exec -w`); subsequent workspaces are
+// additional host paths bind-mounted into the sandbox at the same path.
+//
+// Task/commit agents need two mounts: the worktree (for code) and the
+// project's orch dir (for `.project.yaml` and `tasks/*.yaml`, which live
+// outside the worktree).
+//
+// Must be idempotent: the daemon re-dispatches across restarts. The default
+// implementation treats "already exists" errors from sbx as success.
+type SandboxCreator func(ctx context.Context, name string, workspaces []string) error
+
+// DefaultSandboxCreator ensures a sandbox `name` exists with exactly the
+// given workspaces mounted. The flow is:
+//
+//  1. `sbx ls --json` to find the existing sandbox (if any).
+//  2. If it exists with the same set of workspaces → no-op.
+//  3. If it exists with a different set → `sbx rm --force` then recreate.
+//     This self-heals when the daemon's idea of the desired mounts has
+//     grown (e.g. task agents added the orch dir as a second mount).
+//  4. Otherwise `sbx create claude --name <name> <ws...>`.
+//
+// Recreation is safe here because we never use --clone — the sandbox is a
+// thin bind-mount wrapper, so rm just stops the container and leaves the
+// host paths (worktrees, orch dir) untouched.
+func DefaultSandboxCreator(ctx context.Context, name string, workspaces []string) error {
+	if len(workspaces) == 0 {
+		return fmt.Errorf("sandbox: at least one workspace is required")
+	}
+	existing, err := readSandboxWorkspaces(ctx, name)
+	if err != nil {
+		return fmt.Errorf("sbx ls: %w", err)
+	}
+	if existing != nil {
+		if sameWorkspaceSet(existing, workspaces) {
+			return nil
+		}
+		rm := exec.CommandContext(ctx, "sbx", "rm", "--force", name)
+		if out, err := rm.CombinedOutput(); err != nil {
+			return fmt.Errorf("sbx rm %s: %w: %s", name, err, strings.TrimSpace(string(out)))
+		}
+	}
+	args := append([]string{"create", "claude", "--name", name}, workspaces...)
+	cmd := exec.CommandContext(ctx, "sbx", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("sbx create %s %v: %w: %s", name, workspaces, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// readSandboxWorkspaces returns the workspace list for the named sandbox,
+// or nil if no sandbox by that name exists. `sbx ls --json` is the only
+// stable read interface sbx exposes.
+func readSandboxWorkspaces(ctx context.Context, name string) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "sbx", "ls", "--json").Output()
+	if err != nil {
+		return nil, err
+	}
+	var data struct {
+		Sandboxes []struct {
+			Name       string   `json:"name"`
+			Workspaces []string `json:"workspaces"`
+		} `json:"sandboxes"`
+	}
+	if err := json.Unmarshal(out, &data); err != nil {
+		return nil, fmt.Errorf("decode sbx ls output: %w", err)
+	}
+	for _, s := range data.Sandboxes {
+		if s.Name == name {
+			return s.Workspaces, nil
+		}
+	}
+	return nil, nil
+}
+
+// sameWorkspaceSet reports whether a and b contain the same workspace paths.
+// Order is intentionally ignored — sbx doesn't expose an "order" semantics
+// for mounts, and we want the comparison to be insensitive to how either
+// side happened to enumerate them.
+func sameWorkspaceSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, x := range a {
+		seen[x] = true
+	}
+	for _, x := range b {
+		if !seen[x] {
+			return false
+		}
+	}
+	return true
 }
 
 type Runner struct {
@@ -83,6 +195,13 @@ type Runner struct {
 	Launcher   agent.Launcher
 	Audit      *audit.Logger
 	Command    CommandBuilder // defaults to DefaultCommandBuilder when nil
+
+	// Sandbox, when non-nil, is called before each non-project agent launch
+	// to ensure a sandbox exists; the launch command is then wrapped with
+	// `sbx exec -it <name>` so claude runs inside it. Leave nil to skip
+	// sandboxing entirely — tests that fake the launch command set this to
+	// nil so they don't shell out to sbx.
+	Sandbox SandboxCreator
 }
 
 // Start is non-blocking: it returns the Session once the launcher accepts it.
@@ -94,14 +213,15 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	}
 
 	data := prompts.Data{
-		Kind:        p.Kind,
-		Workspace:   workingDir,
-		Branch:      p.Branch,
-		ProjectPath: p.ProjectPath,
-		TasksDir:    p.TasksDir,
-		TaskPath:    p.TaskPath,
-		TaskName:    p.TaskName,
-		FailedTasks: p.FailedTasks,
+		Kind:          p.Kind,
+		Workspace:     workingDir,
+		Branch:        p.Branch,
+		ProjectPath:   p.ProjectPath,
+		TasksDir:      p.TasksDir,
+		TaskPath:      p.TaskPath,
+		TaskName:      p.TaskName,
+		FailedTasks:   p.FailedTasks,
+		BlockedReason: p.BlockedReason,
 	}
 	instructions, err := prompts.Render(p.Kind, data)
 	if err != nil {
@@ -109,14 +229,15 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	}
 
 	ctxFile := setup.Context{
-		Kind:        p.Kind.String(),
-		Workspace:   workingDir,
-		Branch:      p.Branch,
-		ProjectPath: p.ProjectPath,
-		TasksDir:    p.TasksDir,
-		TaskPath:    p.TaskPath,
-		TaskName:    p.TaskName,
-		FailedTasks: p.FailedTasks,
+		Kind:          p.Kind.String(),
+		Workspace:     workingDir,
+		Branch:        p.Branch,
+		ProjectPath:   p.ProjectPath,
+		TasksDir:      p.TasksDir,
+		TaskPath:      p.TaskPath,
+		TaskName:      p.TaskName,
+		FailedTasks:   p.FailedTasks,
+		BlockedReason: p.BlockedReason,
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {
 		return nil, err
@@ -126,11 +247,35 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	if build == nil {
 		build = DefaultCommandBuilder
 	}
+	command := build(p.Kind, workingDir)
+
+	sandboxName := sandboxNameFor(p.Kind, p.ProjectPath)
+	if r.Sandbox != nil && sandboxName != "" {
+		workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath)
+		if err := r.Sandbox(ctx, sandboxName, workspaces); err != nil {
+			return nil, fmt.Errorf("runner: sandbox: %w", err)
+		}
+		if r.Audit != nil {
+			r.Audit.Log("sandbox_ensured",
+				"name", sandboxName,
+				"workspaces", strings.Join(workspaces, ","),
+				"kind", p.Kind.String(),
+			)
+		}
+		// -w pins claude's working directory to the project workspace. The
+		// sandbox bind-mounts the host workspace at the same absolute path,
+		// but `sbx exec` lands in /home/agent/workspace by default (empty),
+		// so the agent's relative `Read .orch/instructions.md` prompt would
+		// resolve to nothing without this — claude would start up, find no
+		// instructions, and exit, sending the daemon into a relaunch loop.
+		command = append([]string{"sbx", "exec", "-it", "-w", workingDir, sandboxName}, command...)
+	}
+
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionName(p),
 		Workspace: workingDir,
-		Command:   build(p.Kind, workingDir),
+		Command:   command,
 	}
 
 	sess, err := r.Launcher.Launch(ctx, spec)
@@ -184,6 +329,57 @@ func sessionName(p Plan) string {
 	// No "orch-" prefix — the umbrella tmux session carries that brand.
 	// Window names show up bare in tmux's status bar.
 	return fmt.Sprintf("%s-%s", p.Kind, tail)
+}
+
+// sandboxNameFor derives the sbx sandbox name for a given launch:
+//
+//   - Project agent → "" (no sandbox; the project agent interviews the user
+//     in the bare workspace and writes the initial .project.yaml).
+//   - Wolf agent → "" (runs outside the sandbox so it can advise on the
+//     project from the host, including for sandbox-related blocks).
+//   - Planning → basename of the project's control dir (the dir holding
+//     .project.yaml). Workspace = control dir.
+//   - Task / commit → basename + "-worktree". One sandbox per project's
+//     worktree, workspace = the wsp-managed worktree dir. The hyphen (not
+//     underscore) is mandatory: sbx rejects sandbox names containing
+//     underscores.
+//
+// Returns "" when there's no ProjectPath to derive a name from.
+func sandboxNameFor(kind agent.Kind, projectPath string) string {
+	if projectPath == "" {
+		return ""
+	}
+	base := filepath.Base(filepath.Dir(projectPath))
+	switch kind {
+	case agent.PlanningAgent:
+		return base
+	case agent.TaskAgent, agent.CommitAgent:
+		return base + "-worktree"
+	}
+	return ""
+}
+
+// sandboxWorkspaces returns the host paths to mount into the sandbox. The
+// first element is the primary workspace claude `cd`s into; the rest are
+// extra mounts.
+//
+// Task/commit agents need TWO mounts: the worktree (where the code lives
+// and where the agent does `git` work) and the project's orch dir (which
+// holds `.project.yaml` and `tasks/*.yaml`). Without the second mount, the
+// task agent's status writeback to `tasks/<name>.yaml` fails because the
+// directory simply doesn't exist inside the sandbox.
+//
+// Planning runs in the project's orch dir; one mount is enough.
+func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath string) []string {
+	switch kind {
+	case agent.TaskAgent, agent.CommitAgent:
+		orchDir := filepath.Dir(projectPath)
+		if orchDir == "" || orchDir == workingDir {
+			return []string{workingDir}
+		}
+		return []string{workingDir, orchDir}
+	}
+	return []string{workingDir}
 }
 
 // shortID hashes a path to a short stable suffix. Used for session names when

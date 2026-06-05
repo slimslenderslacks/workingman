@@ -21,6 +21,12 @@ func (w Writer) Valid() bool {
 type Repo struct {
 	Org  string `yaml:"org"`
 	Name string `yaml:"name"`
+	// BaseBranch is the branch the workspace's feature branch should start
+	// from when the workspace is first created. Defaults to the repo's
+	// default branch (typically `main`) when empty. Only applied on first
+	// workspace creation — once the workspace exists, the agent's commits
+	// own the branch's HEAD.
+	BaseBranch string `yaml:"base_branch,omitempty"`
 }
 
 type Project struct {
@@ -29,7 +35,13 @@ type Project struct {
 	Branch      string `yaml:"branch"`
 	Status      Status `yaml:"status"`
 	Cron        string `yaml:"cron,omitempty"`
-	UpdatedBy   Writer `yaml:"updated_by"`
+	// BlockedReason is set by the daemon when transitioning a project to
+	// `status: blocked` so the cause survives a daemon restart and is
+	// visible to both humans reading the file and the wolf agent. Left
+	// empty for any non-blocked state. Cleared by whichever agent moves
+	// the project back out of blocked (planning, wolf).
+	BlockedReason string `yaml:"blocked_reason,omitempty"`
+	UpdatedBy     Writer `yaml:"updated_by"`
 }
 
 // Empty reports whether the file is the unpopulated placeholder the project

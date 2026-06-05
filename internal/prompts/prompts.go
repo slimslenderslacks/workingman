@@ -27,14 +27,15 @@ var templatesFS embed.FS
 // Data is the shared template input. Per-Kind templates use only the fields
 // that apply to their role and ignore the rest.
 type Data struct {
-	Kind        agent.Kind
-	Workspace   string   // absolute path to the workspace root
-	ProjectPath string   // absolute path to .project.yaml
-	TasksDir    string   // absolute path to the tasks/ directory
-	Branch      string   // target branch (also the workspace name)
-	TaskPath    string   // for TaskAgent: path to this task's yaml
-	TaskName    string   // for TaskAgent: name field of the task
-	FailedTasks []string // for WolfAgent: paths to failed/blocked task yamls
+	Kind          agent.Kind
+	Workspace     string   // absolute path to the workspace root
+	ProjectPath   string   // absolute path to .project.yaml
+	TasksDir      string   // absolute path to the tasks/ directory
+	Branch        string   // target branch (also the workspace name)
+	TaskPath      string   // for TaskAgent: path to this task's yaml
+	TaskName      string   // for TaskAgent: name field of the task
+	FailedTasks   []string // for WolfAgent: paths to failed/blocked task yamls
+	BlockedReason string   // for WolfAgent: why the project was blocked
 }
 
 var tmpls = template.Must(template.ParseFS(templatesFS, "templates/*.tmpl"))

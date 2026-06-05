@@ -7,9 +7,12 @@ description: |
   manifest so the new k8s readiness check has something to hit.
 
 # Repos the workspace needs. Passed to `wsp` when the workspace is created.
+# `base_branch` is the branch the feature branch's HEAD starts at when the
+# workspace is first created. Omit for the repo's default branch.
 repos:
   - org: docker
     name: gateway
+    base_branch: integration/k8s-readiness
   - org: docker
     name: deploy-manifests
 

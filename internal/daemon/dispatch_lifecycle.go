@@ -205,6 +205,7 @@ func (d *Daemon) transitionProjectDone(projectPath string, p *project.Project) {
 func (d *Daemon) transitionProjectBlocked(projectPath string, p *project.Project, reason string) {
 	updated := *p
 	updated.Status = project.StatusBlocked
+	updated.BlockedReason = reason
 	if err := project.Save(projectPath, &updated); err != nil {
 		d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
 		// Even if we couldn't persist the block status, still launch wolf —
@@ -235,13 +236,14 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	root := filepath.Dir(projectPath)
 	tasksDir := filepath.Join(root, "tasks")
 	plan := runner.Plan{
-		Kind:        agent.WolfAgent,
-		WorkingDir:  root,
-		ProjectPath: projectPath,
-		TasksDir:    tasksDir,
-		Branch:      p.Branch,
-		Repos:       toWorkspaceRepos(p.Repos),
-		FailedTasks: failedOrBlockedTaskPaths(tasksDir),
+		Kind:          agent.WolfAgent,
+		WorkingDir:    root,
+		ProjectPath:   projectPath,
+		TasksDir:      tasksDir,
+		Branch:        p.Branch,
+		Repos:         toWorkspaceRepos(p.Repos),
+		FailedTasks:   failedOrBlockedTaskPaths(tasksDir),
+		BlockedReason: reason,
 	}
 	d.audit.Log("wolf_dispatch", "path", projectPath, "reason", reason)
 	// Ignore start error here: the project is already blocked, recursing

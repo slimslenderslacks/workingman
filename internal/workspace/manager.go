@@ -7,14 +7,22 @@
 // change inside the daemon wiring.
 package workspace
 
-import "context"
+import (
+	"context"
+	"path"
+)
 
 // Repo identifies a repository for wsp. Identity is the canonical name wsp
 // uses in its registry (e.g. "github.com/docker/gateway"); Shortname is the
 // equivalent unqualified alias ("gateway"). Either is accepted by `wsp new`.
+//
+// BaseBranch, when set, is the branch the feature branch's HEAD should
+// start at when the workspace is first created. Empty means use wsp's
+// default behavior (start from the repo's default branch).
 type Repo struct {
-	Identity  string
-	Shortname string
+	Identity   string
+	Shortname  string
+	BaseBranch string
 }
 
 // Ref returns the string form wsp prefers — identity if known, otherwise the
@@ -24,6 +32,18 @@ func (r Repo) Ref() string {
 		return r.Identity
 	}
 	return r.Shortname
+}
+
+// DirName is the per-repo directory wsp creates inside the workspace —
+// always the last path segment of the Ref (e.g. "mcpruntime" for
+// "github.com/docker/mcpruntime"). Used by code that needs to reach into
+// the repo on disk after `wsp new` succeeds (e.g. to reset the base
+// branch).
+func (r Repo) DirName() string {
+	if r.Shortname != "" {
+		return r.Shortname
+	}
+	return path.Base(r.Identity)
 }
 
 type Manager interface {

@@ -34,21 +34,16 @@ func (k Kind) String() string {
 	return "unknown"
 }
 
-// Interactive reports whether this Kind expects a human in the loop. Every
-// kind now runs claude without `--print`: the project agent interviews the
-// user to fill in `.project.yaml`, the wolf agent asks for guidance when a
-// project is blocked, and the planning / task / commit agents stream their
-// output into the tmux window and stay at the prompt afterwards so a human
-// can read what they did and respond if needed. The session ends only when
-// the human closes the tmux window, at which point the daemon's onEnd
-// callback advances the project's state machine to the next phase.
+// Interactive reports whether this Kind expects a human in the loop. The
+// project agent interviews the user to fill in `.project.yaml`; the wolf
+// agent asks for guidance when a project is blocked. The planning, task,
+// and commit agents are autonomous — they run under `claude --print`,
+// finish one turn, and exit without prompting.
 //
-// The TUI uses this flag to highlight sessions waiting for input. With all
-// kinds now interactive, every session row carries that highlight — the
-// badge has become a "this session is alive" indicator rather than a
-// distinguishing marker.
+// The runner uses this to pick the right claude flags; the TUI uses it to
+// highlight sessions that won't make progress until someone attaches.
 func (k Kind) Interactive() bool {
-	return true
+	return k == ProjectAgent || k == WolfAgent
 }
 
 // Spec is the minimum a Launcher needs to start a session. Command is

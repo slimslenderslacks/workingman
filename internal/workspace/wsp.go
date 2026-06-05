@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -66,11 +67,50 @@ func (m *WspManager) Create(ctx context.Context, branch string, repos []Repo) (s
 	}
 	if errMsg != "" {
 		if isAlreadyExists(errMsg) {
+			// Skip base-branch application on re-resolve: the workspace
+			// already exists with whatever commits the agent has made on
+			// the feature branch, so we must not reset its HEAD.
 			return m.Path(branch)
 		}
 		return "", fmt.Errorf("wsp new %s: %s", branch, errMsg)
 	}
+	if err := applyBaseBranches(ctx, path, branch, repos); err != nil {
+		return "", fmt.Errorf("wsp new %s: base branch setup: %w", branch, err)
+	}
 	return path, nil
+}
+
+// applyBaseBranches resets each repo's feature branch HEAD to its declared
+// base branch. Called only after a fresh `wsp new` succeeds — the freshly
+// created branch has no commits yet, so `git checkout -B` is a safe reset.
+//
+// For each repo with BaseBranch set:
+//
+//	cd <workspace>/<repo-dir>
+//	git fetch origin <base_branch>
+//	git checkout -B <branch> origin/<base_branch>
+//
+// Repos with BaseBranch empty are left as wsp configured them (default
+// branch or remote-tracking the feature branch if it already exists).
+func applyBaseBranches(ctx context.Context, workspaceDir, branch string, repos []Repo) error {
+	for _, r := range repos {
+		if r.BaseBranch == "" {
+			continue
+		}
+		repoDir := filepath.Join(workspaceDir, r.DirName())
+		fetch := exec.CommandContext(ctx, "git", "-C", repoDir, "fetch", "origin", r.BaseBranch)
+		if out, err := fetch.CombinedOutput(); err != nil {
+			return fmt.Errorf("%s: git fetch origin %s: %w: %s",
+				r.DirName(), r.BaseBranch, err, strings.TrimSpace(string(out)))
+		}
+		checkout := exec.CommandContext(ctx, "git", "-C", repoDir,
+			"checkout", "-B", branch, "origin/"+r.BaseBranch)
+		if out, err := checkout.CombinedOutput(); err != nil {
+			return fmt.Errorf("%s: git checkout -B %s origin/%s: %w: %s",
+				r.DirName(), branch, r.BaseBranch, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
 }
 
 func (m *WspManager) Path(branch string) (string, error) {

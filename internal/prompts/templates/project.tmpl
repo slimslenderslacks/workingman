@@ -8,8 +8,15 @@ Your job is to interview the user about the project they want to run, then
 populate that file. Required fields:
 
 - description: a short paragraph describing the goal.
-- repos: list of {org, name} pairs the workspace should contain.
-- branch: the target branch name (also used as the workspace name).
+- repos: list of {org, name, base_branch} entries. `base_branch` is the
+  branch this repo's feature branch should start from when the workspace
+  is first created. Default it to `main` unless the user names a different
+  base branch (e.g. an integration branch the feature should fork from).
+  You may omit `base_branch` entirely when `main` is correct — it stays
+  out of the saved YAML in that case.
+- branch: the target feature branch name (also used as the workspace
+  name). Each repo's `base_branch` is the *starting point*; `branch` is
+  what gets checked out on top of it.
 - cron: optional 5-field cron schedule for daemon-driven wake-ups.
 
 Set `status: ready` and `updated_by: agent` when you save. Do not write any

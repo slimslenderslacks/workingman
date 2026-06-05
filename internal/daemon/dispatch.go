@@ -77,7 +77,13 @@ func (d *Daemon) handleProject(path string) {
 		// Could be set by the user, the project agent, or some other agent.
 		// Daemon-driven blocks go through transitionProjectBlocked, which
 		// launches wolf inline rather than relying on this fsnotify path.
-		d.launchWolfAgent(path, p, "project marked blocked by "+string(p.UpdatedBy))
+		// Prefer the persisted reason — it covers daemon restarts when the
+		// original transition's in-memory reason is gone.
+		reason := p.BlockedReason
+		if reason == "" {
+			reason = "project marked blocked by " + string(p.UpdatedBy)
+		}
+		d.launchWolfAgent(path, p, reason)
 	case project.StatusDone:
 		// terminal
 	}
@@ -196,11 +202,14 @@ func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) {
 // toWorkspaceRepos converts the project's repo schema into workspace.Repo
 // values for downstream wsp use. We map {Org,Name} → identity
 // "github.com/<org>/<name>" since wsp's registry is GitHub-keyed.
+// BaseBranch is forwarded as-is so WspManager.Create can reset the feature
+// branch's HEAD on first creation.
 func toWorkspaceRepos(in []project.Repo) []workspace.Repo {
 	out := make([]workspace.Repo, len(in))
 	for i, r := range in {
 		out[i] = workspace.Repo{
-			Identity: "github.com/" + r.Org + "/" + r.Name,
+			Identity:   "github.com/" + r.Org + "/" + r.Name,
+			BaseBranch: r.BaseBranch,
 		}
 	}
 	return out

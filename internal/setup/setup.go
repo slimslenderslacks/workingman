@@ -25,14 +25,15 @@ import (
 // the YAML on disk reads naturally; omitempty keeps role-irrelevant fields
 // from cluttering the file.
 type Context struct {
-	Kind        string   `yaml:"kind"`
-	Workspace   string   `yaml:"workspace"`
-	Branch      string   `yaml:"branch,omitempty"`
-	ProjectPath string   `yaml:"project_path,omitempty"`
-	TasksDir    string   `yaml:"tasks_dir,omitempty"`
-	TaskPath    string   `yaml:"task_path,omitempty"`
-	TaskName    string   `yaml:"task_name,omitempty"`
-	FailedTasks []string `yaml:"failed_tasks,omitempty"`
+	Kind          string   `yaml:"kind"`
+	Workspace     string   `yaml:"workspace"`
+	Branch        string   `yaml:"branch,omitempty"`
+	ProjectPath   string   `yaml:"project_path,omitempty"`
+	TasksDir      string   `yaml:"tasks_dir,omitempty"`
+	TaskPath      string   `yaml:"task_path,omitempty"`
+	TaskName      string   `yaml:"task_name,omitempty"`
+	FailedTasks   []string `yaml:"failed_tasks,omitempty"`
+	BlockedReason string   `yaml:"blocked_reason,omitempty"`
 }
 
 // Skill is a directory of files copied verbatim into the workspace's
