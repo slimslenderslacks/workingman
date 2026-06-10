@@ -40,6 +40,10 @@ type ProjectView struct {
 	// logic uses it to detect changes even if the project's structured
 	// fields are unchanged.
 	LastUpdate time.Time
+	// CreatedAt mirrors the project file's `created_at` field, stamped by
+	// the daemon the first time it observed the populated project. Zero
+	// for projects created before the field existed; those sort last.
+	CreatedAt time.Time
 }
 
 // TaskView is the minimal snapshot the Tasks pane renders: a task's name,
@@ -91,7 +95,20 @@ func ScanProjects(roots []string) ([]ProjectView, error) {
 		}
 	}
 
-	sort.Slice(views, func(i, j int) bool { return views[i].Path < views[j].Path })
+	sort.Slice(views, func(i, j int) bool {
+		ai, aj := views[i].CreatedAt, views[j].CreatedAt
+		if !ai.IsZero() && !aj.IsZero() {
+			if !ai.Equal(aj) {
+				return ai.After(aj) // most recently created first
+			}
+		} else if !ai.IsZero() {
+			return true
+		} else if !aj.IsZero() {
+			return false
+		}
+		// Tie-break (and stable fallback for un-stamped projects) on path.
+		return views[i].Path < views[j].Path
+	})
 	return views, nil
 }
 
@@ -105,6 +122,10 @@ func loadProjectView(path string) (ProjectView, bool) {
 		mtime = info.ModTime()
 	}
 	counts, tasks := tasksFor(filepath.Join(filepath.Dir(path), "tasks"))
+	var createdAt time.Time
+	if pr.CreatedAt != nil {
+		createdAt = *pr.CreatedAt
+	}
 	return ProjectView{
 		Name:        filepath.Base(filepath.Dir(path)),
 		Path:        path,
@@ -115,6 +136,7 @@ func loadProjectView(path string) (ProjectView, bool) {
 		TaskCounts:  counts,
 		Tasks:       tasks,
 		LastUpdate:  mtime,
+		CreatedAt:   createdAt,
 	}, true
 }
 

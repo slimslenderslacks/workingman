@@ -3,6 +3,7 @@ package project
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -41,7 +42,13 @@ type Project struct {
 	// empty for any non-blocked state. Cleared by whichever agent moves
 	// the project back out of blocked (planning, wolf).
 	BlockedReason string `yaml:"blocked_reason,omitempty"`
-	UpdatedBy     Writer `yaml:"updated_by"`
+	// CreatedAt is stamped by the daemon the first time it observes a
+	// populated .project.yaml (i.e. just after the project agent fills in
+	// description/branch/status). Used by the TUI to order work streams
+	// most-recent-first. Pointer + omitempty so the field stays out of
+	// the YAML on disk until the daemon writes it.
+	CreatedAt *time.Time `yaml:"created_at,omitempty"`
+	UpdatedBy Writer     `yaml:"updated_by"`
 }
 
 // Empty reports whether the file is the unpopulated placeholder the project

@@ -243,7 +243,7 @@ func TestModalReplacesViewBody(t *testing.T) {
 	m.mode = modeNewProject
 
 	view := m.View()
-	if !strings.Contains(view, "New project") {
+	if !strings.Contains(view, "New work stream") {
 		t.Errorf("modal view missing title; got:\n%s", view)
 	}
 	// The normal Sessions / Projects panes should NOT render when the

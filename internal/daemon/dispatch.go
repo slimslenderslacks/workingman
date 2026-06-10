@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/slimslenderslacks/work/internal/agent"
@@ -57,10 +58,52 @@ func (d *Daemon) handleProject(path string) {
 	if p.UpdatedBy == project.WriterDaemon {
 		return
 	}
+	d.dispatchProject(path, p)
+}
+
+// revisitProject re-evaluates a project from disk, bypassing
+// handleProject's daemon-write filter. Used by callers (session-end
+// callbacks, cron firings, startup scan) that must re-dispatch even when
+// the file's last writer was the daemon — typically the case right after
+// our own created_at stamp save lands on disk.
+func (d *Daemon) revisitProject(path string) {
+	p, err := project.Load(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return
+		}
+		d.audit.Log("project_load_error", "path", path, "err", err.Error())
+		return
+	}
+	d.dispatchProject(path, p)
+}
+
+// dispatchProject runs the empty-check, created_at stamp, and routing
+// logic. Factored out of handleProject so the cron callback can invoke it
+// directly: cron-driven re-evaluations must skip handleProject's
+// daemon-write filter (otherwise our own created_at stamp save, also
+// written as `daemon`, would silence every subsequent cron firing).
+func (d *Daemon) dispatchProject(path string, p *project.Project) {
 	if p.Empty() {
 		d.audit.Log("project_empty", "path", path)
 		d.launchProjectRootAgent(path, agent.ProjectAgent, p)
 		return
+	}
+	// Stamp created_at the first time we see a populated project on disk.
+	// The save uses `updated_by: daemon`, which prevents the resulting
+	// fsnotify event from re-entering dispatch via handleProject — but
+	// cron callbacks reach this function directly and re-read the file,
+	// so they still re-evaluate as expected.
+	if p.CreatedAt == nil {
+		now := time.Now()
+		stamped := *p
+		stamped.CreatedAt = &now
+		if err := project.Save(path, &stamped); err != nil {
+			d.audit.Log("project_save_error", "path", path, "err", err.Error())
+		} else {
+			d.audit.Log("project_created_stamped", "path", path, "at", now.UTC().Format(time.RFC3339))
+			p = &stamped
+		}
 	}
 	d.audit.Log("project_updated",
 		"path", path,
@@ -117,7 +160,7 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 		Repos:       toWorkspaceRepos(p.Repos),
 	}
 	err := d.startSession(projectPath, plan, func() {
-		d.handleProject(projectPath)
+		d.revisitProject(projectPath)
 	})
 	// Project agent failure leaves an empty file — nothing to block.
 	// Wolf agent failure: the project is already blocked, recursing won't
@@ -192,7 +235,7 @@ func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) {
 	}
 	err := d.scheduler.Register(projectPath, p.Cron, func() {
 		d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
-		d.handleProject(projectPath)
+		d.revisitProject(projectPath)
 	})
 	if err != nil {
 		d.audit.Log("cron_register_error", "path", projectPath, "spec", p.Cron, "err", err.Error())

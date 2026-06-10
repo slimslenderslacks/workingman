@@ -44,7 +44,7 @@ func (d *Daemon) startupScan() {
 				return nil
 			}
 			found++
-			d.handleProject(p)
+			d.revisitProject(p)
 			return nil
 		})
 		d.audit.Log("startup_scan", "root", root, "projects", strconv.Itoa(found))

@@ -1,8 +1,10 @@
 package task
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +59,53 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if reloaded.Path != dst {
 		t.Errorf("Path = %q, want %q", reloaded.Path, dst)
+	}
+}
+
+func TestCommitArtifactsRoundTrip(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "t.yaml")
+	src := &Task{
+		Name:        "x",
+		Description: "do the thing",
+		Status:      StatusCommitted,
+		Summary:     "Renamed gwctl to cp and updated all callers.",
+		Commits: []Commit{
+			{Repo: "mcpruntime", Hash: "abc123"},
+			{Repo: "sandboxes", Hash: "def456"},
+		},
+		CreatedFiles: []string{"/tmp/notes.md"},
+	}
+	if err := Save(dst, src); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Summary != src.Summary {
+		t.Errorf("Summary = %q, want %q", got.Summary, src.Summary)
+	}
+	if !reflect.DeepEqual(got.Commits, src.Commits) {
+		t.Errorf("Commits = %+v, want %+v", got.Commits, src.Commits)
+	}
+	if !reflect.DeepEqual(got.CreatedFiles, src.CreatedFiles) {
+		t.Errorf("CreatedFiles = %+v, want %+v", got.CreatedFiles, src.CreatedFiles)
+	}
+}
+
+func TestCommitArtifactsOmittedWhenEmpty(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "t.yaml")
+	if err := Save(dst, &Task{Name: "x", Status: StatusReady}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	for _, key := range []string{"summary:", "commits:", "created_files:"} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("empty task yaml should not contain %q; got:\n%s", key, string(data))
+		}
 	}
 }
 

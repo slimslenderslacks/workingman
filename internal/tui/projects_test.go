@@ -11,6 +11,43 @@ import (
 	"github.com/slimslenderslacks/work/internal/task"
 )
 
+func TestScanProjectsOrdersByCreatedAtDescending(t *testing.T) {
+	root := t.TempDir()
+
+	mk := func(name string, created *time.Time) {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
+			Description: name,
+			Branch:      "feat/" + name,
+			Status:      project.StatusReady,
+			CreatedAt:   created,
+		}, project.WriterAgent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	older := now.Add(-1 * time.Hour)
+	newer := now
+	mk("alpha", &older)
+	mk("bravo", &newer)
+	mk("charlie", nil) // un-stamped — sorts last regardless of name
+
+	views, err := ScanProjects([]string{root})
+	if err != nil {
+		t.Fatalf("ScanProjects: %v", err)
+	}
+	got := []string{views[0].Name, views[1].Name, views[2].Name}
+	want := []string{"bravo", "alpha", "charlie"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("order[%d] = %q, want %q (full order: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestScanProjectsReturnsViews(t *testing.T) {
 	root := t.TempDir()
 

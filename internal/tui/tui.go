@@ -885,7 +885,7 @@ func (m model) renderProjects(width, height int) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(paneTitleStyle.Render("Projects"))
+	b.WriteString(paneTitleStyle.Render("Work Streams"))
 	b.WriteString("\n\n")
 	if !m.loaded {
 		b.WriteString(dimStyle.Render("(loading…)"))
@@ -1464,7 +1464,7 @@ func paneName(p pane) string {
 	case paneTasks:
 		return "tasks"
 	default:
-		return "projects"
+		return "work streams"
 	}
 }
 

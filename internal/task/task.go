@@ -48,6 +48,23 @@ type Task struct {
 	FailureReason string   `yaml:"failure_reason"`
 	BlockedReason string   `yaml:"blocked_reason"`
 
+	// Summary is a short prose record of what was done, written by the
+	// commit agent when it transitions the task to `committed`. Empty on a
+	// task that hasn't been committed yet.
+	Summary string `yaml:"summary,omitempty"`
+
+	// Commits records the git commits the commit agent produced — one
+	// entry per repo that had modifications. Empty when the work didn't
+	// require any commits (e.g. the task was a no-op or its only output
+	// landed in CreatedFiles).
+	Commits []Commit `yaml:"commits,omitempty"`
+
+	// CreatedFiles lists files the agent created outside of any commit:
+	// untracked files left in repo working trees, scratch notes in the
+	// workspace root, etc. Useful for surfacing artifacts that don't show
+	// up in `git log`.
+	CreatedFiles []string `yaml:"created_files,omitempty"`
+
 	// Path is the absolute file path the task was loaded from. It is set by
 	// Load and excluded from YAML so it round-trips cleanly. Callers use it
 	// when they need to read or write the task file again (e.g. the daemon
@@ -55,6 +72,15 @@ type Task struct {
 	// path from Name — filenames may carry sort prefixes ("00-foo.yaml")
 	// that don't match the task's identity.
 	Path string `yaml:"-"`
+}
+
+// Commit captures a single git commit produced by the commit agent during a
+// task's commit phase. Repo is the workspace-relative directory name of the
+// repo that was committed in (matches workspace.Repo.DirName()); Hash is
+// the full SHA from `git rev-parse HEAD`.
+type Commit struct {
+	Repo string `yaml:"repo"`
+	Hash string `yaml:"hash"`
 }
 
 func Load(path string) (*Task, error) {

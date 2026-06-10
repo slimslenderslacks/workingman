@@ -177,6 +177,33 @@ func TestNewDirectoryIsPickedUp(t *testing.T) {
 // an empty .project.yaml back-to-back. The directory watch is installed
 // after the file already exists on disk, so without the post-watch scan the
 // file's Create event is missed and the project agent never fires.
+func TestDaemonStampsCreatedAtOnFirstObservation(t *testing.T) {
+	root := t.TempDir()
+	buf, _ := startDaemon(t, root)
+
+	path := filepath.Join(root, ".project.yaml")
+	p := &project.Project{
+		Description: "x", Branch: "feat/y", Status: project.StatusReady,
+	}
+	if err := project.SaveAs(path, p, project.WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	if ok, snap := waitFor(t, buf, "project_created_stamped"); !ok {
+		t.Fatalf("daemon never stamped created_at.\naudit:\n%s", snap)
+	}
+
+	reloaded, err := project.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if reloaded.CreatedAt == nil {
+		t.Fatal("CreatedAt still nil after daemon stamp")
+	}
+	if time.Since(*reloaded.CreatedAt) > 2*time.Second {
+		t.Errorf("CreatedAt too far in the past: %v", reloaded.CreatedAt)
+	}
+}
+
 func TestNewDirWithFileIsPickedUp(t *testing.T) {
 	root := t.TempDir()
 	buf, _ := startDaemon(t, root)

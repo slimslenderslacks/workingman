@@ -251,7 +251,7 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	// audit entry plus the notification we already sent are enough to
 	// surface the failure.
 	_ = d.startSession(projectPath, plan, func() {
-		d.handleProject(projectPath)
+		d.revisitProject(projectPath)
 	})
 }
 

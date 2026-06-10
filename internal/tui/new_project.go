@@ -127,7 +127,7 @@ func (m model) renderNewProjectModal() string {
 	field := "Name: " + m.newProjName + cursor
 
 	var b strings.Builder
-	b.WriteString(paneTitleStyle.Render("New project"))
+	b.WriteString(paneTitleStyle.Render("New work stream"))
 	b.WriteString("\n\n")
 	b.WriteString(field)
 	if m.newProjErr != "" {

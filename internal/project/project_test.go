@@ -1,9 +1,12 @@
 package project
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadExample(t *testing.T) {
@@ -66,6 +69,37 @@ func TestSaveAsAgent(t *testing.T) {
 	reloaded, _ := Load(dst)
 	if reloaded.UpdatedBy != WriterAgent {
 		t.Errorf("UpdatedBy = %q, want agent", reloaded.UpdatedBy)
+	}
+}
+
+func TestCreatedAtRoundTripAndOmitEmpty(t *testing.T) {
+	// Zero/missing CreatedAt must not produce a `created_at:` line so the
+	// daemon's "stamp the first time we see it set" gate stays meaningful.
+	noStamp := filepath.Join(t.TempDir(), "a.yaml")
+	if err := SaveAs(noStamp, &Project{
+		Description: "x", Branch: "feat/y", Status: StatusReady,
+	}, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, _ := os.ReadFile(noStamp)
+	if strings.Contains(string(raw), "created_at") {
+		t.Errorf("nil CreatedAt should not emit created_at line; got:\n%s", string(raw))
+	}
+
+	// Setting it round-trips: stored, loaded, equal to the second.
+	withStamp := filepath.Join(t.TempDir(), "b.yaml")
+	now := time.Date(2026, 6, 10, 14, 0, 0, 0, time.UTC)
+	if err := SaveAs(withStamp, &Project{
+		Description: "x", Branch: "feat/y", Status: StatusReady, CreatedAt: &now,
+	}, WriterDaemon); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	reloaded, err := Load(withStamp)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if reloaded.CreatedAt == nil || !reloaded.CreatedAt.Equal(now) {
+		t.Errorf("CreatedAt = %v, want %v", reloaded.CreatedAt, now)
 	}
 }
 

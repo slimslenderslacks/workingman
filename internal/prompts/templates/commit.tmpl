@@ -12,10 +12,32 @@ modifications:
 2. Create one commit with a succinct message describing the change. Use the
    task description as the basis for the commit subject; keep it under 72
    characters.
+3. Capture the commit SHA via `git rev-parse HEAD`.
 
 Do not push. When all repos are committed (or had nothing to commit), update
-the task file to set `status: committed` and save. The daemon will then
-re-evaluate the task graph and dispatch the next ready task.
+the task file with the following fields and save:
+
+  status: committed
+  summary: |
+    <2–4 sentences describing what changed and why; written in past
+    tense from the perspective of someone reading the task log later>
+  commits:
+    - repo: <repo dir name>
+      hash: <full SHA from step 3>
+    # one entry per repo that received a commit; omit the list entirely
+    # when no commits were made.
+  created_files:
+    - <absolute path>
+    # any files you created that did NOT end up in a commit (untracked
+    # working-tree files, scratch notes, generated artifacts you chose
+    # not to commit). Omit the list entirely when every created file was
+    # committed.
+
+`repo` in each `commits:` entry is the workspace-relative directory name
+of the repo (e.g. `mcpruntime`, not `github.com/docker/mcpruntime`).
+
+The daemon will then re-evaluate the task graph and dispatch the next ready
+task.
 
 The task's `status:` field is a fixed enum — any other value is rejected
 by the daemon. Valid: `ready`, `running`, `success`, `failed`,
