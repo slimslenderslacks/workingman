@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"bufio"
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -126,7 +128,7 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 				wg.Add(1)
 				go func(s session.Session) {
 					defer wg.Done()
-					watchOneACPSession(wctx, out, dial, s, prompt)
+					watchOneACPSession(wctx, out, dial, store, s, prompt)
 				}(s)
 			}
 			// Reap watchers whose session directory is gone.
@@ -149,25 +151,38 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 }
 
 // watchOneACPSession watches a single session for its lifetime: it announces the
-// tab, dials the socket, pumps every acpclient.Event back as an acpTabStream,
-// completes the ACP handshake, and sends the opening prompt. It then blocks until
-// ctx is cancelled (the session's directory was reaped) so the connection — and
-// the event pump — stay alive while the agent streams.
+// tab, replays any prior context, dials the socket, pumps every acpclient.Event
+// back as an acpTabStream, completes the ACP handshake, and — for a brand-new
+// session only — sends the opening prompt. It then blocks until ctx is cancelled
+// (the session's directory was reaped) so the connection and the event pump stay
+// alive while the agent streams.
 //
-// A dial failure is surfaced as a synthetic StateDisconnected event so the tab
-// shows the session as dead (the hallmark of a socket whose sandbox is gone). A
+// Reconnect is the crux: when the TUI restarts it rediscovers ongoing sessions
+// here. Such a session has already been prompted (PromptCount>0), so we must NOT
+// re-send the opening prompt — that would restart the agent and duplicate the
+// turn — and we replay its recorded scrollback so the tab comes back with its
+// prior prompts/output.
+//
+// A dead session — socket missing/refused (dial fails) or a sandbox that is gone
+// so the bridge closes the connection mid-handshake — is distinguished from a
+// live one and routed to cleanup: a synthetic StateDisconnected marks the tab
+// dead and the leftover session directory is removed so it doesn't linger. A
 // handshake failure needs no synthetic event: acpclient already emits the
 // terminal event over Events(), which the pump forwards.
-func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDialer, s session.Session, prompt string) {
+func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDialer, store session.Store, s session.Session, prompt string) {
 	emitACP(ctx, out, acpTabEvent{kind: acpTabAdded, id: s.ID, title: acpTabTitle(s)})
 
 	conn, err := dial(ctx, s.SocketPath)
 	if err != nil {
+		// Socket missing or connection refused: the backing sandbox is gone. This
+		// is a dead session discovered on (re)start — mark it dead and reclaim the
+		// orphaned directory.
 		emitACP(ctx, out, acpTabEvent{
 			kind: acpTabStream,
 			id:   s.ID,
 			ev:   acpclient.Event{State: acpclient.StateDisconnected, Err: err},
 		})
+		cleanupDeadSession(ctx, out, store, s.ID)
 		return
 	}
 
@@ -186,23 +201,102 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 		<-pumpDone
 	}()
 
+	// Rebuild the tab's prior context before the live stream so reconnected
+	// sessions come back with their history above any new output.
+	replayPriorContext(ctx, out, s, prompt)
+
 	cwd := ""
 	if len(s.Workspaces) > 0 {
 		cwd = s.Workspaces[0]
 	}
 	if err := conn.Connect(ctx, cwd); err != nil {
+		// Connected to the socket but the handshake never completed — the bridge
+		// closed the connection because the sandbox is gone. Dead session: clean up.
+		cleanupDeadSession(ctx, out, store, s.ID)
 		return // terminal event already forwarded by the pump
 	}
 
-	if prompt != "" {
+	// Drive the opening prompt only for a brand-new session. A reconnected session
+	// (PromptCount>0) was prompted in a prior TUI run; we already replayed it and
+	// re-sending would restart the agent.
+	if prompt != "" && s.PromptCount == 0 {
 		emitACP(ctx, out, acpTabEvent{kind: acpTabPrompt, id: s.ID, text: prompt})
 		// Prompt blocks until the turn completes; its streamed chunks arrive via
 		// the pump. We ignore the stop reason — the StateCompleted event the pump
 		// forwards already updates the tab.
-		_, _ = conn.Prompt(ctx, prompt)
+		if _, err := conn.Prompt(ctx, prompt); err == nil {
+			// Record that the opening prompt was sent so a future restart reconnects
+			// (replays) instead of re-prompting.
+			markPrompted(store, s.ID)
+		}
 	}
 
 	<-ctx.Done()
+}
+
+// replayPriorContext rebuilds a reconnected session's transcript from on-disk
+// state so its tab returns with the context it had before the TUI restarted. A
+// brand-new session (PromptCount==0, empty log) replays nothing. For a session
+// that was already prompted, it re-emits the opening prompt block and then
+// replays the recorded ACP stream log as streamed output events — "prior context
+// (prompts/streamed output as available)". A missing or unreadable log is not an
+// error: reconnection still works, it just lacks scrollback.
+func replayPriorContext(ctx context.Context, out chan<- acpTabEvent, s session.Session, prompt string) {
+	if s.PromptCount > 0 && prompt != "" {
+		emitACP(ctx, out, acpTabEvent{kind: acpTabPrompt, id: s.ID, text: prompt})
+	}
+	if s.LogPath == "" {
+		return
+	}
+	f, err := os.Open(s.LogPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	br := bufio.NewReader(f)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			if ev, ok := acpclient.ParseStreamFrame(line); ok {
+				emitACP(ctx, out, acpTabEvent{kind: acpTabStream, id: s.ID, ev: ev})
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// markPrompted records that a session's opening prompt has been sent by bumping
+// PromptCount in session.json, so a later TUI restart reconnects-and-replays
+// rather than re-prompting. It is best-effort: a read/write failure just means a
+// future restart might re-send the opening prompt, which is recoverable, so we
+// never fail the live session over it. The acp-wrapper writes session.json only
+// up to "running" (before the TUI ever prompts) and then not again until it
+// removes the directory on exit, so this read-modify-write does not race a
+// concurrent wrapper update.
+func markPrompted(store session.Store, id string) {
+	rec, err := store.Read(id)
+	if err != nil {
+		return
+	}
+	if rec.PromptCount > 0 {
+		return
+	}
+	rec.PromptCount = 1
+	rec.UpdatedAt = time.Now()
+	_ = store.Write(rec)
+}
+
+// cleanupDeadSession reclaims a session whose sandbox is gone: it removes the
+// orphaned directory (session.json, socket, log) and emits acpTabRemoved so the
+// dead tab disappears. Removal is best-effort; the parent watcher's reaper also
+// emits acpTabRemoved once the directory is gone, and the model's remove is
+// idempotent, so a duplicate is harmless.
+func cleanupDeadSession(ctx context.Context, out chan<- acpTabEvent, store session.Store, id string) {
+	_ = store.Remove(id)
+	emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: id})
 }
 
 // acpTabTitle is the label shown on a session's tab. The session id already

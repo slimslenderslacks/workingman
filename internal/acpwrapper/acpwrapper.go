@@ -37,6 +37,14 @@ import (
 // aliased from the session package so the layout has one source of truth.
 const SocketName = session.SocketName
 
+// LogName is the append-only file inside a session directory where the bridge
+// records the raw ACP stream the agent emits (one newline-delimited frame per
+// line). The live socket only carries the stream from "now", so this log is what
+// lets a TUI that reconnects after a restart replay the session's prior
+// assistant output and rebuild its scrollback. Its absolute path is recorded as
+// session.Session.LogPath.
+const LogName = "stream.log"
+
 // sandboxNamePrefix is prepended to the session id when deriving a sandbox
 // name. sbx rejects names containing underscores, so normalize() also rewrites
 // any underscores to hyphens.
@@ -86,6 +94,11 @@ func (c Config) SocketPath() string {
 	return filepath.Join(c.SessionDir(), SocketName)
 }
 
+// LogPath is the raw ACP stream log for this session — see LogName.
+func (c Config) LogPath() string {
+	return filepath.Join(c.SessionDir(), LogName)
+}
+
 // sessionRecord projects the wrapper's config into the session.json the TUI
 // reads to reconnect. createdAt is preserved across status updates so the
 // "running" record keeps the "starting" record's birth time; updatedAt stamps
@@ -101,6 +114,7 @@ func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.T
 		SocketPath:  c.SocketPath(),
 		Workspaces:  c.Workspaces,
 		Kit:         c.KitPath,
+		LogPath:     c.LogPath(),
 	}
 }
 
@@ -324,6 +338,21 @@ func Run(ctx context.Context, c Config) error {
 		return fmt.Errorf("acpwrapper: listen on %s: %w", c.SocketPath(), err)
 	}
 
+	// Open the stream log the bridge tees the agent's ACP output into, so a TUI
+	// that reconnects after a restart can replay this session's prior output.
+	// O_APPEND keeps a relaunch's output continuous rather than truncating. A
+	// failure here is non-fatal: without the log, reconnect just loses replayable
+	// scrollback (the live stream still works), so we log and press on. The nil
+	// interface (not a nil *os.File) is deliberate — passing a typed nil would
+	// make the hub's `log != nil` guard true and panic on Write.
+	var logW io.Writer
+	if logFile, err := os.OpenFile(c.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "acp-wrapper:", err)
+	} else {
+		logW = logFile
+		defer logFile.Close()
+	}
+
 	// The ACP client is started and the socket is accepting: mark the session
 	// running so a reconnecting TUI knows the transport is live. A failed update
 	// here is non-fatal — the session is genuinely usable; we just log and press
@@ -347,7 +376,7 @@ func Run(ctx context.Context, c Config) error {
 		ln.Close()
 	}()
 
-	serve(ctx, ln, procStdin, procStdout)
+	serve(ctx, ln, procStdin, procStdout, logW)
 
 	// The ACP client has exited and the session's transport is gone: remove the
 	// whole session directory (session.json and the socket together) so a
@@ -375,9 +404,10 @@ func Run(ctx context.Context, c Config) error {
 //
 // The stdout reader runs in its own goroutine; the accept loop registers each
 // connection with the hub. When ln is closed (ctx cancelled or ACP client
-// exited) the hub is torn down and serve returns.
-func serve(ctx context.Context, ln net.Listener, procStdin io.Writer, procStdout io.Reader) {
-	h := newHub(procStdin)
+// exited) the hub is torn down and serve returns. logW, when non-nil, receives a
+// copy of every agent frame for reconnect replay (see hub.log).
+func serve(ctx context.Context, ln net.Listener, procStdin io.Writer, procStdout io.Reader, logW io.Writer) {
+	h := newHub(procStdin, logW)
 	// One reader drains the ACP client's stdout and broadcasts whole frames to
 	// every connected client. It also tears the hub down on stdout EOF.
 	go h.run(procStdout)

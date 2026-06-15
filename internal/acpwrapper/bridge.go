@@ -50,6 +50,12 @@ type hub struct {
 	// clients never interleave on the shared stream.
 	writeMu sync.Mutex
 
+	// log, when non-nil, receives a copy of every agent stdout frame so a TUI
+	// reconnecting after a restart can replay the session's prior output (the
+	// live socket only carries the stream from "now"). Only run's single stdout
+	// reader writes it, so no mutex is needed.
+	log io.Writer
+
 	// mu guards clients and closed. broadcast, registration, and teardown all
 	// take it, so a client is never sent a frame after it has been removed.
 	mu      sync.Mutex
@@ -69,8 +75,8 @@ type client struct {
 	once sync.Once
 }
 
-func newHub(stdin io.Writer) *hub {
-	return &hub{stdin: stdin, clients: make(map[*client]struct{})}
+func newHub(stdin, log io.Writer) *hub {
+	return &hub{stdin: stdin, log: log, clients: make(map[*client]struct{})}
 }
 
 // run is the single stdout fan-out reader. It frames the ACP client's stdout
@@ -79,6 +85,12 @@ func newHub(stdin io.Writer) *hub {
 // down so no client is left dangling on a dead agent.
 func (h *hub) run(stdout io.Reader) {
 	scanFrames(stdout, func(frame []byte) bool {
+		// Persist before broadcasting so a frame is never shown to a live client
+		// without also being recorded for a later reconnect to replay. A log write
+		// error is non-fatal: the live fan-out must not stall on a bad log.
+		if h.log != nil {
+			_, _ = h.log.Write(frame)
+		}
 		h.broadcast(frame)
 		return true
 	})

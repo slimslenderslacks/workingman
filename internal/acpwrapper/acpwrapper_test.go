@@ -2,6 +2,7 @@ package acpwrapper
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -230,7 +231,7 @@ func newTestHub(t *testing.T) (h *hub, stdinR *io.PipeReader, stdoutW *io.PipeWr
 	var stdoutR *io.PipeReader
 	stdinR, stdinW = io.Pipe()
 	stdoutR, stdoutW = io.Pipe()
-	h = newHub(stdinW)
+	h = newHub(stdinW, nil)
 	runDone := make(chan struct{})
 	go func() { h.run(stdoutR); close(runDone) }()
 	t.Cleanup(func() {
@@ -312,6 +313,45 @@ func TestHubLateReconnect(t *testing.T) {
 	go stdoutW.Write([]byte("second\n"))
 	if got := scanLine(t, tuiB); got != "second\n" {
 		t.Errorf("reconnecting tuiB got %q, want %q", got, "second\n")
+	}
+}
+
+// TestHubLogsAgentFrames asserts the hub tees each agent stdout frame into the
+// session's stream log, so a TUI that reconnects after a restart can replay the
+// prior output. The log must record the same whole frames the live clients see.
+func TestHubLogsAgentFrames(t *testing.T) {
+	var log bytes.Buffer
+
+	stdoutR, stdoutW := io.Pipe()
+	_, stdinW := io.Pipe()
+	h := newHub(stdinW, &log)
+	runDone := make(chan struct{})
+	go func() { h.run(stdoutR); close(runDone) }()
+
+	tui, wrapper := net.Pipe()
+	defer tui.Close()
+	h.add(wrapper)
+
+	// Stream two frames; wait for the live client to receive each so run() has
+	// processed (and logged) it before we close stdout.
+	go stdoutW.Write([]byte("frame-one\n"))
+	if got := scanLine(t, tui); got != "frame-one\n" {
+		t.Fatalf("tui got %q, want %q", got, "frame-one\n")
+	}
+	go stdoutW.Write([]byte("frame-two\n"))
+	if got := scanLine(t, tui); got != "frame-two\n" {
+		t.Fatalf("tui got %q, want %q", got, "frame-two\n")
+	}
+
+	stdoutW.Close() // EOF -> run() returns; close(runDone) happens-after all logging
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("hub.run did not return after stdout closed")
+	}
+
+	if got, want := log.String(), "frame-one\nframe-two\n"; got != want {
+		t.Errorf("stream log = %q, want %q", got, want)
 	}
 }
 

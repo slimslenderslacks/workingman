@@ -428,16 +428,48 @@ func (c *Client) rejectRequest(id int, method string) {
 // text and are not rendered as reply text here — surfacing them richly is the
 // session-tabs task's concern.
 func (c *Client) handleUpdate(params json.RawMessage) {
+	if ev, ok := eventFromUpdateParams(params); ok {
+		c.emit(ev)
+	}
+}
+
+// eventFromUpdateParams maps a session/update notification's params to the
+// display Event it produces, or ok=false when the update carries no assistant
+// text. It is the single decode point shared by the live read loop
+// (handleUpdate) and the log-replay path (ParseStreamFrame), so a reconnecting
+// TUI rebuilds scrollback through exactly the same Event shape the live stream
+// would have produced.
+func eventFromUpdateParams(params json.RawMessage) (Event, bool) {
 	var p updateParams
 	if err := json.Unmarshal(params, &p); err != nil {
-		return
+		return Event{}, false
 	}
 	switch p.Update.SessionUpdate {
 	case updateAgentMessageChunk, updateAgentThoughtChunk:
 		if p.Update.Content != nil && p.Update.Content.Text != "" {
-			c.emit(Event{State: StateStreaming, Text: p.Update.Content.Text})
+			return Event{State: StateStreaming, Text: p.Update.Content.Text}, true
 		}
 	}
+	return Event{}, false
+}
+
+// ParseStreamFrame decodes one raw newline-delimited ACP frame — as recorded in
+// a session's stream log by the acp-wrapper bridge — into the display Event it
+// maps to. A reconnecting TUI replays the log through this so the prior
+// assistant output is rebuilt as StateStreaming Events, identical to what the
+// live read loop emits. It returns ok=false for frames that carry no assistant
+// display text (responses, agent→client requests, tool-call updates, or
+// malformed lines), which the caller simply skips.
+func ParseStreamFrame(line []byte) (Event, bool) {
+	var f frame
+	if err := json.Unmarshal(line, &f); err != nil {
+		return Event{}, false
+	}
+	// Only session/update *notifications* (method set, no id) carry stream text.
+	if f.Method != methodUpdate || f.ID != nil {
+		return Event{}, false
+	}
+	return eventFromUpdateParams(f.Params)
 }
 
 // shutdown is the read loop's single teardown. It marks the client closed (so no
