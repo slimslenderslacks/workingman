@@ -55,6 +55,9 @@ func runDaemon(args []string) {
 	workspaceMode := fs.String("workspace-manager", "wsp", `workspace manager: "wsp" (real) or "stub" (test/dev)`)
 	stubRoot := fs.String("stub-workspace-root", "", `when --workspace-manager=stub, directory where workspaces are created (default: $TMPDIR/orch-workspaces)`)
 	tmuxSession := fs.String("tmux-session", agent.DefaultUmbrellaSession, "name of the umbrella tmux session every agent's window lives in")
+	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, planning/task/commit agents launch as acp-wrapper-backed ACP sessions instead of tmux+`sbx exec claude -p`")
+	acpWrapper := fs.String("acp-wrapper", "", "path to the acp-wrapper binary (default: acp-wrapper on PATH)")
+	sessionsRoot := fs.String("sessions-root", "", "root dir holding per-session dirs for ACP agents (default ~/.workingman/sessions)")
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -98,7 +101,28 @@ func runDaemon(args []string) {
 		},
 		Audit: a,
 		// Command defaults to claude-code via runner.DefaultCommandBuilder.
-		Sandbox: runner.DefaultSandboxCreator,
+	}
+
+	// When --acp-kit is set, non-interactive agents (planning/task/commit) are
+	// launched as acp-wrapper-backed ACP sessions rather than tmux windows
+	// running `sbx exec claude -p`. The wrapper is a host process: its stderr
+	// (diagnostics) goes to a log file so it never corrupts the TUI alt-screen.
+	// Interactive agents (project/wolf) keep the tmux launcher above.
+	if *acpKit != "" {
+		acpLogPath := filepath.Join(filepath.Dir(*auditPath), "acp-wrapper.log")
+		acpLog, err := os.OpenFile(acpLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			log.Fatalf("open acp-wrapper log: %v", err)
+		}
+		defer acpLog.Close()
+		r.AcpLauncher = &agent.ProcessLauncher{Stderr: acpLog}
+		r.Kit = *acpKit
+		r.AcpWrapperPath = *acpWrapper
+		r.SessionsRoot = *sessionsRoot
+	} else {
+		// No ACP kit configured: keep the legacy sandboxed tmux path for
+		// non-interactive agents so the daemon still functions standalone.
+		r.Sandbox = runner.DefaultSandboxCreator
 	}
 
 	d, err := daemon.New(roots, a,
@@ -120,6 +144,7 @@ func runDaemon(args []string) {
 		"headless", fmt.Sprintf("%t", *headless),
 		"tmux", tmuxBin,
 		"tmux_session", *tmuxSession,
+		"acp_kit", *acpKit,
 	)
 
 	if *headless {

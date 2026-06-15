@@ -20,10 +20,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/prompts"
+	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/setup"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
@@ -201,7 +203,41 @@ type Runner struct {
 	// `sbx exec -it <name>` so claude runs inside it. Leave nil to skip
 	// sandboxing entirely — tests that fake the launch command set this to
 	// nil so they don't shell out to sbx.
+	//
+	// This is the legacy tmux + `sbx exec` path. In production it has been
+	// superseded for non-interactive agents by the ACP path (see AcpLauncher):
+	// when AcpLauncher is set, planning/task/commit agents launch as
+	// acp-wrapper-backed ACP sessions instead and never reach this seam. It is
+	// retained for interactive-agent dev/tests that exercise the generic
+	// launcher without ACP.
 	Sandbox SandboxCreator
+
+	// AcpLauncher, when non-nil, switches non-interactive agents
+	// (planning/task/commit) from the tmux + `sbx exec claude -p` path to a
+	// per-session acp-wrapper host process that backs an ACP claude session.
+	// The wrapper creates the sandbox (with acp-kit layered on), execs the ACP
+	// client, and serves <SessionsRoot>/<id>/agent.sock; the TUI watches the
+	// stream over that socket. Interactive agents (project/wolf) are never
+	// routed here — they keep the tmux path. Leave nil to fall back to the
+	// legacy launcher for every kind (dev/tests).
+	AcpLauncher agent.Launcher
+
+	// Kit is the acp-kit reference passed to `acp-wrapper --kit` (a local kit
+	// dir or a published ref). Required when AcpLauncher is set.
+	Kit string
+
+	// SessionsRoot is where per-session directories live; passed to
+	// `acp-wrapper --sessions-root` and used to write the initial session.json.
+	// Defaults to ~/.workingman/sessions when empty.
+	SessionsRoot string
+
+	// AcpWrapperPath is the acp-wrapper binary the AcpLauncher runs. Defaults
+	// to "acp-wrapper" resolved on PATH.
+	AcpWrapperPath string
+
+	// SbxPath, when set, is forwarded to `acp-wrapper --sbx` so the wrapper
+	// uses a specific sbx binary. Empty lets the wrapper resolve sbx on PATH.
+	SbxPath string
 }
 
 // Start is non-blocking: it returns the Session once the launcher accepts it.
@@ -241,6 +277,17 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {
 		return nil, err
+	}
+
+	// Non-interactive agents back ACP claude sessions via acp-wrapper when the
+	// Runner is configured for it (production). The .orch instructions/context
+	// written above are read by the sandboxed ACP client from the mounted
+	// workspace exactly as before; only the launch mechanism changes — an
+	// acp-wrapper host process instead of a tmux window running
+	// `sbx exec claude -p`. Interactive agents (project/wolf) always take the
+	// legacy tmux path below.
+	if !p.Kind.Interactive() && r.AcpLauncher != nil {
+		return r.startACP(ctx, p, workingDir)
 	}
 
 	build := r.Command
@@ -290,6 +337,125 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		)
 	}
 	return sess, nil
+}
+
+// startACP launches a non-interactive agent as an acp-wrapper-backed ACP
+// session. It allocates a session id, writes the initial session.json (so the
+// daemon and a restarting TUI can discover the session before the wrapper has
+// brought the sandbox up), and starts the acp-wrapper host process. The wrapper
+// itself creates the sandbox with acp-kit, execs the ACP client, and re-writes
+// session.json with the live status once the socket is accepting connections.
+//
+// Unlike the tmux path, this does NOT call r.Sandbox or wrap the command in
+// `sbx exec` — the wrapper owns sandbox creation end-to-end.
+func (r *Runner) startACP(ctx context.Context, p Plan, workingDir string) (agent.Session, error) {
+	sandboxName := sandboxNameFor(p.Kind, p.ProjectPath)
+	if sandboxName == "" {
+		return nil, fmt.Errorf("runner: acp launch for kind %s needs a ProjectPath to derive a sandbox name", p.Kind)
+	}
+	if strings.TrimSpace(r.Kit) == "" {
+		return nil, fmt.Errorf("runner: acp launch requires Kit (the acp-kit reference)")
+	}
+
+	sessionsRoot, err := r.sessionsRoot()
+	if err != nil {
+		return nil, err
+	}
+	sessionID := acpSessionID(p)
+	workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath)
+
+	// Allocate the session id and write the initial session.json. acp-wrapper
+	// will overwrite this record with StatusRunning once its socket is live;
+	// writing it here means the session is discoverable in the brief window
+	// before the wrapper's own write lands.
+	store := session.Store{Root: sessionsRoot}
+	now := time.Now()
+	rec := session.Session{
+		ID:          sessionID,
+		SandboxName: sandboxName,
+		Status:      session.StatusStarting,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		SocketPath:  store.SocketPath(sessionID),
+		Workspaces:  workspaces,
+		Kit:         r.Kit,
+	}
+	if err := store.Write(rec); err != nil {
+		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
+	}
+
+	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, workspaces)
+	spec := agent.Spec{
+		Kind:      p.Kind,
+		Name:      sessionID,
+		Workspace: workingDir,
+		Command:   command,
+	}
+	sess, err := r.AcpLauncher.Launch(ctx, spec)
+	if err != nil {
+		// The wrapper never started, so no one will clean up the record we just
+		// wrote — remove it so a restarting TUI doesn't discover a dead session.
+		_ = store.Remove(sessionID)
+		return nil, fmt.Errorf("runner: acp launch: %w", err)
+	}
+	if r.Audit != nil {
+		r.Audit.Log("acp_session_started",
+			"kind", p.Kind.String(),
+			"session_id", sessionID,
+			"sandbox", sandboxName,
+			"workspaces", strings.Join(workspaces, ","),
+		)
+	}
+	return sess, nil
+}
+
+// acpWrapperCommand builds the argv that launches one acp-wrapper host process
+// for an ACP session. The wrapper resolves --workspace paths to absolute itself,
+// but they already are (workspace.Manager and the orch dir both yield abs paths).
+func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, workspaces []string) []string {
+	bin := r.AcpWrapperPath
+	if bin == "" {
+		bin = "acp-wrapper"
+	}
+	args := []string{
+		bin,
+		"--session-id", sessionID,
+		"--kit", r.Kit,
+		"--sandbox", sandboxName,
+		"--sessions-root", sessionsRoot,
+	}
+	if r.SbxPath != "" {
+		args = append(args, "--sbx", r.SbxPath)
+	}
+	for _, w := range workspaces {
+		args = append(args, "--workspace", w)
+	}
+	return args
+}
+
+// sessionsRoot resolves the absolute sessions root: the configured value when
+// set, otherwise the session package default (~/.workingman/sessions).
+func (r *Runner) sessionsRoot() (string, error) {
+	if strings.TrimSpace(r.SessionsRoot) != "" {
+		abs, err := filepath.Abs(r.SessionsRoot)
+		if err != nil {
+			return "", fmt.Errorf("runner: sessions root %q: %w", r.SessionsRoot, err)
+		}
+		return abs, nil
+	}
+	return session.DefaultRoot()
+}
+
+// acpSessionID derives the ACP session id from the Plan. It reuses the tmux
+// window-name logic (kind-tail) so the id is stable across daemon restarts —
+// the same task relaunch maps to the same session dir and sandbox, making the
+// launch idempotent — then sanitizes path separators (a branch tail like
+// "feat/x" would otherwise be an illegal multi-segment session id).
+func acpSessionID(p Plan) string {
+	id := sessionName(p)
+	id = strings.ReplaceAll(id, "/", "-")
+	id = strings.ReplaceAll(id, `\`, "-")
+	return id
 }
 
 func (r *Runner) resolveWorkingDir(ctx context.Context, p Plan) (string, error) {
