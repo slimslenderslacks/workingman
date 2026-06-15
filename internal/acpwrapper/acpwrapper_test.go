@@ -1,6 +1,7 @@
 package acpwrapper
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -208,51 +209,176 @@ func TestSameWorkspaceSet(t *testing.T) {
 	}
 }
 
-// TestBridge wires a fake TUI connection (one end of net.Pipe) through bridge to
-// a fake ACP client stdio (io.Pipe pairs), asserting bytes flow both ways and
-// that bridge returns when the TUI hangs up.
-func TestBridge(t *testing.T) {
-	tuiSide, wrapperSide := net.Pipe()
+// scanLine reads one '\n'-terminated frame from r with a deadline guard, used
+// by the hub tests to assert a client received a specific whole frame.
+func scanLine(t *testing.T, r net.Conn) string {
+	t.Helper()
+	r.SetReadDeadline(time.Now().Add(2 * time.Second))
+	line, err := bufio.NewReader(r).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	return string(line)
+}
 
-	// ACP client stdin: bridge writes here; we read what the TUI sent.
-	stdinR, stdinW := io.Pipe()
-	// ACP client stdout: we write here; bridge forwards to the TUI.
-	stdoutR, stdoutW := io.Pipe()
-	// Closing stdout (client exit) lets the detached stdout->TUI copy retire.
-	defer stdoutW.Close()
+// newTestHub starts a hub fed by an in-memory ACP client stdio pair. It returns
+// the hub, a reader over the client's stdin (what TUIs sent), and a writer to
+// the client's stdout (what the hub broadcasts). Closing stdoutW ends run().
+func newTestHub(t *testing.T) (h *hub, stdinR *io.PipeReader, stdoutW *io.PipeWriter) {
+	t.Helper()
+	var stdinW *io.PipeWriter
+	var stdoutR *io.PipeReader
+	stdinR, stdinW = io.Pipe()
+	stdoutR, stdoutW = io.Pipe()
+	h = newHub(stdinW)
+	runDone := make(chan struct{})
+	go func() { h.run(stdoutR); close(runDone) }()
+	t.Cleanup(func() {
+		stdoutW.Close() // EOF on stdout -> run() returns and shuts the hub down
+		select {
+		case <-runDone:
+		case <-time.After(2 * time.Second):
+			t.Error("hub.run did not return after stdout closed")
+		}
+	})
+	return h, stdinR, stdoutW
+}
 
-	bridgeDone := make(chan struct{})
+// TestHubBidirectional is the single-client smoke test: a streamed frame from
+// the agent reaches the TUI, and a prompt from the TUI reaches the agent's
+// stdin — both with frame boundaries preserved.
+func TestHubBidirectional(t *testing.T) {
+	h, stdinR, stdoutW := newTestHub(t)
+
+	tui, wrapper := net.Pipe()
+	defer tui.Close()
+	h.add(wrapper)
+
+	// Agent streams a response -> TUI receives the whole frame.
+	go stdoutW.Write([]byte("from-agent\n"))
+	if got := scanLine(t, tui); got != "from-agent\n" {
+		t.Errorf("tui got %q, want %q", got, "from-agent\n")
+	}
+
+	// TUI sends a prompt -> agent stdin receives the whole frame.
+	go tui.Write([]byte("from-tui\n"))
+	if got, err := bufio.NewReader(stdinR).ReadBytes('\n'); err != nil || string(got) != "from-tui\n" {
+		t.Fatalf("agent stdin got %q (err %v), want %q", got, err, "from-tui\n")
+	}
+}
+
+// TestHubFanOut asserts every connected TUI receives a copy of each broadcast
+// frame — the property a single per-connection io.Copy(conn, stdout) could not
+// provide, since the lone stdout cannot be read by N goroutines without each
+// seeing only a fraction of the stream.
+func TestHubFanOut(t *testing.T) {
+	h, _, stdoutW := newTestHub(t)
+
+	tuiA, wrapperA := net.Pipe()
+	tuiB, wrapperB := net.Pipe()
+	defer tuiA.Close()
+	defer tuiB.Close()
+	h.add(wrapperA)
+	h.add(wrapperB)
+
+	go stdoutW.Write([]byte("broadcast\n"))
+	if got := scanLine(t, tuiA); got != "broadcast\n" {
+		t.Errorf("tuiA got %q, want %q", got, "broadcast\n")
+	}
+	if got := scanLine(t, tuiB); got != "broadcast\n" {
+		t.Errorf("tuiB got %q, want %q", got, "broadcast\n")
+	}
+}
+
+// TestHubLateReconnect models a watcher that disconnects and a new one that
+// connects afterward: the late client must receive frames the agent streams
+// from that point on. This is the task's minimum reconnection guarantee.
+func TestHubLateReconnect(t *testing.T) {
+	h, _, stdoutW := newTestHub(t)
+
+	// First watcher connects, sees one frame, then hangs up.
+	tuiA, wrapperA := net.Pipe()
+	h.add(wrapperA)
+	go stdoutW.Write([]byte("first\n"))
+	if got := scanLine(t, tuiA); got != "first\n" {
+		t.Errorf("tuiA got %q, want %q", got, "first\n")
+	}
+	tuiA.Close()
+
+	// A later watcher connects and must receive ongoing stream output.
+	tuiB, wrapperB := net.Pipe()
+	defer tuiB.Close()
+	h.add(wrapperB)
+	go stdoutW.Write([]byte("second\n"))
+	if got := scanLine(t, tuiB); got != "second\n" {
+		t.Errorf("reconnecting tuiB got %q, want %q", got, "second\n")
+	}
+}
+
+// TestScanFramesReassemblesPartialReads checks the framing reassembles a single
+// frame delivered across several Read calls and still emits a trailing,
+// unterminated chunk at EOF — so partial reads never split or drop a frame.
+func TestScanFramesReassemblesPartialReads(t *testing.T) {
+	pr, pw := io.Pipe()
+	var frames []string
+	done := make(chan struct{})
 	go func() {
-		bridge(wrapperSide, stdinW, stdoutR)
-		close(bridgeDone)
+		scanFrames(pr, func(f []byte) bool { frames = append(frames, string(f)); return true })
+		close(done)
 	}()
 
-	// ACP client emits a streamed response -> TUI should receive it.
-	go func() { stdoutW.Write([]byte("from-agent\n")) }()
-	buf := make([]byte, len("from-agent\n"))
-	tuiSide.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := io.ReadFull(tuiSide, buf); err != nil {
-		t.Fatalf("read agent->tui: %v", err)
-	}
-	if string(buf) != "from-agent\n" {
-		t.Errorf("tui got %q, want %q", buf, "from-agent\n")
-	}
+	pw.Write([]byte("hel"))
+	pw.Write([]byte("lo\nwor")) // completes "hello\n", starts "wor"
+	pw.Write([]byte("ld"))      // "world" left unterminated
+	pw.Close()                  // EOF flushes the trailing "world"
 
-	// TUI sends a prompt -> ACP client stdin should receive it.
-	go func() { tuiSide.Write([]byte("from-tui\n")) }()
-	pbuf := make([]byte, len("from-tui\n"))
-	if _, err := io.ReadFull(stdinR, pbuf); err != nil {
-		t.Fatalf("read tui->agent: %v", err)
-	}
-	if string(pbuf) != "from-tui\n" {
-		t.Errorf("agent stdin got %q, want %q", pbuf, "from-tui\n")
-	}
-
-	// TUI hangs up -> bridge returns.
-	tuiSide.Close()
 	select {
-	case <-bridgeDone:
+	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("bridge did not return after TUI closed")
+		t.Fatal("scanFrames did not finish")
+	}
+	want := []string{"hello\n", "world"}
+	if !reflect.DeepEqual(frames, want) {
+		t.Errorf("frames = %v, want %v", frames, want)
+	}
+}
+
+// TestHubStdinNoInterleave drives two clients writing large frames concurrently
+// and asserts each frame lands in the agent's stdin whole — never split by the
+// other client's bytes. This is the stdin-serialization guarantee that a naive
+// shared io.Copy(stdin, conn) per connection cannot make.
+func TestHubStdinNoInterleave(t *testing.T) {
+	h, stdinR, _ := newTestHub(t)
+
+	frameA := strings.Repeat("A", 50000) + "\n"
+	frameB := strings.Repeat("B", 50000) + "\n"
+
+	tuiA, wrapperA := net.Pipe()
+	tuiB, wrapperB := net.Pipe()
+	defer tuiA.Close()
+	defer tuiB.Close()
+	h.add(wrapperA)
+	h.add(wrapperB)
+
+	go tuiA.Write([]byte(frameA))
+	go tuiB.Write([]byte(frameB))
+
+	br := bufio.NewReader(stdinR)
+	got1, err := br.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read frame 1: %v", err)
+	}
+	got2, err := br.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read frame 2: %v", err)
+	}
+	// Each frame must be exactly one of the inputs, intact and homogeneous.
+	for i, got := range []string{string(got1), string(got2)} {
+		if got != frameA && got != frameB {
+			t.Fatalf("frame %d was interleaved/corrupted (len %d, prefix %q)", i, len(got), got[:min(8, len(got))])
+		}
+	}
+	if string(got1) == string(got2) {
+		t.Errorf("expected the two distinct frames, got the same one twice")
 	}
 }

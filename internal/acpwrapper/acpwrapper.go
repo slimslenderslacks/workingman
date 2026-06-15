@@ -366,38 +366,27 @@ func Run(ctx context.Context, c Config) error {
 	return nil
 }
 
-// serve accepts connections on ln and bridges each to the ACP client's stdio
-// until the listener is closed. Each connection is handled in its own goroutine
-// so a hung or idle TUI never blocks new connections.
+// serve bridges TUI connections on ln to the one sandboxed ACP client's stdio
+// until the listener is closed. A single hub fans the ACP client's stdout out
+// to every connected client and serializes each client's framed input into the
+// ACP client's stdin, so several TUIs (including a watcher that reconnects
+// later) share the same session without corrupting the newline-delimited
+// JSON-RPC stream. See bridge.go for the framing/fan-out details.
 //
-// All connections share the one ACP client's stdin/stdout: a single sandboxed
-// claude session that a reconnecting TUI resumes. Multiplexing several
-// concurrent TUIs cleanly over that shared stream (framing/fan-out) is a
-// dependent task; this wiring assumes the common single-attached-TUI case.
+// The stdout reader runs in its own goroutine; the accept loop registers each
+// connection with the hub. When ln is closed (ctx cancelled or ACP client
+// exited) the hub is torn down and serve returns.
 func serve(ctx context.Context, ln net.Listener, procStdin io.Writer, procStdout io.Reader) {
+	h := newHub(procStdin)
+	// One reader drains the ACP client's stdout and broadcasts whole frames to
+	// every connected client. It also tears the hub down on stdout EOF.
+	go h.run(procStdout)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return // listener closed: ctx cancelled or ACP client exited
+			h.shutdown() // listener closed: ctx cancelled or ACP client exited
+			return
 		}
-		go bridge(conn, procStdin, procStdout)
+		h.add(conn)
 	}
-}
-
-// bridge wires a single TUI connection to the ACP client's stdio: bytes the TUI
-// sends go to the client's stdin (prompts/requests); bytes the client writes on
-// stdout go back to the TUI (streamed ACP responses). It returns when the TUI
-// hangs up. The ACP client's stdio stays open for the next connection so a
-// reconnecting TUI resumes the same session.
-func bridge(conn net.Conn, procStdin io.Writer, procStdout io.Reader) {
-	// ACP client stdout -> TUI. Detached on purpose: a Read blocked on the
-	// client's stdout pipe can't be interrupted by closing conn, so we don't
-	// wait on it. It retires on its own when the client next writes (the write
-	// to the now-closed conn fails) or when stdout reaches EOF (client exit).
-	go io.Copy(conn, procStdout)
-	// TUI -> ACP client stdin. Returns when the TUI closes its side — our
-	// signal that this connection is done, so we don't block the bridge on an
-	// idle ACP client that isn't streaming anything back.
-	io.Copy(procStdin, conn)
-	conn.Close()
 }
