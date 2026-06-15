@@ -7,11 +7,12 @@
 // TUI can send prompts and watch streamed ACP responses.
 //
 // This package owns the entrypoint scaffolding, config parsing, sandbox launch
-// and acp-kit exec, plus the socket-bridge wiring. The richer bridging
-// semantics (framing, multiplexing several reconnecting TUIs, resuming a
-// stream) and the on-disk session file layout (session.json next to the
-// socket) are layered on by dependent tasks; this package defines where those
-// artifacts live and the seams they hook into.
+// and acp-kit exec, plus the socket-bridge wiring. It records each session as
+// session.json next to the socket (via the session package) so a restarting TUI
+// can rediscover and reconnect to it. The richer bridging semantics (framing,
+// multiplexing several reconnecting TUIs, resuming a stream) are layered on by
+// dependent tasks; this package defines where those artifacts live and the
+// seams they hook into.
 package acpwrapper
 
 import (
@@ -26,11 +27,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/slimslenderslacks/work/internal/session"
 )
 
 // SocketName is the unix-domain socket the wrapper creates inside a session
-// directory. The TUI connects to <SessionsRoot>/<SessionID>/agent.sock.
-const SocketName = "agent.sock"
+// directory. The TUI connects to <SessionsRoot>/<SessionID>/agent.sock. It is
+// aliased from the session package so the layout has one source of truth.
+const SocketName = session.SocketName
 
 // sandboxNamePrefix is prepended to the session id when deriving a sandbox
 // name. sbx rejects names containing underscores, so normalize() also rewrites
@@ -71,8 +76,7 @@ type Config struct {
 	SbxPath string
 }
 
-// SessionDir is the per-session directory holding the socket (and, in
-// dependent tasks, session.json).
+// SessionDir is the per-session directory holding the socket and session.json.
 func (c Config) SessionDir() string {
 	return filepath.Join(c.SessionsRoot, c.SessionID)
 }
@@ -80,6 +84,24 @@ func (c Config) SessionDir() string {
 // SocketPath is the unix socket the TUI connects to for this session.
 func (c Config) SocketPath() string {
 	return filepath.Join(c.SessionDir(), SocketName)
+}
+
+// sessionRecord projects the wrapper's config into the session.json the TUI
+// reads to reconnect. createdAt is preserved across status updates so the
+// "running" record keeps the "starting" record's birth time; updatedAt stamps
+// each write. Must be called after normalize() so the derived sandbox name and
+// absolute paths are populated.
+func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.Time) session.Session {
+	return session.Session{
+		ID:          c.SessionID,
+		SandboxName: c.SandboxName,
+		Status:      status,
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
+		SocketPath:  c.SocketPath(),
+		Workspaces:  c.Workspaces,
+		Kit:         c.KitPath,
+	}
 }
 
 // primaryWorkspace is the first mount — the ACP client's cwd inside the
@@ -255,7 +277,18 @@ func Run(ctx context.Context, c Config) error {
 		return fmt.Errorf("acpwrapper: create session dir %s: %w", c.SessionDir(), err)
 	}
 
+	// Record the session as soon as the directory exists so a TUI that lists
+	// the sessions root mid-startup sees it (as "starting") rather than a bare,
+	// metadata-less directory. The store roots at the same SessionsRoot the path
+	// helpers use, so it writes session.json next to agent.sock.
+	store := session.Store{Root: c.SessionsRoot}
+	createdAt := time.Now()
+	if err := store.Write(c.sessionRecord(session.StatusStarting, createdAt, createdAt)); err != nil {
+		return err
+	}
+
 	if err := ensureSandbox(ctx, execCommand, c); err != nil {
+		_ = store.Remove(c.SessionID) // never started — don't leave a stale record
 		return err
 	}
 
@@ -291,6 +324,14 @@ func Run(ctx context.Context, c Config) error {
 		return fmt.Errorf("acpwrapper: listen on %s: %w", c.SocketPath(), err)
 	}
 
+	// The ACP client is started and the socket is accepting: mark the session
+	// running so a reconnecting TUI knows the transport is live. A failed update
+	// here is non-fatal — the session is genuinely usable; we just log and press
+	// on rather than tear down a working session over a metadata hiccup.
+	if err := store.Write(c.sessionRecord(session.StatusRunning, createdAt, time.Now())); err != nil {
+		fmt.Fprintln(os.Stderr, "acp-wrapper:", err)
+	}
+
 	// When the ACP client exits, the session's transport is gone: cancel the
 	// context and close the listener so the accept loop unwinds.
 	waitErr := make(chan error, 1)
@@ -308,10 +349,11 @@ func Run(ctx context.Context, c Config) error {
 
 	serve(ctx, ln, procStdin, procStdout)
 
-	// The socket is ours; remove it so a reconnecting TUI doesn't dial a dead
-	// transport. session.json cleanup is the caller's / dependent task's job.
-	if rmErr := os.Remove(c.SocketPath()); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-		return fmt.Errorf("acpwrapper: remove socket %s: %w", c.SocketPath(), rmErr)
+	// The ACP client has exited and the session's transport is gone: remove the
+	// whole session directory (session.json and the socket together) so a
+	// reconnecting TUI doesn't discover a dead session and dial a dead socket.
+	if rmErr := store.Remove(c.SessionID); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		return fmt.Errorf("acpwrapper: remove session %s: %w", c.SessionID, rmErr)
 	}
 
 	procErr := <-waitErr
