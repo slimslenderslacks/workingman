@@ -18,6 +18,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/notify"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
+	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/tui"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
@@ -177,7 +178,21 @@ func runDaemon(args []string) {
 
 	sessCh := adaptSessionFeed(ctx, d.WatchSessions(ctx, 0))
 
-	tuiErr := tui.Run(ctx, roots, sessCh, *auditPath)
+	// The TUI watches the same ACP sessions root the runner writes to, so the
+	// `a`-key tab view shows one tab per live ACP session. Only meaningful when
+	// non-interactive agents run as ACP sessions (--acp-kit set); otherwise no
+	// ACP sessions exist, so we skip the watcher.
+	acpSessionsRoot := ""
+	if *acpKit != "" {
+		acpSessionsRoot = *sessionsRoot
+		if acpSessionsRoot == "" {
+			if def, err := session.DefaultRoot(); err == nil {
+				acpSessionsRoot = def
+			}
+		}
+	}
+
+	tuiErr := tui.Run(ctx, roots, sessCh, *auditPath, acpSessionsRoot)
 
 	// TUI exited — either the user quit or ctx was already cancelled. Cancel
 	// to be sure, then wait for the daemon to wind down so its shutdown
@@ -280,7 +295,7 @@ func runTUI(args []string) {
 	// sessions pane gets a nil source — the pane renders "(none)" in that
 	// case. To see live sessions, run `orch --root=...` (the integrated
 	// mode wires the daemon's WatchSessions into the TUI).
-	if err := tui.Run(ctx, roots, nil, *auditPath); err != nil {
+	if err := tui.Run(ctx, roots, nil, *auditPath, ""); err != nil {
 		log.Fatal(err)
 	}
 }

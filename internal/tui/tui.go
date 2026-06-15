@@ -71,11 +71,11 @@ type model struct {
 	sessLoaded bool
 	sessSel    string
 	projects   []ProjectView
-	projCh        <-chan []ProjectView
-	projSel       string // path of the selected project card; empty when unset
-	loaded        bool
-	attacher      tmuxAttacher
-	statusMsg     string
+	projCh     <-chan []ProjectView
+	projSel    string // path of the selected project card; empty when unset
+	loaded     bool
+	attacher   tmuxAttacher
+	statusMsg  string
 
 	// yamlScroll is the index of the first visible wrapped line of the
 	// project-YAML viewer. Reset to 0 whenever projSel or taskSel changes
@@ -110,6 +110,14 @@ type model struct {
 
 	auditLines []string
 	auditCh    <-chan []string
+
+	// acp holds the ACP-session tab view: one tab per live non-interactive ACP
+	// session, fed by acpCh. showACP toggles the full-window tab view on top of
+	// the normal two-pane layout (entered with `a`, left with esc). acpCh is nil
+	// in standalone/test models with no ACP source wired in; Run sets it.
+	acp     acpTabs
+	acpCh   <-chan acpTabEvent
+	showACP bool
 }
 
 func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh <-chan []string, attacher tmuxAttacher) model {
@@ -136,6 +144,9 @@ func (m model) Init() tea.Cmd {
 	}
 	if m.auditCh != nil {
 		cmds = append(cmds, waitForAudit(m.auditCh))
+	}
+	if m.acpCh != nil {
+		cmds = append(cmds, waitForACP(m.acpCh))
 	}
 	if len(cmds) == 0 {
 		return nil
@@ -173,6 +184,16 @@ func waitForAudit(ch <-chan []string) tea.Cmd {
 	}
 }
 
+func waitForACP(ch <-chan acpTabEvent) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return ev
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -201,6 +222,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case auditMsg:
 		m.auditLines = msg.lines
 		return m, waitForAudit(m.auditCh)
+	case acpTabEvent:
+		switch msg.kind {
+		case acpTabAdded:
+			m.acp.upsert(msg.id, msg.title)
+		case acpTabPrompt:
+			m.acp.addPrompt(msg.id, msg.text)
+		case acpTabStream:
+			m.acp.apply(msg.id, msg.ev)
+		case acpTabRemoved:
+			m.acp.remove(msg.id)
+		}
+		return m, waitForACP(m.acpCh)
 	case attachResultMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("attach %s: %v", msg.target, msg.err)
@@ -209,9 +242,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
-		// Mouse events get suspended while a modal is open — the user is
-		// committed to the text-entry flow until they confirm or cancel.
-		if m.mode != modeNormal {
+		// Mouse events get suspended while a modal or the ACP tab view is open —
+		// the user is committed to that flow until they leave it.
+		if m.mode != modeNormal || m.showACP {
 			return m, nil
 		}
 		return m.handleMouse(msg)
@@ -220,6 +253,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// trapped in a modal they don't know how to exit.
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		// The ACP tab view captures keys whole while it's open, layered on top
+		// of any pane focus the normal UI had.
+		if m.showACP {
+			return m.handleACPKey(msg)
 		}
 		switch m.mode {
 		case modeCommandLine:
@@ -246,6 +284,13 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == paneProjects {
 			m.mode = modeCommandLine
 			m.cmdInput = ""
+			m.statusMsg = ""
+		}
+	case "a":
+		// Open the full-window ACP session tab view. Only meaningful when an
+		// ACP source is wired in (daemon mode); a no-op in standalone tui mode.
+		if m.acpCh != nil {
+			m.showACP = true
 			m.statusMsg = ""
 		}
 	case "tab":
@@ -326,6 +371,23 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == paneSessions {
 			return m.attachSelected()
 		}
+	}
+	return m, nil
+}
+
+// handleACPKey processes a keystroke while the full-window ACP tab view is open.
+// Left/right (and tab/shift+tab) switch tabs; esc (or `a`) returns to the normal
+// two-pane UI; q and ctrl+c still quit the whole TUI.
+func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		return m, tea.Quit
+	case "esc", "a":
+		m.showACP = false
+	case "right", "l", "tab":
+		m.acp.next()
+	case "left", "h", "shift+tab":
+		m.acp.prev()
 	}
 	return m, nil
 }
@@ -457,7 +519,6 @@ func selectedTmuxTarget(views []SessionView, id string) (string, bool) {
 	}
 	return "", false
 }
-
 
 // projectCardAtPoint maps a click inside the projects pane to a card index.
 // The arithmetic mirrors renderProjectGrid: cards are cardWidth wide with a
@@ -1072,10 +1133,10 @@ func (m model) computeLayout() uiLayout {
 	// the body below a usable minimum. Otherwise the audit pane forces the
 	// body to overflow the terminal and the footer disappears off-screen.
 	const (
-		headerH    = 1
-		footerH    = 1
-		minBodyH   = 4
-		minAuditH  = 5
+		headerH   = 1
+		footerH   = 1
+		minBodyH  = 4
+		minAuditH = 5
 	)
 	audit := 0
 	if m.auditCh != nil {
@@ -1227,6 +1288,11 @@ func (m model) View() string {
 	// esc/enter and the regular UI returns intact.
 	if m.mode == modeNewProject {
 		return m.renderNewProjectModal()
+	}
+
+	// The ACP tab view takes over the whole window when open.
+	if m.showACP {
+		return m.renderACPView()
 	}
 
 	l := m.computeLayout()
@@ -1443,6 +1509,9 @@ func (m model) renderFooter() string {
 	style := statusErrStyle
 	if text == "" {
 		base := "tab: switch pane  •  ↑/↓: select  •  p/t: project/task yaml  •  enter/click: attach  •  q: quit"
+		if m.acpCh != nil {
+			base += "  •  a: acp tabs"
+		}
 		if m.focus == paneProjects {
 			base += "  •  :new: create project"
 		}
@@ -1472,12 +1541,14 @@ func paneName(p pane) string {
 // the gallery as files change; the sessions pane is fed by sessCh, which the
 // caller wires up to a real source (the daemon's WatchSessions) or leaves nil
 // for standalone/demo mode. The audit log pane at the bottom tails auditPath
-// when non-empty. Run blocks until the user quits or ctx is cancelled.
+// when non-empty. When sessionsRoot is non-empty, Run also watches that ACP
+// sessions root and feeds the `a`-key tab view one tab per live ACP session.
+// Run blocks until the user quits or ctx is cancelled.
 //
 // Mouse cell-motion is enabled so the sessions pane responds to clicks. The
 // tmux-attach plumbing opens a new Terminal.app window via osascript, so the
 // TUI keeps running while the user works in the attached session.
-func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, auditPath string) error {
+func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, auditPath, sessionsRoot string) error {
 	tuiCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -1491,6 +1562,12 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, audit
 	}
 
 	m := newModel(ch, sessCh, auditCh, newTmuxAttacher())
+	// Watch ACP sessions for the tab view when a sessions root is configured
+	// (daemon mode with --acp-kit). Standalone `orch tui` passes "" and gets no
+	// ACP tabs, matching its nil sessions source.
+	if sessionsRoot != "" {
+		m.acpCh = WatchACPSessions(tuiCtx, sessionsRoot, 0)
+	}
 	// `:new` writes the empty .project.yaml into the first --root the caller
 	// passed in. Standalone tui mode without any --root has no place to
 	// create projects; the command-line handler reports that gracefully.
