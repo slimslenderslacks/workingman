@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,6 +63,10 @@ func (f *fakeACPConn) Close() error {
 	return nil
 }
 
+// aliveProbe is a sandboxProbe that always reports the sandbox is up, so tests
+// exercising the connection paths aren't short-circuited by the liveness check.
+func aliveProbe(_ context.Context, _ string) (bool, error) { return true, nil }
+
 // writeRunningSession persists a StatusRunning session.json under root so the
 // watcher discovers it.
 func writeRunningSession(t *testing.T, root, id string) session.Store {
@@ -90,7 +95,7 @@ func TestWatchDiscoversSessionAndStreamsTranscript(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, "go read it")
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "go read it")
 
 	// Collect events until we've seen the added tab, the prompt, and the
 	// completed stream event.
@@ -144,7 +149,7 @@ func TestWatchEmitsRemovedWhenSessionDirGone(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, "")
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "")
 
 	// Wait for the tab to be added, then delete the session directory.
 	waitForKind(t, ch, acpTabAdded, 2*time.Second)
@@ -168,7 +173,7 @@ func TestWatchDialFailureMarksDisconnected(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, "")
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "")
 
 	waitForKind(t, ch, acpTabAdded, 2*time.Second)
 	deadline := time.After(2 * time.Second)
@@ -224,7 +229,7 @@ func TestWatchReconnectReplaysAndSkipsPrompt(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, "go read it")
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "go read it")
 
 	var (
 		sawPrompt, sawReplay, sawConnected bool
@@ -281,22 +286,116 @@ func TestWatchDialFailureCleansUpDeadSession(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, "")
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "")
 
 	ev := waitForKind(t, ch, acpTabRemoved, 2*time.Second)
 	if ev.id != "task-dead" {
 		t.Errorf("removed id = %q, want task-dead", ev.id)
 	}
 	// The orphaned directory must be reclaimed.
-	deadline := time.After(2 * time.Second)
+	waitForDirGone(t, store.Dir("task-dead"), 2*time.Second)
+}
+
+// waitForDirGone polls until dir no longer exists or the timeout elapses.
+func waitForDirGone(t *testing.T, dir string, dur time.Duration) {
+	t.Helper()
+	deadline := time.After(dur)
 	for {
-		if _, err := os.Stat(store.Dir("task-dead")); os.IsNotExist(err) {
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
 			return // cleaned up
 		}
 		select {
 		case <-deadline:
-			t.Fatal("dead session directory was not removed")
+			t.Fatalf("directory %s was not removed", dir)
 		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestWatchSandboxGoneCleansUpStaleSession asserts that when a discovered
+// session's backing sandbox is gone (the probe reports it absent), the watcher
+// reaps the stale directory and drops the tab WITHOUT ever dialing the leftover
+// socket — the socket can't be trusted once the sandbox is gone, and dialing a
+// lingering one could hang with no per-dial timeout.
+func TestWatchSandboxGoneCleansUpStaleSession(t *testing.T) {
+	root := t.TempDir()
+	store := writeRunningSession(t, root, "task-orphan")
+
+	var dialed int32
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		atomic.AddInt32(&dialed, 1)
+		return newFakeACPConn(), nil // would "succeed" — but must never be called
+	}
+	goneProbe := func(_ context.Context, _ string) (bool, error) { return false, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, goneProbe, "go read it")
+
+	// The stale tab is marked dead and dropped.
+	var sawDisconnected bool
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			switch {
+			case ev.kind == acpTabStream && ev.ev.State == acpclient.StateDisconnected:
+				sawDisconnected = true
+			case ev.kind == acpTabRemoved && ev.id == "task-orphan":
+				if !sawDisconnected {
+					t.Error("tab removed without first marking it disconnected")
+				}
+				if n := atomic.LoadInt32(&dialed); n != 0 {
+					t.Errorf("dialed a stale socket whose sandbox is gone (%d times)", n)
+				}
+				// The orphaned directory must be reclaimed.
+				waitForDirGone(t, store.Dir("task-orphan"), 2*time.Second)
+				return
+			}
+		case <-deadline:
+			t.Fatal("sandbox-gone session was never cleaned up")
+		}
+	}
+}
+
+// TestWatchSandboxProbeErrorFallsThroughToConnection asserts an inconclusive
+// probe (sbx unavailable) does NOT reap the session: the watcher falls through
+// to dialing and lets the connection's own behavior decide liveness, so a flaky
+// `sbx ls` can never tear down a session whose socket is actually live.
+func TestWatchSandboxProbeErrorFallsThroughToConnection(t *testing.T) {
+	root := t.TempDir()
+	writeRunningSession(t, root, "task-probeerr")
+
+	conn := newFakeACPConn()
+	var dialed int32
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		atomic.AddInt32(&dialed, 1)
+		return conn, nil
+	}
+	errProbe := func(_ context.Context, _ string) (bool, error) {
+		return false, context.DeadlineExceeded // inconclusive: probe couldn't run
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, errProbe, "go read it")
+
+	// A live session connects and streams despite the probe error.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.kind == acpTabStream && ev.ev.State == acpclient.StateConnected {
+				if n := atomic.LoadInt32(&dialed); n == 0 {
+					t.Error("probe error short-circuited the dial instead of falling through")
+				}
+				return
+			}
+			if ev.kind == acpTabRemoved {
+				t.Fatal("inconclusive probe wrongly reaped a live session")
+			}
+		case <-deadline:
+			t.Fatal("session never connected after an inconclusive probe")
 		}
 	}
 }
@@ -313,7 +412,7 @@ func TestWatchNewSessionMarksPrompted(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, "go read it")
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "go read it")
 	go func() {
 		for range ch { // drain so the watcher never blocks emitting
 		}

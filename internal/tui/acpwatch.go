@@ -3,7 +3,9 @@ package tui
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -55,6 +57,47 @@ type acpConn interface {
 // realDialer (acpclient.Dial); tests inject a fake.
 type acpDialer func(ctx context.Context, socketPath string) (acpConn, error)
 
+// sandboxProbe reports whether the named sbx sandbox still exists. It is how the
+// watcher verifies a discovered session's backing sandbox is alive before
+// trusting its socket: a crashed wrapper can leave an agent.sock behind that
+// still accepts a connection (or hangs without ever answering) even though
+// nothing is bridging it to a live agent, and there is no per-dial timeout to
+// rescue a watcher that blocks on such a socket. A definitive "gone" lets the
+// watcher reap the stale session without dialing at all.
+//
+// The boolean is only meaningful when err is nil: alive=false with a nil error
+// means the sandbox is authoritatively absent. A non-nil error means the probe
+// itself could not run (sbx missing, transient failure) and is inconclusive —
+// the caller must NOT treat the session as dead on that basis and falls back to
+// letting the connection's own behavior decide.
+type sandboxProbe func(ctx context.Context, sandboxName string) (alive bool, err error)
+
+// sbxSandboxProbe is the production sandboxProbe. It lists the sandboxes via
+// `sbx ls --json` (the same stable read interface the wrapper and runner use)
+// and reports whether one named sandboxName exists. A query or decode failure is
+// returned as an error so the caller treats it as inconclusive rather than as
+// "gone".
+func sbxSandboxProbe(ctx context.Context, sandboxName string) (bool, error) {
+	out, err := exec.CommandContext(ctx, "sbx", "ls", "--json").Output()
+	if err != nil {
+		return false, err
+	}
+	var data struct {
+		Sandboxes []struct {
+			Name string `json:"name"`
+		} `json:"sandboxes"`
+	}
+	if err := json.Unmarshal(out, &data); err != nil {
+		return false, err
+	}
+	for _, s := range data.Sandboxes {
+		if s.Name == sandboxName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // realDialer is the production dialer. It wraps acpclient.Dial so a dial failure
 // yields a genuinely nil interface (returning a typed-nil *Client would make the
 // interface non-nil and defeat the caller's err check).
@@ -77,7 +120,7 @@ const defaultACPPrompt = "Read .orch/instructions.md and .orch/context.yaml, the
 // root and returns a channel of tab mutations for the TUI to consume. The
 // channel is closed when ctx is cancelled. interval <= 0 defaults to 500ms.
 func WatchACPSessions(ctx context.Context, root string, interval time.Duration) <-chan acpTabEvent {
-	return watchACPSessions(ctx, root, interval, realDialer, defaultACPPrompt)
+	return watchACPSessions(ctx, root, interval, realDialer, sbxSandboxProbe, defaultACPPrompt)
 }
 
 // watchACPSessions is the testable core of WatchACPSessions, taking the dialer
@@ -87,7 +130,7 @@ func WatchACPSessions(ctx context.Context, root string, interval time.Duration) 
 // being watched gets a per-session goroutine (watchOneACPSession). A session
 // that has disappeared from the listing — its directory cleaned up — has its
 // watcher cancelled and an acpTabRemoved emitted so the tab goes away.
-func watchACPSessions(ctx context.Context, root string, interval time.Duration, dial acpDialer, prompt string) <-chan acpTabEvent {
+func watchACPSessions(ctx context.Context, root string, interval time.Duration, dial acpDialer, probe sandboxProbe, prompt string) <-chan acpTabEvent {
 	if interval <= 0 {
 		interval = 500 * time.Millisecond
 	}
@@ -128,7 +171,7 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 				wg.Add(1)
 				go func(s session.Session) {
 					defer wg.Done()
-					watchOneACPSession(wctx, out, dial, store, s, prompt)
+					watchOneACPSession(wctx, out, dial, probe, store, s, prompt)
 				}(s)
 			}
 			// Reap watchers whose session directory is gone.
@@ -163,14 +206,45 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 // turn — and we replay its recorded scrollback so the tab comes back with its
 // prior prompts/output.
 //
-// A dead session — socket missing/refused (dial fails) or a sandbox that is gone
-// so the bridge closes the connection mid-handshake — is distinguished from a
-// live one and routed to cleanup: a synthetic StateDisconnected marks the tab
-// dead and the leftover session directory is removed so it doesn't linger. A
-// handshake failure needs no synthetic event: acpclient already emits the
-// terminal event over Events(), which the pump forwards.
-func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDialer, store session.Store, s session.Session, prompt string) {
+// A dead session is distinguished from a live one and routed to cleanup three
+// ways, in order:
+//
+//   - The backing sandbox is authoritatively gone (probe). A discovered session
+//     whose sbx sandbox no longer exists is stale regardless of what its socket
+//     file looks like — a crashed wrapper can leave an agent.sock that still
+//     accepts (or hangs without answering), and there is no per-dial timeout to
+//     rescue us from blocking on it. So we check liveness first and, when gone,
+//     skip the dial entirely, mark the tab dead, and reap the directory.
+//   - Socket missing/refused (dial fails) — a stale socket from a wrapper that
+//     crashed while its sandbox may even still be up; either way it can't be
+//     bridged, so the directory is reaped.
+//   - A sandbox that vanishes mid-handshake so the bridge closes the connection.
+//
+// The first two emit a synthetic StateDisconnected to mark the tab dead; the
+// third needs none — acpclient already emits the terminal event over Events(),
+// which the pump forwards.
+func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDialer, probe sandboxProbe, store session.Store, s session.Session, prompt string) {
 	emitACP(ctx, out, acpTabEvent{kind: acpTabAdded, id: s.ID, title: acpTabTitle(s)})
+
+	// Verify the backing sandbox still exists before trusting the socket. We only
+	// reach here for StatusRunning sessions, whose sandbox provably existed when
+	// the wrapper flipped them to running, so a "gone" verdict is a genuine
+	// after-the-fact teardown (sandbox removed, wrapper crashed) and not the
+	// brief starting-window race where the wrapper writes the record before
+	// creating the sandbox. An inconclusive probe (error) is ignored so a flaky
+	// `sbx ls` never reaps a live session — the connection paths below still
+	// catch a truly dead socket.
+	if probe != nil && s.SandboxName != "" {
+		if alive, err := probe(ctx, s.SandboxName); err == nil && !alive {
+			emitACP(ctx, out, acpTabEvent{
+				kind: acpTabStream,
+				id:   s.ID,
+				ev:   acpclient.Event{State: acpclient.StateDisconnected},
+			})
+			cleanupDeadSession(ctx, out, store, s.ID)
+			return
+		}
+	}
 
 	conn, err := dial(ctx, s.SocketPath)
 	if err != nil {
