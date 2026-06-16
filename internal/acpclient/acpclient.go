@@ -223,6 +223,17 @@ func (c *Client) Connect(ctx context.Context, cwd string) error {
 	c.sessionID = newRes.SessionID
 	c.mu.Unlock()
 
+	// Flip the session into bypassPermissions so the bridge stops issuing
+	// session/request_permission for escalated tool calls. This client doesn't
+	// implement that method; without bypass, the first Bash/Edit/etc. would fail
+	// with "method not found: session/request_permission" and the agent would
+	// give up. The mode id is one of the modes session/new just advertised in
+	// availableModes (see protocol.go ModeBypassPermissions).
+	setModeP := setModeParams{SessionID: newRes.SessionID, ModeID: ModeBypassPermissions}
+	if err := c.call(ctx, methodSessionSetMode, setModeP, nil); err != nil {
+		return fmt.Errorf("acpclient: session/set_mode: %w", err)
+	}
+
 	c.setState(StateConnected)
 	c.emit(Event{State: StateConnected})
 	return nil

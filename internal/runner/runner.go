@@ -423,6 +423,13 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, 
 		"--kit", r.Kit,
 		"--sandbox", sandboxName,
 		"--sessions-root", sessionsRoot,
+		// Orch's planning/task/commit are single-turn: when the TUI's watcher
+		// drives its one prompt and disconnects, the wrapper should exit so
+		// the daemon's session_ended callback fires and the next stage
+		// dispatches. Without this the wrapper would survive the disconnect
+		// (designed for long-lived interactive sessions) and the project
+		// would stall in `working`.
+		"--exit-when-empty",
 	}
 	if r.SbxPath != "" {
 		args = append(args, "--sbx", r.SbxPath)

@@ -128,6 +128,22 @@ func stdHandshake(a *agentConn, sessionID string) {
 		a.t.Fatalf("second request = %q, want session/new", newReq.Method)
 	}
 	a.result(newReq.ID, map[string]any{"sessionId": sessionID})
+
+	setMode := a.readRequest()
+	if setMode.Method != methodSessionSetMode {
+		a.t.Fatalf("third request = %q, want session/set_mode", setMode.Method)
+	}
+	var sm setModeParams
+	if err := json.Unmarshal(setMode.Params, &sm); err != nil {
+		a.t.Fatalf("decode set_mode params: %v", err)
+	}
+	if sm.SessionID != sessionID {
+		a.t.Errorf("set_mode sessionId = %q, want %q", sm.SessionID, sessionID)
+	}
+	if sm.ModeID != ModeBypassPermissions {
+		a.t.Errorf("set_mode modeId = %q, want %q", sm.ModeID, ModeBypassPermissions)
+	}
+	a.result(setMode.ID, map[string]any{})
 }
 
 func TestConnectAndPromptStreamsChunks(t *testing.T) {

@@ -23,6 +23,17 @@ func argValue(args []string, flag string) string {
 	return ""
 }
 
+// hasFlag reports whether flag appears anywhere in args. For boolean flags like
+// --exit-when-empty that take no following token.
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
 // argValues returns every token following an occurrence of flag — used for
 // repeatable flags like --workspace.
 func argValues(args []string, flag string) []string {
@@ -90,6 +101,9 @@ func TestACPLaunchPlanningAgent(t *testing.T) {
 	}
 	if ws := argValues(cmd, "--workspace"); len(ws) != 1 || ws[0] != workingDir {
 		t.Errorf("--workspace = %v, want [%q]", ws, workingDir)
+	}
+	if !hasFlag(cmd, "--exit-when-empty") {
+		t.Errorf("expected --exit-when-empty in argv, got %v", cmd)
 	}
 	if acp.last.Name != wantID {
 		t.Errorf("spec.Name = %q, want %q", acp.last.Name, wantID)

@@ -302,6 +302,15 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 			// Record that the opening prompt was sent so a future restart reconnects
 			// (replays) instead of re-prompting.
 			markPrompted(store, s.ID)
+			// Orch's non-interactive agents (planning/task/commit) are
+			// single-turn: the opening prompt finishing IS the agent's exit
+			// signal. Return so the deferred conn.Close() fires, the sandboxed
+			// claude-acp-client sees EOF on stdio and exits, acp-wrapper
+			// returns, and the daemon's session_ended callback dispatches the
+			// next stage (task-after-planning, commit-after-task, etc.). The
+			// pump forwards the trailing StateDisconnected before pumpDone
+			// closes, so the tab still transitions through completed → dead.
+			return
 		}
 	}
 

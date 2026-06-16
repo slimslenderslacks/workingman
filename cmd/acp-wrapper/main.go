@@ -53,6 +53,7 @@ func main() {
 	sandboxName := fs.String("sandbox", "", "sbx sandbox name (default acp-<session-id>)")
 	kitPath := fs.String("kit", "", "acp-kit reference to layer onto the claude sandbox: a local kit dir or published ref (required)")
 	sbxPath := fs.String("sbx", "", "path to the sbx binary (default: sbx on PATH)")
+	exitWhenEmpty := fs.Bool("exit-when-empty", false, "shut down once the last connected TUI disconnects (after at least one has connected); used by orch's autonomous single-turn flow")
 	var workspaces workspacesFlag
 	fs.Var(&workspaces, "workspace", "host path to mount into the sandbox; the first is the ACP client cwd (repeatable, at least one required)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -60,12 +61,13 @@ func main() {
 	}
 
 	cfg := acpwrapper.Config{
-		SessionID:    *sessionID,
-		SessionsRoot: *sessionsRoot,
-		SandboxName:  *sandboxName,
-		KitPath:      *kitPath,
-		SbxPath:      *sbxPath,
-		Workspaces:   workspaces,
+		SessionID:     *sessionID,
+		SessionsRoot:  *sessionsRoot,
+		SandboxName:   *sandboxName,
+		KitPath:       *kitPath,
+		SbxPath:       *sbxPath,
+		Workspaces:    workspaces,
+		ExitWhenEmpty: *exitWhenEmpty,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

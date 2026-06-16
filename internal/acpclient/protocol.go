@@ -24,11 +24,19 @@ const protocolVersion = 1
 // of the minimal prompt sequence plus the one agent→client notification we
 // decode (session/update); see acp-kit's README "ACP message mapping".
 const (
-	methodInitialize = "initialize"
-	methodSessionNew = "session/new"
-	methodPrompt     = "session/prompt"
-	methodUpdate     = "session/update"
+	methodInitialize     = "initialize"
+	methodSessionNew     = "session/new"
+	methodSessionSetMode = "session/set_mode"
+	methodPrompt         = "session/prompt"
+	methodUpdate         = "session/update"
 )
+
+// ModeBypassPermissions is the ACP mode id that disables tool-call permission
+// prompts. Non-interactive orch agents run in this mode because the workingman
+// ACP client doesn't implement session/request_permission — without bypass, the
+// bridge issues a permission request on the first escalated tool call, our
+// "method not found" reply fails the call, and the agent gives up.
+const ModeBypassPermissions = "bypassPermissions"
 
 // request is an outgoing JSON-RPC 2.0 request. ID is unique per client so the
 // read loop can match the response back to the blocked caller; Params is
@@ -99,6 +107,14 @@ type newSessionParams struct {
 // prompt is scoped to.
 type newSessionResult struct {
 	SessionID string `json:"sessionId"`
+}
+
+// setModeParams switches the session into one of the modes the agent advertised
+// in session/new's result.modes.availableModes. Connect uses it to flip into
+// bypassPermissions right after session/new (see ModeBypassPermissions).
+type setModeParams struct {
+	SessionID string `json:"sessionId"`
+	ModeID    string `json:"modeId"`
 }
 
 // promptParams sends one user turn. Prompt is a content block array; this client

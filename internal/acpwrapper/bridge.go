@@ -56,11 +56,24 @@ type hub struct {
 	// reader writes it, so no mutex is needed.
 	log io.Writer
 
-	// mu guards clients and closed. broadcast, registration, and teardown all
-	// take it, so a client is never sent a frame after it has been removed.
+	// mu guards clients, closed, everConnected. broadcast, registration, and
+	// teardown all take it, so a client is never sent a frame after it has been
+	// removed.
 	mu      sync.Mutex
 	closed  bool
 	clients map[*client]struct{}
+
+	// exitWhenEmpty + stdinCloser implement orch's one-shot mode: once at least
+	// one client has connected and the last one disconnects, close the ACP
+	// client's stdin so it sees EOF and exits — driving the wrapper itself to
+	// unwind. everConnected gates the close on "we saw at least one client" so
+	// startup (before the TUI dials) isn't mistaken for "the last one left".
+	// stdinShutdown makes the close at-most-once, even if several clients are
+	// removed concurrently.
+	exitWhenEmpty bool
+	stdinCloser   io.Closer
+	everConnected bool
+	stdinShutdown sync.Once
 }
 
 // client is one connected TUI. Frames bound for it are queued on out and
@@ -77,6 +90,18 @@ type client struct {
 
 func newHub(stdin, log io.Writer) *hub {
 	return &hub{stdin: stdin, log: log, clients: make(map[*client]struct{})}
+}
+
+// enableExitWhenEmpty turns on one-shot mode: the hub will close stdinCloser
+// after the last connected client disconnects (once at least one has
+// connected). The wrapper passes its child's stdin pipe here — closing it
+// makes the sandboxed claude-acp-client see EOF and exit, which is the signal
+// that propagates through proc.Wait → ctx cancel → ln.Close so the wrapper
+// itself returns. Safe to call before any client connects; must be called
+// before run starts (no locking by design — wrapper sets it once at startup).
+func (h *hub) enableExitWhenEmpty(stdinCloser io.Closer) {
+	h.exitWhenEmpty = true
+	h.stdinCloser = stdinCloser
 }
 
 // run is the single stdout fan-out reader. It frames the ACP client's stdout
@@ -111,6 +136,7 @@ func (h *hub) add(conn net.Conn) {
 		return
 	}
 	h.clients[c] = struct{}{}
+	h.everConnected = true
 	h.mu.Unlock()
 
 	go h.clientWriter(c)
@@ -163,11 +189,19 @@ func (h *hub) clientWriter(c *client) {
 }
 
 // remove retires a single client (idempotently). Safe to call from any
-// goroutine; the actual close happens at most once.
+// goroutine; the actual close happens at most once. When exit-when-empty is
+// enabled and this was the last connected client, the ACP client's stdin is
+// closed (outside h.mu) so the child sees EOF, exits, and the wrapper unwinds.
 func (h *hub) remove(c *client) {
 	h.mu.Lock()
 	h.dropLocked(c)
+	shouldExit := h.exitWhenEmpty && h.everConnected && len(h.clients) == 0
 	h.mu.Unlock()
+	if shouldExit {
+		h.stdinShutdown.Do(func() {
+			_ = h.stdinCloser.Close()
+		})
+	}
 }
 
 // dropLocked removes c from the client set and closes it. Caller holds h.mu, so

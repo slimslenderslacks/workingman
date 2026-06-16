@@ -82,6 +82,16 @@ type Config struct {
 
 	// SbxPath is the sbx executable. Defaults to "sbx" (resolved on PATH).
 	SbxPath string
+
+	// ExitWhenEmpty makes the wrapper shut its sandboxed ACP client down
+	// (close its stdin) once the last connected TUI disconnects, after at
+	// least one client has connected. Set by orch's daemon for the
+	// non-interactive autonomous flow: planning/task/commit each run one turn
+	// driven by the TUI's watcher, and the wrapper must exit when that turn
+	// ends so the daemon's session-end callback dispatches the next stage.
+	// Leave false for interactive/long-lived sessions that should survive
+	// transient TUI disconnects.
+	ExitWhenEmpty bool
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -376,7 +386,7 @@ func Run(ctx context.Context, c Config) error {
 		ln.Close()
 	}()
 
-	serve(ctx, ln, procStdin, procStdout, logW)
+	serve(ctx, ln, procStdin, procStdout, logW, c.ExitWhenEmpty)
 
 	// The ACP client has exited and the session's transport is gone: remove the
 	// whole session directory (session.json and the socket together) so a
@@ -406,8 +416,11 @@ func Run(ctx context.Context, c Config) error {
 // connection with the hub. When ln is closed (ctx cancelled or ACP client
 // exited) the hub is torn down and serve returns. logW, when non-nil, receives a
 // copy of every agent frame for reconnect replay (see hub.log).
-func serve(ctx context.Context, ln net.Listener, procStdin io.Writer, procStdout io.Reader, logW io.Writer) {
+func serve(ctx context.Context, ln net.Listener, procStdin io.WriteCloser, procStdout io.Reader, logW io.Writer, exitWhenEmpty bool) {
 	h := newHub(procStdin, logW)
+	if exitWhenEmpty {
+		h.enableExitWhenEmpty(procStdin)
+	}
 	// One reader drains the ACP client's stdout and broadcasts whole frames to
 	// every connected client. It also tears the hub down on stdout EOF.
 	go h.run(procStdout)
