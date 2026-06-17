@@ -32,6 +32,12 @@ tasks:
     generates:
       - acp-wrapper
 
+  test:
+    desc: Run go vet and the Go test suite (mirrors ci.yml)
+    cmds:
+      - go vet ./...
+      - go test -race -count=1 ./...
+
   clean:
     desc: Remove built binaries
     cmds:
