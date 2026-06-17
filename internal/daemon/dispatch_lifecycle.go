@@ -180,7 +180,7 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		StaticMCPs: t.StaticMCPs,
 		Policies:   t.Policies,
 	}
-	err := d.startSession(projectPath, plan, func() {
+	err := d.startSession(projectPath, plan, func(error) {
 		d.afterCommitSession(projectPath, plan.TaskPath, p)
 	})
 	if err != nil {
@@ -258,7 +258,7 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	// into transitionProjectBlocked would loop. The session_start_error
 	// audit entry plus the notification we already sent are enough to
 	// surface the failure.
-	_ = d.startSession(projectPath, plan, func() {
+	_ = d.startSession(projectPath, plan, func(error) {
 		d.revisitProject(projectPath)
 	})
 }

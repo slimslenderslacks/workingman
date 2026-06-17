@@ -159,7 +159,17 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 		Branch:      p.Branch,
 		Repos:       toWorkspaceRepos(p.Repos),
 	}
-	err := d.startSession(projectPath, plan, func() {
+	err := d.startSession(projectPath, plan, func(waitErr error) {
+		// The planning agent gets a circuit breaker: its session ending
+		// with the project still in status:ready means no progress was
+		// made, and an unbounded relaunch on that condition is what turns a
+		// broken sandbox (or any failing planning run) into a crash loop.
+		// afterPlanningSession bounds the retries and blocks the project
+		// instead. Other project-root kinds just re-evaluate.
+		if kind == agent.PlanningAgent {
+			d.afterPlanningSession(projectPath, waitErr)
+			return
+		}
 		d.revisitProject(projectPath)
 	})
 	// Project agent failure leaves an empty file — nothing to block.
@@ -172,6 +182,102 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 	}
 }
 
+// afterPlanningSession is the planning agent's session-end callback and its
+// crash-loop circuit breaker.
+//
+// A planning agent's job is to move the project off status:ready — by writing
+// tasks and flipping it to working. The daemon relaunches planning whenever it
+// observes status:ready, so a planning session that ends with the project
+// still in status:ready is a non-productive cycle. Relaunching it unbounded is
+// exactly what lets a broken environment (e.g. an acp-kit path that doesn't
+// exist, so the sandbox can't be created) spin the daemon many times a second.
+//
+// Decision table for a finished planning session:
+//   - project advanced off status:ready → productive; reset the counter and
+//     dispatch whatever the agent left behind.
+//   - still status:ready, non-nil waitErr → the agent process itself failed to
+//     run (the acp-wrapper exited non-zero, e.g. `sbx create` failed). That is
+//     an environment/config error that relaunching cannot fix, so block
+//     immediately without consuming the retry budget.
+//   - still status:ready, clean exit → the agent ran but produced nothing.
+//     Could be transient, so retry up to maxPlanningRetries with backoff, then
+//     block.
+func (d *Daemon) afterPlanningSession(projectPath string, waitErr error) {
+	p, err := project.Load(projectPath)
+	if err != nil {
+		// File gone or unreadable: nothing to relaunch or block. Clear any
+		// failure record so a future recreation starts fresh.
+		d.resetPlanningFailures(projectPath)
+		if !errors.Is(err, fs.ErrNotExist) {
+			d.audit.Log("project_load_error", "path", projectPath, "err", err.Error())
+		}
+		return
+	}
+	if p.Status != project.StatusReady {
+		// Planning advanced the project. Clear the counter and dispatch the
+		// new state (revisitProject would just reload what we already have).
+		d.resetPlanningFailures(projectPath)
+		d.dispatchProject(projectPath, p)
+		return
+	}
+	if waitErr != nil {
+		// Hard launch failure — relaunching won't help. Block now.
+		d.resetPlanningFailures(projectPath)
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("planning agent could not run (session exited with error: %v); not retrying", waitErr))
+		return
+	}
+	n := d.bumpPlanningFailures(projectPath)
+	if n >= maxPlanningRetries {
+		d.resetPlanningFailures(projectPath)
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("planning agent made no progress after %d attempts; project still in status:ready", n))
+		return
+	}
+	d.audit.Log("planning_retry", "path", projectPath, "attempt", fmt.Sprintf("%d", n))
+	if !d.backoffPlanning(n) {
+		// ctx cancelled during backoff (daemon shutting down).
+		return
+	}
+	d.revisitProject(projectPath)
+}
+
+// bumpPlanningFailures increments and returns the consecutive non-productive
+// planning-cycle count for projectPath.
+func (d *Daemon) bumpPlanningFailures(projectPath string) int {
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	d.planningFailures[projectPath]++
+	return d.planningFailures[projectPath]
+}
+
+// resetPlanningFailures clears the planning-cycle failure count for
+// projectPath, called whenever planning makes progress or the project goes
+// away.
+func (d *Daemon) resetPlanningFailures(projectPath string) {
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	delete(d.planningFailures, projectPath)
+}
+
+// backoffPlanning sleeps for a bounded, attempt-scaled delay before the next
+// planning relaunch. Returns false if the daemon's context was cancelled
+// during the wait (caller should abandon the relaunch).
+func (d *Daemon) backoffPlanning(attempt int) bool {
+	delay := time.Duration(attempt) * planningBackoffStep
+	if delay > planningBackoffMax {
+		delay = planningBackoffMax
+	}
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-d.ctx.Done():
+		return false
+	}
+}
+
 // startSession is the single launching point: build a Spec via Runner, track
 // it, and arrange for onEnd to fire after it exits.
 //
@@ -181,7 +287,7 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 // only logs (we are already blocked, recursing won't help); the project
 // agent launch only logs (the file is empty, there is no project state to
 // block).
-func (d *Daemon) startSession(key string, plan runner.Plan, onEnd func()) error {
+func (d *Daemon) startSession(key string, plan runner.Plan, onEnd func(error)) error {
 	sess, err := d.runner.Start(d.ctx, plan)
 	if err != nil {
 		d.audit.Log("session_start_error",
@@ -338,7 +444,7 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 		StaticMCPs: t.StaticMCPs,
 		Policies:   t.Policies,
 	}
-	err := d.startSession(projectPath, plan, func() {
+	err := d.startSession(projectPath, plan, func(error) {
 		d.afterTaskSession(projectPath, plan.TaskPath, p)
 	})
 	if err != nil {

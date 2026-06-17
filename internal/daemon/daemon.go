@@ -32,7 +32,29 @@ type Daemon struct {
 
 	sessionsMu sync.Mutex
 	sessions   map[string]sessionEntry // keyed by project file path
+
+	// planningMu guards planningFailures, the per-project count of
+	// consecutive planning cycles that ended without advancing the project
+	// off status:ready. It drives the planning circuit breaker
+	// (afterPlanningSession) so a planning agent that can't make progress —
+	// e.g. its sandbox won't build — blocks the project instead of being
+	// relaunched in a tight loop.
+	planningMu       sync.Mutex
+	planningFailures map[string]int // keyed by project file path
 }
+
+const (
+	// maxPlanningRetries is how many consecutive non-productive planning
+	// cycles (agent ran, project still status:ready) the daemon tolerates
+	// before blocking the project. A hard launch failure (non-nil wait
+	// error) blocks immediately and does not consume a retry.
+	maxPlanningRetries = 3
+	// planningBackoffStep / planningBackoffMax bound the delay inserted
+	// before relaunching a planning agent after a non-productive cycle, so
+	// even within the retry budget the daemon cannot spin.
+	planningBackoffStep = 2 * time.Second
+	planningBackoffMax  = 30 * time.Second
+)
 
 // sessionEntry bundles a live agent.Session with the metadata the TUI's
 // sessions view needs. Stored under Daemon.sessions and exposed via
@@ -83,8 +105,9 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		roots:    roots,
 		audit:    a,
 		watcher:  w,
-		notifier: notify.Noop{},
-		sessions: map[string]sessionEntry{},
+		notifier:         notify.Noop{},
+		sessions:         map[string]sessionEntry{},
+		planningFailures: map[string]int{},
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -153,7 +176,12 @@ func (d *Daemon) shutdown() {
 //
 // Returns false if a session is already running for key (caller should treat
 // the new launch as a duplicate).
-func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, taskName string, onEnd func()) bool {
+//
+// onEnd receives the session's wait error: nil on a clean exit, or the
+// underlying process's exit error when the agent (or the acp-wrapper hosting
+// it) terminated abnormally. Callers that can recover from a failed launch —
+// notably the planning agent — inspect it; the others ignore it.
+func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, taskName string, onEnd func(error)) bool {
 	d.sessionsMu.Lock()
 	if _, ok := d.sessions[key]; ok {
 		d.sessionsMu.Unlock()
@@ -168,11 +196,15 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, t
 	d.sessionsMu.Unlock()
 
 	go func() {
-		_ = sess.Wait(d.ctx)
+		waitErr := sess.Wait(d.ctx)
 		d.sessionsMu.Lock()
 		delete(d.sessions, key)
 		d.sessionsMu.Unlock()
-		d.audit.Log("session_ended", "key", key, "name", sess.Name())
+		fields := []string{"key", key, "name", sess.Name()}
+		if waitErr != nil {
+			fields = append(fields, "err", waitErr.Error())
+		}
+		d.audit.Log("session_ended", fields...)
 		if onEnd == nil {
 			return
 		}
@@ -186,7 +218,7 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, t
 			return
 		default:
 		}
-		onEnd()
+		onEnd(waitErr)
 	}()
 	return true
 }
