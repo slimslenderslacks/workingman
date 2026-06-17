@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: go test
+    name: task test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,8 +18,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: go vet
-        run: go vet ./...
+      - uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: go test
-        run: go test -race -count=1 ./...
+      - name: task test
+        run: task test
