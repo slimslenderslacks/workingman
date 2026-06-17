@@ -281,6 +281,7 @@ func adaptDaemonSessions(ctx context.Context, in <-chan []daemon.SessionInfo) <-
 						StartedAt:   s.StartedAt,
 						TaskName:    s.TaskName,
 						Interactive: s.Interactive,
+						SandboxName: s.SandboxName,
 					}
 				}
 				select {

@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/task"
 )
@@ -110,6 +111,58 @@ func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	m = sized.(model)
+	step, _ := m.Update(projectsMsg{views: []ProjectView{
+		{
+			Name:   "alpha",
+			Path:   "/x/alpha/.project.yaml",
+			Status: project.StatusWorking,
+			Tasks: []TaskView{
+				{
+					Name:       "fetch-readme",
+					Model:      "default",
+					StaticMCPs: []string{"github", "web-search"},
+					Policies: []policy.Rule{
+						{Action: policy.ActionDeny, Kind: policy.KindNetwork, Resource: "**"},
+						{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.github.com"},
+					},
+					Status: task.StatusReady,
+				},
+				{
+					Name:   "bare",
+					Status: task.StatusReady,
+				},
+			},
+		},
+	}})
+	m = step.(model)
+
+	view := m.View()
+	// Column header is rendered above the data rows.
+	for _, want := range []string{"name", "model", "mcps", "rules", "status"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing column header %q:\n%s", want, view)
+		}
+	}
+	// First row's cell values are all present.
+	for _, want := range []string{"fetch-readme", "default", "github,web-search", "2"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing cell %q:\n%s", want, view)
+		}
+	}
+	// Second row's mcps + rules show the empty-value placeholder.
+	if !strings.Contains(view, "bare") {
+		t.Errorf("view missing second task name 'bare':\n%s", view)
+	}
+	// "-" placeholders for empty mcps/rules — count occurrences loosely.
+	if strings.Count(view, "-") < 2 {
+		t.Errorf("view should carry placeholder '-' for empty mcps and rules:\n%s", view)
 	}
 }
 

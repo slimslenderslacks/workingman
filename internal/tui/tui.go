@@ -8,6 +8,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,11 +72,11 @@ type model struct {
 	sessLoaded bool
 	sessSel    string
 	projects   []ProjectView
-	projCh        <-chan []ProjectView
-	projSel       string // path of the selected project card; empty when unset
-	loaded        bool
-	attacher      tmuxAttacher
-	statusMsg     string
+	projCh     <-chan []ProjectView
+	projSel    string // path of the selected project card; empty when unset
+	loaded     bool
+	attacher   tmuxAttacher
+	statusMsg  string
 
 	// yamlScroll is the index of the first visible wrapped line of the
 	// project-YAML viewer. Reset to 0 whenever projSel or taskSel changes
@@ -110,6 +111,14 @@ type model struct {
 
 	auditLines []string
 	auditCh    <-chan []string
+
+	// acp holds the ACP-session tab view: one tab per live non-interactive ACP
+	// session, fed by acpCh. showACP toggles the full-window tab view on top of
+	// the normal two-pane layout (entered with `a`, left with esc). acpCh is nil
+	// in standalone/test models with no ACP source wired in; Run sets it.
+	acp     acpTabs
+	acpCh   <-chan acpTabEvent
+	showACP bool
 }
 
 func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh <-chan []string, attacher tmuxAttacher) model {
@@ -136,6 +145,9 @@ func (m model) Init() tea.Cmd {
 	}
 	if m.auditCh != nil {
 		cmds = append(cmds, waitForAudit(m.auditCh))
+	}
+	if m.acpCh != nil {
+		cmds = append(cmds, waitForACP(m.acpCh))
 	}
 	if len(cmds) == 0 {
 		return nil
@@ -173,6 +185,16 @@ func waitForAudit(ch <-chan []string) tea.Cmd {
 	}
 }
 
+func waitForACP(ch <-chan acpTabEvent) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return ev
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -201,6 +223,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case auditMsg:
 		m.auditLines = msg.lines
 		return m, waitForAudit(m.auditCh)
+	case acpTabEvent:
+		switch msg.kind {
+		case acpTabAdded:
+			m.acp.upsert(msg.id, msg.title)
+		case acpTabPrompt:
+			m.acp.addPrompt(msg.id, msg.text)
+		case acpTabStream:
+			m.acp.apply(msg.id, msg.ev)
+		case acpTabRemoved:
+			m.acp.remove(msg.id)
+		}
+		return m, waitForACP(m.acpCh)
 	case attachResultMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("attach %s: %v", msg.target, msg.err)
@@ -209,9 +243,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
-		// Mouse events get suspended while a modal is open — the user is
-		// committed to the text-entry flow until they confirm or cancel.
-		if m.mode != modeNormal {
+		// Mouse events get suspended while a modal or the ACP tab view is open —
+		// the user is committed to that flow until they leave it.
+		if m.mode != modeNormal || m.showACP {
 			return m, nil
 		}
 		return m.handleMouse(msg)
@@ -220,6 +254,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// trapped in a modal they don't know how to exit.
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		// The ACP tab view captures keys whole while it's open, layered on top
+		// of any pane focus the normal UI had.
+		if m.showACP {
+			return m.handleACPKey(msg)
 		}
 		switch m.mode {
 		case modeCommandLine:
@@ -248,6 +287,13 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cmdInput = ""
 			m.statusMsg = ""
 		}
+	case "a":
+		// Open the full-window ACP session tab view. Only meaningful when an
+		// ACP source is wired in (daemon mode); a no-op in standalone tui mode.
+		if m.acpCh != nil {
+			m.showACP = true
+			m.statusMsg = ""
+		}
 	case "tab":
 		m.focus = togglePane(m.focus)
 		m.statusMsg = ""
@@ -274,6 +320,26 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.yamlSrc != yamlSourceTask {
 			m.yamlSrc = yamlSourceTask
 			m.yamlScroll = 0
+		}
+		m.statusMsg = ""
+	case "ctrl+f":
+		// Vim-style page-down on whichever YAML view is currently visible.
+		// Independent of pane focus — the user can be navigating projects or
+		// tasks and still page through the YAML pane below. The page size is
+		// one screen minus one row of context overlap, matching less/vim.
+		// renderProjectYAML clamps yamlScroll on overflow, so we don't need
+		// the line count here.
+		if page := yamlPageSize(m); page > 0 {
+			m.yamlScroll += page
+		}
+		m.statusMsg = ""
+	case "ctrl+b":
+		// Vim-style page-up on whichever YAML view is currently visible.
+		if page := yamlPageSize(m); page > 0 {
+			m.yamlScroll -= page
+			if m.yamlScroll < 0 {
+				m.yamlScroll = 0
+			}
 		}
 		m.statusMsg = ""
 	case "up":
@@ -330,16 +396,33 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse routes a mouse event to its pane.
+// handleACPKey processes a keystroke while the full-window ACP tab view is open.
+// Left/right (and tab/shift+tab) switch tabs; esc (or `a`) returns to the normal
+// two-pane UI; q and ctrl+c still quit the whole TUI.
+func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q":
+		return m, tea.Quit
+	case "esc", "a":
+		m.showACP = false
+	case "right", "l", "tab":
+		m.acp.next()
+	case "left", "h", "shift+tab":
+		m.acp.prev()
+	}
+	return m, nil
+}
+
+// handleMouse routes a mouse event to its pane. With the single-column
+// layout, X is irrelevant — every pane spans the full body width, so the
+// pane under the cursor is determined purely by Y.
 //
-//   - Sessions pane (left column): left-button press selects the row under
-//     the cursor and immediately attaches to it (click-to-attach UX).
-//   - Projects pane (right column, top): left-button press focuses the
-//     pane and selects the card under the cursor. No attach.
-//   - Tasks pane (right column, middle): left-button press focuses the
-//     pane and selects the task row under the cursor.
-//   - Project-YAML / Task-YAML pane (right column, bottom): focus only;
+//   - Projects pane (top): focus + select the card under the cursor.
+//   - Tasks pane (middle): focus + select the task row under the cursor.
+//   - Project-YAML pane (optional, between tasks and sessions): focus only;
 //     the body is read-only and scrolled via keyboard.
+//   - Sessions pane (bottom): focus + select the row under the cursor and
+//     immediately attach to it (click-to-attach UX).
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
@@ -349,35 +432,24 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	l := m.computeLayout()
 
-	// Sessions pane: clicks in the left column.
-	if msg.X < l.sessionsW {
-		idx := sessionRowAtY(msg.Y, len(m.sessions))
-		if idx < 0 {
-			m.focus = paneSessions
-			return m, nil
-		}
-		m.focus = paneSessions
-		m.sessSel = m.sessions[idx].ID
-		m.statusMsg = ""
-		return m.attachSelected()
-	}
-
-	// Right column. Vertical layout (top → bottom): header (1 row), projects
-	// pane, tasks pane, optional YAML pane. The bands here mirror the View()
-	// stacking so click routing and rendering can't drift.
+	// Vertical layout (top → bottom): header (1 row), projects, tasks,
+	// optional YAML, optional sessions. The bands here mirror View()'s
+	// stacking exactly so click routing and rendering can't drift.
 	const headerRows = 1
 	projectsEnd := headerRows + l.projectsH
 	tasksStart := projectsEnd
 	tasksEnd := tasksStart + l.tasksH
 	yamlStart := tasksEnd
 	yamlEnd := yamlStart + l.yamlH
+	sessionsStart := yamlEnd
+	sessionsEnd := sessionsStart + l.sessionsH
 
 	if msg.Y >= headerRows && msg.Y < projectsEnd {
-		innerW := l.projectsW - unfocusedBorder.GetHorizontalFrameSize()
+		innerW := l.bodyW - unfocusedBorder.GetHorizontalFrameSize()
 		if innerW < 0 {
 			innerW = 0
 		}
-		idx := projectCardAtPoint(msg.X-l.sessionsW, msg.Y, innerW, len(m.projects))
+		idx := projectCardAtPoint(msg.X, msg.Y, innerW, len(m.projects))
 		m.focus = paneProjects
 		m.statusMsg = ""
 		if idx < 0 || idx >= len(m.projects) {
@@ -411,21 +483,52 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		return m, nil
 	}
+	if l.sessionsH > 0 && msg.Y >= sessionsStart && msg.Y < sessionsEnd {
+		idx := sessionRowAtY(msg.Y, sessionsStart, len(m.sessions))
+		m.focus = paneSessions
+		m.statusMsg = ""
+		if idx < 0 {
+			return m, nil
+		}
+		m.sessSel = m.sessions[idx].ID
+		return m.attachSelected()
+	}
 	// Click below every pane (audit area or empty). Focus projects as a
 	// safe default so up/down still does something sensible.
 	m.focus = paneProjects
 	return m, nil
 }
 
+// yamlPageSize returns the number of lines ctrl+f / ctrl+b should scroll
+// the YAML pane by — one screen minus one row of context overlap so the
+// last visible line before a page-down becomes the first line after it
+// (matching less/vim convention). Returns 0 when the YAML pane is not in
+// the layout, so the caller can treat that as "no-op".
+func yamlPageSize(m model) int {
+	l := m.computeLayout()
+	if l.yamlH <= 0 {
+		return 0
+	}
+	// Vertical chrome inside the pane: top border + bottom border + title +
+	// blank = 4 rows. The remainder is visible content.
+	const chromeRows = 4
+	contentRows := l.yamlH - chromeRows
+	if contentRows < 1 {
+		return 0
+	}
+	if contentRows == 1 {
+		return 1
+	}
+	return contentRows - 1
+}
+
 // taskRowAtY maps an absolute y row to a task index using the tasks pane's
-// layout: top border (1) + title (1) + blank (1) + one row per task. Returns
-// -1 for clicks on the chrome or beyond the last task.
+// table layout: top border (1) + title (1) + blank (1) + column header (1) +
+// one row per task. Returns -1 for clicks on the chrome (incl. the header
+// row) or beyond the last task.
 func taskRowAtY(y, paneTop, count int) int {
-	const (
-		topBorder = 1
-		titleRows = 2 // "Tasks" + blank
-	)
-	rel := y - paneTop - topBorder - titleRows
+	const chromeRows = 4 // top border + "Tasks" + blank + column header
+	rel := y - paneTop - chromeRows
 	if rel < 0 || rel >= count {
 		return -1
 	}
@@ -457,7 +560,6 @@ func selectedTmuxTarget(views []SessionView, id string) (string, bool) {
 	}
 	return "", false
 }
-
 
 // projectCardAtPoint maps a click inside the projects pane to a card index.
 // The arithmetic mirrors renderProjectGrid: cards are cardWidth wide with a
@@ -531,109 +633,61 @@ func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 	return idx
 }
 
-// sessionRowAtY maps an absolute y row to a session index using the same
-// layout constants View() renders with: header(1) + pane top border(1) +
-// "Agent Sessions" title + blank(2) + per-session triplet of (head, status,
-// separator). The separator row is intentionally a dead zone so clicking
-// between rows doesn't pick the wrong session.
-func sessionRowAtY(y, count int) int {
+// sessionRowAtY maps an absolute y row to a session index. paneStartY is the
+// absolute y of the sessions pane's top border (so this function works no
+// matter where the pane sits in the stack). Inside the pane:
+// top border(1) + "Agent Sessions" title(1) + blank(1) + column header(1) +
+// one row per session.
+func sessionRowAtY(y, paneStartY, count int) int {
 	const (
-		headerLines    = 1
-		paneTopBorder  = 1
-		paneTitleLines = 2
-		rowsPerSession = 3
+		paneTopBorder   = 1
+		paneTitleLines  = 2 // title + blank
+		paneHeaderLines = 1 // column header
 	)
-	rel := y - (headerLines + paneTopBorder + paneTitleLines)
-	if rel < 0 {
+	if count <= 0 {
 		return -1
 	}
-	idx := rel / rowsPerSession
-	if rel%rowsPerSession == 2 {
+	rel := y - paneStartY - (paneTopBorder + paneTitleLines + paneHeaderLines)
+	if rel < 0 || rel >= count {
 		return -1
 	}
-	if idx < 0 || idx >= count {
-		return -1
-	}
-	return idx
+	return rel
 }
-
-// paneWidths reproduces View()'s sessions/projects split so handleMouse can
-// decide whether a click landed in the sessions pane without re-rendering.
-// Keep this in lockstep with the width clamps used at the top of View().
-//
-// Returned widths always sum to ≤ width. When the terminal is too narrow to
-// fit both panes side by side, projectsWidth is 0 and the caller is expected
-// to skip the right column entirely — keeping projects ≥ 1 in that regime
-// would force the body to overflow the terminal and clip the rightmost
-// border off the screen.
-func paneWidths(width int) (sessionsWidth, projectsWidth int) {
-	if width <= 0 {
-		return 0, 0
-	}
-	sessionsWidth = width / 3
-	if sessionsWidth < 20 {
-		sessionsWidth = 20
-	}
-	if sessionsWidth > 40 {
-		sessionsWidth = 40
-	}
-	if width-sessionsWidth < minProjectsPaneWidth {
-		return width, 0
-	}
-	return sessionsWidth, width - sessionsWidth
-}
-
-// minProjectsPaneWidth is the smallest projects pane that's still usable —
-// enough cols to render the "Projects" title plus a one-col card. Below
-// this, paneWidths gives everything to the sessions pane.
-const minProjectsPaneWidth = 12
 
 // togglePane cycles forward through the focusable panes in the order they
-// appear on screen, top-to-bottom for the right column: sessions (left)
-// → projects (right top) → tasks (right middle) → project-YAML (right
-// bottom) → sessions. shiftTogglePane is the inverse cycle.
+// appear on screen, top-to-bottom: projects → tasks → project-YAML →
+// sessions → projects. shiftTogglePane is the inverse cycle.
 func togglePane(p pane) pane {
 	switch p {
-	case paneSessions:
-		return paneProjects
 	case paneProjects:
 		return paneTasks
 	case paneTasks:
 		return paneProjectYAML
-	default:
+	case paneProjectYAML:
 		return paneSessions
+	default:
+		return paneProjects
 	}
 }
 
 func shiftTogglePane(p pane) pane {
 	switch p {
+	case paneProjects:
+		return paneSessions
 	case paneSessions:
 		return paneProjectYAML
 	case paneProjectYAML:
 		return paneTasks
-	case paneTasks:
-		return paneProjects
 	default:
-		return paneSessions
-	}
-}
-
-// paneRight / paneLeft move focus toward / away from the right column.
-// Sessions is the only pane in the left column; the right column holds
-// projects, YAML viewer, and tasks stacked vertically. Right from sessions
-// lands on projects (top of the stack); left from any right-column pane
-// returns to sessions. Vertical movement within the right column is
-// driven by tab / shift+tab.
-func paneRight(p pane) pane {
-	if p == paneSessions {
 		return paneProjects
 	}
-	return p
 }
 
-func paneLeft(p pane) pane {
-	return paneSessions
-}
+// paneRight / paneLeft are kept as aliases for forward / backward cycle so
+// the hjkl/arrow bindings still navigate the stack now that there is no
+// separate left column. They behave the same as togglePane / shiftTogglePane.
+func paneRight(p pane) pane { return togglePane(p) }
+func paneLeft(p pane) pane  { return shiftTogglePane(p) }
 
 var (
 	titleStyle = lipgloss.NewStyle().
@@ -674,8 +728,6 @@ var (
 				Bold(true).
 				Foreground(lipgloss.Color("212")).
 				Background(lipgloss.Color("236"))
-	sessionRowSelectedStatusStyle = lipgloss.NewStyle().
-					Background(lipgloss.Color("236"))
 	// sessionRowInteractiveStyle marks a row whose agent kind waits for a
 	// human (project / wolf). Yellow is chosen so it doesn't collide with
 	// the selection-pink or any of the status colours, and so it reads as
@@ -767,60 +819,182 @@ func (m model) renderSessions(width, height int) string {
 		b.WriteString(dimStyle.Render("(none)"))
 		return style.Render(clampLines(b.String(), innerHeight))
 	}
-	for i, s := range m.sessions {
-		b.WriteString(renderSessionRow(s, s.ID == m.sessSel, innerWidth))
-		if i < len(m.sessions)-1 {
-			b.WriteString("\n")
-		}
+
+	cols := sessionColumnWidths(innerWidth)
+	b.WriteString(renderSessionHeader(cols))
+
+	// 3 chrome rows above (title, blank, header) — data rows fit in the
+	// remaining inner height. Anything past that is dropped so the bottom
+	// border survives.
+	maxRows := innerHeight - 3
+	if maxRows < 0 {
+		maxRows = 0
+	}
+	sessions := m.sessions
+	if len(sessions) > maxRows {
+		sessions = sessions[:maxRows]
+	}
+	for _, s := range sessions {
+		b.WriteString("\n")
+		b.WriteString(renderSessionRow(s, cols, s.ID == m.sessSel))
 	}
 	return style.Render(clampLines(b.String(), innerHeight))
 }
 
-// renderSessionRow draws one session as a two-line block: the headline carries
-// the agent kind, an interactive badge (when the kind waits for a human),
-// and the project; the second line carries a colored status indicator and
-// (for task/commit agents) the task name. Truncation happens on the raw
-// text before any style is applied so the byte-slice in truncate never
-// tears an ANSI escape.
+// sessionColumns holds the per-column character widths for the sessions
+// table. Computed once per render from the pane's inner width so the header
+// and every data row share the same alignment.
+type sessionColumns struct {
+	agent, project, task, status, sandbox int
+}
+
+// Column gap is one space; the selection marker occupies a fixed two-column
+// prefix before the table proper (so the marker can flip without touching
+// column alignment).
+const (
+	sessionMarkerWidth   = 2
+	sessionColGap        = 1
+	sessionColGaps       = 4
+	sessionColAgentDef   = 10
+	sessionColTaskDef    = 14
+	sessionColStatusDef  = 10
+	sessionColSandboxDef = 28
+	sessionColMinProject = 4
+)
+
+// sessionColumnWidths sizes the five columns to fill innerWidth (after the
+// selection-marker prefix). project takes whatever's left; the other four get
+// fixed defaults that shrink in priority order (task → sandbox → agent) when
+// the pane is too narrow to honour them.
+func sessionColumnWidths(innerWidth int) sessionColumns {
+	c := sessionColumns{
+		agent:   sessionColAgentDef,
+		task:    sessionColTaskDef,
+		status:  sessionColStatusDef,
+		sandbox: sessionColSandboxDef,
+	}
+	avail := innerWidth - sessionMarkerWidth
+	if avail < 0 {
+		avail = 0
+	}
+	required := func() int {
+		return c.agent + c.task + c.status + c.sandbox + sessionColGaps*sessionColGap
+	}
+	// task shrinks first (least load-bearing for at-a-glance read), then
+	// sandbox (often long but informational), then agent (kind labels are
+	// short, so this rarely fires). status stays fixed — it's the
+	// at-a-glance signal.
+	for avail-required() < sessionColMinProject && c.task > 0 {
+		c.task--
+	}
+	for avail-required() < sessionColMinProject && c.sandbox > 0 {
+		c.sandbox--
+	}
+	for avail-required() < sessionColMinProject && c.agent > 0 {
+		c.agent--
+	}
+	c.project = avail - required()
+	if c.project < 0 {
+		c.project = 0
+	}
+	return c
+}
+
+// renderSessionHeader emits the column-header row in the dim style so the
+// table reads as a unit. The marker prefix is left blank — selection state
+// belongs on data rows only.
+func renderSessionHeader(c sessionColumns) string {
+	cells := []string{
+		padCell("agent", c.agent),
+		padCell("project", c.project),
+		padCell("task", c.task),
+		padCell("status", c.status),
+		padCell("sandbox", c.sandbox),
+	}
+	gap := strings.Repeat(" ", sessionColGap)
+	return dimStyle.Render(strings.Repeat(" ", sessionMarkerWidth) + strings.Join(nonEmpty(cells), gap))
+}
+
+// renderSessionRow lays one session out as a single table row:
+// marker | agent | project | task | status | sandbox.
+//
+// The marker is a two-char selection indicator that flips between ▶ and a
+// blank. Truncation happens on the raw text before any style is applied so
+// the byte-slice in truncate never tears an ANSI escape.
 //
 // Three row styles, in precedence order:
-//   - selected: bold pink on dark background, both lines highlighted.
-//   - interactive (not selected): bold yellow on the headline so the row
-//     stands out even when another pane is focused.
-//   - autonomous (not selected): plain headline, status-coloured second
-//     line.
-func renderSessionRow(s SessionView, selected bool, width int) string {
+//   - selected: accent background across the full row width.
+//   - interactive (not selected): yellow agent cell flags rows that wait
+//     for a human, even when another pane is focused.
+//   - autonomous (not selected): plain cells, status-coloured status cell.
+//
+// Sandbox is only populated for ACP-routed sessions; for the rest the cell
+// renders an em-dash so the column reads as "n/a" rather than empty.
+func renderSessionRow(s SessionView, c sessionColumns, selected bool) string {
 	marker := sessionMarkerIdle
 	if selected {
 		marker = sessionMarkerSelected
 	}
-	agentName := s.AgentName
+
+	agent := s.AgentName
 	if s.Interactive {
-		agentName += interactiveBadge
+		agent += interactiveBadge
 	}
-	head := marker + agentName
-	if s.Project != "" {
-		head += "  " + s.Project
+	statusText := sessionStatusGlyph(s.Status) + " " + s.Status
+	sandbox := s.SandboxName
+	if sandbox == "" {
+		sandbox = "—"
 	}
-	head = padToWidth(truncate(head, width), width)
 
-	statusLine := "  " + sessionStatusGlyph(s.Status) + " " + s.Status
-	if s.TaskName != "" {
-		statusLine += "  " + s.TaskName
-	}
-	statusText := padToWidth(truncate(statusLine, width), width)
+	gap := strings.Repeat(" ", sessionColGap)
 
-	switch {
-	case selected:
-		head = sessionRowSelectedStyle.Render(head)
-		statusText = sessionRowSelectedStatusStyle.Inherit(sessionStatusStyle(s.Status)).Render(statusText)
-	case s.Interactive:
-		head = sessionRowInteractiveStyle.Render(head)
-		statusText = sessionStatusStyle(s.Status).Render(statusText)
-	default:
-		statusText = sessionStatusStyle(s.Status).Render(statusText)
+	if selected {
+		cells := []string{
+			padCell(truncate(agent, c.agent), c.agent),
+			padCell(truncate(s.Project, c.project), c.project),
+			padCell(truncate(s.TaskName, c.task), c.task),
+			padCell(truncate(statusText, c.status), c.status),
+			padCell(truncate(sandbox, c.sandbox), c.sandbox),
+		}
+		plain := marker + strings.Join(nonEmpty(cells), gap)
+		return sessionRowSelectedStyle.Render(padToWidth(plain, c.totalWidth()))
 	}
-	return head + "\n" + statusText
+
+	// Non-selected rows: status cell is coloured by status; the agent cell
+	// is coloured yellow on interactive kinds. All other cells stay plain.
+	agentCell := padCell(truncate(agent, c.agent), c.agent)
+	if s.Interactive {
+		agentCell = sessionRowInteractiveStyle.Render(agentCell)
+	}
+	statusCell := sessionStatusStyle(s.Status).Render(truncate(statusText, c.status))
+	statusCell = padCell(statusCell, c.status)
+
+	cells := []string{
+		agentCell,
+		padCell(truncate(s.Project, c.project), c.project),
+		padCell(truncate(s.TaskName, c.task), c.task),
+		statusCell,
+		padCell(truncate(sandbox, c.sandbox), c.sandbox),
+	}
+	return marker + strings.Join(nonEmpty(cells), gap)
+}
+
+// totalWidth is the rendered width of a session row including the marker
+// prefix and all column gaps. Used by the selected-row highlight so the
+// accent background fills the full pane width.
+func (c sessionColumns) totalWidth() int {
+	w := sessionMarkerWidth
+	gaps := 0
+	for _, n := range []int{c.agent, c.project, c.task, c.status, c.sandbox} {
+		if n > 0 {
+			w += n
+			gaps++
+		}
+	}
+	if gaps > 1 {
+		w += (gaps - 1) * sessionColGap
+	}
+	return w
 }
 
 // padToWidth right-pads s with spaces so it reaches width display columns.
@@ -1042,8 +1216,10 @@ const auditPaneHeight = 10
 const projectsMinHeight = 9
 
 // tasksMinHeight is the floor for the tasks pane below the projects pane.
-// 3 rows = top border + 1 line of content + bottom border.
-const tasksMinHeight = 3
+// 6 rows = top border + "Tasks" title + blank + column header + 1 task row +
+// bottom border. Below this the table can't show even one task underneath
+// the column headers.
+const tasksMinHeight = 6
 
 // yamlMinHeight is the floor for the project-YAML pane stacked between
 // projects and tasks. 5 rows = top border + title + blank + 1 content line +
@@ -1051,31 +1227,44 @@ const tasksMinHeight = 3
 // projects + tasks the way it was before the YAML viewer existed.
 const yamlMinHeight = 5
 
+// sessionsBottomHeight is the target height of the sessions pane when it
+// sits at the bottom of the body stack. 10 rows = 5 chrome (top border,
+// title, blank, column header, bottom border) + 5 content, enough for five
+// rows of the table. The pane is deliberately short — sessions are
+// status-at-a-glance, not the primary workspace.
+const sessionsBottomHeight = 10
+
+// sessionsMinHeight is the absolute floor for the sessions pane: 5 chrome +
+// 1 content. Below this we drop it from the layout entirely so the projects/
+// tasks/yaml stack can still fit on a tiny terminal.
+const sessionsMinHeight = 6
+
 // uiLayout caches the computed dimensions of every pane for a given window
 // size. View() and handleMouse() both use it so the rendering and the
 // click-routing math stay in lockstep.
 //
-// The right column stacks three panes vertically: projects (top), tasks
-// (middle), and the project/task YAML viewer (bottom). yamlH is 0 when the
-// terminal is too short to fit all three; in that regime the layout falls
-// back to projects + tasks the way it did before the YAML pane existed.
+// The body is a single column stacked vertically: projects (top), tasks,
+// project/task YAML viewer (optional), and the sessions pane at the bottom.
+// yamlH is 0 when the terminal is too short to fit all four; sessionsH is 0
+// when even after dropping yaml there's no room. bodyW is the full inner
+// width (we no longer split a left column out for sessions).
 type uiLayout struct {
-	sessionsW, projectsW             int
-	bodyH                            int
-	projectsH, yamlH, tasksH, auditH int
+	bodyW                                       int
+	bodyH                                       int
+	projectsH, yamlH, tasksH, sessionsH, auditH int
 }
 
 func (m model) computeLayout() uiLayout {
-	sessW, projW := paneWidths(m.width)
+	bodyW := m.width
 
 	// Reserve audit space only when there's room for it without squashing
 	// the body below a usable minimum. Otherwise the audit pane forces the
 	// body to overflow the terminal and the footer disappears off-screen.
 	const (
-		headerH    = 1
-		footerH    = 1
-		minBodyH   = 4
-		minAuditH  = 5
+		headerH   = 1
+		footerH   = 1
+		minBodyH  = 4
+		minAuditH = 5
 	)
 	audit := 0
 	if m.auditCh != nil {
@@ -1092,8 +1281,29 @@ func (m model) computeLayout() uiLayout {
 		bodyH = 1
 	}
 
-	projH, yamlH, tasksH := splitRightColumn(bodyH, projW, len(m.projects))
-	return uiLayout{sessW, projW, bodyH, projH, yamlH, tasksH, audit}
+	// Carve a fixed-ish slice for the sessions pane at the bottom of the
+	// body. Drop it entirely when there isn't enough room left for the rest
+	// of the stack to hit their minimums — we'd rather lose the at-a-glance
+	// status pane than overflow the terminal.
+	sessionsH := sessionsBottomHeight
+	if sessionsH > bodyH/3 {
+		sessionsH = bodyH / 3
+	}
+	if sessionsH < sessionsMinHeight ||
+		bodyH-sessionsH < projectsMinHeight+tasksMinHeight {
+		sessionsH = 0
+	}
+
+	projH, yamlH, tasksH := splitRightColumn(bodyH-sessionsH, bodyW, len(m.projects))
+	return uiLayout{
+		bodyW:     bodyW,
+		bodyH:     bodyH,
+		projectsH: projH,
+		yamlH:     yamlH,
+		tasksH:    tasksH,
+		sessionsH: sessionsH,
+		auditH:    audit,
+	}
 }
 
 // splitRightColumn divides the right column's bodyH rows between projects
@@ -1229,30 +1439,25 @@ func (m model) View() string {
 		return m.renderNewProjectModal()
 	}
 
+	// The ACP tab view takes over the whole window when open.
+	if m.showACP {
+		return m.renderACPView()
+	}
+
 	l := m.computeLayout()
 	header := titleStyle.Render("orch")
 	footer := m.renderFooter()
 
-	left := m.renderSessions(l.sessionsW, l.bodyH)
-
-	var body string
-	if l.projectsW > 0 {
-		projects := m.renderProjects(l.projectsW, l.projectsH)
-		tasks := m.renderTasks(l.projectsW, l.tasksH)
-		var right string
-		if l.yamlH > 0 {
-			yaml := m.renderProjectYAML(l.projectsW, l.yamlH)
-			right = lipgloss.JoinVertical(lipgloss.Left, projects, tasks, yaml)
-		} else {
-			right = lipgloss.JoinVertical(lipgloss.Left, projects, tasks)
-		}
-		body = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
-	} else {
-		// Terminal is too narrow for two columns. Sessions takes the full
-		// width and the projects/yaml/tasks panes are dropped — the user can
-		// still see and click sessions, which is the primary action.
-		body = left
+	projects := m.renderProjects(l.bodyW, l.projectsH)
+	tasks := m.renderTasks(l.bodyW, l.tasksH)
+	panes := []string{projects, tasks}
+	if l.yamlH > 0 {
+		panes = append(panes, m.renderProjectYAML(l.bodyW, l.yamlH))
 	}
+	if l.sessionsH > 0 {
+		panes = append(panes, m.renderSessions(l.bodyW, l.sessionsH))
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left, panes...)
 
 	if l.auditH > 0 {
 		audit := m.renderAudit(m.width, l.auditH)
@@ -1261,16 +1466,16 @@ func (m model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
-// renderTasks draws the per-project task list pane that sits below the
-// projects gallery. Each task takes one row: name on the left, colored
-// status on the right. The list is bound to whichever project projSel
-// currently points at; switching project swaps the content.
+// renderTasks draws the per-project task list pane as a table: one header
+// row plus one row per task with columns name | model | mcps | rules |
+// status. The list is bound to whichever project projSel currently points
+// at; switching project swaps the content.
 //
-// The row matching taskSel gets the highlighted treatment (same pink
-// accent used by the session row selection) so the user can see which
-// task the YAML viewer is currently pointing at when this pane is
-// focused. The Tasks pane uses the focused border when m.focus == paneTasks
-// so the user knows the pane accepts up/down input.
+// The row matching taskSel gets the highlighted treatment (same pink accent
+// used by the session row selection) so the user can see which task the
+// YAML viewer is currently pointing at when this pane is focused. The Tasks
+// pane uses the focused border when m.focus == paneTasks so the user knows
+// the pane accepts up/down input.
 //
 // `height` is the total rows the pane should occupy. Borders eat 2 of them.
 func (m model) renderTasks(width, height int) string {
@@ -1296,20 +1501,105 @@ func (m model) renderTasks(width, height int) string {
 		return style.Render(clampLines(b.String(), innerHeight))
 	}
 
-	maxRows := innerHeight - 2 // title + blank
+	cols := taskColumnWidths(innerWidth)
+	b.WriteString(renderTaskHeader(cols))
+
+	// 3 chrome rows above (title, blank, header) and we just wrote the
+	// header — so task data rows fit in innerHeight-3.
+	maxRows := innerHeight - 3
 	if maxRows < 0 {
 		maxRows = 0
 	}
 	if len(tasks) > maxRows {
 		tasks = tasks[:maxRows]
 	}
-	for i, t := range tasks {
-		b.WriteString(renderTaskRow(t, innerWidth, t.Path == m.taskSel))
-		if i < len(tasks)-1 {
-			b.WriteString("\n")
-		}
+	for _, t := range tasks {
+		b.WriteString("\n")
+		b.WriteString(renderTaskRow(t, cols, t.Path == m.taskSel))
 	}
 	return style.Render(clampLines(b.String(), innerHeight))
+}
+
+// taskColumns holds the per-column character widths the tasks table renders
+// with. Computed once per render from the pane's inner width so the header
+// and every data row share the same alignment.
+type taskColumns struct {
+	name, model, mcps, rules, status int
+}
+
+// Column gap is one space; five columns means four gaps.
+const (
+	taskColGap            = 1
+	taskColGaps           = 4
+	taskColModelDefault   = 10
+	taskColMCPsDefault    = 18
+	taskColRulesDefault   = 6
+	taskColStatusDefault  = 10
+	taskColMinNameWidth   = 4
+	taskColMinTotalWidth  = taskColMinNameWidth + taskColModelDefault + taskColMCPsDefault + taskColRulesDefault + taskColStatusDefault + taskColGaps*taskColGap
+)
+
+// taskColumnWidths sizes the five columns to fill innerWidth. The model,
+// mcps, rules and status columns get fixed defaults; the name column takes
+// whatever's left. When the pane is too narrow to honour the defaults, the
+// model/mcps columns shrink (in that order) before name drops below its
+// minimum. mcps and rules can both drop to 0 — they're informational, so
+// truncating them to nothing is better than crowding name and status.
+func taskColumnWidths(innerWidth int) taskColumns {
+	c := taskColumns{
+		name:   0,
+		model:  taskColModelDefault,
+		mcps:   taskColMCPsDefault,
+		rules:  taskColRulesDefault,
+		status: taskColStatusDefault,
+	}
+	required := func() int {
+		gaps := 0
+		if c.model > 0 {
+			gaps++
+		}
+		if c.mcps > 0 {
+			gaps++
+		}
+		if c.rules > 0 {
+			gaps++
+		}
+		if c.status > 0 {
+			gaps++
+		}
+		return c.model + c.mcps + c.rules + c.status + gaps*taskColGap
+	}
+	// Shrink the optional informational columns when there isn't enough
+	// room. Order: mcps (verbose) → rules (small) → model (small).
+	for innerWidth-required() < taskColMinNameWidth && c.mcps > 0 {
+		c.mcps--
+	}
+	for innerWidth-required() < taskColMinNameWidth && c.rules > 0 {
+		c.rules--
+	}
+	for innerWidth-required() < taskColMinNameWidth && c.model > 0 {
+		c.model--
+	}
+	c.name = innerWidth - required()
+	if c.name < taskColMinNameWidth {
+		c.name = taskColMinNameWidth
+	}
+	// Status always survives — it's the at-a-glance signal. If even that
+	// doesn't fit (super narrow pane), let it truncate when rendered.
+	return c
+}
+
+// renderTaskHeader emits the column-header row in the title style so the
+// table reads as one above its data.
+func renderTaskHeader(c taskColumns) string {
+	cells := []string{
+		padCell("name", c.name),
+		padCell("model", c.model),
+		padCell("mcps", c.mcps),
+		padCell("rules", c.rules),
+		padCell("status", c.status),
+	}
+	return dimStyle.Render(strings.Join(nonEmpty(cells), strings.Repeat(" ", taskColGap)))
 }
 
 // selectedProjectTasks returns the task slice for the currently-selected
@@ -1327,32 +1617,104 @@ func (m model) selectedProjectTasks() []TaskView {
 	return nil
 }
 
-// renderTaskRow lays one task out as "name … status", right-aligning the
-// status to the inner width so the colored statuses form a tidy column. The
-// task status colour matches the project-status palette so the eye learns
-// one mapping across the UI.
+// renderTaskRow lays one task out as a row in the table: name | model |
+// mcps | rules | status. Each cell is padded to its column width so the
+// columns line up; columns sized to 0 by taskColumnWidths drop out entirely.
+// The status column is the only one that carries colour — same palette as
+// the project status indicator so the eye learns one mapping.
 //
-// When selected, the entire row is rendered with the accent
-// background/foreground used elsewhere for "active selection", so the user
-// can see at a glance which task the YAML viewer is mirroring.
-func renderTaskRow(t TaskView, width int, selected bool) string {
+// When selected, every cell is rendered with the accent background/foreground
+// used elsewhere for "active selection" so the user can see at a glance
+// which task the YAML viewer is mirroring.
+func renderTaskRow(t TaskView, c taskColumns, selected bool) string {
+	model := t.Model
+	if model == "" {
+		// Defensive: TaskView already mirrors task.Load()'s backfill, but
+		// nothing in this file guarantees that path was taken — display
+		// "default" so a stray empty value doesn't render as a blank cell.
+		model = "default"
+	}
+	mcps := strings.Join(t.StaticMCPs, ",")
+	if mcps == "" {
+		mcps = "-"
+	}
+	rules := "-"
+	if n := len(t.Policies); n > 0 {
+		rules = strconv.Itoa(n)
+	}
 	status := string(t.Status)
-	statusW := lipgloss.Width(status)
-	nameW := width - statusW - 1 // 1 col gap
-	if nameW < 1 {
-		nameW = 1
+
+	cells := []string{
+		padCell(truncate(t.Name, c.name), c.name),
+		padCell(truncate(model, c.model), c.model),
+		padCell(truncate(mcps, c.mcps), c.mcps),
+		padCell(truncate(rules, c.rules), c.rules),
+		padCell(truncate(status, c.status), c.status),
 	}
-	name := truncate(t.Name, nameW)
-	pad := width - lipgloss.Width(name) - statusW
-	if pad < 1 {
-		pad = 1
-	}
-	plain := name + strings.Repeat(" ", pad) + status
+	gap := strings.Repeat(" ", taskColGap)
+	plain := strings.Join(nonEmpty(cells), gap)
 	if selected {
-		return sessionRowSelectedStyle.Render(padToWidth(plain, width))
+		return sessionRowSelectedStyle.Render(padToWidth(plain, c.totalWidth()))
 	}
-	statusStyled := taskStatusStyle(t.Status).Render(status)
-	return name + strings.Repeat(" ", pad) + statusStyled
+	// Re-emit non-status cells as plain and recolour just the status cell so
+	// the table tints stay subtle.
+	if c.status > 0 {
+		nonStatus := nonEmpty(cells[:4])
+		joined := strings.Join(nonStatus, gap)
+		statusCell := taskStatusStyle(t.Status).Render(truncate(status, c.status))
+		statusCell = padCell(statusCell, c.status)
+		if joined == "" {
+			return statusCell
+		}
+		return joined + gap + statusCell
+	}
+	return plain
+}
+
+// totalWidth is the rendered width of a row including gaps. Used by the
+// selected-row highlight so the accent background fills the full column.
+func (c taskColumns) totalWidth() int {
+	w := 0
+	gaps := 0
+	for _, n := range []int{c.name, c.model, c.mcps, c.rules, c.status} {
+		if n > 0 {
+			w += n
+			gaps++
+		}
+	}
+	if gaps > 1 {
+		w += (gaps - 1) * taskColGap
+	}
+	return w
+}
+
+// padCell pads s to exactly width visible columns on the right with spaces,
+// or returns "" when width is 0 (column dropped). It's used both for header
+// and data cells so columns align by character count regardless of styling.
+func padCell(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	w := lipgloss.Width(s)
+	if w >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-w)
+}
+
+// nonEmpty returns a new slice with empty strings dropped, preserving order.
+// Used to assemble row text without leading/trailing/duplicate gaps when a
+// column has been dropped. A fresh slice is allocated so callers can pass
+// sub-slices of the same backing array (e.g. cells, cells[:4]) without one
+// call clobbering the other.
+func nonEmpty(parts []string) []string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // taskStatusStyle picks the same colour palette renderStatus uses for
@@ -1443,6 +1805,9 @@ func (m model) renderFooter() string {
 	style := statusErrStyle
 	if text == "" {
 		base := "tab: switch pane  •  ↑/↓: select  •  p/t: project/task yaml  •  enter/click: attach  •  q: quit"
+		if m.acpCh != nil {
+			base += "  •  a: acp tabs"
+		}
 		if m.focus == paneProjects {
 			base += "  •  :new: create project"
 		}
@@ -1472,12 +1837,14 @@ func paneName(p pane) string {
 // the gallery as files change; the sessions pane is fed by sessCh, which the
 // caller wires up to a real source (the daemon's WatchSessions) or leaves nil
 // for standalone/demo mode. The audit log pane at the bottom tails auditPath
-// when non-empty. Run blocks until the user quits or ctx is cancelled.
+// when non-empty. When sessionsRoot is non-empty, Run also watches that ACP
+// sessions root and feeds the `a`-key tab view one tab per live ACP session.
+// Run blocks until the user quits or ctx is cancelled.
 //
 // Mouse cell-motion is enabled so the sessions pane responds to clicks. The
 // tmux-attach plumbing opens a new Terminal.app window via osascript, so the
 // TUI keeps running while the user works in the attached session.
-func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, auditPath string) error {
+func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, auditPath, sessionsRoot string) error {
 	tuiCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -1491,6 +1858,12 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, audit
 	}
 
 	m := newModel(ch, sessCh, auditCh, newTmuxAttacher())
+	// Watch ACP sessions for the tab view when a sessions root is configured
+	// (daemon mode with --acp-kit). Standalone `orch tui` passes "" and gets no
+	// ACP tabs, matching its nil sessions source.
+	if sessionsRoot != "" {
+		m.acpCh = WatchACPSessions(tuiCtx, sessionsRoot, 0)
+	}
 	// `:new` writes the empty .project.yaml into the first --root the caller
 	// passed in. Standalone tui mode without any --root has no place to
 	// create projects; the command-line handler reports that gracefully.

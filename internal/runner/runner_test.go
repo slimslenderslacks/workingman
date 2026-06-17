@@ -83,23 +83,27 @@ func TestDefaultCommandBuilderModes(t *testing.T) {
 func TestSandboxNameFor(t *testing.T) {
 	const projectPath = "/orch/myproj/.project.yaml"
 	cases := []struct {
-		kind agent.Kind
-		want string
+		name     string
+		kind     agent.Kind
+		taskName string
+		want     string
 	}{
-		{agent.ProjectAgent, ""},
-		{agent.PlanningAgent, "myproj"},
-		{agent.WolfAgent, ""},
-		{agent.TaskAgent, "myproj-worktree"},
-		{agent.CommitAgent, "myproj-worktree"},
+		{"project", agent.ProjectAgent, "", ""},
+		{"planning", agent.PlanningAgent, "", "myproj"},
+		{"wolf", agent.WolfAgent, "", ""},
+		{"task", agent.TaskAgent, "scaffold", "myproj-scaffold"},
+		{"commit", agent.CommitAgent, "scaffold", "myproj-scaffold"},
+		{"task-no-name", agent.TaskAgent, "", ""},
+		{"commit-no-name", agent.CommitAgent, "", ""},
 	}
 	for _, tc := range cases {
-		t.Run(tc.kind.String(), func(t *testing.T) {
-			if got := sandboxNameFor(tc.kind, projectPath); got != tc.want {
-				t.Errorf("sandboxNameFor = %q, want %q", got, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SandboxNameFor(tc.kind, projectPath, tc.taskName); got != tc.want {
+				t.Errorf("SandboxNameFor = %q, want %q", got, tc.want)
 			}
 		})
 	}
-	if got := sandboxNameFor(agent.PlanningAgent, ""); got != "" {
+	if got := SandboxNameFor(agent.PlanningAgent, "", ""); got != "" {
 		t.Errorf("empty projectPath should produce empty name, got %q", got)
 	}
 }
@@ -112,14 +116,19 @@ func TestSandboxCreatorInvokedAndWraps(t *testing.T) {
 	type call struct {
 		name       string
 		workspaces []string
+		mcps       []string
 	}
 	var sbCalls []call
 	launcher := &fakeLauncher{}
 	r := &Runner{
 		Launcher: launcher,
 		Command:  func(_ agent.Kind, _ string) []string { return []string{"claude", "--print", "hi"} },
-		Sandbox: func(_ context.Context, name string, workspaces []string) error {
-			sbCalls = append(sbCalls, call{name, append([]string(nil), workspaces...)})
+		Sandbox: func(_ context.Context, spec SandboxSpec) error {
+			sbCalls = append(sbCalls, call{
+				name:       spec.Name,
+				workspaces: append([]string(nil), spec.Workspaces...),
+				mcps:       append([]string(nil), spec.StaticMCPs...),
+			})
 			return nil
 		},
 	}
@@ -163,6 +172,7 @@ func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
 	type call struct {
 		name       string
 		workspaces []string
+		mcps       []string
 	}
 	var sbCalls []call
 	launcher := &fakeLauncher{}
@@ -170,8 +180,12 @@ func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
 		Workspaces: workspace.NewStub(wsRoot),
 		Launcher:   launcher,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"claude", "--print", "hi"} },
-		Sandbox: func(_ context.Context, name string, workspaces []string) error {
-			sbCalls = append(sbCalls, call{name, append([]string(nil), workspaces...)})
+		Sandbox: func(_ context.Context, spec SandboxSpec) error {
+			sbCalls = append(sbCalls, call{
+				name:       spec.Name,
+				workspaces: append([]string(nil), spec.Workspaces...),
+				mcps:       append([]string(nil), spec.StaticMCPs...),
+			})
 			return nil
 		},
 	}
@@ -181,12 +195,13 @@ func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
 		ProjectPath: projectPath,
 		TaskPath:    filepath.Join(orchDir, "tasks", "first.yaml"),
 		TaskName:    "first",
+		StaticMCPs:  []string{"github", "web-search"},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
-	wantName := filepath.Base(orchDir) + "-worktree"
+	wantName := filepath.Base(orchDir) + "-first"
 	wantWorktree := filepath.Join(wsRoot, "feat-x")
 	if len(sbCalls) != 1 {
 		t.Fatalf("expected one sandbox create, got %d: %+v", len(sbCalls), sbCalls)
@@ -197,6 +212,9 @@ func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
 	}
 	if len(got.workspaces) != 2 || got.workspaces[0] != wantWorktree || got.workspaces[1] != orchDir {
 		t.Errorf("workspaces = %v, want [%q %q]", got.workspaces, wantWorktree, orchDir)
+	}
+	if len(got.mcps) != 2 || got.mcps[0] != "github" || got.mcps[1] != "web-search" {
+		t.Errorf("static_mcps = %v, want [github web-search]", got.mcps)
 	}
 }
 
@@ -209,7 +227,7 @@ func TestProjectAgentSkipsSandbox(t *testing.T) {
 	r := &Runner{
 		Launcher: launcher,
 		Command:  func(_ agent.Kind, _ string) []string { return []string{"claude", "hi"} },
-		Sandbox: func(_ context.Context, _ string, _ []string) error {
+		Sandbox: func(_ context.Context, _ SandboxSpec) error {
 			t.Fatal("sandbox creator must not be called for the project agent")
 			return nil
 		},

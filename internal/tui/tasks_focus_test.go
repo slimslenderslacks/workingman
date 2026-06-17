@@ -262,14 +262,14 @@ func TestMouseClickOnTaskRowSelectsIt(t *testing.T) {
 	// layout: header(1) + projectsH rows, then the tasks pane.
 	const headerRows = 1
 	tasksStart := headerRows + l.projectsH
-	// Inside the tasks pane: row 0 is the top border, row 1 the "Tasks"
-	// title, row 2 a blank, row 3 the first task. So the second task is
-	// at tasksStart + 4.
-	clickY := tasksStart + 4
+	// Inside the tasks pane: row 0 top border, row 1 "Tasks" title, row 2
+	// blank, row 3 column header, row 4 the first task, row 5 the second
+	// task. So the second-task row is at tasksStart + 5.
+	clickY := tasksStart + 5
 	step, _ := m.Update(tea.MouseMsg{
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
-		X:      l.sessionsW + 5,
+		X:      5,
 		Y:      clickY,
 	})
 	m = step.(model)

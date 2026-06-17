@@ -333,8 +333,10 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 		TasksDir:    filepath.Join(root, "tasks"),
 		// Use the path the task was loaded from — filenames may carry
 		// sort prefixes ("00-register-repo.yaml") that don't match Name.
-		TaskPath: t.Path,
-		TaskName: t.Name,
+		TaskPath:   t.Path,
+		TaskName:   t.Name,
+		StaticMCPs: t.StaticMCPs,
+		Policies:   t.Policies,
 	}
 	err := d.startSession(projectPath, plan, func() {
 		d.afterTaskSession(projectPath, plan.TaskPath, p)

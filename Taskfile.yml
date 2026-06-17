@@ -1,0 +1,38 @@
+version: '3'
+
+tasks:
+  default:
+    deps: [build]
+
+  build:
+    desc: Build orch and acp-wrapper into the repo root
+    deps: [orch, acp-wrapper]
+
+  orch:
+    desc: Build the orch daemon
+    cmds:
+      - go build -o orch ./cmd/orch
+    sources:
+      - cmd/orch/**/*.go
+      - internal/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - orch
+
+  acp-wrapper:
+    desc: Build the acp-wrapper host
+    cmds:
+      - go build -o acp-wrapper ./cmd/acp-wrapper
+    sources:
+      - cmd/acp-wrapper/**/*.go
+      - internal/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - acp-wrapper
+
+  clean:
+    desc: Remove built binaries
+    cmds:
+      - rm -f orch acp-wrapper

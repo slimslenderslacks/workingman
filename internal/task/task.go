@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/slimslenderslacks/work/internal/policy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -17,6 +18,11 @@ const (
 	StatusBlocked   Status = "blocked"
 	StatusCommitted Status = "committed"
 )
+
+// ModelDefault is the placeholder value every task carries today. The
+// planning agent writes this verbatim; Load() backfills it for tasks on
+// disk that pre-date the field.
+const ModelDefault = "default"
 
 func (s Status) Valid() bool {
 	switch s {
@@ -65,6 +71,30 @@ type Task struct {
 	// up in `git log`.
 	CreatedFiles []string `yaml:"created_files,omitempty"`
 
+	// StaticMCPs are the sbx static-MCP names this task's sandbox should be
+	// created with: each entry becomes a `--static-mcp <name>` flag on
+	// `sbx create`. Populated by the planning agent when a task needs an MCP
+	// server inside its sandbox (web search, github, etc.). Empty means no
+	// MCPs and a vanilla sandbox.
+	StaticMCPs []string `yaml:"static_mcps,omitempty"`
+
+	// Policies are per-task sandbox policy rules applied with `sbx policy`
+	// after the sandbox is created and before any `sbx exec` runs in it.
+	// Each rule is an allow/deny decision over a network or filesystem
+	// resource pattern. The default sandbox policy is "balanced" — many
+	// common resources are already permitted — so rules here typically
+	// tighten the network surface (deny all + allow a known host) or
+	// loosen filesystem access for a task that needs more.
+	Policies []policy.Rule `yaml:"policies,omitempty"`
+
+	// Model is the claude model the task agent should run under. For now
+	// every task uses "default", which lets claude pick its own current
+	// default; the field is reserved so a future planner can choose a
+	// cheaper/heavier model per task (e.g. "haiku" for trivial tasks).
+	// Load() backfills empty values to "default" so older tasks on disk
+	// continue to work without a planner rewrite.
+	Model string `yaml:"model"`
+
 	// Path is the absolute file path the task was loaded from. It is set by
 	// Load and excluded from YAML so it round-trips cleanly. Callers use it
 	// when they need to read or write the task file again (e.g. the daemon
@@ -93,6 +123,9 @@ func Load(path string) (*Task, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	t.Path = path
+	if t.Model == "" {
+		t.Model = ModelDefault
+	}
 	return &t, nil
 }
 

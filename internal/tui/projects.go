@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/task"
 	"github.com/slimslenderslacks/work/internal/taskgraph"
@@ -46,15 +47,18 @@ type ProjectView struct {
 	CreatedAt time.Time
 }
 
-// TaskView is the minimal snapshot the Tasks pane renders: a task's name,
-// its current status, and the path to its source YAML file (so the YAML
-// viewer can render the file when the Tasks pane is focused). Kept narrow
-// so the diff logic in projectViewEqual stays cheap and a future "skipped"
-// status (see workingman#1) plugs in without churn.
+// TaskView is the snapshot the Tasks pane renders for one task: name, model,
+// per-task sandbox MCPs, policy rules, and current status, plus the path to
+// the source YAML so the viewer can render it when the pane is focused. The
+// slice fields make TaskView not directly comparable (==), so projectViewEqual
+// compares them element-wise.
 type TaskView struct {
-	Name   string
-	Status task.Status
-	Path   string
+	Name       string
+	Model      string
+	StaticMCPs []string
+	Policies   []policy.Rule
+	Status     task.Status
+	Path       string
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
@@ -153,7 +157,21 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 	tasks := make([]TaskView, 0, len(gTasks))
 	for _, t := range gTasks {
 		counts[t.Status]++
-		tasks = append(tasks, TaskView{Name: t.Name, Status: t.Status, Path: t.Path})
+		// task.Load() backfills Model to "default", but a task added to the
+		// graph through other code paths might not have, so we mirror that
+		// defaulting here for display safety.
+		model := t.Model
+		if model == "" {
+			model = task.ModelDefault
+		}
+		tasks = append(tasks, TaskView{
+			Name:       t.Name,
+			Model:      model,
+			StaticMCPs: append([]string(nil), t.StaticMCPs...),
+			Policies:   append([]policy.Rule(nil), t.Policies...),
+			Status:     t.Status,
+			Path:       t.Path,
+		})
 	}
 	return counts, tasks
 }
@@ -340,7 +358,34 @@ func projectViewEqual(a, b ProjectView) bool {
 		return false
 	}
 	for i := range a.Tasks {
-		if a.Tasks[i] != b.Tasks[i] {
+		if !taskViewEqual(a.Tasks[i], b.Tasks[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// taskViewEqual compares two TaskViews including their slice fields. Used by
+// projectViewEqual now that TaskView holds StaticMCPs/Policies and is no
+// longer directly comparable with ==. Order matters for both slices since
+// rule order is meaningful and MCP order is what the planner wrote.
+func taskViewEqual(a, b TaskView) bool {
+	if a.Name != b.Name || a.Model != b.Model || a.Status != b.Status || a.Path != b.Path {
+		return false
+	}
+	if len(a.StaticMCPs) != len(b.StaticMCPs) {
+		return false
+	}
+	for i := range a.StaticMCPs {
+		if a.StaticMCPs[i] != b.StaticMCPs[i] {
+			return false
+		}
+	}
+	if len(a.Policies) != len(b.Policies) {
+		return false
+	}
+	for i := range a.Policies {
+		if a.Policies[i] != b.Policies[i] {
 			return false
 		}
 	}

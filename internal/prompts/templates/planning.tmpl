@@ -7,7 +7,44 @@ Read the project description and existing tasks:
 
 Break the project into a set of tasks under `{{.TasksDir}}/*.yaml`. Each task
 file must include: name, description, depends_on (list of task names), status
-(start at `ready`), attempts (0), failure_reason (""), blocked_reason ("").
+(start at `ready`), attempts (0), failure_reason (""), blocked_reason (""),
+model ("default").
+
+A task may optionally include `static_mcps:` — a YAML list of sbx static-MCP
+names to attach when the task's sandbox is created. Each entry becomes a
+`--static-mcp <name>` flag on `sbx create`. Use this only when the task
+genuinely needs an MCP server in its sandbox (e.g. a `github` MCP for tasks
+that interact with GitHub APIs). Leave the field out for tasks that don't
+need extra MCPs. Each task gets its own sandbox named
+`<work-stream>-<task-name>`, so a task's MCP choices are isolated from
+sibling tasks. Example:
+
+  static_mcps:
+    - github
+    - web-search
+
+A task may also optionally include `policies:` — a YAML list of sandbox
+policy rules applied with `sbx policy ...` immediately after the task's
+sandbox is created and before any tool runs inside it. Each rule has three
+fields:
+
+  - action:   "allow" or "deny"
+  - type:     "network" or "filesystem"
+  - resource: a pattern; "**" matches everything, otherwise a host glob
+              (network) or path glob (filesystem)
+
+The default sandbox policy is "balanced" — many common resources are
+already permitted — so use this field only when the task needs the surface
+narrower (deny + targeted allow) or wider (allow a host that's normally
+blocked). Rules apply in declaration order. Example:
+
+  policies:
+    - action: deny
+      type: network
+      resource: "**"
+    - action: allow
+      type: network
+      resource: "api.github.com"
 
 You may freely add, remove, or edit task files and you may edit
 `.project.yaml` as well — but only those files. When you are finished, set
@@ -25,4 +62,18 @@ New tasks you write should always start with `status: ready` and
 `attempts: 0`. Do not invent values (no `active`, `pending`,
 `in-progress`, etc.).
 
+Set `model: default` on every task you write. This field is reserved for
+future per-task model selection; for now "default" is the only supported
+value.
+
 You are in workspace: {{.Workspace}}
+{{if .Worktree}}
+The project's repositories are checked out at: {{.Worktree}}
+
+That directory is mounted into your sandbox so you can read source files
+directly — `ls {{.Worktree}}`, `cat`, etc. Use it to inform your task
+breakdown. Do NOT try to `git clone` from GitHub or `gh auth login`: the
+sandbox has no network credentials and those calls will fail. Treat the
+worktree as read-only for planning; the task agents that run later get their
+own write access in the same worktree.
+{{end}}
