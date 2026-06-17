@@ -94,8 +94,8 @@ func TestWatchDiscoversSessionAndStreamsTranscript(t *testing.T) {
 	dial := func(_ context.Context, _ string) (acpConn, error) { return conn, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "go read it")
+	defer stopWatch(cancel, ch)
 
 	// Collect events until we've seen the added tab, the prompt, and the
 	// completed stream event.
@@ -148,8 +148,8 @@ func TestWatchEmitsRemovedWhenSessionDirGone(t *testing.T) {
 	dial := func(_ context.Context, _ string) (acpConn, error) { return conn, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "")
+	defer stopWatch(cancel, ch)
 
 	// Wait for the tab to be added, then delete the session directory.
 	waitForKind(t, ch, acpTabAdded, 2*time.Second)
@@ -172,8 +172,8 @@ func TestWatchDialFailureMarksDisconnected(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "")
+	defer stopWatch(cancel, ch)
 
 	waitForKind(t, ch, acpTabAdded, 2*time.Second)
 	deadline := time.After(2 * time.Second)
@@ -228,8 +228,8 @@ func TestWatchReconnectReplaysAndSkipsPrompt(t *testing.T) {
 	dial := func(_ context.Context, _ string) (acpConn, error) { return conn, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "go read it")
+	defer stopWatch(cancel, ch)
 
 	var (
 		sawPrompt, sawReplay, sawConnected bool
@@ -285,8 +285,8 @@ func TestWatchDialFailureCleansUpDeadSession(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "")
+	defer stopWatch(cancel, ch)
 
 	ev := waitForKind(t, ch, acpTabRemoved, 2*time.Second)
 	if ev.id != "task-dead" {
@@ -329,8 +329,8 @@ func TestWatchSandboxGoneCleansUpStaleSession(t *testing.T) {
 	goneProbe := func(_ context.Context, _ string) (bool, error) { return false, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, goneProbe, "go read it")
+	defer stopWatch(cancel, ch)
 
 	// The stale tab is marked dead and dropped.
 	var sawDisconnected bool
@@ -377,8 +377,8 @@ func TestWatchSandboxProbeErrorFallsThroughToConnection(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, errProbe, "go read it")
+	defer stopWatch(cancel, ch)
 
 	// A live session connects and streams despite the probe error.
 	deadline := time.After(2 * time.Second)
@@ -429,6 +429,18 @@ func TestWatchNewSessionMarksPrompted(t *testing.T) {
 			t.Fatalf("PromptCount never reached 1 (err=%v, count=%d)", err, rec.PromptCount)
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// stopWatch shuts the watcher down deterministically: it cancels the context and
+// then drains the event channel until it closes. watchACPSessions closes the
+// channel only after wg.Wait() returns — i.e. after every per-session goroutine
+// has finished, including any trailing markPrompted store.Write. Waiting for that
+// close before the test returns keeps those late writes from racing t.TempDir's
+// RemoveAll cleanup (which otherwise fails with "directory not empty").
+func stopWatch(cancel context.CancelFunc, ch <-chan acpTabEvent) {
+	cancel()
+	for range ch {
 	}
 }
 
