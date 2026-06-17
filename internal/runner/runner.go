@@ -19,11 +19,13 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
+	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/prompts"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/setup"
@@ -50,6 +52,18 @@ type Plan struct {
 	TaskPath    string
 	TaskName    string
 	FailedTasks []string
+
+	// StaticMCPs are sbx static-MCP names to attach to this agent's sandbox.
+	// Forwarded by the daemon from the task's static_mcps field for task and
+	// commit agents (commit shares the task's per-task sandbox). Empty for
+	// planning/project/wolf and for tasks that declared none.
+	StaticMCPs []string
+
+	// Policies are sbx policy rules applied to the sandbox right after
+	// `sbx create` and before any `sbx exec`. Forwarded by the daemon from
+	// the task's policies field for task and commit agents (commit shares
+	// the task's sandbox; the rules already on it remain in effect).
+	Policies []policy.Rule
 
 	// BlockedReason, when set, is the message surfaced to the wolf agent
 	// describing why the project entered status:blocked. Ignored for any
@@ -96,10 +110,21 @@ func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
 	return cmd
 }
 
-// SandboxCreator ensures a sandbox named `name` exists with the given
-// workspaces mounted. The first workspace is the primary one (the dir
-// claude will `cd` into via `sbx exec -w`); subsequent workspaces are
-// additional host paths bind-mounted into the sandbox at the same path.
+// SandboxSpec describes the sandbox a SandboxCreator should ensure exists.
+// Name is the sbx sandbox name; Workspaces are host paths to bind-mount (the
+// first is the primary cwd, the rest are extra mounts); StaticMCPs are sbx
+// static-MCP names that become repeated `--static-mcp <name>` flags on
+// `sbx create`; Policies are sbx policy rules applied immediately after
+// `sbx create` and before any `sbx exec` (one `sbx policy ...` invocation
+// per rule, in order).
+type SandboxSpec struct {
+	Name       string
+	Workspaces []string
+	StaticMCPs []string
+	Policies   []policy.Rule
+}
+
+// SandboxCreator ensures a sandbox described by spec exists.
 //
 // Task/commit agents need two mounts: the worktree (for code) and the
 // project's orch dir (for `.project.yaml` and `tasks/*.yaml`, which live
@@ -107,42 +132,63 @@ func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
 //
 // Must be idempotent: the daemon re-dispatches across restarts. The default
 // implementation treats "already exists" errors from sbx as success.
-type SandboxCreator func(ctx context.Context, name string, workspaces []string) error
+type SandboxCreator func(ctx context.Context, spec SandboxSpec) error
 
-// DefaultSandboxCreator ensures a sandbox `name` exists with exactly the
-// given workspaces mounted. The flow is:
+// DefaultSandboxCreator ensures a sandbox named spec.Name exists with exactly
+// the given workspaces mounted and static MCPs attached. The flow is:
 //
 //  1. `sbx ls --json` to find the existing sandbox (if any).
-//  2. If it exists with the same set of workspaces → no-op.
-//  3. If it exists with a different set → `sbx rm --force` then recreate.
-//     This self-heals when the daemon's idea of the desired mounts has
-//     grown (e.g. task agents added the orch dir as a second mount).
-//  4. Otherwise `sbx create claude --name <name> <ws...>`.
+//  2. If it exists with the same set of workspaces → no-op. We do NOT inspect
+//     MCPs or policies on an existing sandbox because sbx ls doesn't surface
+//     those details; for per-task sandboxes the name uniquely encodes the
+//     task and its MCP/policy set, so a name collision implies a matching
+//     set. (A retry of the same task reuses the same sandbox.)
+//  3. If it exists with a different workspace set → `sbx rm --force` then
+//     recreate. This self-heals when the daemon's idea of the desired mounts
+//     has grown (e.g. task agents added the orch dir as a second mount).
+//  4. Otherwise `sbx create claude --name <name> [--static-mcp <m>...] <ws...>`,
+//     then one `sbx policy <action> <kind> --sandbox <name> <resource>` per
+//     rule in spec.Policies (in declaration order, so deny-all + allow-host
+//     compositions evaluate left-to-right as written).
 //
 // Recreation is safe here because we never use --clone — the sandbox is a
 // thin bind-mount wrapper, so rm just stops the container and leaves the
 // host paths (worktrees, orch dir) untouched.
-func DefaultSandboxCreator(ctx context.Context, name string, workspaces []string) error {
-	if len(workspaces) == 0 {
+func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
+	if len(spec.Workspaces) == 0 {
 		return fmt.Errorf("sandbox: at least one workspace is required")
 	}
-	existing, err := readSandboxWorkspaces(ctx, name)
+	existing, err := readSandboxWorkspaces(ctx, spec.Name)
 	if err != nil {
 		return fmt.Errorf("sbx ls: %w", err)
 	}
 	if existing != nil {
-		if sameWorkspaceSet(existing, workspaces) {
+		if sameWorkspaceSet(existing, spec.Workspaces) {
 			return nil
 		}
-		rm := exec.CommandContext(ctx, "sbx", "rm", "--force", name)
+		rm := exec.CommandContext(ctx, "sbx", "rm", "--force", spec.Name)
 		if out, err := rm.CombinedOutput(); err != nil {
-			return fmt.Errorf("sbx rm %s: %w: %s", name, err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("sbx rm %s: %w: %s", spec.Name, err, strings.TrimSpace(string(out)))
 		}
 	}
-	args := append([]string{"create", "claude", "--name", name}, workspaces...)
+	args := []string{"create", "claude", "--name", spec.Name}
+	for _, m := range spec.StaticMCPs {
+		args = append(args, "--static-mcp", m)
+	}
+	args = append(args, spec.Workspaces...)
 	cmd := exec.CommandContext(ctx, "sbx", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("sbx create %s %v: %w: %s", name, workspaces, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("sbx create %s %v: %w: %s", spec.Name, spec.Workspaces, err, strings.TrimSpace(string(out)))
+	}
+	for _, r := range spec.Policies {
+		if err := r.Validate(); err != nil {
+			return fmt.Errorf("sbx policy %s: %w", spec.Name, err)
+		}
+		pcmd := exec.CommandContext(ctx, "sbx", r.CLIArgs(spec.Name)...)
+		if out, err := pcmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("sbx policy %s %s %s %s: %w: %s",
+				r.Action, r.Kind, spec.Name, r.Resource, err, strings.TrimSpace(string(out)))
+		}
 	}
 	return nil
 }
@@ -240,10 +286,30 @@ type Runner struct {
 	SbxPath string
 }
 
+// UsesACP reports whether a Start for kind would take the ACP path (i.e. the
+// agent runs inside an acp-wrapper-managed sandbox). The daemon uses this to
+// decide whether to surface a session's sandbox name to the TUI: only ACP
+// sessions own a stable, user-visible sandbox; the legacy tmux path's sandbox
+// is an implementation detail.
+func (r *Runner) UsesACP(kind agent.Kind) bool {
+	return r.AcpLauncher != nil && !kind.Interactive()
+}
+
 // Start is non-blocking: it returns the Session once the launcher accepts it.
 // The caller owns Wait/Close on the returned Session.
 func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	workingDir, err := r.resolveWorkingDir(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+
+	// Planning runs in the project's orch dir, but it needs to read source
+	// from the project's repos to write meaningful task breakdowns. Provision
+	// the same wsp worktree the task/commit agents will later use, so the
+	// planner can inspect source via a second sandbox mount instead of
+	// hitting GitHub from inside a credential-less sandbox. wsp Create is
+	// idempotent, so the task agent's later call returns the same dir.
+	planningWorktree, err := r.resolvePlanningWorktree(ctx, p)
 	if err != nil {
 		return nil, err
 	}
@@ -258,6 +324,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		TaskName:      p.TaskName,
 		FailedTasks:   p.FailedTasks,
 		BlockedReason: p.BlockedReason,
+		Worktree:      planningWorktree,
 	}
 	instructions, err := prompts.Render(p.Kind, data)
 	if err != nil {
@@ -274,6 +341,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		TaskName:      p.TaskName,
 		FailedTasks:   p.FailedTasks,
 		BlockedReason: p.BlockedReason,
+		Worktree:      planningWorktree,
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {
 		return nil, err
@@ -287,7 +355,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	// `sbx exec claude -p`. Interactive agents (project/wolf) always take the
 	// legacy tmux path below.
 	if !p.Kind.Interactive() && r.AcpLauncher != nil {
-		return r.startACP(ctx, p, workingDir)
+		return r.startACP(ctx, p, workingDir, planningWorktree)
 	}
 
 	build := r.Command
@@ -296,10 +364,15 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	}
 	command := build(p.Kind, workingDir)
 
-	sandboxName := sandboxNameFor(p.Kind, p.ProjectPath)
+	sandboxName := SandboxNameFor(p.Kind, p.ProjectPath, p.TaskName)
 	if r.Sandbox != nil && sandboxName != "" {
-		workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath)
-		if err := r.Sandbox(ctx, sandboxName, workspaces); err != nil {
+		workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
+		if err := r.Sandbox(ctx, SandboxSpec{
+			Name:       sandboxName,
+			Workspaces: workspaces,
+			StaticMCPs: p.StaticMCPs,
+			Policies:   p.Policies,
+		}); err != nil {
 			return nil, fmt.Errorf("runner: sandbox: %w", err)
 		}
 		if r.Audit != nil {
@@ -307,6 +380,8 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 				"name", sandboxName,
 				"workspaces", strings.Join(workspaces, ","),
 				"kind", p.Kind.String(),
+				"static_mcps", strings.Join(p.StaticMCPs, ","),
+				"policies", strconv.Itoa(len(p.Policies)),
 			)
 		}
 		// -w pins claude's working directory to the project workspace. The
@@ -348,8 +423,8 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 //
 // Unlike the tmux path, this does NOT call r.Sandbox or wrap the command in
 // `sbx exec` — the wrapper owns sandbox creation end-to-end.
-func (r *Runner) startACP(ctx context.Context, p Plan, workingDir string) (agent.Session, error) {
-	sandboxName := sandboxNameFor(p.Kind, p.ProjectPath)
+func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorktree string) (agent.Session, error) {
+	sandboxName := SandboxNameFor(p.Kind, p.ProjectPath, p.TaskName)
 	if sandboxName == "" {
 		return nil, fmt.Errorf("runner: acp launch for kind %s needs a ProjectPath to derive a sandbox name", p.Kind)
 	}
@@ -362,7 +437,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir string) (agent
 		return nil, err
 	}
 	sessionID := acpSessionID(p)
-	workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath)
+	workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
 
 	// Allocate the session id and write the initial session.json. acp-wrapper
 	// will overwrite this record with StatusRunning once its socket is live;
@@ -384,7 +459,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir string) (agent
 		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
 	}
 
-	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, workspaces)
+	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, workspaces, p.StaticMCPs, p.Policies)
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionID,
@@ -412,7 +487,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir string) (agent
 // acpWrapperCommand builds the argv that launches one acp-wrapper host process
 // for an ACP session. The wrapper resolves --workspace paths to absolute itself,
 // but they already are (workspace.Manager and the orch dir both yield abs paths).
-func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, workspaces []string) []string {
+func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, workspaces, staticMCPs []string, policies []policy.Rule) []string {
 	bin := r.AcpWrapperPath
 	if bin == "" {
 		bin = "acp-wrapper"
@@ -433,6 +508,12 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, 
 	}
 	if r.SbxPath != "" {
 		args = append(args, "--sbx", r.SbxPath)
+	}
+	for _, m := range staticMCPs {
+		args = append(args, "--static-mcp", m)
+	}
+	for _, p := range policies {
+		args = append(args, "--policy", p.Encode())
 	}
 	for _, w := range workspaces {
 		args = append(args, "--workspace", w)
@@ -478,6 +559,27 @@ func (r *Runner) resolveWorkingDir(ctx context.Context, p Plan) (string, error) 
 	return r.Workspaces.Create(ctx, p.Branch, p.Repos)
 }
 
+// resolvePlanningWorktree provisions the wsp worktree that backs a planning
+// agent's second sandbox mount. It returns "" for any kind that isn't planning
+// or any planning launch missing the workspace manager / Branch / Repos
+// (legitimate in dev/tests with no wsp wired up). A planning launch that DOES
+// have the wiring but fails to provision is surfaced as an error so the
+// daemon's transitionProjectBlocked path can mark the project blocked rather
+// than silently launching without the mount.
+func (r *Runner) resolvePlanningWorktree(ctx context.Context, p Plan) (string, error) {
+	if p.Kind != agent.PlanningAgent {
+		return "", nil
+	}
+	if r.Workspaces == nil || p.Branch == "" || len(p.Repos) == 0 {
+		return "", nil
+	}
+	dir, err := r.Workspaces.Create(ctx, p.Branch, p.Repos)
+	if err != nil {
+		return "", fmt.Errorf("runner: provision planning worktree: %w", err)
+	}
+	return dir, nil
+}
+
 // sessionName builds the tmux window name in the form "<kind>-<tail>". The
 // tail picks the most specific identifier the Plan carries: a task name
 // when the agent is working a specific task (task / commit agents), the
@@ -504,7 +606,7 @@ func sessionName(p Plan) string {
 	return fmt.Sprintf("%s-%s", p.Kind, tail)
 }
 
-// sandboxNameFor derives the sbx sandbox name for a given launch:
+// SandboxNameFor derives the sbx sandbox name for a given launch:
 //
 //   - Project agent → "" (no sandbox; the project agent interviews the user
 //     in the bare workspace and writes the initial .project.yaml).
@@ -512,24 +614,39 @@ func sessionName(p Plan) string {
 //     project from the host, including for sandbox-related blocks).
 //   - Planning → basename of the project's control dir (the dir holding
 //     .project.yaml). Workspace = control dir.
-//   - Task / commit → basename + "-worktree". One sandbox per project's
-//     worktree, workspace = the wsp-managed worktree dir. The hyphen (not
-//     underscore) is mandatory: sbx rejects sandbox names containing
-//     underscores.
+//   - Task / commit → "<work-stream>-<task-name>" where work-stream is the
+//     basename of the project's control dir. Each task gets its OWN sandbox
+//     so its `--static-mcp` set can differ from siblings; the commit agent
+//     for that task reuses the same sandbox so it sees the task's git work.
 //
-// Returns "" when there's no ProjectPath to derive a name from.
-func sandboxNameFor(kind agent.Kind, projectPath string) string {
+// sbx rejects sandbox names containing underscores, so any "_" in the derived
+// name is rewritten to "-" here — that matches the normalization the
+// acp-wrapper does before calling sbx, so the returned name is the one the
+// sandbox actually registers under.
+//
+// Returns "" when there's no ProjectPath to derive a name from, or when a
+// Task/Commit launch is missing TaskName (the daemon always supplies it).
+//
+// Exported so the daemon can surface the name to the TUI's sessions pane
+// without duplicating the derivation logic.
+func SandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 	if projectPath == "" {
 		return ""
 	}
 	base := filepath.Base(filepath.Dir(projectPath))
+	var name string
 	switch kind {
 	case agent.PlanningAgent:
-		return base
+		name = base
 	case agent.TaskAgent, agent.CommitAgent:
-		return base + "-worktree"
+		if taskName == "" {
+			return ""
+		}
+		name = base + "-" + taskName
+	default:
+		return ""
 	}
-	return ""
+	return strings.ReplaceAll(name, "_", "-")
 }
 
 // sandboxWorkspaces returns the host paths to mount into the sandbox. The
@@ -542,8 +659,12 @@ func sandboxNameFor(kind agent.Kind, projectPath string) string {
 // task agent's status writeback to `tasks/<name>.yaml` fails because the
 // directory simply doesn't exist inside the sandbox.
 //
-// Planning runs in the project's orch dir; one mount is enough.
-func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath string) []string {
+// Planning's primary mount is the project's orch dir (where .orch/ lives).
+// When planningWorktree is non-empty, it is mounted as a second workspace so
+// the planner can read source code from the wsp-provisioned worktree without
+// trying to clone from GitHub (the sandbox has no auth and prior runs got
+// stuck thrashing on auth failures). Empty falls back to one mount.
+func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath, planningWorktree string) []string {
 	switch kind {
 	case agent.TaskAgent, agent.CommitAgent:
 		orchDir := filepath.Dir(projectPath)
@@ -551,6 +672,11 @@ func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath string) []string
 			return []string{workingDir}
 		}
 		return []string{workingDir, orchDir}
+	case agent.PlanningAgent:
+		if planningWorktree == "" || planningWorktree == workingDir {
+			return []string{workingDir}
+		}
+		return []string{workingDir, planningWorktree}
 	}
 	return []string{workingDir}
 }

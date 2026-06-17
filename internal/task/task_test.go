@@ -109,6 +109,34 @@ func TestCommitArtifactsOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestLoadBackfillsModelDefault(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "nomodel.yaml")
+	if err := writeRaw(dst, "name: x\nstatus: ready\n"); err != nil {
+		t.Fatalf("writeRaw: %v", err)
+	}
+	tk, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if tk.Model != ModelDefault {
+		t.Errorf("Model = %q, want %q (backfill when field is absent)", tk.Model, ModelDefault)
+	}
+}
+
+func TestLoadPreservesExplicitModel(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "withmodel.yaml")
+	if err := writeRaw(dst, "name: x\nstatus: ready\nmodel: haiku\n"); err != nil {
+		t.Fatalf("writeRaw: %v", err)
+	}
+	tk, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if tk.Model != "haiku" {
+		t.Errorf("Model = %q, want %q (explicit value must survive Load)", tk.Model, "haiku")
+	}
+}
+
 func TestInvalidStatusRejected(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "bad.yaml")
 	if err := writeRaw(dst, "name: x\nstatus: notathing\n"); err != nil {

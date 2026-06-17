@@ -34,6 +34,7 @@ type Context struct {
 	TaskName      string   `yaml:"task_name,omitempty"`
 	FailedTasks   []string `yaml:"failed_tasks,omitempty"`
 	BlockedReason string   `yaml:"blocked_reason,omitempty"`
+	Worktree      string   `yaml:"worktree,omitempty"`
 }
 
 // Skill is a directory of files copied verbatim into the workspace's

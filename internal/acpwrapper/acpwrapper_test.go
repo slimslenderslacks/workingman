@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/slimslenderslacks/work/internal/policy"
 )
 
 func TestNormalizeDefaults(t *testing.T) {
@@ -156,6 +158,65 @@ func TestEnsureSandboxCreatesWhenMissing(t *testing.T) {
 	want := []string{"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp", "/repo"}
 	if !reflect.DeepEqual(create, want) {
 		t.Errorf("create call = %v, want %v", create, want)
+	}
+}
+
+func TestEnsureSandboxForwardsStaticMCPs(t *testing.T) {
+	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
+	c := Config{
+		SandboxName: "acp-s",
+		KitPath:     "/kits/acp",
+		SbxPath:     "sbx",
+		Workspaces:  []string{"/repo"},
+		StaticMCPs:  []string{"github", "web-search"},
+	}
+	if err := ensureSandbox(context.Background(), f.run, c); err != nil {
+		t.Fatalf("ensureSandbox: %v", err)
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("expected 2 sbx calls, got %d: %v", len(f.calls), f.calls)
+	}
+	create := f.calls[1]
+	want := []string{
+		"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp",
+		"--static-mcp", "github",
+		"--static-mcp", "web-search",
+		"/repo",
+	}
+	if !reflect.DeepEqual(create, want) {
+		t.Errorf("create call = %v, want %v", create, want)
+	}
+}
+
+func TestEnsureSandboxAppliesPoliciesAfterCreate(t *testing.T) {
+	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
+	c := Config{
+		SandboxName: "acp-s",
+		KitPath:     "/kits/acp",
+		SbxPath:     "sbx",
+		Workspaces:  []string{"/repo"},
+		Policies: []policy.Rule{
+			{Action: policy.ActionDeny, Kind: policy.KindNetwork, Resource: "**"},
+			{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.github.com"},
+		},
+	}
+	if err := ensureSandbox(context.Background(), f.run, c); err != nil {
+		t.Fatalf("ensureSandbox: %v", err)
+	}
+	// Expect ls, create, then one policy call per rule, in declaration order.
+	if len(f.calls) != 4 {
+		t.Fatalf("expected 4 sbx calls, got %d: %v", len(f.calls), f.calls)
+	}
+	if f.calls[1][1] != "create" {
+		t.Fatalf("call 1 = %v, want sbx create", f.calls[1])
+	}
+	wantDeny := []string{"sbx", "policy", "deny", "network", "--sandbox", "acp-s", "**"}
+	wantAllow := []string{"sbx", "policy", "allow", "network", "--sandbox", "acp-s", "api.github.com"}
+	if !reflect.DeepEqual(f.calls[2], wantDeny) {
+		t.Errorf("policy call 1 = %v, want %v", f.calls[2], wantDeny)
+	}
+	if !reflect.DeepEqual(f.calls[3], wantAllow) {
+		t.Errorf("policy call 2 = %v, want %v", f.calls[3], wantAllow)
 	}
 }
 

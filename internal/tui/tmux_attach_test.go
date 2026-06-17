@@ -199,7 +199,6 @@ func TestAttachResultSuccessClearsStatusMsg(t *testing.T) {
 func TestMouseClickAttachesSessionRow(t *testing.T) {
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
-	// Set window size first so paneWidths populates sessionsWidth.
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step.(model)
 	step2, _ := m.Update(sessionsMsg{views: []SessionView{
@@ -207,10 +206,18 @@ func TestMouseClickAttachesSessionRow(t *testing.T) {
 		{ID: "b", TmuxTarget: "orch:task-bravo"},
 	}})
 	m = step2.(model)
-	// Click on row 1 (second session). sessionRowAtY: row 1 head is at y=7.
+	// Sessions is now the bottom pane; compute its absolute start-y from the
+	// layout so the click lands inside the pane regardless of how the stack
+	// above (projects/tasks/yaml) is sized.
+	l := m.computeLayout()
+	const headerRows = 1
+	sessionsStartY := headerRows + l.projectsH + l.tasksH + l.yamlH
+	// Row 1 (second session): paneTopBorder(1) + title(1) + blank(1) +
+	// column header(1) + row 0(1) = offset 5 from the pane's top.
+	clickY := sessionsStartY + 5
 	final, cmd := m.Update(tea.MouseMsg{
 		X:      5,
-		Y:      7,
+		Y:      clickY,
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 	})
@@ -224,7 +231,10 @@ func TestMouseClickAttachesSessionRow(t *testing.T) {
 	}
 }
 
-func TestMouseClickOutsideSessionsPaneIgnored(t *testing.T) {
+func TestMouseClickAboveSessionsPaneDoesNotAttach(t *testing.T) {
+	// With the single-column layout, clicks above the sessions pane land in
+	// projects/tasks/yaml — never in sessions — so click-to-attach is gated
+	// to the bottom band.
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -233,9 +243,9 @@ func TestMouseClickOutsideSessionsPaneIgnored(t *testing.T) {
 		{ID: "a", TmuxTarget: "orch:task-alpha"},
 	}})
 	m = step2.(model)
-	// Click well to the right of the sessions pane.
+	// Click on the projects band (y=4 is well above the sessions pane).
 	_, cmd := m.Update(tea.MouseMsg{
-		X:      80,
+		X:      5,
 		Y:      4,
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
@@ -246,42 +256,41 @@ func TestMouseClickOutsideSessionsPaneIgnored(t *testing.T) {
 	}
 }
 
-func TestSessionRowAtYHandlesSeparatorsAndOOB(t *testing.T) {
-	// Header(1) + top border(1) + title+blank(2) = 4. Per-session: head=4+3*i,
-	// status=4+3*i+1, separator=4+3*i+2.
+func TestSessionRowAtYHandlesChromeAndOOB(t *testing.T) {
+	// Inside the sessions pane: top border(1) + title(1) + blank(1) +
+	// column header(1) = 4 chrome rows. Each session is one data row, so
+	// row i lives at y = 4 + i (with paneStartY=0).
 	tests := []struct {
 		name  string
 		y     int
 		count int
 		want  int
 	}{
-		{"row 0 head", 4, 3, 0},
-		{"row 0 status", 5, 3, 0},
-		{"separator", 6, 3, -1},
-		{"row 1 head", 7, 3, 1},
-		{"row 2 head", 10, 3, 2},
-		{"above pane", 0, 3, -1},
-		{"past end", 13, 3, -1},
+		{"row 0", 4, 3, 0},
+		{"row 1", 5, 3, 1},
+		{"row 2", 6, 3, 2},
+		{"top border", 0, 3, -1},
+		{"column header", 3, 3, -1},
+		{"above pane", -1, 3, -1},
+		{"past end", 7, 3, -1},
+		{"empty pane", 4, 0, -1},
 	}
 	for _, tc := range tests {
-		if got := sessionRowAtY(tc.y, tc.count); got != tc.want {
-			t.Errorf("sessionRowAtY(%d, %d) = %d, want %d (%s)",
+		if got := sessionRowAtY(tc.y, 0, tc.count); got != tc.want {
+			t.Errorf("sessionRowAtY(%d, 0, %d) = %d, want %d (%s)",
 				tc.y, tc.count, got, tc.want, tc.name)
 		}
 	}
 }
 
-func TestPaneWidthsAtCommonSizes(t *testing.T) {
-	if s, _ := paneWidths(0); s != 0 {
-		t.Errorf("zero width: sessions = %d, want 0", s)
+func TestSessionRowAtYRespectsPaneStartY(t *testing.T) {
+	// Shifting paneStartY by 20 should shift every band by 20 — i.e. the
+	// pane's vertical position is fully encoded in the argument. With 4
+	// chrome rows, row 0 is at y=24 and row 1 at y=25 when paneStartY=20.
+	if got := sessionRowAtY(24, 20, 2); got != 0 {
+		t.Errorf("sessionRowAtY(24, 20, 2) = %d, want 0", got)
 	}
-	// Wide terminal: sessions clamped to 40.
-	if s, _ := paneWidths(200); s != 40 {
-		t.Errorf("paneWidths(200) sessions = %d, want 40", s)
-	}
-	// Narrow terminal: floor to 20 then trimmed by width-10.
-	s, p := paneWidths(50)
-	if s+p != 50 {
-		t.Errorf("paneWidths(50) sessions+projects = %d, want 50", s+p)
+	if got := sessionRowAtY(25, 20, 2); got != 1 {
+		t.Errorf("sessionRowAtY(25, 20, 2) = %d, want 1", got)
 	}
 }

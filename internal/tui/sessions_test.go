@@ -148,9 +148,10 @@ func TestArrowKeysOnlyAffectSessionsWhenFocused(t *testing.T) {
 }
 
 func TestRenderSessionRowIncludesAgentProjectAndStatus(t *testing.T) {
+	cols := sessionColumnWidths(80)
 	row := renderSessionRow(SessionView{
 		ID: "a", AgentName: "task", Project: "alpha", Status: "running",
-	}, false, 30)
+	}, cols, false)
 	if !strings.Contains(row, "task") {
 		t.Errorf("row missing agent name; got:\n%s", row)
 	}
@@ -163,8 +164,9 @@ func TestRenderSessionRowIncludesAgentProjectAndStatus(t *testing.T) {
 }
 
 func TestRenderSessionRowSelectedHasMarker(t *testing.T) {
-	rowOn := renderSessionRow(SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}, true, 30)
-	rowOff := renderSessionRow(SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}, false, 30)
+	cols := sessionColumnWidths(80)
+	rowOn := renderSessionRow(SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}, cols, true)
+	rowOff := renderSessionRow(SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}, cols, false)
 	if !strings.Contains(rowOn, sessionMarkerSelected) {
 		t.Errorf("selected row missing marker %q; got:\n%s", sessionMarkerSelected, rowOn)
 	}
@@ -215,17 +217,50 @@ func TestSessionViewZeroTime(t *testing.T) {
 }
 
 func TestRenderSessionRowInteractiveBadge(t *testing.T) {
+	cols := sessionColumnWidths(80)
 	auto := SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}
 	intr := SessionView{ID: "b", AgentName: "project", Project: "bravo", Status: "running", Interactive: true}
 
-	autoOut := renderSessionRow(auto, false, 40)
-	intrOut := renderSessionRow(intr, false, 40)
+	autoOut := renderSessionRow(auto, cols, false)
+	intrOut := renderSessionRow(intr, cols, false)
 
 	if strings.Contains(autoOut, interactiveBadge) {
 		t.Errorf("autonomous row should not show the interactive badge; got:\n%s", autoOut)
 	}
 	if !strings.Contains(intrOut, interactiveBadge) {
 		t.Errorf("interactive row should include the badge %q; got:\n%s", interactiveBadge, intrOut)
+	}
+}
+
+func TestRenderSessionsTableHeader(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	step, _ := m.Update(sessionsMsg{views: []SessionView{
+		{ID: "a", AgentName: "task", Project: "alpha", Status: "running"},
+	}})
+	m = step.(model)
+	out := m.renderSessions(80, 10)
+	for _, header := range []string{"agent", "project", "task", "status", "sandbox"} {
+		if !strings.Contains(out, header) {
+			t.Errorf("table header missing column %q; got:\n%s", header, out)
+		}
+	}
+}
+
+func TestRenderSessionRowShowsSandboxNameForACP(t *testing.T) {
+	cols := sessionColumnWidths(80)
+	acp := SessionView{
+		ID: "a", AgentName: "task", Project: "alpha", TaskName: "scaffold",
+		Status: "running", SandboxName: "alpha-scaffold",
+	}
+	legacy := SessionView{
+		ID: "b", AgentName: "wolf", Project: "bravo", Status: "running",
+		Interactive: true,
+	}
+	if got := renderSessionRow(acp, cols, false); !strings.Contains(got, "alpha-scaffold") {
+		t.Errorf("ACP row should expose sandbox name; got:\n%s", got)
+	}
+	if got := renderSessionRow(legacy, cols, false); !strings.Contains(got, "—") {
+		t.Errorf("non-ACP row should render an em-dash in the sandbox column; got:\n%s", got)
 	}
 }
 

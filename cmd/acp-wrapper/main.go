@@ -30,6 +30,7 @@ import (
 	"syscall"
 
 	"github.com/slimslenderslacks/work/internal/acpwrapper"
+	"github.com/slimslenderslacks/work/internal/policy"
 )
 
 // workspacesFlag collects repeatable --workspace values, resolving each to an
@@ -46,6 +47,42 @@ func (w *workspacesFlag) Set(s string) error {
 	return nil
 }
 
+// staticMCPsFlag collects repeatable --static-mcp values, forwarded verbatim
+// as `--static-mcp <name>` to `sbx create`.
+type staticMCPsFlag []string
+
+func (m *staticMCPsFlag) String() string { return strings.Join(*m, ",") }
+func (m *staticMCPsFlag) Set(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	*m = append(*m, s)
+	return nil
+}
+
+// policiesFlag collects repeatable --policy values. Each value is the
+// encoded form "<action>:<type>:<resource>" (see policy.Rule.Encode); we
+// decode here so a typo surfaces at flag parse time, not deep inside
+// ensureSandbox after `sbx create`.
+type policiesFlag []policy.Rule
+
+func (p *policiesFlag) String() string {
+	parts := make([]string, len(*p))
+	for i, r := range *p {
+		parts[i] = r.Encode()
+	}
+	return strings.Join(parts, ",")
+}
+
+func (p *policiesFlag) Set(s string) error {
+	r, err := policy.Decode(s)
+	if err != nil {
+		return err
+	}
+	*p = append(*p, r)
+	return nil
+}
+
 func main() {
 	fs := flag.NewFlagSet("acp-wrapper", flag.ExitOnError)
 	sessionID := fs.String("session-id", "", "unique session id; names the session dir and (by default) the sandbox (required)")
@@ -56,6 +93,10 @@ func main() {
 	exitWhenEmpty := fs.Bool("exit-when-empty", false, "shut down once the last connected TUI disconnects (after at least one has connected); used by orch's autonomous single-turn flow")
 	var workspaces workspacesFlag
 	fs.Var(&workspaces, "workspace", "host path to mount into the sandbox; the first is the ACP client cwd (repeatable, at least one required)")
+	var staticMCPs staticMCPsFlag
+	fs.Var(&staticMCPs, "static-mcp", "static-MCP name to attach when creating the sandbox; passed verbatim to `sbx create --static-mcp` (repeatable)")
+	var policies policiesFlag
+	fs.Var(&policies, "policy", "sbx policy rule applied after `sbx create`, encoded as \"<allow|deny>:<network|filesystem>:<resource>\" (repeatable)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -68,6 +109,8 @@ func main() {
 		SbxPath:       *sbxPath,
 		Workspaces:    workspaces,
 		ExitWhenEmpty: *exitWhenEmpty,
+		StaticMCPs:    staticMCPs,
+		Policies:      policies,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

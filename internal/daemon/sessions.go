@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/slimslenderslacks/work/internal/runner"
 )
 
 // SessionStatus is the lifecycle state of a tracked session as the daemon
@@ -46,6 +48,13 @@ type SessionInfo struct {
 	// human (project, wolf). The TUI uses it to flag sessions that won't
 	// make progress on their own.
 	Interactive bool
+	// SandboxName is the sbx sandbox the agent is running inside. Populated
+	// only for ACP-routed sessions (the daemon's runner has an AcpLauncher
+	// and the agent kind is non-interactive); empty otherwise, because the
+	// legacy tmux + `sbx exec` path treats the sandbox as an implementation
+	// detail. Matches the name visible in `sbx ls` — underscores already
+	// normalized to hyphens.
+	SandboxName string
 }
 
 // ListSessions returns a snapshot of every session the daemon is currently
@@ -56,7 +65,7 @@ func (d *Daemon) ListSessions() []SessionInfo {
 	defer d.sessionsMu.Unlock()
 	out := make([]SessionInfo, 0, len(d.sessions))
 	for key, entry := range d.sessions {
-		out = append(out, SessionInfo{
+		info := SessionInfo{
 			ID:          key,
 			AgentName:   entry.kind.String(),
 			Project:     filepath.Base(filepath.Dir(key)),
@@ -65,7 +74,11 @@ func (d *Daemon) ListSessions() []SessionInfo {
 			StartedAt:   entry.startedAt,
 			TaskName:    entry.taskName,
 			Interactive: entry.kind.Interactive(),
-		})
+		}
+		if d.runner != nil && d.runner.UsesACP(entry.kind) {
+			info.SandboxName = runner.SandboxNameFor(entry.kind, key, entry.taskName)
+		}
+		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].StartedAt.Equal(out[j].StartedAt) {
@@ -142,5 +155,6 @@ func sessionInfoEqual(a, b SessionInfo) bool {
 		a.Status == b.Status &&
 		a.StartedAt.Equal(b.StartedAt) &&
 		a.TaskName == b.TaskName &&
-		a.Interactive == b.Interactive
+		a.Interactive == b.Interactive &&
+		a.SandboxName == b.SandboxName
 }

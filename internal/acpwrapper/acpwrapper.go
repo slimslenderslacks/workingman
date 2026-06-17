@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/session"
 )
 
@@ -92,6 +93,19 @@ type Config struct {
 	// Leave false for interactive/long-lived sessions that should survive
 	// transient TUI disconnects.
 	ExitWhenEmpty bool
+
+	// StaticMCPs are sbx static-MCP names to attach to the sandbox when it
+	// is created (each becomes a `--static-mcp <name>` flag on `sbx create`).
+	// Ignored when the sandbox already exists with a matching workspace set —
+	// the sandbox name encodes the task identity, so a reused name implies a
+	// matching MCP set.
+	StaticMCPs []string
+
+	// Policies are sbx policy rules applied with `sbx policy ...` after the
+	// sandbox is created and before any `sbx exec`. Same reuse semantics as
+	// StaticMCPs: skipped on an existing sandbox because the name encodes
+	// the policy set.
+	Policies []policy.Rule
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -222,7 +236,10 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 //  1. `sbx ls --json` to find an existing sandbox by name.
 //  2. Same workspace set → no-op.
 //  3. Different set → `sbx rm --force` then recreate (self-heals drift).
-//  4. Otherwise `sbx create claude --name <name> --kit <kit> <ws...>`.
+//  4. Otherwise `sbx create claude --name <name> --kit <kit> [--static-mcp <m>...] <ws...>`,
+//     then one `sbx policy <action> <kind> --sandbox <name> <resource>` per rule
+//     in c.Policies, in declaration order (so deny-all + allow-host stacks
+//     evaluate left-to-right).
 func ensureSandbox(ctx context.Context, run commandFunc, c Config) error {
 	existing, err := readSandboxWorkspaces(ctx, run, c.SbxPath, c.SandboxName)
 	if err != nil {
@@ -237,9 +254,21 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) error {
 		}
 	}
 	args := []string{"create", "claude", "--name", c.SandboxName, "--kit", c.KitPath}
+	for _, m := range c.StaticMCPs {
+		args = append(args, "--static-mcp", m)
+	}
 	args = append(args, c.Workspaces...)
 	if out, err := run(ctx, c.SbxPath, args...); err != nil {
 		return fmt.Errorf("acpwrapper: sbx create %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
+	}
+	for _, r := range c.Policies {
+		if err := r.Validate(); err != nil {
+			return fmt.Errorf("acpwrapper: sbx policy %s: %w", c.SandboxName, err)
+		}
+		if out, err := run(ctx, c.SbxPath, r.CLIArgs(c.SandboxName)...); err != nil {
+			return fmt.Errorf("acpwrapper: sbx policy %s %s %s %s: %w: %s",
+				r.Action, r.Kind, c.SandboxName, r.Resource, err, strings.TrimSpace(string(out)))
+		}
 	}
 	return nil
 }

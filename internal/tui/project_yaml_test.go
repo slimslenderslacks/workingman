@@ -109,6 +109,42 @@ func TestProjectYAMLScrollAdvancesOnDown(t *testing.T) {
 	}
 }
 
+func TestCtrlFCtrlBPageYAMLRegardlessOfFocus(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	// Use a window tall enough that the YAML pane gets a meaningful slice.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
+	m = sized.(model)
+	step, _ := m.Update(projectsMsg{views: []ProjectView{
+		{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusReady},
+	}})
+	m = step.(model)
+
+	// Force focus to projects so we prove the binding is independent of
+	// pane focus.
+	m.focus = paneProjects
+	page := yamlPageSize(m)
+	if page <= 0 {
+		t.Fatalf("yamlPageSize = %d; need a positive page size for the test (height too small?)", page)
+	}
+
+	fwd, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	m = fwd.(model)
+	if m.yamlScroll != page {
+		t.Errorf("ctrl+f from focus=projects: scroll = %d, want %d", m.yamlScroll, page)
+	}
+	back, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = back.(model)
+	if m.yamlScroll != 0 {
+		t.Errorf("ctrl+b back to top: scroll = %d, want 0", m.yamlScroll)
+	}
+	// Ctrl+b at zero must not underflow.
+	back2, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = back2.(model)
+	if m.yamlScroll != 0 {
+		t.Errorf("ctrl+b at zero: scroll = %d, want 0", m.yamlScroll)
+	}
+}
+
 func TestProjectYAMLScrollResetsWhenSelectionChanges(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 60})

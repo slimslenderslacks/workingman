@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/slimslenderslacks/work/internal/agent"
+	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
@@ -169,8 +170,8 @@ func TestACPLaunchTaskAgentMountsOrchDir(t *testing.T) {
 	if len(ws) != 2 || ws[0] != wantWorktree || ws[1] != orchDir {
 		t.Errorf("--workspace = %v, want [%q %q]", ws, wantWorktree, orchDir)
 	}
-	if got := argValue(cmd, "--sandbox"); got != filepath.Base(orchDir)+"-worktree" {
-		t.Errorf("--sandbox = %q, want %q", got, filepath.Base(orchDir)+"-worktree")
+	if got := argValue(cmd, "--sandbox"); got != filepath.Base(orchDir)+"-first" {
+		t.Errorf("--sandbox = %q, want %q", got, filepath.Base(orchDir)+"-first")
 	}
 	if got := argValue(cmd, "--session-id"); got != "task-first" {
 		t.Errorf("--session-id = %q, want task-first", got)
@@ -178,6 +179,155 @@ func TestACPLaunchTaskAgentMountsOrchDir(t *testing.T) {
 	// --sbx omitted when SbxPath is unset.
 	if got := argValue(cmd, "--sbx"); got != "" {
 		t.Errorf("--sbx = %q, want empty (unset)", got)
+	}
+}
+
+func TestACPLaunchPlanningAgentMountsWorktree(t *testing.T) {
+	wsRoot := t.TempDir()
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sessionsRoot := t.TempDir()
+
+	acp := &fakeLauncher{}
+	r := &Runner{
+		Workspaces:   workspace.NewStub(wsRoot),
+		Launcher:     &fakeLauncher{},
+		AcpLauncher:  acp,
+		Kit:          "kit-ref",
+		SessionsRoot: sessionsRoot,
+	}
+
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.PlanningAgent,
+		WorkingDir:  orchDir,
+		ProjectPath: projectPath,
+		Branch:      "feat-x",
+		Repos:       []workspace.Repo{{Identity: "github.com/example/repo"}},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	wantWorktree := filepath.Join(wsRoot, "feat-x")
+	cmd := acp.last.Command
+	ws := argValues(cmd, "--workspace")
+	if len(ws) != 2 || ws[0] != orchDir || ws[1] != wantWorktree {
+		t.Errorf("--workspace = %v, want [%q %q]", ws, orchDir, wantWorktree)
+	}
+}
+
+func TestACPLaunchPlanningAgentNoRepoSingleMount(t *testing.T) {
+	// Planning with a Workspaces manager but no Repos must NOT call Create
+	// (no Repos means no source to mount); the planner falls back to the
+	// single-mount layout.
+	wsRoot := t.TempDir()
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	acp := &fakeLauncher{}
+	r := &Runner{
+		Workspaces:   workspace.NewStub(wsRoot),
+		Launcher:     &fakeLauncher{},
+		AcpLauncher:  acp,
+		Kit:          "kit-ref",
+		SessionsRoot: t.TempDir(),
+	}
+
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.PlanningAgent,
+		WorkingDir:  orchDir,
+		ProjectPath: projectPath,
+		Branch:      "feat-x",
+		// no Repos
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ws := argValues(acp.last.Command, "--workspace")
+	if len(ws) != 1 || ws[0] != orchDir {
+		t.Errorf("--workspace = %v, want [%q]", ws, orchDir)
+	}
+}
+
+func TestACPLaunchTaskAgentForwardsStaticMCPs(t *testing.T) {
+	wsRoot := t.TempDir()
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	acp := &fakeLauncher{}
+	r := &Runner{
+		Workspaces:   workspace.NewStub(wsRoot),
+		Launcher:     &fakeLauncher{},
+		AcpLauncher:  acp,
+		Kit:          "kit-ref",
+		SessionsRoot: t.TempDir(),
+	}
+
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.TaskAgent,
+		Branch:      "feat-x",
+		ProjectPath: projectPath,
+		TaskPath:    filepath.Join(orchDir, "tasks", "first.yaml"),
+		TaskName:    "first",
+		StaticMCPs:  []string{"github", "web-search"},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	mcps := argValues(acp.last.Command, "--static-mcp")
+	if len(mcps) != 2 || mcps[0] != "github" || mcps[1] != "web-search" {
+		t.Errorf("--static-mcp = %v, want [github web-search]", mcps)
+	}
+}
+
+func TestACPLaunchTaskAgentForwardsPolicies(t *testing.T) {
+	wsRoot := t.TempDir()
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	acp := &fakeLauncher{}
+	r := &Runner{
+		Workspaces:   workspace.NewStub(wsRoot),
+		Launcher:     &fakeLauncher{},
+		AcpLauncher:  acp,
+		Kit:          "kit-ref",
+		SessionsRoot: t.TempDir(),
+	}
+
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.TaskAgent,
+		Branch:      "feat-x",
+		ProjectPath: projectPath,
+		TaskPath:    filepath.Join(orchDir, "tasks", "first.yaml"),
+		TaskName:    "first",
+		Policies: []policy.Rule{
+			{Action: policy.ActionDeny, Kind: policy.KindNetwork, Resource: "**"},
+			{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.github.com"},
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	got := argValues(acp.last.Command, "--policy")
+	want := []string{"deny:network:**", "allow:network:api.github.com"}
+	if len(got) != len(want) {
+		t.Fatalf("--policy = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("--policy[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

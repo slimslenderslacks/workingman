@@ -23,6 +23,13 @@ type SessionView struct {
 	// tmux prompt (project, wolf). The sessions pane highlights these
 	// rows so the user can see at a glance which sessions need attention.
 	Interactive bool
+	// SandboxName is the sbx sandbox the session is running in. Set only
+	// for ACP-routed sessions (planning / task / commit launched via
+	// acp-wrapper); empty for the legacy tmux+sbx-exec path and for the
+	// interactive kinds that never use a sandbox. The sessions pane
+	// surfaces it in its own column so the user can correlate a row with
+	// the underlying `sbx` resource.
+	SandboxName string
 }
 
 // reconcileSelection returns the session ID the pane should keep highlighted

@@ -171,6 +171,14 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		TasksDir:    filepath.Join(root, "tasks"),
 		TaskPath:    t.Path,
 		TaskName:    t.Name,
+		// Commit shares the task's per-task sandbox (same sandbox name);
+		// passing the same MCPs + policies keeps the rule set consistent on
+		// reuse. `sbx create` is skipped when the sandbox already exists, so
+		// policies typically remain whatever the task agent's first create
+		// applied — we forward them here for the case where commit happens
+		// to be the first launch (retry after a crash, etc.).
+		StaticMCPs: t.StaticMCPs,
+		Policies:   t.Policies,
 	}
 	err := d.startSession(projectPath, plan, func() {
 		d.afterCommitSession(projectPath, plan.TaskPath, p)

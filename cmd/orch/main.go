@@ -244,6 +244,7 @@ func adaptSessionFeed(ctx context.Context, in <-chan []daemon.SessionInfo) <-cha
 						StartedAt:   s.StartedAt,
 						TaskName:    s.TaskName,
 						Interactive: s.Interactive,
+						SandboxName: s.SandboxName,
 					}
 				}
 				select {
