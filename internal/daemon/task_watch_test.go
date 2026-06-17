@@ -48,11 +48,13 @@ func TestTaskFileWatching(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Save updated: %v", err)
 	}
-	if ok, snap := waitForCount(t, buf, "task_file_updated", 2, 2*time.Second); !ok {
-		t.Fatalf("no second task_file_updated.\naudit:\n%s", snap)
-	}
-	if !strings.Contains(buf.String(), "status=success") {
-		t.Errorf("expected status=success in audit:\n%s", buf.String())
+	// Wait for the distinguishing content of the second save rather than a count
+	// of task_file_updated events: the initial save can emit two events (fsnotify
+	// CREATE + WRITE for a newly created file), which would satisfy a count of 2
+	// before the second save is ever processed and leave the assertions below
+	// reading only the status=ready entries.
+	if ok, snap := waitForWithin(t, buf, "status=success", 2*time.Second); !ok {
+		t.Fatalf("no task_file_updated reflecting the status=success save.\naudit:\n%s", snap)
 	}
 	if !strings.Contains(buf.String(), "attempts=2") {
 		t.Errorf("expected attempts=2 in audit:\n%s", buf.String())
