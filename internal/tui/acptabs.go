@@ -14,22 +14,35 @@ import (
 // be unit-tested in isolation; acpwatch.go owns the live wiring that feeds these
 // structures from real session.Store discovery + acpclient connections.
 
-// transcriptKind distinguishes the two kinds of entries in a tab's transcript:
-// a prompt the TUI sent to the agent, and a chunk of assistant output streamed
-// back. Keeping them typed lets the renderer label each block ("prompt" vs
-// "agent") so the conversation reads top-to-bottom.
+// transcriptKind distinguishes the kinds of entries in a tab's transcript: a
+// prompt the TUI sent, a chunk of assistant output, the agent's private
+// reasoning, a tool invocation, and the agent's task plan. Keeping them typed
+// lets the renderer label each block so the conversation reads top-to-bottom.
 type transcriptKind int
 
 const (
 	entryPrompt transcriptKind = iota
 	entryMessage
+	entryThought
+	entryTool
+	entryPlan
 )
 
-// transcriptEntry is one block in a tab's scrollback: either a whole prompt or
-// an assistant message accreted from streamed chunks.
+// transcriptEntry is one block in a tab's scrollback. text holds the prose for
+// the prompt/message/thought kinds and the title for a tool block; the tool* and
+// plan fields carry the extra structure those kinds render.
 type transcriptEntry struct {
 	kind transcriptKind
 	text string
+
+	// entryTool fields.
+	toolID     string
+	toolKind   string
+	toolStatus string
+	toolOutput string
+
+	// entryPlan field: the agent's current task list.
+	plan []acpclient.PlanEntry
 }
 
 // acpTab is the per-session state the tab view renders. status is the latest
@@ -44,6 +57,10 @@ type acpTab struct {
 	status  acpclient.State
 	entries []transcriptEntry
 	curMsg  int
+	// toolIdx maps a tool call id to the index of its entryTool block so a later
+	// tool_call_update mutates the block in place instead of appending a copy.
+	// Lazily created; entries are only ever appended, so stored indices stay valid.
+	toolIdx map[string]int
 }
 
 // acpTabs is the collection of tabs plus the selected index. The zero value is
@@ -110,12 +127,15 @@ func (a *acpTabs) addPrompt(id, text string) {
 }
 
 // apply folds one acpclient.Event into the tab's state: it updates the status
-// and, for streaming chunks, accretes the assistant text.
+// and routes the payload by Event.Kind.
 //
+//   - EventToolCall and EventPlan are handled by their helpers below.
+//   - EventStream / EventThought share the streaming-accretion path, differing
+//     only in the entry kind they open:
 //   - StateStreaming with empty Text marks the start of a turn: curMsg is reset
-//     so the next non-empty chunk opens a new message block.
-//   - StateStreaming with text appends to the in-progress message (or opens one
-//     if none is open).
+//     so the next non-empty chunk opens a new block.
+//   - StateStreaming with text appends to the in-progress block of the same
+//     kind (or opens one if none is open, or the open block is a different kind).
 //   - StateCompleted ends the turn (curMsg -1).
 //   - Terminal states (disconnected/errored) just record the status so the tab
 //     shows the session ended; the transcript is preserved.
@@ -125,6 +145,16 @@ func (a *acpTabs) apply(id string, ev acpclient.Event) {
 		return
 	}
 	t := &a.tabs[i]
+
+	switch ev.Kind {
+	case acpclient.EventToolCall:
+		t.applyToolCall(ev)
+		return
+	case acpclient.EventPlan:
+		t.applyPlan(ev)
+		return
+	}
+
 	switch ev.State {
 	case acpclient.StateStreaming:
 		t.status = ev.State
@@ -132,8 +162,12 @@ func (a *acpTabs) apply(id string, ev acpclient.Event) {
 			t.curMsg = -1
 			return
 		}
-		if t.curMsg < 0 {
-			t.entries = append(t.entries, transcriptEntry{kind: entryMessage, text: ev.Text})
+		kind := entryMessage
+		if ev.Kind == acpclient.EventThought {
+			kind = entryThought
+		}
+		if t.curMsg < 0 || t.entries[t.curMsg].kind != kind {
+			t.entries = append(t.entries, transcriptEntry{kind: kind, text: ev.Text})
 			t.curMsg = len(t.entries) - 1
 		} else {
 			t.entries[t.curMsg].text += ev.Text
@@ -147,6 +181,60 @@ func (a *acpTabs) apply(id string, ev acpclient.Event) {
 			t.curMsg = -1
 		}
 	}
+}
+
+// applyToolCall folds a tool_call / tool_call_update event into the transcript.
+// A tool call interrupts any in-progress assistant or thought block (curMsg is
+// reset) so the following text opens a fresh block. The first event for a tool
+// id opens a tool block; later events for the same id mutate it in place —
+// updating status/title and accreting output — rather than appending a copy.
+func (t *acpTab) applyToolCall(ev acpclient.Event) {
+	t.status = ev.State
+	t.curMsg = -1
+	if t.toolIdx == nil {
+		t.toolIdx = make(map[string]int)
+	}
+	if ev.ToolCallID != "" {
+		if idx, ok := t.toolIdx[ev.ToolCallID]; ok {
+			e := &t.entries[idx]
+			if ev.ToolTitle != "" {
+				e.text = ev.ToolTitle
+			}
+			if ev.ToolKind != "" {
+				e.toolKind = ev.ToolKind
+			}
+			if ev.ToolStatus != "" {
+				e.toolStatus = ev.ToolStatus
+			}
+			e.toolOutput += ev.Text
+			return
+		}
+	}
+	t.entries = append(t.entries, transcriptEntry{
+		kind:       entryTool,
+		text:       ev.ToolTitle,
+		toolID:     ev.ToolCallID,
+		toolKind:   ev.ToolKind,
+		toolStatus: ev.ToolStatus,
+		toolOutput: ev.Text,
+	})
+	if ev.ToolCallID != "" {
+		t.toolIdx[ev.ToolCallID] = len(t.entries) - 1
+	}
+}
+
+// applyPlan records the agent's task list. ACP sends the whole plan on every
+// change, so a single plan block is kept and replaced in place rather than
+// appended each time. The plan is not part of the streamed message flow, so it
+// leaves curMsg untouched.
+func (t *acpTab) applyPlan(ev acpclient.Event) {
+	for i := range t.entries {
+		if t.entries[i].kind == entryPlan {
+			t.entries[i].plan = ev.Plan
+			return
+		}
+	}
+	t.entries = append(t.entries, transcriptEntry{kind: entryPlan, plan: ev.Plan})
 }
 
 // next / prev cycle the selected tab, wrapping at the ends so left/right keys
@@ -211,6 +299,38 @@ func acpStatusGlyph(s acpclient.State) string {
 	return "○"
 }
 
+// acpToolHeading renders a tool block's one-line header: a gear, the tool's
+// title (falling back to its kind, then a generic label when neither is set),
+// and its current status. The whole heading is styled as one unit so the status
+// rides along with the title.
+func acpToolHeading(e transcriptEntry) string {
+	title := e.text
+	if title == "" {
+		title = e.toolKind
+	}
+	if title == "" {
+		title = "tool"
+	}
+	head := "⚙ " + title
+	if e.toolStatus != "" {
+		head += " · " + e.toolStatus
+	}
+	return acpToolLabelStyle.Render(head)
+}
+
+// acpPlanGlyph maps a plan entry's status to a checkbox-style glyph: done, in
+// progress, or pending.
+func acpPlanGlyph(status string) string {
+	switch status {
+	case "completed":
+		return "✓"
+	case "in_progress":
+		return "▸"
+	default:
+		return "○"
+	}
+}
+
 // acpStatusStyle colours the status to match the palette the rest of the UI
 // uses: green-ish for active/done, red for ended, dim for transitional.
 func acpStatusStyle(s acpclient.State) lipgloss.Style {
@@ -242,6 +362,15 @@ var (
 	acpMsgLabelStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("110"))
+	acpThoughtLabelStyle = lipgloss.NewStyle().
+				Italic(true).
+				Foreground(lipgloss.Color("103"))
+	acpToolLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("180"))
+	acpPlanLabelStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("147"))
 )
 
 // acpChromeRows is the non-body height of the ACP view: header, tab bar, status
@@ -282,10 +411,28 @@ func renderACPTabBody(t *acpTab, width, height int) string {
 		switch e.kind {
 		case entryPrompt:
 			lines = append(lines, acpPromptLabelStyle.Render("▷ prompt"))
+			lines = append(lines, acpWrapLines(e.text, width)...)
 		case entryMessage:
 			lines = append(lines, acpMsgLabelStyle.Render("◁ agent"))
+			lines = append(lines, acpWrapLines(e.text, width)...)
+		case entryThought:
+			lines = append(lines, acpThoughtLabelStyle.Render("◌ thinking"))
+			for _, l := range acpWrapLines(e.text, width) {
+				lines = append(lines, dimStyle.Render(l))
+			}
+		case entryTool:
+			lines = append(lines, acpWrapLines(acpToolHeading(e), width)...)
+			if e.toolOutput != "" {
+				for _, l := range acpWrapLines(e.toolOutput, width) {
+					lines = append(lines, dimStyle.Render(l))
+				}
+			}
+		case entryPlan:
+			lines = append(lines, acpPlanLabelStyle.Render("☰ plan"))
+			for _, pe := range e.plan {
+				lines = append(lines, acpWrapLines(acpPlanGlyph(pe.Status)+" "+pe.Content, width)...)
+			}
 		}
-		lines = append(lines, acpWrapLines(e.text, width)...)
 		lines = append(lines, "")
 	}
 	if len(lines) > height {

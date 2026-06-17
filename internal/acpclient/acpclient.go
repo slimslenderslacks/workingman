@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 )
 
@@ -81,12 +82,47 @@ func (s State) IsTerminal() bool {
 	return s == StateDisconnected || s == StateErrored
 }
 
-// Event is one transition or streamed delta on a Client's connection. Exactly
-// one Event shape is produced per State:
+// EventKind classifies what an Event carries, orthogonally to its connection
+// State. The zero value (EventStream) is an assistant message chunk — the
+// original and most common Event — so every Event constructed without setting
+// Kind keeps its historical meaning. The other kinds surface activity that used
+// to be decoded and dropped: the agent's private reasoning, its tool
+// invocations, and its task plan.
+type EventKind int
+
+const (
+	// EventStream is a streamed assistant message chunk; Text holds the delta.
+	EventStream EventKind = iota
+	// EventThought is a streamed agent reasoning chunk; Text holds the delta.
+	EventThought
+	// EventToolCall is a tool invocation appearing or changing. ToolCallID
+	// identifies it across updates, ToolTitle/ToolKind describe it, ToolStatus is
+	// its latest status, and Text holds any output emitted so far.
+	EventToolCall
+	// EventPlan is the agent's current task list; Plan holds the full list, sent
+	// fresh on every change.
+	EventPlan
+)
+
+// PlanEntry is one task in an EventPlan's Plan.
+type PlanEntry struct {
+	Content string
+	Status  string // pending | in_progress | completed
+}
+
+// Event is one transition or streamed delta on a Client's connection. Kind
+// classifies the payload; State carries the connection lifecycle independently
+// (a tool call or plan update, for instance, arrives while State is streaming).
+// The shapes:
 //
 //   - StateConnecting / StateConnected: lifecycle markers, no payload.
-//   - StateStreaming: Text holds an incremental assistant chunk (empty Text
-//     marks the start of a turn, before the first chunk).
+//   - StateStreaming, Kind EventStream: Text holds an incremental assistant
+//     chunk (empty Text marks the start of a turn, before the first chunk).
+//   - StateStreaming, Kind EventThought: Text holds an incremental reasoning
+//     chunk.
+//   - StateStreaming, Kind EventToolCall: ToolCallID/ToolTitle/ToolKind/
+//     ToolStatus describe the tool call and Text holds any output so far.
+//   - StateStreaming, Kind EventPlan: Plan holds the agent's task list.
 //   - StateCompleted: StopReason holds the turn's terminal reason.
 //   - StateDisconnected / StateErrored: Err holds the cause (nil for a clean
 //     disconnect).
@@ -95,10 +131,23 @@ func (s State) IsTerminal() bool {
 // is closed after the single terminal Event, so a `for range` over it drains
 // naturally when the session ends.
 type Event struct {
+	// Kind classifies the payload; see EventKind. The zero value EventStream is
+	// an assistant message chunk.
+	Kind EventKind
+
 	State      State
 	Text       string
 	StopReason string
 	Err        error
+
+	// Tool-call fields, set when Kind == EventToolCall.
+	ToolCallID string
+	ToolTitle  string
+	ToolKind   string
+	ToolStatus string
+
+	// Plan is the agent's task list, set when Kind == EventPlan.
+	Plan []PlanEntry
 }
 
 // Client is one TUI-side ACP connection to a session's agent.sock. Construct it
@@ -433,11 +482,9 @@ func (c *Client) rejectRequest(id int, method string) {
 }
 
 // handleUpdate decodes a session/update notification and emits the display
-// Event it maps to. Assistant message chunks become StateStreaming Events
-// carrying the incremental text; thought chunks are surfaced the same way (they
-// are still streamed model output). Tool-call and other kinds carry no assistant
-// text and are not rendered as reply text here — surfacing them richly is the
-// session-tabs task's concern.
+// Event it maps to. Assistant message chunks, agent thought chunks, tool calls,
+// and plan updates each become an Event (distinguished by Event.Kind); kinds we
+// don't render decode to ok=false and are dropped.
 func (c *Client) handleUpdate(params json.RawMessage) {
 	if ev, ok := eventFromUpdateParams(params); ok {
 		c.emit(ev)
@@ -445,31 +492,89 @@ func (c *Client) handleUpdate(params json.RawMessage) {
 }
 
 // eventFromUpdateParams maps a session/update notification's params to the
-// display Event it produces, or ok=false when the update carries no assistant
-// text. It is the single decode point shared by the live read loop
+// display Event it produces, or ok=false when the update is a kind we don't
+// render. It is the single decode point shared by the live read loop
 // (handleUpdate) and the log-replay path (ParseStreamFrame), so a reconnecting
-// TUI rebuilds scrollback through exactly the same Event shape the live stream
+// TUI rebuilds scrollback through exactly the same Event shapes the live stream
 // would have produced.
 func eventFromUpdateParams(params json.RawMessage) (Event, bool) {
 	var p updateParams
-	if err := json.Unmarshal(params, &p); err != nil {
+	if err := json.Unmarshal(params, &p); err != nil || len(p.Update) == 0 {
 		return Event{}, false
 	}
-	switch p.Update.SessionUpdate {
+	var k updateKind
+	if err := json.Unmarshal(p.Update, &k); err != nil {
+		return Event{}, false
+	}
+
+	switch k.SessionUpdate {
 	case updateAgentMessageChunk, updateAgentThoughtChunk:
-		if p.Update.Content != nil && p.Update.Content.Text != "" {
-			return Event{State: StateStreaming, Text: p.Update.Content.Text}, true
+		var m messageUpdate
+		if err := json.Unmarshal(p.Update, &m); err != nil {
+			return Event{}, false
+		}
+		if m.Content == nil || m.Content.Text == "" {
+			return Event{}, false
+		}
+		kind := EventStream
+		if k.SessionUpdate == updateAgentThoughtChunk {
+			kind = EventThought
+		}
+		return Event{Kind: kind, State: StateStreaming, Text: m.Content.Text}, true
+
+	case updateToolCall, updateToolCallUpdate:
+		var tc toolCallUpdate
+		if err := json.Unmarshal(p.Update, &tc); err != nil {
+			return Event{}, false
+		}
+		return Event{
+			Kind:       EventToolCall,
+			State:      StateStreaming,
+			ToolCallID: tc.ToolCallID,
+			ToolTitle:  tc.Title,
+			ToolKind:   tc.Kind,
+			ToolStatus: tc.Status,
+			Text:       flattenToolOutput(tc.Content),
+		}, true
+
+	case updatePlan:
+		var pl planUpdate
+		if err := json.Unmarshal(p.Update, &pl); err != nil {
+			return Event{}, false
+		}
+		entries := make([]PlanEntry, 0, len(pl.Entries))
+		for _, e := range pl.Entries {
+			entries = append(entries, PlanEntry{Content: e.Content, Status: e.Status})
+		}
+		return Event{Kind: EventPlan, State: StateStreaming, Plan: entries}, true
+	}
+
+	return Event{}, false
+}
+
+// flattenToolOutput concatenates the text carried by a tool call's content
+// blocks. The common block is {"type":"content","content":{...text...}}; a bare
+// inline "text" is also read. Non-text variants (diffs, terminal handles)
+// contribute nothing.
+func flattenToolOutput(blocks []toolCallContent) string {
+	var b strings.Builder
+	for _, c := range blocks {
+		switch {
+		case c.Content != nil && c.Content.Text != "":
+			b.WriteString(c.Content.Text)
+		case c.Text != "":
+			b.WriteString(c.Text)
 		}
 	}
-	return Event{}, false
+	return b.String()
 }
 
 // ParseStreamFrame decodes one raw newline-delimited ACP frame — as recorded in
 // a session's stream log by the acp-wrapper bridge — into the display Event it
-// maps to. A reconnecting TUI replays the log through this so the prior
-// assistant output is rebuilt as StateStreaming Events, identical to what the
-// live read loop emits. It returns ok=false for frames that carry no assistant
-// display text (responses, agent→client requests, tool-call updates, or
+// maps to. A reconnecting TUI replays the log through this so the prior assistant
+// output, thoughts, tool calls, and plan are rebuilt as Events identical to what
+// the live read loop emits. It returns ok=false for frames that carry no display
+// payload (responses, agent→client requests, unrendered notification kinds, or
 // malformed lines), which the caller simply skips.
 func ParseStreamFrame(line []byte) (Event, bool) {
 	var f frame

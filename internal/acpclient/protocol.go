@@ -143,31 +143,73 @@ func textBlock(text string) contentBlock {
 }
 
 // updateParams is the payload of a session/update notification: which session it
-// concerns and the tagged update union. We decode Update lazily so we only pay
-// for the kinds we render.
+// concerns and the tagged update union. Update is kept raw so the decoder can
+// peek the kind discriminator and then unmarshal only the variant it renders.
+// Decoding lazily is also what lets a tool_call's array-shaped "content" coexist
+// with a message chunk's object-shaped "content": the two kinds share the field
+// name but not the JSON type, so a single struct embedding both would fail to
+// decode one of them.
 type updateParams struct {
 	SessionID string          `json:"sessionId"`
-	Update    sessionUpdate   `json:"update"`
-	Raw       json.RawMessage `json:"-"`
+	Update    json.RawMessage `json:"update"`
 }
 
-// sessionUpdate is the discriminated update body. SessionUpdate is the kind tag;
-// Content carries the text for the message/thought chunk kinds. Tool-call and
-// other kinds decode with a zero Content and are surfaced as non-text activity.
-type sessionUpdate struct {
-	// SessionUpdate is the kind discriminator: "agent_message_chunk",
-	// "agent_thought_chunk", "tool_call", "tool_call_update", etc.
+// updateKind peeks just the discriminator out of an update body so the decoder
+// can branch to the matching variant struct below.
+type updateKind struct {
 	SessionUpdate string `json:"sessionUpdate"`
-	// Content is the chunk body for the *_message_chunk / *_thought_chunk kinds.
-	// Pointer so an absent content (tool-call kinds) is distinguishable from an
-	// empty-text chunk.
+}
+
+// messageUpdate decodes the *_message_chunk / *_thought_chunk kinds, whose
+// content is a single text block.
+type messageUpdate struct {
 	Content *contentBlock `json:"content"`
 }
 
-// Update kind discriminators we special-case. agentMessageChunk is the streamed
-// assistant text the TUI renders incrementally; the others are recognised so we
-// can classify a notification as "activity" without rendering it as reply text.
+// toolCallUpdate decodes both tool_call (a tool invocation appearing) and
+// tool_call_update (its status/output changing). The two share a shape;
+// tool_call_update simply omits the fields that have not changed. Content is an
+// array of output blocks — a different JSON type than a message chunk's
+// object-shaped content, which is why updateParams.Update is decoded lazily.
+type toolCallUpdate struct {
+	ToolCallID string            `json:"toolCallId"`
+	Title      string            `json:"title"`
+	Kind       string            `json:"kind"`   // read | edit | execute | search | ...
+	Status     string            `json:"status"` // pending | in_progress | completed | failed
+	Content    []toolCallContent `json:"content"`
+}
+
+// toolCallContent is one block of a tool call's output. The common variant is
+// {"type":"content","content":{...text...}}; some agents inline a bare "text".
+// We read whichever is present and ignore the diff/terminal variants.
+type toolCallContent struct {
+	Type    string        `json:"type"`
+	Content *contentBlock `json:"content"`
+	Text    string        `json:"text"`
+}
+
+// planUpdate decodes the plan kind: the agent's current task list, sent in full
+// on every change (so a renderer replaces the prior plan rather than appending).
+type planUpdate struct {
+	Entries []planEntryWire `json:"entries"`
+}
+
+// planEntryWire is one task in a plan update.
+type planEntryWire struct {
+	Content  string `json:"content"`
+	Status   string `json:"status"` // pending | in_progress | completed
+	Priority string `json:"priority"`
+}
+
+// Update kind discriminators we decode. The *_chunk kinds carry streamed model
+// text; the tool_call kinds carry tool activity; plan carries the agent's task
+// list. Other kinds (current_mode_update, available_commands_update,
+// user_message_chunk) are recognised by absence — they fall through the decode
+// and are not rendered.
 const (
 	updateAgentMessageChunk = "agent_message_chunk"
 	updateAgentThoughtChunk = "agent_thought_chunk"
+	updateToolCall          = "tool_call"
+	updateToolCallUpdate    = "tool_call_update"
+	updatePlan              = "plan"
 )

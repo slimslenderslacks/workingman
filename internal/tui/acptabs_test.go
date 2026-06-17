@@ -94,6 +94,104 @@ func TestPromptsAndMessagesInterleave(t *testing.T) {
 	}
 }
 
+func TestApplyToolCallOpensAndUpdatesInPlace(t *testing.T) {
+	var a acpTabs
+	a.upsert("s", "s")
+	// Some assistant text, then a tool call interrupts it.
+	a.apply("s", acpclient.Event{State: acpclient.StateStreaming, Text: "let me run that"})
+	a.apply("s", acpclient.Event{
+		Kind: acpclient.EventToolCall, State: acpclient.StateStreaming,
+		ToolCallID: "c1", ToolTitle: "Run tests", ToolKind: "execute", ToolStatus: "in_progress",
+	})
+	// The update for the same id mutates the existing block, not a second one.
+	a.apply("s", acpclient.Event{
+		Kind: acpclient.EventToolCall, State: acpclient.StateStreaming,
+		ToolCallID: "c1", ToolStatus: "completed", Text: "PASS\n",
+	})
+	// Assistant text after the tool call opens a fresh message block.
+	a.apply("s", acpclient.Event{State: acpclient.StateStreaming, Text: "all green"})
+
+	tab := a.tabs[0]
+	wantKinds := []transcriptKind{entryMessage, entryTool, entryMessage}
+	if len(tab.entries) != len(wantKinds) {
+		t.Fatalf("entries = %d, want %d (%v)", len(tab.entries), len(wantKinds), wantKinds)
+	}
+	for i, k := range wantKinds {
+		if tab.entries[i].kind != k {
+			t.Errorf("entry %d kind = %v, want %v", i, tab.entries[i].kind, k)
+		}
+	}
+	tool := tab.entries[1]
+	if tool.toolStatus != "completed" {
+		t.Errorf("tool status = %q, want completed", tool.toolStatus)
+	}
+	if tool.toolOutput != "PASS\n" {
+		t.Errorf("tool output = %q, want %q", tool.toolOutput, "PASS\n")
+	}
+	if tab.entries[2].text != "all green" {
+		t.Errorf("post-tool message = %q, want %q", tab.entries[2].text, "all green")
+	}
+}
+
+func TestApplyThoughtSeparateFromMessage(t *testing.T) {
+	var a acpTabs
+	a.upsert("s", "s")
+	a.apply("s", acpclient.Event{Kind: acpclient.EventThought, State: acpclient.StateStreaming, Text: "I should "})
+	a.apply("s", acpclient.Event{Kind: acpclient.EventThought, State: acpclient.StateStreaming, Text: "check the file"})
+	a.apply("s", acpclient.Event{State: acpclient.StateStreaming, Text: "Here is the answer"})
+
+	tab := a.tabs[0]
+	if len(tab.entries) != 2 {
+		t.Fatalf("entries = %d, want 2 (thought, message)", len(tab.entries))
+	}
+	if tab.entries[0].kind != entryThought || tab.entries[0].text != "I should check the file" {
+		t.Errorf("thought block = %+v, want accreted thought text", tab.entries[0])
+	}
+	if tab.entries[1].kind != entryMessage || tab.entries[1].text != "Here is the answer" {
+		t.Errorf("message block = %+v, want fresh message text", tab.entries[1])
+	}
+}
+
+func TestApplyPlanReplacesInPlace(t *testing.T) {
+	var a acpTabs
+	a.upsert("s", "s")
+	a.apply("s", acpclient.Event{Kind: acpclient.EventPlan, State: acpclient.StateStreaming, Plan: []acpclient.PlanEntry{
+		{Content: "a", Status: "in_progress"},
+	}})
+	a.apply("s", acpclient.Event{Kind: acpclient.EventPlan, State: acpclient.StateStreaming, Plan: []acpclient.PlanEntry{
+		{Content: "a", Status: "completed"},
+		{Content: "b", Status: "in_progress"},
+	}})
+
+	tab := a.tabs[0]
+	plans := 0
+	for _, e := range tab.entries {
+		if e.kind == entryPlan {
+			plans++
+		}
+	}
+	if plans != 1 {
+		t.Fatalf("plan blocks = %d, want 1 (replaced in place)", plans)
+	}
+	if got := tab.entries[0].plan; len(got) != 2 || got[0].Status != "completed" {
+		t.Errorf("plan = %+v, want the latest 2-entry list", got)
+	}
+}
+
+func TestRenderACPTabBodyShowsToolAndPlan(t *testing.T) {
+	tab := &acpTab{id: "s", title: "s", curMsg: -1}
+	tab.entries = []transcriptEntry{
+		{kind: entryTool, text: "Run tests", toolKind: "execute", toolStatus: "completed", toolOutput: "PASS"},
+		{kind: entryPlan, plan: []acpclient.PlanEntry{{Content: "ship it", Status: "in_progress"}}},
+	}
+	out := renderACPTabBody(tab, 60, 30)
+	for _, want := range []string{"Run tests", "completed", "PASS", "plan", "ship it"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("body missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
 func TestApplyTerminalPreservesTranscript(t *testing.T) {
 	var a acpTabs
 	a.upsert("s", "s")
