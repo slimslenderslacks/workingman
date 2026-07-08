@@ -178,16 +178,30 @@ func TestApplyPlanReplacesInPlace(t *testing.T) {
 	}
 }
 
-func TestRenderACPTabBodyShowsToolAndPlan(t *testing.T) {
+func TestRenderACPTabBodyCollapsesToolByDefault(t *testing.T) {
 	tab := &acpTab{id: "s", title: "s", curMsg: -1}
 	tab.entries = []transcriptEntry{
 		{kind: entryTool, text: "Run tests", toolKind: "execute", toolStatus: "completed", toolOutput: "PASS"},
 		{kind: entryPlan, plan: []acpclient.PlanEntry{{Content: "ship it", Status: "in_progress"}}},
 	}
-	out := renderACPTabBody(tab, 60, 30)
-	for _, want := range []string{"Run tests", "completed", "PASS", "plan", "ship it"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("body missing %q; got:\n%s", want, out)
+
+	// Collapsed (default): the summary line shows, but the output does not, and a
+	// ▸ affordance signals it can be expanded.
+	collapsed := renderACPTabBody(tab, 60, 30, false)
+	for _, want := range []string{"Run tests", "completed", "▸", "plan", "ship it"} {
+		if !strings.Contains(collapsed, want) {
+			t.Errorf("collapsed body missing %q; got:\n%s", want, collapsed)
+		}
+	}
+	if strings.Contains(collapsed, "PASS") {
+		t.Errorf("collapsed body should hide tool output; got:\n%s", collapsed)
+	}
+
+	// Expanded (z): the output appears and the affordance flips to ▾.
+	expanded := renderACPTabBody(tab, 60, 30, true)
+	for _, want := range []string{"Run tests", "PASS", "▾"} {
+		if !strings.Contains(expanded, want) {
+			t.Errorf("expanded body missing %q; got:\n%s", want, expanded)
 		}
 	}
 }
@@ -268,17 +282,23 @@ func TestRenderACPTabBodyShowsPromptAndMessage(t *testing.T) {
 		{kind: entryPrompt, text: "do the thing"},
 		{kind: entryMessage, text: "working on it"},
 	}
-	out := renderACPTabBody(tab, 40, 20)
+	out := renderACPTabBody(tab, 40, 20, false)
 	for _, want := range []string{"prompt", "do the thing", "agent", "working on it"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("body missing %q; got:\n%s", want, out)
+		}
+	}
+	// Prompt and message turns render as bordered cards (rounded corners).
+	for _, corner := range []string{"╭", "╰"} {
+		if !strings.Contains(out, corner) {
+			t.Errorf("expected message boxes (missing %q); got:\n%s", corner, out)
 		}
 	}
 }
 
 func TestRenderACPTabBodyEmptyState(t *testing.T) {
 	tab := &acpTab{id: "s", title: "s", curMsg: -1}
-	out := renderACPTabBody(tab, 40, 10)
+	out := renderACPTabBody(tab, 40, 10, false)
 	if !strings.Contains(out, "waiting") {
 		t.Errorf("empty body should hint it's waiting; got:\n%s", out)
 	}
@@ -322,6 +342,75 @@ func TestModelACPViewLifecycle(t *testing.T) {
 	m = step.(model)
 	if m.showACP {
 		t.Error("esc did not leave the ACP view")
+	}
+}
+
+// TestModelACPToolExpandToggle drives the z-key tool collapse/expand through the
+// model: a tool call renders collapsed (output hidden) by default, z reveals the
+// output, and z again re-collapses it.
+func TestModelACPToolExpandToggle(t *testing.T) {
+	m := newModel(nil, nil, nil, nil)
+	m.acpCh = make(chan acpTabEvent)
+	m.width, m.height = 100, 30
+
+	step, _ := m.Update(acpTabEvent{kind: acpTabAdded, id: "task-x", title: "task-x"})
+	m = step.(model)
+	step, _ = m.Update(acpTabEvent{kind: acpTabStream, id: "task-x", ev: acpclient.Event{
+		Kind: acpclient.EventToolCall, ToolCallID: "t1", ToolTitle: "Run tests",
+		ToolKind: "execute", ToolStatus: "completed", Text: "SECRET_OUTPUT",
+	}})
+	m = step.(model)
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")}) // open view
+	m = step.(model)
+
+	if out := m.View(); strings.Contains(out, "SECRET_OUTPUT") {
+		t.Errorf("tool output should be collapsed by default; got:\n%s", out)
+	}
+
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")}) // expand
+	m = step.(model)
+	if !m.acpToolsExpanded {
+		t.Fatal("z did not set acpToolsExpanded")
+	}
+	if out := m.View(); !strings.Contains(out, "SECRET_OUTPUT") {
+		t.Errorf("z should reveal tool output; got:\n%s", out)
+	}
+
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")}) // collapse again
+	m = step.(model)
+	if m.acpToolsExpanded {
+		t.Fatal("second z did not collapse")
+	}
+	if out := m.View(); strings.Contains(out, "SECRET_OUTPUT") {
+		t.Errorf("second z should re-hide tool output; got:\n%s", out)
+	}
+}
+
+// TestRenderACPViewNestedBoxesIntact guards against the message/prompt cards
+// tearing when nested inside the transcript border: if the body is rendered
+// wider than the outer box's true text area, every card line wraps and its
+// corners split across two rows. A clean top border has ╭ and ╮ on ONE line, so
+// with an outer box plus an inner prompt card there must be at least two such
+// complete-top-border lines.
+func TestRenderACPViewNestedBoxesIntact(t *testing.T) {
+	m := newModel(nil, nil, nil, nil)
+	m.width, m.height = 90, 34
+	m.showACP = true
+	tab := acpTab{id: "s", title: "s", status: acpclient.StateStreaming, curMsg: -1}
+	tab.entries = []transcriptEntry{
+		{kind: entryPrompt, text: "Read .orch/instructions.md and .orch/context.yaml, then follow the instructions."},
+	}
+	m.acp.tabs = []acpTab{tab}
+
+	out := m.renderACPView()
+	complete := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "╭") && strings.Contains(line, "╮") {
+			complete++
+		}
+	}
+	if complete < 2 {
+		t.Fatalf("expected >=2 intact top borders (outer + prompt card), got %d; view:\n%s", complete, out)
 	}
 }
 

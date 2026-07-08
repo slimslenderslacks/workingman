@@ -24,6 +24,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,49 @@ import (
 	"github.com/slimslenderslacks/work/internal/acpwrapper"
 	"github.com/slimslenderslacks/work/internal/policy"
 )
+
+// resolveGitIdentity reads the host user's git identity (the same `git config`
+// the user commits under) so the sandboxed agent can commit as them. Returns
+// empty strings when git or either value is unavailable — the wrapper then
+// omits the env and the sandbox's default identity applies. We deliberately do
+// NOT fail hard on a missing identity: a planning/wolf session has no need for
+// it, and the daemon shouldn't refuse to run because git isn't configured.
+func resolveGitIdentity() (name, email string) {
+	get := func(key string) string {
+		out, err := exec.Command("git", "config", "--get", key).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	return get("user.name"), get("user.email")
+}
+
+// resolveGitSigning returns the user's SSH signing public key when the host is
+// configured to SSH-sign commits (user.signingkey set, gpg.format=ssh, and
+// commit.gpgsign enabled), or "" otherwise. The wrapper forwards it into the
+// sandbox so the commit agent can sign via ssh-keygen + the forwarded SSH agent.
+//
+// It intentionally activates ONLY for SSH signing: openpgp/GPG signing needs a
+// keyring the sandbox doesn't have, and a user who doesn't sign by default
+// shouldn't suddenly have signing (which, lacking a working signer, would make
+// `git commit` fail) forced on inside the sandbox.
+func resolveGitSigning() string {
+	get := func(key string) string {
+		out, err := exec.Command("git", "config", "--get", key).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	key := get("user.signingkey")
+	if key == "" ||
+		!strings.EqualFold(get("gpg.format"), "ssh") ||
+		!strings.EqualFold(get("commit.gpgsign"), "true") {
+		return ""
+	}
+	return key
+}
 
 // workspacesFlag collects repeatable --workspace values, resolving each to an
 // absolute host path (the sandbox bind-mounts host paths at their native path).
@@ -101,6 +145,7 @@ func main() {
 		os.Exit(2)
 	}
 
+	gitName, gitEmail := resolveGitIdentity()
 	cfg := acpwrapper.Config{
 		SessionID:     *sessionID,
 		SessionsRoot:  *sessionsRoot,
@@ -111,6 +156,9 @@ func main() {
 		ExitWhenEmpty: *exitWhenEmpty,
 		StaticMCPs:    staticMCPs,
 		Policies:      policies,
+		GitName:       gitName,
+		GitEmail:      gitEmail,
+		SigningKey:    resolveGitSigning(),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

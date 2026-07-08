@@ -14,6 +14,12 @@ modifications:
    characters.
 3. Capture the commit SHA via `git rev-parse HEAD`.
 
+Your git identity is supplied by the environment (GIT_AUTHOR_* / GIT_COMMITTER_*),
+so commits are already attributed to the user. Do NOT run `git config
+user.name` / `user.email`, pass `--author`, or otherwise write a local
+`.git/config` — it is unnecessary and the environment identity overrides it
+anyway.
+
 Do not push. When all repos are committed (or had nothing to commit), update
 the task file with the following fields and save:
 

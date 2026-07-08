@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/project"
@@ -120,6 +121,21 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		d.transitionProjectBlocked(projectPath, p,
 			fmt.Sprintf("commit agent ended with task %q in status %q", t.Name, t.Status))
 		return
+	}
+
+	// Stamp the completion time the first time we observe the task committed,
+	// then re-save. This runs after the commit agent's session has ended, so
+	// the daemon write can't race or be clobbered by the agent. A save failure
+	// is non-fatal — it's only display metadata, not worth blocking the project
+	// over. The TUI sorts the Tasks pane by this so tasks show in run order.
+	if t.CompletedAt == nil {
+		now := time.Now()
+		t.CompletedAt = &now
+		if err := task.Save(taskPath, t); err != nil {
+			d.audit.Log("task_save_error", "task", taskPath, "err", err.Error())
+		} else {
+			d.audit.Log("task_completed_stamped", "task", t.Name, "at", now.UTC().Format(time.RFC3339))
+		}
 	}
 
 	root := filepath.Dir(projectPath)

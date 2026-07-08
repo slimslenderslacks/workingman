@@ -116,11 +116,49 @@ func realDialer(ctx context.Context, socketPath string) (acpConn, error) {
 // "prompts sent" half real.
 const defaultACPPrompt = "Read .orch/instructions.md and .orch/context.yaml, then follow the instructions."
 
+// acpHandshakeTimeout bounds the ACP handshake (initialize + session/new +
+// set_mode) the watcher runs right after dialing a session's socket. A healthy
+// claude-acp-client answers these in well under a second. A wedged one inside
+// an otherwise-live sandbox — e.g. a reused per-task sandbox whose agent never
+// came up after a prior attempt — answers nothing, and acpclient.call blocks on
+// the watcher's unbounded session context forever (the sandboxProbe doesn't
+// help here: the sandbox itself is alive, only the agent inside it is stuck).
+// That is the "daemon thinks the task is running but it is hung" failure — the
+// session never ends, so the daemon never retries or blocks. Capping the
+// handshake turns that infinite hang into a bounded, recoverable failure. The
+// value is deliberately generous so a legitimately cold-starting sandbox (its
+// inner dockerd + claude bootstrap on a reused, stopped sandbox) is never
+// mistaken for a wedge. The turn itself (Prompt) is NOT bounded here — turns
+// can legitimately run for many minutes.
+const acpHandshakeTimeout = 2 * time.Minute
+
+// acpTurnIdleTimeout bounds how long a prompt turn may stream NOTHING before the
+// watcher gives up on it. It is an idle bound, not a total-duration cap: a turn
+// that keeps emitting frames (assistant text, tool calls and their updates)
+// resets the clock and may run arbitrarily long. The failure it guards against
+// is a turn that goes permanently silent without ending — the agent finished its
+// work (the task file may already read success) or wedged, but conn.Prompt never
+// returns, so the wrapper never exits and the daemon stalls before the commit
+// step. The value is deliberately generous: a single long-running tool call
+// (a big build, a slow test suite) streams no intermediate frames, so the bound
+// must exceed the longest such call to avoid cutting off live work.
+const acpTurnIdleTimeout = 20 * time.Minute
+
 // WatchACPSessions starts a background watcher over the session store rooted at
 // root and returns a channel of tab mutations for the TUI to consume. The
 // channel is closed when ctx is cancelled. interval <= 0 defaults to 500ms.
 func WatchACPSessions(ctx context.Context, root string, interval time.Duration) <-chan acpTabEvent {
 	return watchACPSessions(ctx, root, interval, realDialer, sbxSandboxProbe, defaultACPPrompt)
+}
+
+// activeWatch is one live per-session watcher tracked by watchACPSessions.
+// createdAt is the watched session's birth time, used to detect when a per-task
+// session id has been recycled by a retry (same id, new CreatedAt) so the stale
+// watcher can be replaced rather than letting its lingering map entry suppress
+// the new instance.
+type activeWatch struct {
+	cancel    context.CancelFunc
+	createdAt time.Time
 }
 
 // watchACPSessions is the testable core of WatchACPSessions, taking the dialer
@@ -142,11 +180,11 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 			return
 		}
 
-		active := map[string]context.CancelFunc{}
+		active := map[string]activeWatch{}
 		var wg sync.WaitGroup
 		defer func() {
-			for _, cancel := range active {
-				cancel()
+			for _, w := range active {
+				w.cancel()
 			}
 			wg.Wait()
 		}()
@@ -158,8 +196,26 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 			seen := make(map[string]bool, len(sessions))
 			for _, s := range sessions {
 				seen[s.ID] = true
-				if _, watching := active[s.ID]; watching {
-					continue
+				if w, watching := active[s.ID]; watching {
+					// Same session instance still being watched: nothing to do.
+					// But a per-task session id is RECYCLED across task-agent
+					// retries — the prior session's directory is removed and a
+					// fresh one recreated under the SAME id, frequently within a
+					// single poll interval, so the "directory gone" reap below
+					// never observes the gap and never clears the stale entry.
+					// Its predecessor's watcher has already returned, so the
+					// recycled-id session would be skipped here forever: never
+					// connected, never prompted, the agent idling on a prompt
+					// that never arrives (an indefinite hang with an empty
+					// stream log). Distinguish instances by CreatedAt: a changed
+					// birth time means a new session wearing a recycled id, so
+					// drop the stale watch and fall through to start a fresh one.
+					if w.createdAt.Equal(s.CreatedAt) {
+						continue
+					}
+					w.cancel()
+					delete(active, s.ID)
+					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: s.ID})
 				}
 				if s.Status != session.StatusRunning {
 					// Not yet live (starting) or already ended: nothing to watch.
@@ -167,17 +223,17 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 					continue
 				}
 				wctx, cancel := context.WithCancel(ctx)
-				active[s.ID] = cancel
+				active[s.ID] = activeWatch{cancel: cancel, createdAt: s.CreatedAt}
 				wg.Add(1)
 				go func(s session.Session) {
 					defer wg.Done()
-					watchOneACPSession(wctx, out, dial, probe, store, s, prompt)
+					watchOneACPSession(wctx, out, dial, probe, store, s, prompt, acpHandshakeTimeout, acpTurnIdleTimeout)
 				}(s)
 			}
 			// Reap watchers whose session directory is gone.
-			for id, cancel := range active {
+			for id, w := range active {
 				if !seen[id] {
-					cancel()
+					w.cancel()
 					delete(active, id)
 					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: id})
 				}
@@ -223,7 +279,7 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 // The first two emit a synthetic StateDisconnected to mark the tab dead; the
 // third needs none — acpclient already emits the terminal event over Events(),
 // which the pump forwards.
-func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDialer, probe sandboxProbe, store session.Store, s session.Session, prompt string) {
+func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDialer, probe sandboxProbe, store session.Store, s session.Session, prompt string, handshakeTimeout, turnIdleTimeout time.Duration) {
 	emitACP(ctx, out, acpTabEvent{kind: acpTabAdded, id: s.ID, title: acpTabTitle(s)})
 
 	// Verify the backing sandbox still exists before trusting the socket. We only
@@ -262,11 +318,18 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 
 	// Pump events to the model. The pump owns the Events() channel; it drains to
 	// completion when the connection closes. We wait for it before returning so a
-	// late emit can never race the parent's close of out.
+	// late emit can never race the parent's close of out. Every frame also pulses
+	// activity (non-blocking) so the idle-turn watchdog below can tell a turn
+	// that is still working (frames arriving) from one that has gone silent.
+	activity := make(chan struct{}, 1)
 	pumpDone := make(chan struct{})
 	go func() {
 		defer close(pumpDone)
 		for ev := range conn.Events() {
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
 			emitACP(ctx, out, acpTabEvent{kind: acpTabStream, id: s.ID, ev: ev})
 		}
 	}()
@@ -283,11 +346,21 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 	if len(s.Workspaces) > 0 {
 		cwd = s.Workspaces[0]
 	}
-	if err := conn.Connect(ctx, cwd); err != nil {
-		// Connected to the socket but the handshake never completed — the bridge
-		// closed the connection because the sandbox is gone. Dead session: clean up.
+	// Bound the handshake so a wedged agent that accepts the socket connection
+	// but never answers initialize cannot hang the watcher indefinitely (see
+	// acpHandshakeTimeout). The turn that follows (conn.Prompt) keeps the
+	// unbounded session ctx — only the handshake is capped.
+	connectCtx, cancelHandshake := context.WithTimeout(ctx, handshakeTimeout)
+	err = conn.Connect(connectCtx, cwd)
+	cancelHandshake()
+	if err != nil {
+		// Either the bridge closed the connection because the sandbox is gone,
+		// or the handshake timed out against a wedged agent. Both are dead
+		// sessions: clean up so the directory is reaped and the deferred
+		// conn.Close() unwinds the wrapper, letting the daemon's session-end
+		// path retry or block instead of stranding on a hung session.
 		cleanupDeadSession(ctx, out, store, s.ID)
-		return // terminal event already forwarded by the pump
+		return // terminal event forwarded by the pump on conn.Close()
 	}
 
 	// Drive the opening prompt only for a brand-new session. A reconnected session
@@ -295,23 +368,57 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 	// re-sending would restart the agent.
 	if prompt != "" && s.PromptCount == 0 {
 		emitACP(ctx, out, acpTabEvent{kind: acpTabPrompt, id: s.ID, text: prompt})
-		// Prompt blocks until the turn completes; its streamed chunks arrive via
-		// the pump. We ignore the stop reason — the StateCompleted event the pump
-		// forwards already updates the tab.
-		if _, err := conn.Prompt(ctx, prompt); err == nil {
+
+		// conn.Prompt blocks until the turn completes; its chunks arrive via the
+		// pump. The turn is bounded by IDLE time, not total time: a healthy turn
+		// streams frames (assistant text, tool calls/updates) continuously, so we
+		// abort only after turnIdleTimeout elapses with no frames at all. That
+		// silence is the signature of an agent that finished (or wedged) without
+		// ending its turn — the task file may already say success, but conn.Prompt
+		// never returns, so the wrapper never exits and the daemon stalls before
+		// the commit step. A long-but-active turn keeps pulsing activity and is
+		// never cut off. The watchdog resets on each frame and cancels promptCtx
+		// when the gap is exceeded.
+		promptCtx, cancelPrompt := context.WithCancel(ctx)
+		watchdogDone := make(chan struct{})
+		go func() {
+			defer close(watchdogDone)
+			timer := time.NewTimer(turnIdleTimeout)
+			defer timer.Stop()
+			for {
+				select {
+				case <-promptCtx.Done():
+					return
+				case <-activity:
+					if !timer.Stop() {
+						<-timer.C
+					}
+					timer.Reset(turnIdleTimeout)
+				case <-timer.C:
+					cancelPrompt() // turn went silent past the idle bound — abort it
+					return
+				}
+			}
+		}()
+
+		_, err = conn.Prompt(promptCtx, prompt)
+		cancelPrompt()
+		<-watchdogDone
+
+		if err == nil {
 			// Record that the opening prompt was sent so a future restart reconnects
 			// (replays) instead of re-prompting.
 			markPrompted(store, s.ID)
-			// Orch's non-interactive agents (planning/task/commit) are
-			// single-turn: the opening prompt finishing IS the agent's exit
-			// signal. Return so the deferred conn.Close() fires, the sandboxed
-			// claude-acp-client sees EOF on stdio and exits, acp-wrapper
-			// returns, and the daemon's session_ended callback dispatches the
-			// next stage (task-after-planning, commit-after-task, etc.). The
-			// pump forwards the trailing StateDisconnected before pumpDone
-			// closes, so the tab still transitions through completed → dead.
-			return
 		}
+		// Orch's non-interactive agents (planning/task/commit) are single-turn:
+		// the turn finishing IS the agent's exit signal. Return — whether the turn
+		// ended cleanly or the watchdog aborted it — so the deferred conn.Close()
+		// fires, the sandboxed claude-acp-client sees EOF on stdio and exits,
+		// acp-wrapper returns, and the daemon's session_ended callback dispatches
+		// the next stage (commit-after-task, etc.) or re-evaluates the task file
+		// (retry vs. block). The pump forwards the trailing StateDisconnected
+		// before pumpDone closes, so the tab still transitions completed → dead.
+		return
 	}
 
 	<-ctx.Done()

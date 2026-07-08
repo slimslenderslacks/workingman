@@ -32,10 +32,11 @@ type ProjectView struct {
 	// TaskCounts holds the number of tasks observed in each task.Status. A
 	// status with zero tasks is omitted from the map.
 	TaskCounts map[task.Status]int
-	// Tasks is the full list of tasks for the project, in the order
-	// taskgraph.Tasks returns them (alphabetical by name). Populated in
-	// the same scan pass that computes TaskCounts so the Tasks pane
-	// doesn't have to re-walk disk.
+	// Tasks is the full list of tasks for the project, ordered by run order:
+	// completed tasks first (earliest completion at the top), then tasks that
+	// haven't completed in taskgraph (alphabetical) order. Populated in the
+	// same scan pass that computes TaskCounts so the Tasks pane doesn't have
+	// to re-walk disk.
 	Tasks []TaskView
 	// LastUpdate is the mtime of the .project.yaml file at scan time. Diff
 	// logic uses it to detect changes even if the project's structured
@@ -59,6 +60,11 @@ type TaskView struct {
 	Policies   []policy.Rule
 	Status     task.Status
 	Path       string
+	// CompletedAt mirrors the task file's `completed_at` — when the daemon
+	// observed the task reach `committed`. Zero for tasks that haven't
+	// committed (or committed before the field existed). The Tasks pane sorts
+	// by it so completed tasks appear in the order they actually ran.
+	CompletedAt time.Time
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
@@ -164,15 +170,36 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 		if model == "" {
 			model = task.ModelDefault
 		}
+		var completedAt time.Time
+		if t.CompletedAt != nil {
+			completedAt = *t.CompletedAt
+		}
 		tasks = append(tasks, TaskView{
-			Name:       t.Name,
-			Model:      model,
-			StaticMCPs: append([]string(nil), t.StaticMCPs...),
-			Policies:   append([]policy.Rule(nil), t.Policies...),
-			Status:     t.Status,
-			Path:       t.Path,
+			Name:        t.Name,
+			Model:       model,
+			StaticMCPs:  append([]string(nil), t.StaticMCPs...),
+			Policies:    append([]policy.Rule(nil), t.Policies...),
+			Status:      t.Status,
+			Path:        t.Path,
+			CompletedAt: completedAt,
 		})
 	}
+	// Order the pane by run/completion order: tasks that have completed come
+	// first, earliest completion at the top; tasks that haven't completed keep
+	// their taskgraph (alphabetical) order below, via the stable sort.
+	sort.SliceStable(tasks, func(i, j int) bool {
+		ci, cj := tasks[i].CompletedAt, tasks[j].CompletedAt
+		switch {
+		case !ci.IsZero() && !cj.IsZero():
+			return ci.Before(cj)
+		case !ci.IsZero():
+			return true
+		case !cj.IsZero():
+			return false
+		default:
+			return false
+		}
+	})
 	return counts, tasks
 }
 
@@ -370,7 +397,8 @@ func projectViewEqual(a, b ProjectView) bool {
 // longer directly comparable with ==. Order matters for both slices since
 // rule order is meaningful and MCP order is what the planner wrote.
 func taskViewEqual(a, b TaskView) bool {
-	if a.Name != b.Name || a.Model != b.Model || a.Status != b.Status || a.Path != b.Path {
+	if a.Name != b.Name || a.Model != b.Model || a.Status != b.Status || a.Path != b.Path ||
+		!a.CompletedAt.Equal(b.CompletedAt) {
 		return false
 	}
 	if len(a.StaticMCPs) != len(b.StaticMCPs) {

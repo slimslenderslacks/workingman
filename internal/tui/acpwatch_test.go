@@ -19,6 +19,16 @@ import (
 type fakeACPConn struct {
 	events     chan acpclient.Event
 	connectErr error
+	// connectBlocks simulates a wedged agent: Connect ignores its inputs and
+	// blocks until its context is cancelled, then returns ctx.Err(). It models a
+	// claude-acp-client that accepts the socket but never answers the ACP
+	// handshake — the case acpHandshakeTimeout exists to bound.
+	connectBlocks bool
+	// promptBlocks simulates a turn that goes silent without ending: Prompt emits
+	// no events and blocks until its context is cancelled, then returns ctx.Err().
+	// It models the agent that finished (or wedged) without ending its turn — the
+	// case acpTurnIdleTimeout exists to bound.
+	promptBlocks bool
 
 	mu          sync.Mutex
 	closed      bool
@@ -30,7 +40,11 @@ func newFakeACPConn() *fakeACPConn {
 	return &fakeACPConn{events: make(chan acpclient.Event, 16)}
 }
 
-func (f *fakeACPConn) Connect(_ context.Context, cwd string) error {
+func (f *fakeACPConn) Connect(ctx context.Context, cwd string) error {
+	if f.connectBlocks {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if f.connectErr != nil {
 		return f.connectErr
 	}
@@ -41,10 +55,14 @@ func (f *fakeACPConn) Connect(_ context.Context, cwd string) error {
 	return nil
 }
 
-func (f *fakeACPConn) Prompt(_ context.Context, text string) (string, error) {
+func (f *fakeACPConn) Prompt(ctx context.Context, text string) (string, error) {
 	f.mu.Lock()
 	f.promptsSent = append(f.promptsSent, text)
 	f.mu.Unlock()
+	if f.promptBlocks {
+		<-ctx.Done() // turn never ends on its own; emits no activity
+		return "", ctx.Err()
+	}
 	f.events <- acpclient.Event{State: acpclient.StateStreaming}
 	f.events <- acpclient.Event{State: acpclient.StateStreaming, Text: "hi from agent"}
 	f.events <- acpclient.Event{State: acpclient.StateCompleted, StopReason: "end_turn"}
@@ -52,6 +70,13 @@ func (f *fakeACPConn) Prompt(_ context.Context, text string) (string, error) {
 }
 
 func (f *fakeACPConn) Events() <-chan acpclient.Event { return f.events }
+
+// numPrompts reports how many prompts this conn has received, under the lock.
+func (f *fakeACPConn) numPrompts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.promptsSent)
+}
 
 func (f *fakeACPConn) Close() error {
 	f.mu.Lock()
@@ -428,6 +453,160 @@ func TestWatchNewSessionMarksPrompted(t *testing.T) {
 		case <-deadline:
 			t.Fatalf("PromptCount never reached 1 (err=%v, count=%d)", err, rec.PromptCount)
 		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestWatchHandshakeTimeoutReapsWedgedSession is the regression guard for the
+// "daemon thinks the task is running but it is hung" failure. The session's
+// socket accepts a connection (the wrapper is up and the sandbox is alive, so
+// the probe passes and the dial succeeds), but the agent never answers the ACP
+// handshake. Without a bound, conn.Connect blocks on the unbounded session
+// context forever. With acpHandshakeTimeout the watcher must give up, reap the
+// session, and return rather than strand.
+func TestWatchHandshakeTimeoutReapsWedgedSession(t *testing.T) {
+	root := t.TempDir()
+	store := writeRunningSession(t, root, "task-wedged")
+	rec, err := store.Read("task-wedged")
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+
+	conn := newFakeACPConn()
+	conn.connectBlocks = true // accepts the connection but never answers initialize
+	dial := func(_ context.Context, _ string) (acpConn, error) { return conn, nil }
+
+	// Buffered so the watcher's tab-added/removed emits never block this test,
+	// which deliberately does not run a concurrent drainer.
+	out := make(chan acpTabEvent, 64)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchOneACPSession(context.Background(), out, dial, aliveProbe, store, rec, "go read it", 20*time.Millisecond, time.Minute)
+	}()
+
+	select {
+	case <-done:
+		// Returned — the handshake bound fired instead of hanging.
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchOneACPSession hung past the handshake timeout against a wedged agent")
+	}
+
+	// A timed-out handshake is a dead session: its directory must be reclaimed.
+	waitForDirGone(t, store.Dir("task-wedged"), 2*time.Second)
+}
+
+// TestWatchTurnIdleTimeoutEndsSilentTurn is the regression guard for the
+// stalled-after-success failure: the agent starts its turn but then goes
+// permanently silent without ending it (work done, task file may already say
+// success, but conn.Prompt never returns). The idle-turn watchdog must abort the
+// turn after acpTurnIdleTimeout of no frames so the watcher returns, the wrapper
+// unwinds, and the daemon advances to the commit step instead of stalling.
+func TestWatchTurnIdleTimeoutEndsSilentTurn(t *testing.T) {
+	root := t.TempDir()
+	store := writeRunningSession(t, root, "task-silent")
+	rec, err := store.Read("task-silent")
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+
+	conn := newFakeACPConn()
+	conn.promptBlocks = true // turn starts but never streams another frame or ends
+	dial := func(_ context.Context, _ string) (acpConn, error) { return conn, nil }
+
+	out := make(chan acpTabEvent, 64)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Generous handshake bound, tiny idle bound: only the turn watchdog should fire.
+		watchOneACPSession(context.Background(), out, dial, aliveProbe, store, rec, "go read it", time.Minute, 30*time.Millisecond)
+	}()
+
+	select {
+	case <-done:
+		// Returned — the idle watchdog aborted the silent turn instead of hanging.
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchOneACPSession hung on a silent, never-ending turn")
+	}
+
+	if n := conn.numPrompts(); n != 1 {
+		t.Errorf("the turn should have been started (1 prompt) before the watchdog fired, got %d", n)
+	}
+}
+
+// TestWatchRecycledSessionIDStartsFreshWatcher is the regression guard for the
+// retry-hang root cause: orch reuses a per-task session id across task-agent
+// retries, removing the prior session directory and recreating one under the
+// SAME id — often within a single poll interval, so the "directory gone" reap
+// never observes the gap. The stale active-map entry from the prior (returned)
+// watcher must NOT suppress the new instance; the watcher distinguishes them by
+// CreatedAt and starts a fresh watcher that connects and prompts the new
+// session. Without the fix the recycled session is never watched, never
+// prompted, and hangs with an empty stream log.
+func TestWatchRecycledSessionIDStartsFreshWatcher(t *testing.T) {
+	root := t.TempDir()
+	store := writeRunningSession(t, root, "task-recycled")
+
+	var mu sync.Mutex
+	var conns []*fakeACPConn
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		c := newFakeACPConn()
+		mu.Lock()
+		conns = append(conns, c)
+		mu.Unlock()
+		return c, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, aliveProbe, "go read it")
+	defer stopWatch(cancel, ch)
+	go func() {
+		for range ch { // drain so the watcher never blocks emitting
+		}
+	}()
+
+	// First instance: dialed and prompted.
+	waitForCond(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(conns) >= 1 && conns[0].numPrompts() == 1
+	}, "first session was never dialed and prompted")
+
+	// Simulate a task-agent retry: the SAME id reappears with a new CreatedAt,
+	// its directory never having been observed missing (PromptCount reset, as a
+	// fresh wrapper writes a brand-new record).
+	rec, err := store.Read("task-recycled")
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	rec.CreatedAt = rec.CreatedAt.Add(time.Hour)
+	rec.PromptCount = 0
+	if err := store.Write(rec); err != nil {
+		t.Fatalf("rewrite session: %v", err)
+	}
+
+	// The recycled id must get a FRESH watcher that connects and prompts the new
+	// instance, rather than being skipped because of the stale active entry.
+	waitForCond(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(conns) >= 2 && conns[1].numPrompts() == 1
+	}, "recycled session id was skipped — no fresh watcher dialed/prompted it")
+}
+
+// waitForCond polls cond until it returns true or the deadline elapses, failing
+// the test with msg on timeout.
+func waitForCond(t *testing.T, dur time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.After(dur)
+	for {
+		if cond() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal(msg)
+		case <-time.After(5 * time.Millisecond):
 		}
 	}
 }

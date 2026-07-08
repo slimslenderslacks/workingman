@@ -299,11 +299,38 @@ func acpStatusGlyph(s acpclient.State) string {
 	return "○"
 }
 
-// acpToolHeading renders a tool block's one-line header: a gear, the tool's
-// title (falling back to its kind, then a generic label when neither is set),
-// and its current status. The whole heading is styled as one unit so the status
-// rides along with the title.
-func acpToolHeading(e transcriptEntry) string {
+// acpToolGlyph maps a tool's kind to a compact leading glyph so the transcript
+// reads like the reference client — a distinct icon per kind (read/edit/search/
+// execute/…), falling back to a generic gear for unknown or unset kinds.
+func acpToolGlyph(kind string) string {
+	switch kind {
+	case "read":
+		return "◎"
+	case "edit", "write":
+		return "✎"
+	case "delete":
+		return "␡"
+	case "move":
+		return "↦"
+	case "search":
+		return "⌕"
+	case "execute":
+		return "❯"
+	case "fetch":
+		return "↓"
+	case "think":
+		return "◌"
+	}
+	return "⚙"
+}
+
+// acpToolHeading renders a tool block's one-line header: a collapse affordance
+// (▸ collapsed / ▾ expanded, or a space when the call has no output to reveal),
+// a kind glyph, the tool's title (falling back to its kind, then a generic
+// label), and its current status. The whole heading is styled as one unit so
+// the status rides along with the title. This single line is all a tool call
+// shows when collapsed — its output is gated behind the `z` toggle.
+func acpToolHeading(e transcriptEntry, expanded bool) string {
 	title := e.text
 	if title == "" {
 		title = e.toolKind
@@ -311,7 +338,15 @@ func acpToolHeading(e transcriptEntry) string {
 	if title == "" {
 		title = "tool"
 	}
-	head := "⚙ " + title
+	affordance := " "
+	if e.toolOutput != "" {
+		if expanded {
+			affordance = "▾"
+		} else {
+			affordance = "▸"
+		}
+	}
+	head := affordance + " " + acpToolGlyph(e.toolKind) + " " + title
 	if e.toolStatus != "" {
 		head += " · " + e.toolStatus
 	}
@@ -371,7 +406,37 @@ var (
 	acpPlanLabelStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("147"))
+
+	// acpPromptBox / acpMsgBox wrap a conversation turn in a rounded border,
+	// colour-coded by role (prompt vs assistant), so the transcript reads as a
+	// series of message cards — tool calls stay as bare collapsed lines between
+	// them. Padding gives the text breathing room inside the border.
+	acpPromptBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("220")).
+			Padding(0, 1)
+	acpMsgBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("110")).
+			Padding(0, 1)
 )
+
+// acpBoxLines renders a conversation turn as a bordered card: a styled role
+// label on the first line, then the (border-wrapped) body, split into lines
+// ready to append to the transcript. The box's total width is width columns (the
+// rounded border adds the two edge columns to the content+padding width), so a
+// card lines up flush with the transcript's other rows.
+func acpBoxLines(label string, labelStyle lipgloss.Style, text string, box lipgloss.Style, width int) []string {
+	bw := width - 2 // leave room for the rounded border's two edge columns
+	if bw < 1 {
+		bw = 1
+	}
+	content := labelStyle.Render(label)
+	if text != "" {
+		content += "\n" + text
+	}
+	return strings.Split(box.Width(bw).Render(content), "\n")
+}
 
 // acpChromeRows is the non-body height of the ACP view: header, tab bar, status
 // line, and footer hint (one row each). The transcript box gets the rest.
@@ -397,9 +462,11 @@ func renderACPTabBar(tabs []acpTab, sel int) string {
 // renderACPTabBody renders the selected tab's transcript into a width×height
 // box, newest content at the bottom (stream semantics: the eye lands on the
 // latest chunk). Each entry is a labelled block — "▷ prompt" or "◁ agent" —
-// followed by its wrapped text and a blank separator. When the transcript is
-// taller than the box, only the trailing lines that fit are shown.
-func renderACPTabBody(t *acpTab, width, height int) string {
+// followed by its wrapped text and a blank separator. Tool calls render as a
+// single collapsed summary line; their output is shown only when expandTools is
+// set (toggled by the `z` key). When the transcript is taller than the box,
+// only the trailing lines that fit are shown.
+func renderACPTabBody(t *acpTab, width, height int, expandTools bool) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
@@ -410,19 +477,17 @@ func renderACPTabBody(t *acpTab, width, height int) string {
 	for _, e := range t.entries {
 		switch e.kind {
 		case entryPrompt:
-			lines = append(lines, acpPromptLabelStyle.Render("▷ prompt"))
-			lines = append(lines, acpWrapLines(e.text, width)...)
+			lines = append(lines, acpBoxLines("▷ prompt", acpPromptLabelStyle, e.text, acpPromptBox, width)...)
 		case entryMessage:
-			lines = append(lines, acpMsgLabelStyle.Render("◁ agent"))
-			lines = append(lines, acpWrapLines(e.text, width)...)
+			lines = append(lines, acpBoxLines("◁ agent", acpMsgLabelStyle, e.text, acpMsgBox, width)...)
 		case entryThought:
 			lines = append(lines, acpThoughtLabelStyle.Render("◌ thinking"))
 			for _, l := range acpWrapLines(e.text, width) {
 				lines = append(lines, dimStyle.Render(l))
 			}
 		case entryTool:
-			lines = append(lines, acpWrapLines(acpToolHeading(e), width)...)
-			if e.toolOutput != "" {
+			lines = append(lines, acpWrapLines(acpToolHeading(e, expandTools), width)...)
+			if expandTools && e.toolOutput != "" {
 				for _, l := range acpWrapLines(e.toolOutput, width) {
 					lines = append(lines, dimStyle.Render(l))
 				}
@@ -464,7 +529,11 @@ func (m model) renderACPView() string {
 	}
 
 	header := titleStyle.Render("ACP Sessions")
-	hint := hintStyle.Render("←/→: switch tab  •  esc: back  •  q: quit")
+	toolHint := "z: expand tools"
+	if m.acpToolsExpanded {
+		toolHint = "z: collapse tools"
+	}
+	hint := hintStyle.Render("←/→: switch tab  •  " + toolHint + "  •  esc: back  •  q: quit")
 
 	if len(m.acp.tabs) == 0 {
 		body := dimStyle.Render("(no active ACP sessions)")
@@ -488,8 +557,15 @@ func (m model) renderACPView() string {
 	if innerH < 1 {
 		innerH = 1
 	}
-	bodyContent := renderACPTabBody(t, innerW, innerH)
-	box := unfocusedBorder.Width(innerW).Height(innerH).MaxWidth(width).Render(bodyContent)
+	bodyContent := renderACPTabBody(t, innerW, innerH, m.acpToolsExpanded)
+	// lipgloss's Width sets the content+padding width, so to give the body an
+	// innerW-wide text area (what renderACPTabBody drew to) the box Width must add
+	// back the horizontal padding. Without this the text area is padding-narrower
+	// than the body, so every line — and every message box border — wraps by two
+	// columns and the cards render torn.
+	box := unfocusedBorder.
+		Width(innerW + unfocusedBorder.GetHorizontalPadding()).
+		Height(innerH).MaxWidth(width).Render(bodyContent)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, bar, statusLine, box, hint)
 }

@@ -120,6 +120,81 @@ func TestExecArgsNoWorkspace(t *testing.T) {
 	}
 }
 
+func TestExecArgsInjectsGitIdentity(t *testing.T) {
+	c := Config{
+		SandboxName: "acp-s",
+		Workspaces:  []string{"/host/repo"},
+		GitName:     "Jim Clark",
+		GitEmail:    "jim@example.com",
+	}
+	got := c.execArgs()
+	want := []string{
+		"exec",
+		"-e", "GIT_AUTHOR_NAME=Jim Clark",
+		"-e", "GIT_AUTHOR_EMAIL=jim@example.com",
+		"-e", "GIT_COMMITTER_NAME=Jim Clark",
+		"-e", "GIT_COMMITTER_EMAIL=jim@example.com",
+		"-w", "/host/repo",
+		"acp-s", "--", "claude-acp-client",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("execArgs() = %v, want %v", got, want)
+	}
+}
+
+func TestExecArgsInjectsSigningConfig(t *testing.T) {
+	c := Config{
+		SandboxName: "acp-s",
+		Workspaces:  []string{"/host/repo"},
+		GitName:     "Jim Clark",
+		GitEmail:    "jim@example.com",
+		SigningKey:  "ssh-ed25519 AAAAKEY",
+	}
+	got := c.execArgs()
+	want := []string{
+		"exec",
+		"-e", "GIT_AUTHOR_NAME=Jim Clark",
+		"-e", "GIT_AUTHOR_EMAIL=jim@example.com",
+		"-e", "GIT_COMMITTER_NAME=Jim Clark",
+		"-e", "GIT_COMMITTER_EMAIL=jim@example.com",
+		"-e", "GIT_CONFIG_COUNT=4",
+		"-e", "GIT_CONFIG_KEY_0=user.signingkey",
+		"-e", "GIT_CONFIG_VALUE_0=ssh-ed25519 AAAAKEY",
+		"-e", "GIT_CONFIG_KEY_1=gpg.format",
+		"-e", "GIT_CONFIG_VALUE_1=ssh",
+		"-e", "GIT_CONFIG_KEY_2=gpg.ssh.program",
+		"-e", "GIT_CONFIG_VALUE_2=ssh-keygen",
+		"-e", "GIT_CONFIG_KEY_3=commit.gpgsign",
+		"-e", "GIT_CONFIG_VALUE_3=true",
+		"-w", "/host/repo",
+		"acp-s", "--", "claude-acp-client",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("execArgs() = %v, want %v", got, want)
+	}
+}
+
+func TestExecArgsOmitsSigningWhenNoKey(t *testing.T) {
+	// No SigningKey → no GIT_CONFIG_* signing env at all.
+	c := Config{SandboxName: "acp-s", Workspaces: []string{"/host/repo"}}
+	for _, a := range c.execArgs() {
+		if strings.HasPrefix(a, "GIT_CONFIG_") {
+			t.Fatalf("unexpected signing env %q with no SigningKey", a)
+		}
+	}
+}
+
+func TestExecArgsOmitsGitIdentityWhenIncomplete(t *testing.T) {
+	// A half-set identity (name but no email) must NOT inject env — that would
+	// produce commits with a blank email. Fall back to the sandbox default.
+	c := Config{SandboxName: "acp-s", GitName: "Jim Clark"}
+	got := c.execArgs()
+	want := []string{"exec", "acp-s", "--", "claude-acp-client"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("execArgs() = %v, want %v", got, want)
+	}
+}
+
 // fakeSbx records calls and returns canned responses keyed by the first arg.
 type fakeSbx struct {
 	calls    [][]string

@@ -94,10 +94,10 @@ func TestSessionsMsgPreservesSelectionAcrossRefresh(t *testing.T) {
 	}})
 	m = step1.(model)
 	// Move selection to "b".
-	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = step2.(model)
 	if m.sessSel != "b" {
-		t.Fatalf("after Down, sessSel = %q, want %q", m.sessSel, "b")
+		t.Fatalf("after Right, sessSel = %q, want %q", m.sessSel, "b")
 	}
 	// Refresh: "b" still present, must remain selected even though "a" left.
 	step3, _ := m.Update(sessionsMsg{views: []SessionView{
@@ -116,7 +116,7 @@ func TestSessionsMsgFallsBackWhenSelectionDisappears(t *testing.T) {
 		{ID: "a"}, {ID: "b"},
 	}})
 	m = step1.(model)
-	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = step2.(model)
 	if m.sessSel != "b" {
 		t.Fatalf("setup: sessSel = %q, want %q", m.sessSel, "b")
@@ -133,17 +133,18 @@ func TestArrowKeysOnlyAffectSessionsWhenFocused(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, nil)
 	step1, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a"}, {ID: "b"}}})
 	m = step1.(model)
-	// Focus the projects pane.
-	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	// Focus the projects pane (down cycles pane focus).
+	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = step2.(model)
 	if m.focus != paneProjects {
-		t.Fatalf("expected projects focus after Right, got %v", m.focus)
+		t.Fatalf("expected projects focus after Down, got %v", m.focus)
 	}
-	// Down arrow should not move sessions selection when projects pane is focused.
-	step3, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	// The selection key (right) should move the project selection, not the
+	// sessions selection, while the projects pane is focused.
+	step3, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = step3.(model)
 	if m.sessSel != "a" {
-		t.Errorf("Down moved sessSel while projects focused: got %q, want %q", m.sessSel, "a")
+		t.Errorf("Right moved sessSel while projects focused: got %q, want %q", m.sessSel, "a")
 	}
 }
 

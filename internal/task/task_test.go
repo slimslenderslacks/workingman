@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadExampleNoDeps(t *testing.T) {
@@ -106,6 +107,34 @@ func TestCommitArtifactsOmittedWhenEmpty(t *testing.T) {
 		if strings.Contains(string(data), key) {
 			t.Errorf("empty task yaml should not contain %q; got:\n%s", key, string(data))
 		}
+	}
+}
+
+func TestCompletedAtRoundTrip(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "t.yaml")
+	when := time.Date(2026, 6, 21, 18, 49, 0, 0, time.UTC)
+	if err := Save(dst, &Task{Name: "x", Status: StatusCommitted, CompletedAt: &when}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.CompletedAt == nil || !got.CompletedAt.Equal(when) {
+		t.Errorf("CompletedAt = %v, want %v", got.CompletedAt, when)
+	}
+
+	// A task that never completed must omit the field entirely.
+	dst2 := filepath.Join(t.TempDir(), "t2.yaml")
+	if err := Save(dst2, &Task{Name: "y", Status: StatusReady}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(dst2)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(data), "completed_at") {
+		t.Errorf("nil CompletedAt should be omitted from yaml; got:\n%s", string(data))
 	}
 }
 

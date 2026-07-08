@@ -41,6 +41,11 @@ type Daemon struct {
 	// relaunched in a tight loop.
 	planningMu       sync.Mutex
 	planningFailures map[string]int // keyed by project file path
+
+	// sessionIdleTimeout bounds how long a tracked session may go without any
+	// ACP stream activity before the stranded-session reaper terminates it.
+	// See reaper.go.
+	sessionIdleTimeout time.Duration
 }
 
 const (
@@ -90,6 +95,17 @@ func WithScheduler(s *scheduler.Scheduler) Option {
 	return func(d *Daemon) { d.scheduler = s }
 }
 
+// WithSessionIdleTimeout overrides how long a tracked session may go without
+// ACP stream activity before the stranded-session reaper terminates it. A
+// non-positive value leaves the default (defaultSessionIdleTimeout).
+func WithSessionIdleTimeout(timeout time.Duration) Option {
+	return func(d *Daemon) {
+		if timeout > 0 {
+			d.sessionIdleTimeout = timeout
+		}
+	}
+}
+
 func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 	if len(roots) == 0 {
 		return nil, fmt.Errorf("daemon: at least one root is required")
@@ -102,12 +118,13 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: %w", err)
 	}
 	d := &Daemon{
-		roots:    roots,
-		audit:    a,
-		watcher:  w,
-		notifier:         notify.Noop{},
-		sessions:         map[string]sessionEntry{},
-		planningFailures: map[string]int{},
+		roots:              roots,
+		audit:              a,
+		watcher:            w,
+		notifier:           notify.Noop{},
+		sessions:           map[string]sessionEntry{},
+		planningFailures:   map[string]int{},
+		sessionIdleTimeout: defaultSessionIdleTimeout,
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -130,6 +147,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.audit.Log("watch_root", "path", r)
 	}
 	d.startupScan()
+	go d.reapLoop(ctx)
 	for {
 		select {
 		case <-ctx.Done():

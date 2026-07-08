@@ -119,6 +119,11 @@ type model struct {
 	acp     acpTabs
 	acpCh   <-chan acpTabEvent
 	showACP bool
+	// acpToolsExpanded controls whether tool-call blocks show their output in
+	// the ACP view. Tool calls render collapsed to a single summary line by
+	// default (keeping the transcript readable); the `z` key toggles this to
+	// reveal every tool call's output.
+	acpToolsExpanded bool
 }
 
 func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh <-chan []string, attacher tmuxAttacher) model {
@@ -294,17 +299,15 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showACP = true
 			m.statusMsg = ""
 		}
-	case "tab":
-		m.focus = togglePane(m.focus)
-		m.statusMsg = ""
-	case "shift+tab":
-		m.focus = shiftTogglePane(m.focus)
+	case "left", "h":
+		// Left/right move the selection (or scroll) WITHIN the focused pane:
+		// previous/next project in Work Streams, previous/next task in Tasks,
+		// previous/next session in Agent Sessions, line-scroll in the YAML pane.
+		// Pane focus itself is moved with up/down (see below).
+		m = m.moveSelectionInPane(-1)
 		m.statusMsg = ""
 	case "right", "l":
-		m.focus = paneRight(m.focus)
-		m.statusMsg = ""
-	case "left", "h":
-		m.focus = paneLeft(m.focus)
+		m = m.moveSelectionInPane(1)
 		m.statusMsg = ""
 	case "p":
 		// Switch the YAML viewer to project content. Independent of pane
@@ -343,50 +346,13 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.statusMsg = ""
 	case "up":
-		switch m.focus {
-		case paneSessions:
-			m.sessSel = moveSelection(m.sessions, m.sessSel, -1)
-		case paneProjects:
-			prev := m.projSel
-			m.projSel = moveProjectSelection(m.projects, m.projSel, -1)
-			if m.projSel != prev && m.yamlSrc == yamlSourceProject {
-				m.yamlScroll = 0
-			}
-			m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
-			m.sessSel = reconcileSelection(m.sessions, m.sessSel)
-		case paneProjectYAML:
-			if m.yamlScroll > 0 {
-				m.yamlScroll--
-			}
-		case paneTasks:
-			prev := m.taskSel
-			m.taskSel = moveTaskSelection(m.selectedProjectTasks(), m.taskSel, -1)
-			if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
-				m.yamlScroll = 0
-			}
-		}
+		// Up/down move focus between panes (previous/next in the cycle),
+		// replacing the former Tab/Shift+Tab. Selection within a pane is moved
+		// with left/right (see above).
+		m.focus = shiftTogglePane(m.focus)
 		m.statusMsg = ""
 	case "down":
-		switch m.focus {
-		case paneSessions:
-			m.sessSel = moveSelection(m.sessions, m.sessSel, 1)
-		case paneProjects:
-			prev := m.projSel
-			m.projSel = moveProjectSelection(m.projects, m.projSel, 1)
-			if m.projSel != prev && m.yamlSrc == yamlSourceProject {
-				m.yamlScroll = 0
-			}
-			m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
-			m.sessSel = reconcileSelection(m.sessions, m.sessSel)
-		case paneProjectYAML:
-			m.yamlScroll++
-		case paneTasks:
-			prev := m.taskSel
-			m.taskSel = moveTaskSelection(m.selectedProjectTasks(), m.taskSel, 1)
-			if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
-				m.yamlScroll = 0
-			}
-		}
+		m.focus = togglePane(m.focus)
 		m.statusMsg = ""
 	case "enter":
 		if m.focus == paneSessions {
@@ -396,19 +362,55 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// moveSelectionInPane moves the selection (or scroll position) by delta within
+// the currently focused pane: project in Work Streams, task in Tasks, session in
+// Agent Sessions, or a one-line scroll in the YAML pane. delta is -1 for the
+// previous item (left) and +1 for the next (right). Changing the project or task
+// resets the YAML scroll when the viewer is showing that file, and changing the
+// project reconciles the dependent task/session selections — mirroring the
+// behaviour the up/down keys used to carry before they became pane switches.
+func (m model) moveSelectionInPane(delta int) model {
+	switch m.focus {
+	case paneSessions:
+		m.sessSel = moveSelection(m.sessions, m.sessSel, delta)
+	case paneProjects:
+		prev := m.projSel
+		m.projSel = moveProjectSelection(m.projects, m.projSel, delta)
+		if m.projSel != prev && m.yamlSrc == yamlSourceProject {
+			m.yamlScroll = 0
+		}
+		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
+		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
+	case paneProjectYAML:
+		m.yamlScroll += delta
+		if m.yamlScroll < 0 {
+			m.yamlScroll = 0
+		}
+	case paneTasks:
+		prev := m.taskSel
+		m.taskSel = moveTaskSelection(m.selectedProjectTasks(), m.taskSel, delta)
+		if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
+			m.yamlScroll = 0
+		}
+	}
+	return m
+}
+
 // handleACPKey processes a keystroke while the full-window ACP tab view is open.
-// Left/right (and tab/shift+tab) switch tabs; esc (or `a`) returns to the normal
-// two-pane UI; q and ctrl+c still quit the whole TUI.
+// Left/right switch tabs; esc (or `a`) returns to the normal two-pane UI; q and
+// ctrl+c still quit the whole TUI. The Tab key no longer switches tabs.
 func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q":
 		return m, tea.Quit
 	case "esc", "a":
 		m.showACP = false
-	case "right", "l", "tab":
+	case "right", "l":
 		m.acp.next()
-	case "left", "h", "shift+tab":
+	case "left", "h":
 		m.acp.prev()
+	case "z":
+		m.acpToolsExpanded = !m.acpToolsExpanded
 	}
 	return m, nil
 }
@@ -682,12 +684,6 @@ func shiftTogglePane(p pane) pane {
 		return paneProjects
 	}
 }
-
-// paneRight / paneLeft are kept as aliases for forward / backward cycle so
-// the hjkl/arrow bindings still navigate the stack now that there is no
-// separate left column. They behave the same as togglePane / shiftTogglePane.
-func paneRight(p pane) pane { return togglePane(p) }
-func paneLeft(p pane) pane  { return shiftTogglePane(p) }
 
 var (
 	titleStyle = lipgloss.NewStyle().
@@ -1529,14 +1525,14 @@ type taskColumns struct {
 
 // Column gap is one space; five columns means four gaps.
 const (
-	taskColGap            = 1
-	taskColGaps           = 4
-	taskColModelDefault   = 10
-	taskColMCPsDefault    = 18
-	taskColRulesDefault   = 6
-	taskColStatusDefault  = 10
-	taskColMinNameWidth   = 4
-	taskColMinTotalWidth  = taskColMinNameWidth + taskColModelDefault + taskColMCPsDefault + taskColRulesDefault + taskColStatusDefault + taskColGaps*taskColGap
+	taskColGap           = 1
+	taskColGaps          = 4
+	taskColModelDefault  = 10
+	taskColMCPsDefault   = 18
+	taskColRulesDefault  = 6
+	taskColStatusDefault = 10
+	taskColMinNameWidth  = 4
+	taskColMinTotalWidth = taskColMinNameWidth + taskColModelDefault + taskColMCPsDefault + taskColRulesDefault + taskColStatusDefault + taskColGaps*taskColGap
 )
 
 // taskColumnWidths sizes the five columns to fill innerWidth. The model,
@@ -1804,7 +1800,7 @@ func (m model) renderFooter() string {
 	text := m.statusMsg
 	style := statusErrStyle
 	if text == "" {
-		base := "tab: switch pane  •  ↑/↓: select  •  p/t: project/task yaml  •  enter/click: attach  •  q: quit"
+		base := "↑/↓: switch pane  •  ←/→: select in pane  •  p/t: project/task yaml  •  enter/click: attach  •  q: quit"
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}

@@ -534,6 +534,18 @@ func (r *Runner) sessionsRoot() (string, error) {
 	return session.DefaultRoot()
 }
 
+// SessionLogPath returns the absolute path to the ACP stream log for the session
+// named name: <sessions-root>/<name>/stream.log (acpwrapper.LogName). The
+// daemon's stranded-session reaper stats this file's mtime to measure how long a
+// session has gone without ACP stream activity.
+func (r *Runner) SessionLogPath(name string) (string, error) {
+	root, err := r.sessionsRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, name, "stream.log"), nil
+}
+
 // acpSessionID derives the ACP session id from the Plan. It reuses the tmux
 // window-name logic (kind-tail) so the id is stable across daemon restarts —
 // the same task relaunch maps to the same session dir and sandbox, making the

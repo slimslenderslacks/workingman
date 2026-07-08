@@ -189,11 +189,11 @@ func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
 		t.Errorf("initial view should show alpha-only and not bravo-only:\n%s", v1)
 	}
 
-	// Tab to projects pane, then down-arrow to select bravo.
-	tabbed, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = tabbed.(model)
-	down, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = down.(model)
+	// Down to the projects pane, then right-arrow to select bravo.
+	focused, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = focused.(model)
+	right, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = right.(model)
 
 	v2 := m.View()
 	if !strings.Contains(v2, "bravo-only") || strings.Contains(v2, "alpha-only") {

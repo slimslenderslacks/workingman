@@ -123,6 +123,19 @@ func TestHappyPathFullProject(t *testing.T) {
 		t.Errorf("project updated_by = %q, want daemon", reloaded.UpdatedBy)
 	}
 
+	// Each committed task should have been stamped with a completion time by
+	// the daemon's commit-session callback (which runs after the commit agent
+	// exited, so the stamp can't be clobbered). The Tasks pane sorts by it.
+	for _, p := range []string{task1Path, task2Path} {
+		tk, err := task.Load(p)
+		if err != nil {
+			t.Fatalf("reload task %s: %v", p, err)
+		}
+		if tk.CompletedAt == nil {
+			t.Errorf("task %q CompletedAt = nil, want a stamped completion time", tk.Name)
+		}
+	}
+
 	// Sanity: each Kind launched exactly the expected number of times.
 	snap := buf.String()
 	if got := strings.Count(snap, "kind=task"); got != 2 {

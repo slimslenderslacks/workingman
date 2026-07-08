@@ -89,23 +89,23 @@ func TestProjectYAMLPaneRendersSelectedProject(t *testing.T) {
 	}
 }
 
-func TestProjectYAMLScrollAdvancesOnDown(t *testing.T) {
+func TestProjectYAMLScrollAdvancesOnRight(t *testing.T) {
 	m := model{focus: paneProjectYAML}
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = step.(model)
 	if m.yamlScroll != 1 {
-		t.Errorf("down arrow on yaml pane: scroll = %d, want 1", m.yamlScroll)
+		t.Errorf("right arrow on yaml pane: scroll = %d, want 1", m.yamlScroll)
 	}
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
 	m = step.(model)
 	if m.yamlScroll != 0 {
-		t.Errorf("up arrow on yaml pane: scroll = %d, want 0", m.yamlScroll)
+		t.Errorf("left arrow on yaml pane: scroll = %d, want 0", m.yamlScroll)
 	}
-	// Up at zero must clamp to zero (no underflow).
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	// Left at zero must clamp to zero (no underflow).
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
 	m = step.(model)
 	if m.yamlScroll != 0 {
-		t.Errorf("up arrow at zero scroll: scroll = %d, want 0", m.yamlScroll)
+		t.Errorf("left arrow at zero scroll: scroll = %d, want 0", m.yamlScroll)
 	}
 }
 
@@ -156,11 +156,11 @@ func TestProjectYAMLScrollResetsWhenSelectionChanges(t *testing.T) {
 	m = step.(model)
 	m.yamlScroll = 5
 
-	// Tab once to land on projects, then down-arrow to advance selection.
-	tabbed, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = tabbed.(model)
-	down, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = down.(model)
+	// Down once to land on projects, then right-arrow to advance selection.
+	focused, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = focused.(model)
+	right, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = right.(model)
 
 	if m.projSel != "/x/bravo/.project.yaml" {
 		t.Fatalf("projSel = %q, want bravo", m.projSel)

@@ -3,6 +3,7 @@ package task
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/slimslenderslacks/work/internal/policy"
 	"gopkg.in/yaml.v3"
@@ -70,6 +71,15 @@ type Task struct {
 	// workspace root, etc. Useful for surfacing artifacts that don't show
 	// up in `git log`.
 	CreatedFiles []string `yaml:"created_files,omitempty"`
+
+	// CompletedAt is when the daemon observed this task reach `committed` —
+	// i.e. when its work was fully landed. It is stamped by the daemon in its
+	// commit-session callback, AFTER the commit agent has exited, so an agent
+	// rewriting the task file can never clobber it. A pointer so it omits
+	// cleanly from YAML until set; nil on tasks that haven't committed (or that
+	// committed before this field existed). The TUI sorts the Tasks pane by it
+	// to show tasks in the order they actually ran/completed.
+	CompletedAt *time.Time `yaml:"completed_at,omitempty"`
 
 	// StaticMCPs are the sbx static-MCP names this task's sandbox should be
 	// created with: each entry becomes a `--static-mcp <name>` flag on

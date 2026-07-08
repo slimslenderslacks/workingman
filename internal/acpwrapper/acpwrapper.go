@@ -106,6 +106,27 @@ type Config struct {
 	// StaticMCPs: skipped on an existing sandbox because the name encodes
 	// the policy set.
 	Policies []policy.Rule
+
+	// GitName / GitEmail are the host user's git identity. When BOTH are set,
+	// execArgs injects them into `sbx exec` as GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL
+	// and GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL, so the sandboxed agent (the
+	// commit agent in particular) authors commits as the user instead of the
+	// base image's default identity. Env vars override git config for every git
+	// invocation in the session — author and committer alike — so this requires
+	// NO per-repo `.git/config` write and can't be bypassed by which git command
+	// the agent happens to run. Empty (either one) leaves the sandbox default.
+	GitName  string
+	GitEmail string
+
+	// SigningKey, when set, is the user's SSH signing public key (the
+	// `user.signingkey` from their host git config, present only when they sign
+	// commits with an SSH key). execArgs then injects the git config needed to
+	// SSH-sign commits inside the sandbox — user.signingkey, gpg.format=ssh,
+	// commit.gpgsign=true — and crucially forces gpg.ssh.program=ssh-keygen. The
+	// host's configured signer is often a macOS/1Password binary (op-ssh-sign)
+	// that does not exist in the Linux sandbox; ssh-keygen instead signs through
+	// the forwarded SSH agent (SSH_AUTH_SOCK). Empty leaves commits unsigned.
+	SigningKey string
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -151,6 +172,36 @@ func (c Config) primaryWorkspace() string {
 	return ""
 }
 
+// goModCacheDir returns the path to a pre-populated, writable Go module cache
+// staged for this session, or "" if none exists. The task sandbox has no
+// network credentials, so it cannot `go mod download` private
+// github.com/docker/* modules (or the matching Go toolchain). As a workaround
+// the orchestrator may stage an offline module cache — populated on the host,
+// which DOES have the credentials — as a `.gomodcache` directory at the root of
+// one of the session's workspaces. That workspace is bind-mounted read-write at
+// its real host path, so the same path resolves inside the sandbox.
+//
+// Detection is by presence: the first workspace carrying a `.gomodcache`
+// directory wins. Stage it at the root of the code worktree (which is NOT
+// itself a git repo — the repos are subdirectories, so `.gomodcache` sits
+// outside them and can't be committed) rather than the orch control workspace,
+// because the daemon recursively watches the orch tree and the cache's tens of
+// thousands of subdirectories would otherwise exhaust its filesystem watches.
+//
+// When the cache exists, execArgs points the agent's `go` at it offline
+// (GOMODCACHE + GOPROXY=off); when it does not, this returns "" and the sandbox
+// resolves modules over the network exactly as before — so the behavior is
+// opt-in per project and harmless to projects without a staged cache.
+func (c Config) goModCacheDir() string {
+	for _, ws := range c.Workspaces {
+		cache := filepath.Join(ws, ".gomodcache")
+		if info, err := os.Stat(cache); err == nil && info.IsDir() {
+			return cache
+		}
+	}
+	return ""
+}
+
 // execArgs builds the argv (after the sbx binary) that runs acp-kit's
 // claude-acp-client entrypoint inside the sandbox over `sbx exec`, producing an
 // ACP client on the child's stdio.
@@ -161,6 +212,57 @@ func (c Config) primaryWorkspace() string {
 // agent's cwd matches the mounted host path.
 func (c Config) execArgs() []string {
 	args := []string{"exec"}
+	// Commit as the host user without a local .git/config: passing the identity
+	// as environment overrides any git config (including the base image's baked
+	// `agent@orch.local`) for every git command in the session — author AND
+	// committer. We set all four so a commit is fully attributed; git falls back
+	// to its own config only when these are absent. Both fields must be present:
+	// a half-set identity is worse than the sandbox default.
+	if c.GitName != "" && c.GitEmail != "" {
+		args = append(args,
+			"-e", "GIT_AUTHOR_NAME="+c.GitName,
+			"-e", "GIT_AUTHOR_EMAIL="+c.GitEmail,
+			"-e", "GIT_COMMITTER_NAME="+c.GitName,
+			"-e", "GIT_COMMITTER_EMAIL="+c.GitEmail,
+		)
+	}
+	// Point `go` at a host-staged offline module cache when one exists, so the
+	// network-less sandbox can build/test code that depends on private
+	// github.com/docker/* modules. The cache is pre-populated on the host (which
+	// has the credentials) with every module AND the matching Go toolchain.
+	// GOPROXY=off forces strictly offline resolution from the (writable) mounted
+	// cache: pinned modules verify against the repo's go.sum and the toolchain
+	// against its cached sumdb record — both already in the cache. (Deliberately
+	// NOT setting GOSUMDB=off, which makes go refuse the not-in-go.sum toolchain
+	// module, nor GOPRIVATE, which would force a direct git fetch the sandbox
+	// can't authenticate.) Absent a staged cache this block is skipped and
+	// module resolution is unchanged.
+	if cache := c.goModCacheDir(); cache != "" {
+		args = append(args,
+			"-e", "GOMODCACHE="+cache,
+			"-e", "GOFLAGS=-mod=mod",
+			"-e", "GOPROXY=off",
+		)
+	}
+	// Inject SSH commit-signing config when the host is set up for it. Delivered
+	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n so it applies to every git invocation
+	// without writing a .git/config. gpg.ssh.program is forced to ssh-keygen: the
+	// host's configured signer may be a macOS/1Password binary (op-ssh-sign)
+	// absent in the Linux sandbox, so signing must run through ssh-keygen against
+	// the forwarded SSH agent (SSH_AUTH_SOCK) instead.
+	if c.SigningKey != "" {
+		args = append(args,
+			"-e", "GIT_CONFIG_COUNT=4",
+			"-e", "GIT_CONFIG_KEY_0=user.signingkey",
+			"-e", "GIT_CONFIG_VALUE_0="+c.SigningKey,
+			"-e", "GIT_CONFIG_KEY_1=gpg.format",
+			"-e", "GIT_CONFIG_VALUE_1=ssh",
+			"-e", "GIT_CONFIG_KEY_2=gpg.ssh.program",
+			"-e", "GIT_CONFIG_VALUE_2=ssh-keygen",
+			"-e", "GIT_CONFIG_KEY_3=commit.gpgsign",
+			"-e", "GIT_CONFIG_VALUE_3=true",
+		)
+	}
 	if cwd := c.primaryWorkspace(); cwd != "" {
 		args = append(args, "-w", cwd)
 	}

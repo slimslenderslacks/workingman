@@ -135,8 +135,9 @@ func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 		{ID: "b", AgentName: "task", Project: "bravo", TmuxTarget: "orch:task-bravo"},
 	}})
 	m = step.(model)
-	// Move selection to b, then press Enter.
-	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	// Move selection to b (right moves selection within the sessions pane),
+	// then press Enter.
+	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = step2.(model)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	_ = runCmd(t, cmd)
@@ -152,7 +153,7 @@ func TestEnterIgnoredWhenProjectsFocused(t *testing.T) {
 		{ID: "a", TmuxTarget: "orch:task-alpha"},
 	}})
 	m = step.(model)
-	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = step2.(model)
 	if m.focus != paneProjects {
 		t.Fatalf("focus = %v, want projects", m.focus)

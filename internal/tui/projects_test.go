@@ -260,6 +260,51 @@ func writeTask(t *testing.T, path string, tk *task.Task) {
 	}
 }
 
+func TestScanProjectsOrdersTasksByCompletion(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "proj")
+	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
+		Description: "p", Branch: "feat/p", Status: project.StatusWorking,
+	}, project.WriterAgent); err != nil {
+		t.Fatal(err)
+	}
+	// Alphabetical (taskgraph) order is a, b, c. Completion order is c (earlier)
+	// then a (later); b never completed and must fall to the bottom.
+	earlier := time.Now().UTC().Add(-2 * time.Hour)
+	later := time.Now().UTC().Add(-1 * time.Hour)
+	writeTask(t, filepath.Join(dir, "tasks", "01-a.yaml"),
+		&task.Task{Name: "a", Status: task.StatusCommitted, CompletedAt: &later})
+	writeTask(t, filepath.Join(dir, "tasks", "02-b.yaml"),
+		&task.Task{Name: "b", Status: task.StatusReady})
+	writeTask(t, filepath.Join(dir, "tasks", "03-c.yaml"),
+		&task.Task{Name: "c", Status: task.StatusCommitted, CompletedAt: &earlier})
+
+	views, err := ScanProjects([]string{root})
+	if err != nil {
+		t.Fatalf("ScanProjects: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("want 1 view, got %d", len(views))
+	}
+	want := []string{"c", "a", "b"}
+	got := make([]string, 0, len(views[0].Tasks))
+	for _, tk := range views[0].Tasks {
+		got = append(got, tk.Name)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("task order = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("task order = %v, want %v (completed by time, then uncompleted by name)", got, want)
+			break
+		}
+	}
+}
+
 func taskCountsEqual(a, b map[task.Status]int) bool {
 	if len(a) != len(b) {
 		return false

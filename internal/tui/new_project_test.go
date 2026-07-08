@@ -23,11 +23,11 @@ func typeChars(t *testing.T, m model, s string) model {
 
 func focusProjectsPane(t *testing.T, m model) model {
 	t.Helper()
-	// Tab once to land on projects (sessions → projects → yaml cycle).
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	// Down once to land on projects (sessions → projects → yaml cycle).
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = step.(model)
 	if m.focus != paneProjects {
-		t.Fatalf("expected projects focus after one tab, got %v", m.focus)
+		t.Fatalf("expected projects focus after one down, got %v", m.focus)
 	}
 	return m
 }
