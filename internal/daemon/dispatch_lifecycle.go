@@ -253,7 +253,14 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	if d.runner == nil {
 		return
 	}
-	if d.hasSession(projectPath) {
+	// The wolf is tracked under a key distinct from the project path so it can
+	// run in tandem with the project's other agents: summoning the wolf while a
+	// task/commit/planning session is live must bring it up immediately rather
+	// than waiting for the project's single main slot to free up. Dedup is
+	// against that wolf key, so a second summon while a wolf is already running
+	// is still a no-op.
+	key := wolfSessionKey(projectPath)
+	if d.hasSession(key) {
 		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.WolfAgent.String())
 		return
 	}
@@ -273,10 +280,22 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	// Ignore start error here: the project is already blocked, recursing
 	// into transitionProjectBlocked would loop. The session_start_error
 	// audit entry plus the notification we already sent are enough to
-	// surface the failure.
-	_ = d.startSession(projectPath, plan, func(error) {
+	// surface the failure. onEnd revisits under the real project path (not the
+	// wolf key) so post-wolf re-evaluation reloads the actual .project.yaml.
+	_ = d.startSession(key, plan, func(error) {
 		d.revisitProject(projectPath)
 	})
+}
+
+// wolfSessionKey is the session-map key for a project's wolf agent. It appends
+// a "#wolf" marker to the project path so the wolf occupies a slot separate
+// from the one every other agent (project/planning/task/commit) shares under
+// the bare project path — that separation is what lets the wolf run alongside
+// them. The marker is appended to the final path element rather than as a new
+// path segment, so filepath.Dir(key) still yields the project directory that
+// ListSessions relies on to label the sessions pane.
+func wolfSessionKey(projectPath string) string {
+	return projectPath + "#wolf"
 }
 
 // failedOrBlockedTaskPaths returns absolute paths to every task in tasksDir

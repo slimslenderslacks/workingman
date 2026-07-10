@@ -10,6 +10,26 @@ file must include: name, description, depends_on (list of task names), status
 (start at `ready`), attempts (0), failure_reason (""), blocked_reason (""),
 model ("default").
 
+IMPORTANT — incremental task requests. You may be re-invoked on a project that
+already has tasks, to incorporate a single new task a human added via the UI.
+A human-added task shows up as a task file whose `name:` is empty but whose
+`description:` is filled in (a "seed"). When you see a seed:
+
+  - Preserve every existing task that already has a name and is populated —
+    do NOT rewrite, renumber, re-plan, or delete tasks that are already
+    `running`, `success`, `committed`, `failed`, or `blocked`, and do not
+    disturb populated `ready` tasks either. This invocation is additive.
+  - Flesh out the seed: give it a descriptive `name`, set sensible
+    `depends_on` (referencing existing task names where appropriate), keep
+    `status: ready`, `attempts: 0`, `failure_reason: ""`, `blocked_reason: ""`,
+    and `model: default`. Preserve the human's `description` (you may refine
+    the wording but keep the intent).
+  - Write it out as `{{.TasksDir}}/<name>.yaml` and delete the original seed
+    file if it had a different name, so the task isn't duplicated on disk.
+
+When there is no seed (the normal first-plan case, an empty tasks dir), break
+the project into tasks as described above.
+
 A task may optionally include `static_mcps:` — a YAML list of sbx static-MCP
 names to attach when the task's sandbox is created. Each entry becomes a
 `--static-mcp <name>` flag on `sbx create`. Use this only when the task
