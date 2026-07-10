@@ -37,6 +37,31 @@ func (m model) handleCommandLineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeNewProject
 			m.newProjName = ""
 			m.newProjErr = ""
+		case "task":
+			// `:task` seeds a new task into the selected project and re-runs
+			// the planning agent to flesh it out. It needs a project to attach
+			// to; with none selected there's nothing to add a task to.
+			if m.projSel == "" {
+				m.statusMsg = "no project selected"
+				return m, nil
+			}
+			m.mode = modeNewTask
+			m.newTaskDesc = ""
+			m.newTaskErr = ""
+		case "wolf":
+			// `:wolf` summons the wolf agent for the selected project. The
+			// daemon launches the wolf in response to status:blocked, so this
+			// is an immediate action (no modal) that flips the project there.
+			if m.projSel == "" {
+				m.statusMsg = "no project selected"
+				return m, nil
+			}
+			name, err := summonWolf(m.projSel)
+			if err != nil {
+				m.statusMsg = "summon wolf: " + err.Error()
+				return m, nil
+			}
+			m.statusMsg = "summoned the wolf for " + name
 		default:
 			m.statusMsg = "unknown command: :" + cmd
 		}

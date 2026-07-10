@@ -80,6 +80,21 @@ func runDaemon(args []string) {
 	defer f.Close()
 	a := audit.New(f)
 
+	// Point the SSH agent at 1Password when the inherited one can't sign.
+	// A GUI/login-shell SSH_AUTH_SOCK is the macOS system (launchd) agent,
+	// which does not hold the user's 1Password SSH signing key. The acp-wrapper
+	// forwards whatever SSH_AUTH_SOCK the daemon runs with into each agent's
+	// sandbox, so unless we redirect it here the commit agent's ssh-keygen has
+	// no key to sign with and commits land unsigned. A user who deliberately
+	// points SSH_AUTH_SOCK at a non-system agent is left untouched.
+	if sock := onePasswordAgentSock(); sock != "" && shouldDefaultSSHAgent(os.Getenv("SSH_AUTH_SOCK")) {
+		if err := os.Setenv("SSH_AUTH_SOCK", sock); err != nil {
+			a.Log("ssh_auth_sock_set_error", "path", sock, "err", err.Error())
+		} else {
+			a.Log("ssh_auth_sock_defaulted", "path", sock)
+		}
+	}
+
 	wsMgr, err := buildWorkspaceManager(*workspaceMode, *stubRoot)
 	if err != nil {
 		log.Fatal(err)
@@ -299,6 +314,31 @@ func runTUI(args []string) {
 	if err := tui.Run(ctx, roots, nil, *auditPath, ""); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// onePasswordAgentSock returns the path to 1Password's SSH agent socket when
+// it exists as a socket on this host, or "" otherwise (1Password not
+// installed, agent disabled, or a non-macOS layout). The path is 1Password's
+// fixed macOS location; gating on os.ModeSocket keeps non-1Password machines
+// unaffected.
+func onePasswordAgentSock() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	p := filepath.Join(home, "Library", "Group Containers", "2BUA8C4S2C.com.1password", "t", "agent.sock")
+	if fi, err := os.Stat(p); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		return p
+	}
+	return ""
+}
+
+// shouldDefaultSSHAgent reports whether we should redirect SSH_AUTH_SOCK to the
+// 1Password agent. True when it is unset or points at the macOS system (launchd)
+// agent — the value a GUI/login shell inherits, which lacks the 1Password
+// signing key. A value the user deliberately set elsewhere is respected.
+func shouldDefaultSSHAgent(current string) bool {
+	return current == "" || strings.Contains(current, "com.apple.launchd")
 }
 
 func buildWorkspaceManager(mode, stubRoot string) (workspace.Manager, error) {

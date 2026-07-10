@@ -184,6 +184,80 @@ func TestExecArgsOmitsSigningWhenNoKey(t *testing.T) {
 	}
 }
 
+func TestExecArgsForwardsSSHAgentWhenSigning(t *testing.T) {
+	c := Config{
+		SandboxName: "acp-s",
+		Workspaces:  []string{"/host/repo"},
+		SigningKey:  "ssh-ed25519 AAAAKEY",
+		SSHAuthSock: "/Users/jim/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",
+	}
+	got := c.execArgs()
+	if !containsPair(got, "-e", "SSH_AUTH_SOCK=/Users/jim/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock") {
+		t.Errorf("execArgs did not forward SSH_AUTH_SOCK; got %v", got)
+	}
+	// The socket's directory must be one of the sandbox mounts so the socket
+	// resolves inside at the same host path.
+	wantDir := "/Users/jim/Library/Group Containers/2BUA8C4S2C.com.1password/t"
+	if !contains(c.sandboxMounts(), wantDir) {
+		t.Errorf("sandboxMounts missing agent dir %q; got %v", wantDir, c.sandboxMounts())
+	}
+}
+
+func TestExecArgsNoAgentForwardingWithoutSigningKey(t *testing.T) {
+	// An agent socket without a signing key is pointless — no signing happens —
+	// so nothing is forwarded and no extra mount is added.
+	c := Config{
+		SandboxName: "acp-s",
+		Workspaces:  []string{"/host/repo"},
+		SSHAuthSock: "/tmp/agent.sock",
+	}
+	for _, a := range c.execArgs() {
+		if strings.HasPrefix(a, "SSH_AUTH_SOCK=") {
+			t.Fatalf("unexpected SSH_AUTH_SOCK env %q without a signing key", a)
+		}
+	}
+	if got := c.sandboxMounts(); !reflect.DeepEqual(got, []string{"/host/repo"}) {
+		t.Errorf("sandboxMounts should be just the workspaces without signing; got %v", got)
+	}
+}
+
+func TestEnsureSandboxMountsSSHAgentDir(t *testing.T) {
+	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
+	c := Config{
+		SandboxName: "acp-s",
+		KitPath:     "/kits/acp",
+		SbxPath:     "sbx",
+		Workspaces:  []string{"/repo"},
+		SigningKey:  "ssh-ed25519 AAAAKEY",
+		SSHAuthSock: "/home/jim/.1p/agent.sock",
+	}
+	if err := ensureSandbox(context.Background(), f.run, c); err != nil {
+		t.Fatalf("ensureSandbox: %v", err)
+	}
+	create := f.calls[1]
+	if !contains(create, "/home/jim/.1p") {
+		t.Errorf("sbx create did not mount the agent dir; got %v", create)
+	}
+}
+
+func contains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPair(xs []string, a, b string) bool {
+	for i := 0; i+1 < len(xs); i++ {
+		if xs[i] == a && xs[i+1] == b {
+			return true
+		}
+	}
+	return false
+}
+
 func TestExecArgsOmitsGitIdentityWhenIncomplete(t *testing.T) {
 	// A half-set identity (name but no email) must NOT inject env — that would
 	// produce commits with a blank email. Fall back to the sandbox default.

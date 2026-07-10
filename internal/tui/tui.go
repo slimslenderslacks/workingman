@@ -38,6 +38,12 @@ const (
 	modeNormal uiMode = iota
 	modeCommandLine
 	modeNewProject
+	// modeNewTask is the modal that prompts for a free-form task description
+	// after `:task`. On enter it seeds a task file in the selected project's
+	// tasks/ dir and flips the project to status:ready so the daemon re-runs
+	// the planning agent, which fleshes out the seed and returns the project
+	// to status:working.
+	modeNewTask
 )
 
 // yamlSource picks what the YAML viewer pane renders: the selected
@@ -108,6 +114,11 @@ type model struct {
 	cmdInput    string
 	newProjName string
 	newProjErr  string
+	// newTaskDesc / newTaskErr drive the new-task modal's free-form
+	// description field and its inline error line. Populated only while
+	// mode == modeNewTask.
+	newTaskDesc string
+	newTaskErr  string
 
 	auditLines []string
 	auditCh    <-chan []string
@@ -270,6 +281,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleCommandLineKey(msg)
 		case modeNewProject:
 			return m.handleNewProjectKey(msg)
+		case modeNewTask:
+			return m.handleNewTaskKey(msg)
 		}
 		return m.handleNormalKey(msg)
 	}
@@ -1434,6 +1447,9 @@ func (m model) View() string {
 	if m.mode == modeNewProject {
 		return m.renderNewProjectModal()
 	}
+	if m.mode == modeNewTask {
+		return m.renderNewTaskModal()
+	}
 
 	// The ACP tab view takes over the whole window when open.
 	if m.showACP {
@@ -1806,6 +1822,9 @@ func (m model) renderFooter() string {
 		}
 		if m.focus == paneProjects {
 			base += "  •  :new: create project"
+			if m.projSel != "" {
+				base += "  •  :task: add task  •  :wolf: summon wolf"
+			}
 		}
 		text = base + "  •  focus: " + paneName(m.focus)
 		style = hintStyle
