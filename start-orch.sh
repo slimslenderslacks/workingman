@@ -11,6 +11,19 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 OP_AGENT="$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
 if [ -S "$OP_AGENT" ]; then
   export SSH_AUTH_SOCK="$OP_AGENT"
+
+  # sbx exposes an SSH agent inside every sandbox at /run/ssh-agent.sock,
+  # proxied to whatever agent the *sandboxd daemon* was launched with — NOT the
+  # sbx client's and NOT a bind-mounted host socket (a macOS unix socket has no
+  # listener reachable across the Docker VM boundary). If sandboxd is already
+  # running under launchd's empty system agent, the commit agent's ssh-keygen
+  # sees no key and signing fails. Restart it so it adopts the 1Password agent
+  # we just exported. This stops running sandboxes; they are recreated on
+  # demand, so it's safe at orchestrator startup.
+  if command -v sbx >/dev/null 2>&1; then
+    sbx daemon stop  >/dev/null 2>&1 || true
+    sbx daemon start -d >/dev/null 2>&1 || true
+  fi
 fi
 
 "$HERE/orch" \

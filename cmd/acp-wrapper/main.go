@@ -159,7 +159,6 @@ func main() {
 		GitName:       gitName,
 		GitEmail:      gitEmail,
 		SigningKey:    resolveGitSigning(),
-		SSHAuthSock:   strings.TrimSpace(os.Getenv("SSH_AUTH_SOCK")),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

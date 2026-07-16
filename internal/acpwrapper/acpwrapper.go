@@ -125,20 +125,18 @@ type Config struct {
 	// commit.gpgsign=true — and crucially forces gpg.ssh.program=ssh-keygen. The
 	// host's configured signer is often a macOS/1Password binary (op-ssh-sign)
 	// that does not exist in the Linux sandbox; ssh-keygen instead signs through
-	// the forwarded SSH agent (SSH_AUTH_SOCK). Empty leaves commits unsigned.
+	// the SSH agent. Empty leaves commits unsigned.
+	//
+	// We do NOT forward the SSH agent ourselves. sbx already exposes a working
+	// agent inside every sandbox at /run/ssh-agent.sock (its own forwarder,
+	// which it sets as SSH_AUTH_SOCK) proxied to whatever agent the sandboxd
+	// daemon was launched with. Bind-mounting the host's own agent socket does
+	// not work — a macOS unix socket has no listener reachable across the Docker
+	// VM boundary (connect: connection refused) — and overriding SSH_AUTH_SOCK
+	// to that path would only clobber sbx's working socket. So signing relies on
+	// sandboxd being started with the signing agent in its environment (see
+	// start-orch.sh), and the wrapper leaves SSH_AUTH_SOCK alone.
 	SigningKey string
-
-	// SSHAuthSock is the host SSH agent socket to forward into the sandbox so
-	// ssh-keygen can reach the private half of SigningKey (which, for a
-	// 1Password/op-ssh-sign setup, lives in the agent rather than on disk).
-	// When set alongside SigningKey, the socket's directory is bind-mounted into
-	// the sandbox (at its real host path, like every other mount) and
-	// SSH_AUTH_SOCK is exported inside pointing at the same path. Typically the
-	// user's SSH_AUTH_SOCK env at daemon launch — e.g. the 1Password agent at
-	// ~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock. Empty (or
-	// SigningKey empty) means no forwarding and, absent it, signing cannot reach
-	// the key.
-	SSHAuthSock string
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -214,40 +212,6 @@ func (c Config) goModCacheDir() string {
 	return ""
 }
 
-// forwardSSHAgent reports whether the SSH agent should be forwarded into the
-// sandbox: only when the user is set up to SSH-sign (SigningKey) AND a host
-// agent socket is available (SSHAuthSock). Forwarding an agent to an agent
-// that never signs is pointless, so both must be present.
-func (c Config) forwardSSHAgent() bool {
-	return c.SigningKey != "" && strings.TrimSpace(c.SSHAuthSock) != ""
-}
-
-// sshAgentMountDir is the host directory bind-mounted so the forwarded agent
-// socket resolves inside the sandbox at its real host path. We mount the
-// socket's *directory* rather than the socket file itself — sbx mounts are
-// directories, and the socket node inside that directory maps through to the
-// host agent. Empty when forwarding is off.
-func (c Config) sshAgentMountDir() string {
-	if !c.forwardSSHAgent() {
-		return ""
-	}
-	return filepath.Dir(c.SSHAuthSock)
-}
-
-// sandboxMounts is the full set of host paths bind-mounted into the sandbox:
-// the code/orch workspaces plus, when forwarding is on, the SSH agent socket's
-// directory. It is what `sbx create` receives and what the reuse check compares
-// against, so an existing sandbox created with the agent mount isn't needlessly
-// torn down and recreated. session.json still reports only c.Workspaces — the
-// agent mount is an implementation detail, not a user-facing workspace.
-func (c Config) sandboxMounts() []string {
-	mounts := append([]string{}, c.Workspaces...)
-	if dir := c.sshAgentMountDir(); dir != "" {
-		mounts = append(mounts, dir)
-	}
-	return mounts
-}
-
 // execArgs builds the argv (after the sbx binary) that runs acp-kit's
 // claude-acp-client entrypoint inside the sandbox over `sbx exec`, producing an
 // ACP client on the child's stdio.
@@ -295,7 +259,8 @@ func (c Config) execArgs() []string {
 	// without writing a .git/config. gpg.ssh.program is forced to ssh-keygen: the
 	// host's configured signer may be a macOS/1Password binary (op-ssh-sign)
 	// absent in the Linux sandbox, so signing must run through ssh-keygen against
-	// the forwarded SSH agent (SSH_AUTH_SOCK) instead.
+	// the SSH agent sbx exposes inside the sandbox (SSH_AUTH_SOCK=/run/ssh-agent.sock,
+	// which we deliberately leave untouched — see the SigningKey field doc).
 	if c.SigningKey != "" {
 		args = append(args,
 			"-e", "GIT_CONFIG_COUNT=4",
@@ -308,13 +273,6 @@ func (c Config) execArgs() []string {
 			"-e", "GIT_CONFIG_KEY_3=commit.gpgsign",
 			"-e", "GIT_CONFIG_VALUE_3=true",
 		)
-	}
-	// Forward the SSH agent so ssh-keygen can sign against the key held in it.
-	// The socket's directory is mounted (see sandboxMounts) at its real host
-	// path, so the same path names the socket inside the sandbox. Gated on
-	// forwardSSHAgent so this only appears when signing is actually configured.
-	if c.forwardSSHAgent() {
-		args = append(args, "-e", "SSH_AUTH_SOCK="+c.SSHAuthSock)
 	}
 	if cwd := c.primaryWorkspace(); cwd != "" {
 		args = append(args, "-w", cwd)
@@ -400,9 +358,8 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) error {
 	if err != nil {
 		return fmt.Errorf("acpwrapper: sbx ls: %w", err)
 	}
-	mounts := c.sandboxMounts()
 	if existing != nil {
-		if sameWorkspaceSet(existing, mounts) {
+		if sameWorkspaceSet(existing, c.Workspaces) {
 			return nil
 		}
 		if out, err := run(ctx, c.SbxPath, "rm", "--force", c.SandboxName); err != nil {
@@ -413,7 +370,7 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) error {
 	for _, m := range c.StaticMCPs {
 		args = append(args, "--static-mcp", m)
 	}
-	args = append(args, mounts...)
+	args = append(args, c.Workspaces...)
 	if out, err := run(ctx, c.SbxPath, args...); err != nil {
 		return fmt.Errorf("acpwrapper: sbx create %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
 	}
