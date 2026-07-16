@@ -149,10 +149,9 @@ func TestArrowKeysOnlyAffectSessionsWhenFocused(t *testing.T) {
 }
 
 func TestRenderSessionRowIncludesAgentProjectAndStatus(t *testing.T) {
-	cols := sessionColumnWidths(80)
-	row := renderSessionRow(SessionView{
-		ID: "a", AgentName: "task", Project: "alpha", Status: "running",
-	}, cols, false)
+	view := SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}
+	cols := sessionColumnWidths([]SessionView{view}, time.Time{}, 80)
+	row := renderSessionRow(view, cols, time.Time{}, false)
 	if !strings.Contains(row, "task") {
 		t.Errorf("row missing agent name; got:\n%s", row)
 	}
@@ -165,14 +164,98 @@ func TestRenderSessionRowIncludesAgentProjectAndStatus(t *testing.T) {
 }
 
 func TestRenderSessionRowSelectedHasMarker(t *testing.T) {
-	cols := sessionColumnWidths(80)
-	rowOn := renderSessionRow(SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}, cols, true)
-	rowOff := renderSessionRow(SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}, cols, false)
+	view := SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}
+	cols := sessionColumnWidths([]SessionView{view}, time.Time{}, 80)
+	rowOn := renderSessionRow(view, cols, time.Time{}, true)
+	rowOff := renderSessionRow(view, cols, time.Time{}, false)
 	if !strings.Contains(rowOn, sessionMarkerSelected) {
 		t.Errorf("selected row missing marker %q; got:\n%s", sessionMarkerSelected, rowOn)
 	}
 	if strings.Contains(rowOff, sessionMarkerSelected) {
 		t.Errorf("unselected row contains selected-marker %q; got:\n%s", sessionMarkerSelected, rowOff)
+	}
+}
+
+func TestSessionAgeFormatsCompactly(t *testing.T) {
+	base := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		started time.Time
+		want    string
+	}{
+		{"zero", time.Time{}, "—"},
+		{"seconds", base.Add(-45 * time.Second), "45s"},
+		{"minutes", base.Add(-4 * time.Minute), "4m"},
+		{"hours", base.Add(-90 * time.Minute), "1h30m"},
+		{"days", base.Add(-50 * time.Hour), "2d02h"},
+		{"future clamps to zero", base.Add(30 * time.Second), "0s"},
+	}
+	for _, c := range cases {
+		if got := sessionAge(c.started, base); got != c.want {
+			t.Errorf("%s: sessionAge = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestRenderSessionRowShowsAge(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	view := SessionView{
+		ID: "a", AgentName: "task", Project: "alpha", Status: "running",
+		StartedAt: now.Add(-5 * time.Minute),
+	}
+	cols := sessionColumnWidths([]SessionView{view}, now, 80)
+	if got := renderSessionRow(view, cols, now, false); !strings.Contains(got, "5m") {
+		t.Errorf("row should show age 5m; got:\n%s", got)
+	}
+}
+
+// A wide pane must spend its width on the data: long task/sandbox names show in
+// full (no truncation) and the columns fill the pane rather than leaving dead
+// space on the right. This is the "maximize horizontal space" behaviour.
+func TestSessionColumnsFillWidthWithoutTruncation(t *testing.T) {
+	const innerWidth = 200
+	longSandbox := "entra-eval-marp-entra-presentation"
+	longTask := "marp-entra-presentation"
+	view := SessionView{
+		ID: "a", AgentName: "task", Project: "entra-eval", TaskName: longTask,
+		Status: "running", SandboxName: longSandbox,
+	}
+	cols := sessionColumnWidths([]SessionView{view}, time.Time{}, innerWidth)
+
+	if cols.sandbox < len(longSandbox) {
+		t.Errorf("sandbox column %d too narrow to show %q (%d) on a wide pane",
+			cols.sandbox, longSandbox, len(longSandbox))
+	}
+	if cols.task < len(longTask) {
+		t.Errorf("task column %d too narrow to show %q (%d) on a wide pane",
+			cols.task, longTask, len(longTask))
+	}
+	got := renderSessionRow(view, cols, time.Time{}, false)
+	if !strings.Contains(got, longSandbox) {
+		t.Errorf("wide pane should show the full sandbox name; got:\n%s", got)
+	}
+	if !strings.Contains(got, longTask) {
+		t.Errorf("wide pane should show the full task name; got:\n%s", got)
+	}
+	// Columns consume the full inner width — no trailing dead space.
+	if cols.totalWidth() != innerWidth {
+		t.Errorf("columns should fill the pane exactly; totalWidth=%d, want %d",
+			cols.totalWidth(), innerWidth)
+	}
+}
+
+// When the pane is too narrow for every column at content width, the flexible
+// columns shrink to their minimums instead of overflowing.
+func TestSessionColumnsShrinkWhenNarrow(t *testing.T) {
+	view := SessionView{
+		ID: "a", AgentName: "planning", Project: "some-long-project-name",
+		TaskName: "a-fairly-long-task-name", Status: "running",
+		SandboxName: "a-long-sandbox-name-here",
+	}
+	cols := sessionColumnWidths([]SessionView{view}, time.Time{}, 40)
+	if cols.project < sessionColMinProject || cols.task < sessionColMinTask ||
+		cols.sandbox < sessionColMinSandbox || cols.agent < sessionColMinAgent {
+		t.Errorf("flexible columns fell below their minimums: %+v", cols)
 	}
 }
 
@@ -218,12 +301,12 @@ func TestSessionViewZeroTime(t *testing.T) {
 }
 
 func TestRenderSessionRowInteractiveBadge(t *testing.T) {
-	cols := sessionColumnWidths(80)
 	auto := SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}
 	intr := SessionView{ID: "b", AgentName: "project", Project: "bravo", Status: "running", Interactive: true}
+	cols := sessionColumnWidths([]SessionView{auto, intr}, time.Time{}, 80)
 
-	autoOut := renderSessionRow(auto, cols, false)
-	intrOut := renderSessionRow(intr, cols, false)
+	autoOut := renderSessionRow(auto, cols, time.Time{}, false)
+	intrOut := renderSessionRow(intr, cols, time.Time{}, false)
 
 	if strings.Contains(autoOut, interactiveBadge) {
 		t.Errorf("autonomous row should not show the interactive badge; got:\n%s", autoOut)
@@ -240,7 +323,7 @@ func TestRenderSessionsTableHeader(t *testing.T) {
 	}})
 	m = step.(model)
 	out := m.renderSessions(80, 10)
-	for _, header := range []string{"agent", "project", "task", "status", "sandbox"} {
+	for _, header := range []string{"agent", "project", "task", "status", "age", "sandbox"} {
 		if !strings.Contains(out, header) {
 			t.Errorf("table header missing column %q; got:\n%s", header, out)
 		}
@@ -248,7 +331,6 @@ func TestRenderSessionsTableHeader(t *testing.T) {
 }
 
 func TestRenderSessionRowShowsSandboxNameForACP(t *testing.T) {
-	cols := sessionColumnWidths(80)
 	acp := SessionView{
 		ID: "a", AgentName: "task", Project: "alpha", TaskName: "scaffold",
 		Status: "running", SandboxName: "alpha-scaffold",
@@ -257,10 +339,11 @@ func TestRenderSessionRowShowsSandboxNameForACP(t *testing.T) {
 		ID: "b", AgentName: "wolf", Project: "bravo", Status: "running",
 		Interactive: true,
 	}
-	if got := renderSessionRow(acp, cols, false); !strings.Contains(got, "alpha-scaffold") {
+	cols := sessionColumnWidths([]SessionView{acp, legacy}, time.Time{}, 80)
+	if got := renderSessionRow(acp, cols, time.Time{}, false); !strings.Contains(got, "alpha-scaffold") {
 		t.Errorf("ACP row should expose sandbox name; got:\n%s", got)
 	}
-	if got := renderSessionRow(legacy, cols, false); !strings.Contains(got, "—") {
+	if got := renderSessionRow(legacy, cols, time.Time{}, false); !strings.Contains(got, "—") {
 		t.Errorf("non-ACP row should render an em-dash in the sandbox column; got:\n%s", got)
 	}
 }

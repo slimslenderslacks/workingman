@@ -829,7 +829,8 @@ func (m model) renderSessions(width, height int) string {
 		return style.Render(clampLines(b.String(), innerHeight))
 	}
 
-	cols := sessionColumnWidths(innerWidth)
+	now := time.Now()
+	cols := sessionColumnWidths(m.sessions, now, innerWidth)
 	b.WriteString(renderSessionHeader(cols))
 
 	// 3 chrome rows above (title, blank, header) — data rows fit in the
@@ -845,7 +846,7 @@ func (m model) renderSessions(width, height int) string {
 	}
 	for _, s := range sessions {
 		b.WriteString("\n")
-		b.WriteString(renderSessionRow(s, cols, s.ID == m.sessSel))
+		b.WriteString(renderSessionRow(s, cols, now, s.ID == m.sessSel))
 	}
 	return style.Render(clampLines(b.String(), innerHeight))
 }
@@ -854,59 +855,148 @@ func (m model) renderSessions(width, height int) string {
 // table. Computed once per render from the pane's inner width so the header
 // and every data row share the same alignment.
 type sessionColumns struct {
-	agent, project, task, status, sandbox int
+	agent, project, task, status, age, sandbox int
 }
 
 // Column gap is one space; the selection marker occupies a fixed two-column
 // prefix before the table proper (so the marker can flip without touching
-// column alignment).
+// column alignment). The flexible columns (agent, project, task, sandbox)
+// shrink no smaller than their mins when the pane can't fit every column at
+// its content width; status and age are short and pinned to their content.
 const (
-	sessionMarkerWidth   = 2
-	sessionColGap        = 1
-	sessionColGaps       = 4
-	sessionColAgentDef   = 10
-	sessionColTaskDef    = 14
-	sessionColStatusDef  = 10
-	sessionColSandboxDef = 28
+	sessionMarkerWidth = 2
+	sessionColGap      = 1
+	sessionColGapCount = 5 // six columns → five inter-column gaps
+	sessionColMinAgent   = 6
 	sessionColMinProject = 4
+	sessionColMinTask    = 6
+	sessionColMinSandbox = 6
 )
 
-// sessionColumnWidths sizes the five columns to fill innerWidth (after the
-// selection-marker prefix). project takes whatever's left; the other four get
-// fixed defaults that shrink in priority order (task → sandbox → agent) when
-// the pane is too narrow to honour them.
-func sessionColumnWidths(innerWidth int) sessionColumns {
+// sessionColumnWidths sizes each column to the widest value it must show — the
+// column header or any row's content, whichever is longer — and then spends the
+// rest of the pane width to surface as much information as possible: leftover
+// width is shared across the flexible columns (project, task, sandbox) so the
+// table fills the pane instead of trailing off, and when the content is too
+// wide to fit it shrinks those columns — widest first — down to their minimums.
+// status and age are short, so they're pinned to their content width and never
+// shrink. Sizing from the live rows (rather than fixed caps) is what lets a wide
+// terminal show full task and sandbox names instead of truncating them.
+func sessionColumnWidths(views []SessionView, now time.Time, innerWidth int) sessionColumns {
 	c := sessionColumns{
-		agent:   sessionColAgentDef,
-		task:    sessionColTaskDef,
-		status:  sessionColStatusDef,
-		sandbox: sessionColSandboxDef,
+		agent:   lipgloss.Width("agent"),
+		project: lipgloss.Width("project"),
+		task:    lipgloss.Width("task"),
+		status:  lipgloss.Width("status"),
+		age:     lipgloss.Width("age"),
+		sandbox: lipgloss.Width("sandbox"),
 	}
+	for _, s := range views {
+		c.agent = maxInt(c.agent, lipgloss.Width(sessionAgentLabel(s)))
+		c.project = maxInt(c.project, lipgloss.Width(s.Project))
+		c.task = maxInt(c.task, lipgloss.Width(s.TaskName))
+		c.status = maxInt(c.status, lipgloss.Width(sessionStatusText(s)))
+		c.age = maxInt(c.age, lipgloss.Width(sessionAge(s.StartedAt, now)))
+		c.sandbox = maxInt(c.sandbox, lipgloss.Width(sessionSandboxLabel(s)))
+	}
+
 	avail := innerWidth - sessionMarkerWidth
 	if avail < 0 {
 		avail = 0
 	}
-	required := func() int {
-		return c.agent + c.task + c.status + c.sandbox + sessionColGaps*sessionColGap
+	total := func() int {
+		return c.agent + c.project + c.task + c.status + c.age + c.sandbox +
+			sessionColGapCount*sessionColGap
 	}
-	// task shrinks first (least load-bearing for at-a-glance read), then
-	// sandbox (often long but informational), then agent (kind labels are
-	// short, so this rarely fires). status stays fixed — it's the
-	// at-a-glance signal.
-	for avail-required() < sessionColMinProject && c.task > 0 {
-		c.task--
+
+	// Too wide to fit: shrink the flexible columns, widest first, one column
+	// each pass, down to their minimums. Widest-first keeps the trimming
+	// balanced instead of gutting a single column.
+	type flexCol struct {
+		w   *int
+		min int
 	}
-	for avail-required() < sessionColMinProject && c.sandbox > 0 {
-		c.sandbox--
+	flex := []flexCol{
+		{&c.project, sessionColMinProject},
+		{&c.task, sessionColMinTask},
+		{&c.sandbox, sessionColMinSandbox},
+		{&c.agent, sessionColMinAgent},
 	}
-	for avail-required() < sessionColMinProject && c.agent > 0 {
-		c.agent--
+	for total() > avail {
+		var widest *flexCol
+		for i := range flex {
+			if *flex[i].w > flex[i].min && (widest == nil || *flex[i].w > *widest.w) {
+				widest = &flex[i]
+			}
+		}
+		if widest == nil {
+			break // everything at its min; the pane's MaxWidth clamp absorbs the rest
+		}
+		*widest.w--
 	}
-	c.project = avail - required()
-	if c.project < 0 {
-		c.project = 0
+
+	// Room to spare: spread the surplus across project, task, and sandbox so
+	// the table fills the pane rather than leaving dead space on the right.
+	if surplus := avail - total(); surplus > 0 {
+		grow := []*int{&c.project, &c.task, &c.sandbox}
+		for i := 0; i < surplus; i++ {
+			*grow[i%len(grow)]++
+		}
 	}
 	return c
+}
+
+// sessionAgentLabel is the agent-column text: the kind plus the interactive
+// badge on kinds that wait for a human. Shared by sizing and rendering so the
+// column is sized to exactly what the row draws.
+func sessionAgentLabel(s SessionView) string {
+	if s.Interactive {
+		return s.AgentName + interactiveBadge
+	}
+	return s.AgentName
+}
+
+// sessionStatusText is the status-column text: the glyph plus the raw status.
+func sessionStatusText(s SessionView) string {
+	return sessionStatusGlyph(s.Status) + " " + s.Status
+}
+
+// sessionSandboxLabel is the sandbox-column text: the sandbox name, or an
+// em-dash for the kinds that don't run in an ACP sandbox.
+func sessionSandboxLabel(s SessionView) string {
+	if s.SandboxName == "" {
+		return "—"
+	}
+	return s.SandboxName
+}
+
+// sessionAge renders how long a session has been running as a compact relative
+// duration: 45s, 4m, 1h02m, 2d05h. Zero StartedAt (unknown) renders an em-dash.
+func sessionAge(started, now time.Time) string {
+	if started.IsZero() {
+		return "—"
+	}
+	d := now.Sub(started)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd%02dh", int(d.Hours())/24, int(d.Hours())%24)
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // renderSessionHeader emits the column-header row in the dim style so the
@@ -918,6 +1008,7 @@ func renderSessionHeader(c sessionColumns) string {
 		padCell("project", c.project),
 		padCell("task", c.task),
 		padCell("status", c.status),
+		padCell("age", c.age),
 		padCell("sandbox", c.sandbox),
 	}
 	gap := strings.Repeat(" ", sessionColGap)
@@ -939,21 +1030,16 @@ func renderSessionHeader(c sessionColumns) string {
 //
 // Sandbox is only populated for ACP-routed sessions; for the rest the cell
 // renders an em-dash so the column reads as "n/a" rather than empty.
-func renderSessionRow(s SessionView, c sessionColumns, selected bool) string {
+func renderSessionRow(s SessionView, c sessionColumns, now time.Time, selected bool) string {
 	marker := sessionMarkerIdle
 	if selected {
 		marker = sessionMarkerSelected
 	}
 
-	agent := s.AgentName
-	if s.Interactive {
-		agent += interactiveBadge
-	}
-	statusText := sessionStatusGlyph(s.Status) + " " + s.Status
-	sandbox := s.SandboxName
-	if sandbox == "" {
-		sandbox = "—"
-	}
+	agent := sessionAgentLabel(s)
+	statusText := sessionStatusText(s)
+	age := sessionAge(s.StartedAt, now)
+	sandbox := sessionSandboxLabel(s)
 
 	gap := strings.Repeat(" ", sessionColGap)
 
@@ -963,6 +1049,7 @@ func renderSessionRow(s SessionView, c sessionColumns, selected bool) string {
 			padCell(truncate(s.Project, c.project), c.project),
 			padCell(truncate(s.TaskName, c.task), c.task),
 			padCell(truncate(statusText, c.status), c.status),
+			padCell(truncate(age, c.age), c.age),
 			padCell(truncate(sandbox, c.sandbox), c.sandbox),
 		}
 		plain := marker + strings.Join(nonEmpty(cells), gap)
@@ -983,6 +1070,7 @@ func renderSessionRow(s SessionView, c sessionColumns, selected bool) string {
 		padCell(truncate(s.Project, c.project), c.project),
 		padCell(truncate(s.TaskName, c.task), c.task),
 		statusCell,
+		padCell(truncate(age, c.age), c.age),
 		padCell(truncate(sandbox, c.sandbox), c.sandbox),
 	}
 	return marker + strings.Join(nonEmpty(cells), gap)
@@ -994,7 +1082,7 @@ func renderSessionRow(s SessionView, c sessionColumns, selected bool) string {
 func (c sessionColumns) totalWidth() int {
 	w := sessionMarkerWidth
 	gaps := 0
-	for _, n := range []int{c.agent, c.project, c.task, c.status, c.sandbox} {
+	for _, n := range []int{c.agent, c.project, c.task, c.status, c.age, c.sandbox} {
 		if n > 0 {
 			w += n
 			gaps++
