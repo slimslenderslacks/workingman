@@ -305,6 +305,51 @@ func TestScanProjectsOrdersTasksByCompletion(t *testing.T) {
 	}
 }
 
+// TestScanProjectsKeepsTasksWithUnnamedSeed guards the `:task` flow: the seed
+// it writes has an empty name (the signal planning keys off), and the strict
+// taskgraph loader aborts on that. The Tasks pane must NOT go blank in the
+// window before planning fills the name in — existing named tasks stay, and the
+// unnamed seed shows under its filename stem.
+func TestScanProjectsKeepsTasksWithUnnamedSeed(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "proj")
+	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
+		Description: "p", Branch: "feat/p", Status: project.StatusReady,
+	}, project.WriterAgent); err != nil {
+		t.Fatal(err)
+	}
+	// An existing, named task plus the freshly-seeded unnamed task `:task` wrote.
+	writeTask(t, filepath.Join(dir, "tasks", "existing.yaml"),
+		&task.Task{Name: "existing", Status: task.StatusCommitted})
+	writeTask(t, filepath.Join(dir, "tasks", "my-new-idea.yaml"),
+		&task.Task{Name: "", Status: task.StatusReady})
+
+	views, err := ScanProjects([]string{root})
+	if err != nil {
+		t.Fatalf("ScanProjects: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("want 1 view, got %d", len(views))
+	}
+	got := map[string]bool{}
+	for _, tk := range views[0].Tasks {
+		got[tk.Name] = true
+	}
+	if !got["existing"] {
+		t.Errorf("existing task vanished when an unnamed seed was present; tasks=%v", views[0].Tasks)
+	}
+	// The unnamed seed appears under its filename stem so the user sees it land.
+	if !got["my-new-idea"] {
+		t.Errorf("unnamed seed not shown under its filename stem; tasks=%v", views[0].Tasks)
+	}
+	if n := len(views[0].Tasks); n != 2 {
+		t.Errorf("want 2 tasks (existing + seed), got %d: %v", n, views[0].Tasks)
+	}
+}
+
 func taskCountsEqual(a, b map[task.Status]int) bool {
 	if len(a) != len(b) {
 		return false

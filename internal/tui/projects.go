@@ -6,12 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/task"
-	"github.com/slimslenderslacks/work/internal/taskgraph"
 )
 
 // ProjectView is the read-only snapshot of a single project that the TUI's
@@ -150,32 +150,56 @@ func loadProjectView(path string) (ProjectView, bool) {
 	}, true
 }
 
-// tasksFor loads the taskgraph and returns both the per-status counts and
-// the ordered list of task views. Both are derived from the same scan so a
-// project that has 12 tasks doesn't pay for the YAML decode twice.
+// tasksFor reads a project's tasks/ directory and returns both the per-status
+// counts and the ordered list of task views. Both are derived from the same
+// scan so a project that has 12 tasks doesn't pay for the YAML decode twice.
+//
+// This is deliberately NOT taskgraph.Load: that loader is strict (it aborts on
+// the first task with an empty name, a duplicate name, or a bad dependency),
+// which is right for the daemon but wrong for display. A single offending file
+// must not blank the whole pane. In particular `:task` seeds a task with an
+// empty name — the signal the planning agent keys off — and the pane must keep
+// showing the project's existing tasks (plus the new seed) while planning runs
+// to fill the name in, not wipe every task until it does. So we load each file
+// independently, skip any that fail to parse (a half-written file on disk), and
+// give an unnamed seed a display name from its filename stem so it shows up
+// immediately as a pending row. Mirrors ScanProjects' per-file resilience.
 func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 	counts := map[task.Status]int{}
-	g, err := taskgraph.Load(tasksDir)
-	if err != nil || g.Empty() {
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
 		return counts, nil
 	}
-	gTasks := g.Tasks()
-	tasks := make([]TaskView, 0, len(gTasks))
-	for _, t := range gTasks {
+	tasks := make([]TaskView, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
+			continue
+		}
+		path := filepath.Join(tasksDir, e.Name())
+		t, err := task.Load(path)
+		if err != nil {
+			continue
+		}
 		counts[t.Status]++
-		// task.Load() backfills Model to "default", but a task added to the
-		// graph through other code paths might not have, so we mirror that
-		// defaulting here for display safety.
+		// task.Load() backfills Model to "default", but mirror the defaulting
+		// here for display safety in case a task reaches us another way.
 		model := t.Model
 		if model == "" {
 			model = task.ModelDefault
+		}
+		// An unnamed seed (just written by `:task`, not yet named by planning)
+		// still gets a row — under its filename stem — so the user sees their
+		// new task land instead of the pane appearing to lose everything.
+		name := t.Name
+		if name == "" {
+			name = strings.TrimSuffix(e.Name(), ".yaml")
 		}
 		var completedAt time.Time
 		if t.CompletedAt != nil {
 			completedAt = *t.CompletedAt
 		}
 		tasks = append(tasks, TaskView{
-			Name:        t.Name,
+			Name:        name,
 			Model:       model,
 			StaticMCPs:  append([]string(nil), t.StaticMCPs...),
 			Policies:    append([]policy.Rule(nil), t.Policies...),
@@ -184,9 +208,14 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 			CompletedAt: completedAt,
 		})
 	}
-	// Order the pane by run/completion order: tasks that have completed come
-	// first, earliest completion at the top; tasks that haven't completed keep
-	// their taskgraph (alphabetical) order below, via the stable sort.
+	if len(tasks) == 0 {
+		return counts, nil
+	}
+	// ReadDir returns entries sorted by name, so tasks start in stable
+	// alphabetical order. Order the pane by run/completion order on top of that:
+	// tasks that have completed come first, earliest completion at the top;
+	// tasks that haven't completed keep the alphabetical order below, via the
+	// stable sort.
 	sort.SliceStable(tasks, func(i, j int) bool {
 		ci, cj := tasks[i].CompletedAt, tasks[j].CompletedAt
 		switch {
