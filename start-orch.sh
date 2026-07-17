@@ -3,6 +3,20 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# Rebuild orch and acp-wrapper from source so the running binaries always match
+# HEAD. The daemon execs acp-wrapper fresh per session, so a stale binary here
+# silently changes agent behaviour (commit signing, sandbox wiring) until
+# someone remembers to `task build` — a footgun we hit more than once. go's
+# build cache makes this near-instant when nothing changed. Abort on a build
+# failure (set -e) rather than launch a stale binary; only skip when go isn't
+# on PATH, where launching the prebuilt binary beats not starting at all.
+if command -v go >/dev/null 2>&1; then
+  echo "building orch and acp-wrapper from source..."
+  ( cd "$HERE" && go build -o orch ./cmd/orch && go build -o acp-wrapper ./cmd/acp-wrapper )
+else
+  echo "start-orch: warning: go not found on PATH; launching prebuilt binaries (may be stale)" >&2
+fi
+
 # 1Password's SSH agent holds the commit-signing key. A GUI/login shell's
 # default SSH_AUTH_SOCK points at the macOS system agent, which lacks that key,
 # so orch (and the sandboxes it forwards the agent into) couldn't sign commits.
