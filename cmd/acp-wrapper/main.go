@@ -51,30 +51,97 @@ func resolveGitIdentity() (name, email string) {
 	return get("user.name"), get("user.email")
 }
 
-// resolveGitSigning returns the user's SSH signing public key when the host is
-// configured to SSH-sign commits (user.signingkey set, gpg.format=ssh, and
-// commit.gpgsign enabled), or "" otherwise. The wrapper forwards it into the
-// sandbox so the commit agent can sign via ssh-keygen + the forwarded SSH agent.
+// gitSigningConfig is the host's SSH commit-signing configuration, read once so
+// the wrapper can both decide whether to inject signing and explain, in the
+// session log, why it did or didn't. The three fields are exactly what SSH
+// signing requires.
+type gitSigningConfig struct {
+	signingKey string // user.signingkey
+	format     string // gpg.format
+	gpgSign    string // commit.gpgsign
+}
+
+// readGitSigningConfig reads the host's SSH-signing settings in a way that does
+// NOT depend on the wrapper's launch directory. It runs `git config --get` from
+// a non-repo directory (a scratch temp dir), so resolution sees the user-level
+// scopes — system, ~/.gitconfig, AND the XDG path ~/.config/git/config — but is
+// blind to any per-repo local config.
 //
-// It intentionally activates ONLY for SSH signing: openpgp/GPG signing needs a
-// keyring the sandbox doesn't have, and a user who doesn't sign by default
-// shouldn't suddenly have signing (which, lacking a working signer, would make
-// `git commit` fail) forced on inside the sandbox.
-func resolveGitSigning() string {
+// Both properties matter, and each rules out a simpler approach:
+//   - Not the plain cwd-relative `git config --get`: that layers in the local
+//     config of whatever repo orch was started in, so a repo overriding (or
+//     lacking) a signing setting would silently turn signing off — the field
+//     failure that produced unsigned commits days later.
+//   - Not `--global`: that reads only ~/.gitconfig and misses the XDG global
+//     ~/.config/git/config, where signing actually lives on some hosts (this
+//     one included) — which would silently disable signing for everyone.
+func readGitSigningConfig() gitSigningConfig {
+	// Any non-repo dir works; TempDir is guaranteed to exist and (barring an
+	// exotic TMPDIR) is not inside a git repo, so no repo-local config leaks in.
+	dir := os.TempDir()
 	get := func(key string) string {
-		out, err := exec.Command("git", "config", "--get", key).Output()
+		cmd := exec.Command("git", "config", "--get", key)
+		cmd.Dir = dir
+		out, err := cmd.Output()
 		if err != nil {
 			return ""
 		}
 		return strings.TrimSpace(string(out))
 	}
-	key := get("user.signingkey")
-	if key == "" ||
-		!strings.EqualFold(get("gpg.format"), "ssh") ||
-		!strings.EqualFold(get("commit.gpgsign"), "true") {
-		return ""
+	return gitSigningConfig{
+		signingKey: get("user.signingkey"),
+		format:     get("gpg.format"),
+		gpgSign:    get("commit.gpgsign"),
 	}
-	return key
+}
+
+// enabled reports whether the host is set up for SSH commit signing: a signing
+// key, gpg.format=ssh, and commit.gpgsign=true must ALL be present. We activate
+// only for SSH signing — openpgp/GPG needs a keyring the sandbox doesn't have,
+// and a user who doesn't sign by default shouldn't have it (which, lacking a
+// working signer, would make `git commit` fail) forced on inside the sandbox.
+func (c gitSigningConfig) enabled() bool {
+	return c.signingKey != "" &&
+		strings.EqualFold(c.format, "ssh") &&
+		strings.EqualFold(c.gpgSign, "true")
+}
+
+// key returns the signing key to inject, or "" when signing isn't fully
+// configured (so the wrapper leaves commits unsigned rather than half-configured).
+func (c gitSigningConfig) key() string {
+	if c.enabled() {
+		return c.signingKey
+	}
+	return ""
+}
+
+// logSigningStatus records, in this session's acp-wrapper log, whether the
+// sandboxed agent will SSH-sign commits. It exists because a signing drop is
+// otherwise silent — `git commit` still succeeds, just unsigned — so the
+// symptom (unsigned commits) shows up long after the cause. The line is prefixed
+// with the session id so it's greppable per session. The DISABLED case names
+// which of the three settings is missing, and flags the specific asymmetry we
+// hit in the field: a resolvable identity but unresolved signing.
+func logSigningStatus(sessionID string, haveIdentity bool, c gitSigningConfig) {
+	if c.enabled() {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: commit signing ENABLED (ssh)\n", sessionID)
+		return
+	}
+	msg := fmt.Sprintf(
+		"acp-wrapper: session %s: commit signing DISABLED — commits will be UNSIGNED "+
+			"(user.signingkey=%s gpg.format=%q commit.gpgsign=%q, read from global git config)",
+		sessionID, presence(c.signingKey), c.format, c.gpgSign)
+	if haveIdentity {
+		msg += " — note: git identity DID resolve but signing did not"
+	}
+	fmt.Fprintln(os.Stderr, msg)
+}
+
+func presence(s string) string {
+	if s == "" {
+		return "unset"
+	}
+	return "set"
 }
 
 // workspacesFlag collects repeatable --workspace values, resolving each to an
@@ -146,6 +213,8 @@ func main() {
 	}
 
 	gitName, gitEmail := resolveGitIdentity()
+	signing := readGitSigningConfig()
+	logSigningStatus(*sessionID, gitName != "" && gitEmail != "", signing)
 	cfg := acpwrapper.Config{
 		SessionID:     *sessionID,
 		SessionsRoot:  *sessionsRoot,
@@ -158,7 +227,7 @@ func main() {
 		Policies:      policies,
 		GitName:       gitName,
 		GitEmail:      gitEmail,
-		SigningKey:    resolveGitSigning(),
+		SigningKey:    signing.key(),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
