@@ -596,3 +596,46 @@ func TestHubStdinNoInterleave(t *testing.T) {
 		t.Errorf("expected the two distinct frames, got the same one twice")
 	}
 }
+
+func TestSigningPreflight(t *testing.T) {
+	base := Config{SandboxName: "acp-s", SbxPath: "sbx", SigningKey: "ssh-ed25519 AAAA"}
+
+	// Signing not configured -> not checked, and run is never invoked.
+	noKey := base
+	noKey.SigningKey = ""
+	if checked, _ := signingPreflight(context.Background(), func(context.Context, string, ...string) ([]byte, error) {
+		t.Fatal("run must not be called when signing is unconfigured")
+		return nil, nil
+	}, noKey); checked {
+		t.Errorf("expected checked=false when SigningKey is empty")
+	}
+
+	// Forwarded agent lists a key -> ok.
+	okRun := func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("256 SHA256:abc123 github (ED25519)\n"), nil
+	}
+	if checked, ok := signingPreflight(context.Background(), okRun, base); !checked || !ok {
+		t.Errorf("agent-with-key: got checked=%v ok=%v, want true true", checked, ok)
+	}
+
+	// Empty agent: `ssh-add -l` exits non-zero, so run returns an error and no
+	// fingerprint -> checked but not ok.
+	emptyRun := func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("The agent has no identities.\n"), errors.New("exit status 1")
+	}
+	if checked, ok := signingPreflight(context.Background(), emptyRun, base); !checked || ok {
+		t.Errorf("empty-agent: got checked=%v ok=%v, want true false", checked, ok)
+	}
+
+	// The probe runs exactly `sbx exec <sandbox> -- ssh-add -l`.
+	var gotArgs []string
+	capRun := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		gotArgs = append([]string{name}, args...)
+		return []byte("SHA256:x"), nil
+	}
+	signingPreflight(context.Background(), capRun, base)
+	want := []string{"sbx", "exec", "acp-s", "--", "ssh-add", "-l"}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Errorf("preflight argv = %v, want %v", gotArgs, want)
+	}
+}

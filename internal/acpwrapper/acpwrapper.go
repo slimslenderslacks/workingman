@@ -429,6 +429,27 @@ func sameWorkspaceSet(a, b []string) bool {
 	return true
 }
 
+// signingPreflight verifies, once the sandbox exists, that the SSH agent sbx
+// forwards into it actually holds a key — the runtime precondition ssh-keygen
+// needs to sign. Config resolution (main's readGitSigningConfig) proves signing
+// is *configured*; this proves the key is *reachable*, which is a separate,
+// runtime-varying fact: 1Password can be locked, or sandboxd can have been
+// restarted since orch launched and lost the 1Password agent. Without this the
+// gap only surfaces at commit time as a signing failure.
+//
+// Returns checked=false when signing isn't configured (nothing to verify), and
+// otherwise ok=true iff the forwarded agent lists at least one identity.
+// `ssh-add -l` exits non-zero (so run returns an error) when the agent has no
+// identities or is unreachable, so a good result is a nil error whose output
+// carries a key fingerprint.
+func signingPreflight(ctx context.Context, run commandFunc, c Config) (checked, ok bool) {
+	if c.SigningKey == "" {
+		return false, false
+	}
+	out, err := run(ctx, c.SbxPath, "exec", c.SandboxName, "--", "ssh-add", "-l")
+	return true, err == nil && strings.Contains(string(out), "SHA256:")
+}
+
 // Run is the wrapper's blocking main loop. It normalizes the config, ensures
 // the sandbox, starts the sandboxed ACP client over `sbx exec`, listens on the
 // session's agent.sock, and bridges each TUI connection to the ACP client's
@@ -456,6 +477,19 @@ func Run(ctx context.Context, c Config) error {
 	if err := ensureSandbox(ctx, execCommand, c); err != nil {
 		_ = store.Remove(c.SessionID) // never started — don't leave a stale record
 		return err
+	}
+
+	// Signing preflight: when signing is configured, confirm the forwarded agent
+	// can actually reach a key and warn (without blocking) if not, so a locked
+	// 1Password or a restarted sandboxd surfaces here in the log rather than as a
+	// silent commit-time signing failure later.
+	if checked, ok := signingPreflight(ctx, execCommand, c); checked && !ok {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING signing preflight FAILED — the SSH "+
+			"agent forwarded into sandbox %q has no key, so commits will NOT sign. Likely 1Password is "+
+			"locked or sandboxd was restarted without it; run ./check-signing.sh to fix.\n",
+			c.SessionID, c.SandboxName)
+	} else if checked {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: signing preflight OK — forwarded agent holds a key\n", c.SessionID)
 	}
 
 	// Cancelling this child context tears down the ACP client process when the
