@@ -101,6 +101,14 @@ type model struct {
 	// the project view that existed before the task viewer was added.
 	yamlSrc yamlSource
 
+	// zoomed maximizes the focused pane: when set, View renders only the
+	// focused pane filling the whole body (reclaiming the audit strip too),
+	// and the `z` key toggles it back to the normal stacked layout. Because
+	// the maximized pane is always whichever pane has focus, up/down still
+	// cycle focus while zoomed — moving the maximize to the next pane rather
+	// than exiting — so the user can page through panes full-screen.
+	zoomed bool
+
 	// projectRoot is the directory where the `:new` command creates a new
 	// project's empty .project.yaml. Set by Run() from the first --root the
 	// caller passed in; empty in standalone test models.
@@ -367,6 +375,11 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down":
 		m.focus = togglePane(m.focus)
 		m.statusMsg = ""
+	case "z":
+		// Toggle maximize of the focused pane: fill the body with it, or
+		// restore the normal stacked layout if it's already maximized.
+		m.zoomed = !m.zoomed
+		m.statusMsg = ""
 	case "enter":
 		if m.focus == paneSessions {
 			return m.attachSelected()
@@ -445,6 +458,12 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.width <= 0 || msg.X < 0 || msg.Y < 0 {
 		return m, nil
 	}
+	// While a pane is maximized the stacked-layout band math below doesn't
+	// apply (only one pane is on screen), so click-routing is a no-op —
+	// keyboard drives the zoomed pane. `z` or up/down returns to the grid.
+	if m.zoomed {
+		return m, nil
+	}
 	l := m.computeLayout()
 
 	// Vertical layout (top → bottom): header (1 row), projects, tasks,
@@ -483,10 +502,12 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.focus = paneTasks
 		m.statusMsg = ""
 		tasks := m.selectedProjectTasks()
-		idx := taskRowAtY(msg.Y, tasksStart, len(tasks))
-		if idx >= 0 {
+		// The pane may be scrolled (centered on the selection), so map the
+		// clicked visible row through the same window the renderer used.
+		start, end := centerWindow(len(tasks), taskIndex(tasks, m.taskSel), listMaxRows(l.tasksH))
+		if rel := taskRowAtY(msg.Y, tasksStart, end-start); rel >= 0 {
 			prev := m.taskSel
-			m.taskSel = tasks[idx].Path
+			m.taskSel = tasks[start+rel].Path
 			if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
 				m.yamlScroll = 0
 			}
@@ -499,13 +520,16 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if l.sessionsH > 0 && msg.Y >= sessionsStart && msg.Y < sessionsEnd {
-		idx := sessionRowAtY(msg.Y, sessionsStart, len(m.sessions))
 		m.focus = paneSessions
 		m.statusMsg = ""
-		if idx < 0 {
+		// Same scroll-window mapping as the tasks pane: the sessions list may be
+		// centered on its selection, so offset the clicked visible row.
+		start, end := centerWindow(len(m.sessions), sessionIndex(m.sessions, m.sessSel), listMaxRows(l.sessionsH))
+		rel := sessionRowAtY(msg.Y, sessionsStart, end-start)
+		if rel < 0 {
 			return m, nil
 		}
-		m.sessSel = m.sessions[idx].ID
+		m.sessSel = m.sessions[start+rel].ID
 		return m.attachSelected()
 	}
 	// Click below every pane (audit area or empty). Focus projects as a
@@ -834,17 +858,15 @@ func (m model) renderSessions(width, height int) string {
 	b.WriteString(renderSessionHeader(cols))
 
 	// 3 chrome rows above (title, blank, header) — data rows fit in the
-	// remaining inner height. Anything past that is dropped so the bottom
-	// border survives.
+	// remaining inner height. Scroll the window so the selected row stays
+	// centered when the list outgrows the pane, rather than clipping to the
+	// first maxRows and hiding a selection below it.
 	maxRows := innerHeight - 3
 	if maxRows < 0 {
 		maxRows = 0
 	}
-	sessions := m.sessions
-	if len(sessions) > maxRows {
-		sessions = sessions[:maxRows]
-	}
-	for _, s := range sessions {
+	start, end := centerWindow(len(m.sessions), sessionIndex(m.sessions, m.sessSel), maxRows)
+	for _, s := range m.sessions[start:end] {
 		b.WriteString("\n")
 		b.WriteString(renderSessionRow(s, cols, now, s.ID == m.sessSel))
 	}
@@ -1104,6 +1126,68 @@ func padToWidth(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+// listPaneChromeRows is the non-data height of the row-list panes (Tasks,
+// Agent Sessions): top + bottom border, the title, its blank line, and the
+// column header. maxRows of data = paneHeight - listPaneChromeRows. Both the
+// renderers and the mouse click-router derive the visible window from it, so
+// they must agree; keeping the count here is what keeps them in lockstep.
+const listPaneChromeRows = 5
+
+// listMaxRows is how many data rows fit in a row-list pane of the given total
+// height, floored at 0.
+func listMaxRows(paneHeight int) int {
+	if r := paneHeight - listPaneChromeRows; r > 0 {
+		return r
+	}
+	return 0
+}
+
+// centerWindow returns the [start, end) slice of a list of n items to show in a
+// viewport of maxRows rows, scrolled so the selected index sits as near the
+// vertical center as the list bounds allow. When everything fits (n <= maxRows)
+// it returns the whole list; a sel of -1 (no selection) pins to the top. This
+// is what makes a long Tasks/Sessions list follow the selection — and keep it
+// centered — instead of clipping to the first maxRows and losing it off-screen.
+func centerWindow(n, sel, maxRows int) (start, end int) {
+	if maxRows <= 0 || n <= 0 {
+		return 0, 0
+	}
+	if n <= maxRows {
+		return 0, n
+	}
+	if sel < 0 {
+		sel = 0
+	}
+	start = sel - maxRows/2
+	if start < 0 {
+		start = 0
+	}
+	if max := n - maxRows; start > max {
+		start = max
+	}
+	return start, start + maxRows
+}
+
+// taskIndex / sessionIndex return the position of the selected item in its
+// list, or -1 when the selection is absent.
+func taskIndex(tasks []TaskView, path string) int {
+	for i := range tasks {
+		if tasks[i].Path == path {
+			return i
+		}
+	}
+	return -1
+}
+
+func sessionIndex(views []SessionView, id string) int {
+	for i := range views {
+		if views[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 // clampLines returns s truncated to at most max lines. Used by the pane
@@ -1544,9 +1628,22 @@ func (m model) View() string {
 		return m.renderACPView()
 	}
 
-	l := m.computeLayout()
 	header := titleStyle.Render("orch")
 	footer := m.renderFooter()
+
+	// Maximized: the focused pane fills the whole region between header and
+	// footer, reclaiming even the audit strip for the most vertical space.
+	if m.zoomed {
+		const headerH, footerH = 1, 1
+		zoomH := m.height - headerH - footerH
+		if zoomH < 1 {
+			zoomH = 1
+		}
+		pane := m.renderFocusedPane(m.width, zoomH)
+		return lipgloss.JoinVertical(lipgloss.Left, header, pane, footer)
+	}
+
+	l := m.computeLayout()
 
 	projects := m.renderProjects(l.bodyW, l.projectsH)
 	tasks := m.renderTasks(l.bodyW, l.tasksH)
@@ -1564,6 +1661,23 @@ func (m model) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, header, body, audit, footer)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+// renderFocusedPane draws whichever pane currently has focus at the given
+// size. Used by the maximized (`z`) layout, where a single pane fills the body.
+// Each pane's own renderer handles its borders and internal chrome, so it fills
+// the height it's given exactly as it would in the normal stack.
+func (m model) renderFocusedPane(width, height int) string {
+	switch m.focus {
+	case paneTasks:
+		return m.renderTasks(width, height)
+	case paneProjectYAML:
+		return m.renderProjectYAML(width, height)
+	case paneSessions:
+		return m.renderSessions(width, height)
+	default: // paneProjects
+		return m.renderProjects(width, height)
+	}
 }
 
 // renderTasks draws the per-project task list pane as a table: one header
@@ -1605,15 +1719,14 @@ func (m model) renderTasks(width, height int) string {
 	b.WriteString(renderTaskHeader(cols))
 
 	// 3 chrome rows above (title, blank, header) and we just wrote the
-	// header — so task data rows fit in innerHeight-3.
+	// header — so task data rows fit in innerHeight-3. Scroll the window so the
+	// selected row stays centered when the list outgrows the pane.
 	maxRows := innerHeight - 3
 	if maxRows < 0 {
 		maxRows = 0
 	}
-	if len(tasks) > maxRows {
-		tasks = tasks[:maxRows]
-	}
-	for _, t := range tasks {
+	start, end := centerWindow(len(tasks), taskIndex(tasks, m.taskSel), maxRows)
+	for _, t := range tasks[start:end] {
 		b.WriteString("\n")
 		b.WriteString(renderTaskRow(t, cols, t.Path == m.taskSel))
 	}
@@ -1904,7 +2017,11 @@ func (m model) renderFooter() string {
 	text := m.statusMsg
 	style := statusErrStyle
 	if text == "" {
-		base := "↑/↓: switch pane  •  ←/→: select in pane  •  p/t: project/task yaml  •  enter/click: attach  •  q: quit"
+		zoomHint := "z: maximize pane"
+		if m.zoomed {
+			zoomHint = "z: restore panes"
+		}
+		base := "↑/↓: switch pane  •  ←/→: select in pane  •  " + zoomHint + "  •  p/t: project/task yaml  •  enter/click: attach  •  q: quit"
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}
