@@ -168,6 +168,35 @@ func TestNewTaskModalAcceptsSpacesAndPunctuation(t *testing.T) {
 	}
 }
 
+func TestNewTaskModalAcceptsPastedText(t *testing.T) {
+	root := t.TempDir()
+	m, _ := selectProject(t, root, "widget")
+	m.mode = modeNewTask
+
+	// A paste arrives as one KeyMsg carrying every pasted rune (bracketed
+	// paste sets Paste:true); the modal must append the whole thing rather
+	// than dropping it as it once did with a length==1 guard.
+	pasted := "Add a /healthz endpoint that returns 200"
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pasted), Paste: true})
+	m = step.(model)
+
+	if m.newTaskDesc != pasted {
+		t.Errorf("description = %q, want the full pasted text %q", m.newTaskDesc, pasted)
+	}
+}
+
+func TestNewTaskModalCollapsesPastedNewlines(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m.mode = modeNewTask
+
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line one\nline\ttwo\r\n"), Paste: true})
+	m = step.(model)
+
+	if m.newTaskDesc != "line one line two " { // trailing \r\n -> one space
+		t.Errorf("description = %q, want newlines and tabs collapsed to spaces", m.newTaskDesc)
+	}
+}
+
 func TestNewTaskModalBackspaceTrimsDescription(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m.mode = modeNewTask
