@@ -10,6 +10,11 @@ file must include: name, description, depends_on (list of task names), status
 (start at `ready`), attempts (0), failure_reason (""), blocked_reason (""),
 model ("default").
 
+A task `name` must not exceed 63 characters. The name flows into the task's
+sandbox name (`<work-stream>-<task-name>`), which becomes a Docker container
+name (an RFC 1123 DNS label capped at 63 chars). Keep names short, lowercase,
+and hyphenated (no spaces or underscores); a too-long name aborts loading.
+
 IMPORTANT — incremental task requests. You may be re-invoked on a project that
 already has tasks, to incorporate a single new task a human added via the UI.
 A human-added task shows up as a task file whose `name:` is empty but whose

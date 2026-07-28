@@ -21,6 +21,13 @@ import (
 	"github.com/slimslenderslacks/work/internal/task"
 )
 
+// MaxNameLen is the maximum length of a task name. A task name flows into the
+// task's sbx sandbox name ("<work-stream>-<task-name>"), which sbx passes to
+// Docker as a container name — an RFC 1123 DNS label capped at 63 characters.
+// Names longer than this are rejected at Load so the failure surfaces here
+// with a clear message instead of downstream as an opaque sbx/Docker error.
+const MaxNameLen = 63
+
 // Graph is an immutable snapshot of a project's task DAG.
 type Graph struct {
 	dir   string
@@ -60,6 +67,9 @@ func Load(dir string) (*Graph, error) {
 		}
 		if t.Name == "" {
 			return nil, fmt.Errorf("taskgraph: %s has no name", path)
+		}
+		if len(t.Name) > MaxNameLen {
+			return nil, fmt.Errorf("taskgraph: %s name %q is %d chars; must not exceed %d", path, t.Name, len(t.Name), MaxNameLen)
 		}
 		if _, dup := g.tasks[t.Name]; dup {
 			return nil, fmt.Errorf("taskgraph: duplicate task name %q in %s", t.Name, dir)
