@@ -45,11 +45,35 @@ func (m model) handleNewTaskKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = "queued task " + name + " for planning"
 		return m, nil
 	}
-	if len(msg.Runes) == 1 && isPrintableASCII(msg.Runes[0]) {
-		m.newTaskDesc += string(msg.Runes[0])
+	// A single keystroke and a paste both arrive as a KeyMsg carrying Runes;
+	// a paste (bracketed paste is on by default) simply has many. Append every
+	// printable rune so pasted descriptions land intact rather than being
+	// dropped by a length==1 guard. Newlines and tabs from a multi-line paste
+	// collapse to spaces so words don't run together in the single-line field.
+	if runes := sanitizePastedRunes(msg.Runes); runes != "" {
+		m.newTaskDesc += runes
 		m.newTaskErr = ""
 	}
 	return m, nil
+}
+
+// sanitizePastedRunes keeps the printable ASCII from a keystroke or paste,
+// turning embedded newlines and tabs into single spaces so a multi-line paste
+// reads as continuous prose in the one-line description field. Other control
+// characters are dropped.
+func sanitizePastedRunes(runes []rune) string {
+	var b strings.Builder
+	for _, r := range runes {
+		switch {
+		case isPrintableASCII(r):
+			b.WriteRune(r)
+		case r == '\n' || r == '\t':
+			b.WriteByte(' ')
+			// A carriage return is dropped rather than turned into a space so a
+			// CRLF ("\r\n") paste yields a single separating space, not two.
+		}
+	}
+	return b.String()
 }
 
 // queueTaskForPlanning seeds a new task into the project identified by

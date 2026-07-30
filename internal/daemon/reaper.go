@@ -122,6 +122,16 @@ const (
 // (so any further wrapper lifetime is pure zombie) and a short grace has elapsed,
 // or it has produced no ACP stream activity for longer than the idle timeout.
 func (d *Daemon) strandedVerdict(key string, e sessionEntry) reapVerdict {
+	// Interactive sessions are never reaped by any timer. Both the project agent
+	// (interviews the user to fill in .project.yaml) and the wolf agent
+	// (dispatched to unblock a stuck project) are human-driven: they have no
+	// terminal-status signal (stageComplete returns false for them) and may sit
+	// idle indefinitely while a human thinks or steps away. Killing one on an idle
+	// timeout would silently discard that context, so it holds its slot until it
+	// exits on its own.
+	if e.kind.Interactive() {
+		return reapVerdict{}
+	}
 	idle := d.sessionIdle(e)
 	if d.stageComplete(key, e) {
 		if idle >= sessionDoneGrace {

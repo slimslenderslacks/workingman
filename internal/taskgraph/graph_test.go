@@ -139,6 +139,22 @@ func TestDuplicateTaskNamesRejected(t *testing.T) {
 	}
 }
 
+func TestOverlongNameRejected(t *testing.T) {
+	dir := t.TempDir()
+	// Exactly at the limit loads; one over aborts.
+	writeTask(t, dir, strings.Repeat("a", MaxNameLen), task.StatusReady)
+	if _, err := Load(dir); err != nil {
+		t.Fatalf("name of exactly %d chars should load, got %v", MaxNameLen, err)
+	}
+
+	dir2 := t.TempDir()
+	writeTask(t, dir2, strings.Repeat("a", MaxNameLen+1), task.StatusReady)
+	_, err := Load(dir2)
+	if err == nil || !strings.Contains(err.Error(), "exceed") {
+		t.Errorf("expected overlong-name error, got %v", err)
+	}
+}
+
 func TestNonYamlFilesIgnored(t *testing.T) {
 	dir := t.TempDir()
 	writeTask(t, dir, "a", task.StatusReady)
