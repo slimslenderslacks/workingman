@@ -35,10 +35,10 @@ type tmuxAttacher interface {
 // instead of trying to spawn a new terminal. The user can run
 // `tmux attach -t orch` themselves and click again.
 type defaultTmuxAttacher struct {
-	binary       string                              // resolved tmux binary; defaults to "tmux"
-	lookPath     func(string) (string, error)        // defaults to exec.LookPath
-	exists       func(binary, target string) bool    // defaults to tmuxSessionExists
-	switchClient func(binary, target string) bool    // defaults to tmuxSwitchClient
+	binary       string                           // resolved tmux binary; defaults to "tmux"
+	lookPath     func(string) (string, error)     // defaults to exec.LookPath
+	exists       func(binary, target string) bool // defaults to tmuxSessionExists
+	switchClient func(binary, target string) bool // defaults to tmuxSwitchClient
 }
 
 func newTmuxAttacher() *defaultTmuxAttacher {

@@ -72,7 +72,7 @@ func TestZoomFollowsFocus(t *testing.T) {
 		t.Fatalf("precondition: want zoomed sessions, got zoomed=%v focus=%v", m.zoomed, m.focus)
 	}
 	// down cycles focus; zoom stays on and now maximizes the newly focused pane.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 	m = next.(model)
 	if !m.zoomed {
 		t.Error("moving focus should not exit zoom")

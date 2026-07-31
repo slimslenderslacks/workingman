@@ -44,6 +44,11 @@ const (
 	// the planning agent, which fleshes out the seed and returns the project
 	// to status:working.
 	modeNewTask
+	// modeConfirmArchive is the yes/no confirmation shown after `:archive`.
+	// On confirm it moves the selected project's tree out of the workspace
+	// root into the sibling ~/<root>.backup dir; the project then disappears
+	// from the gallery on the next scan.
+	modeConfirmArchive
 )
 
 // yamlSource picks what the YAML viewer pane renders: the selected
@@ -85,9 +90,14 @@ type model struct {
 	statusMsg  string
 
 	// yamlScroll is the index of the first visible wrapped line of the
-	// project-YAML viewer. Reset to 0 whenever projSel or taskSel changes
-	// so a fresh selection opens from the top of the file.
+	// project-YAML viewer. Derived from yamlCursor so the cursor line stays
+	// in view. Reset to 0 whenever projSel or taskSel changes so a fresh
+	// selection opens from the top of the file.
 	yamlScroll int
+	// yamlCursor is the wrapped-line index of the highlighted cursor line in
+	// the YAML viewer. Moved by j/k while the YAML pane is focused; the view
+	// scrolls to keep it visible. Reset to 0 alongside yamlScroll.
+	yamlCursor int
 
 	// taskSel is the file path of the currently-selected task. Drives the
 	// Tasks pane's row highlight and feeds the YAML viewer when yamlSrc is
@@ -116,12 +126,20 @@ type model struct {
 
 	// Input-mode state. mode gates which key handler the Update loop hands
 	// the next keystroke to. cmdInput holds the characters typed after `:`
-	// in command-line mode; newProjName / newProjErr drive the new-project
-	// modal's input field and its inline error line.
-	mode        uiMode
-	cmdInput    string
-	newProjName string
-	newProjErr  string
+	// in command-line mode; newProjName / newProjDesc / newProjErr drive the
+	// new-project modal's two input fields and its inline error line, and
+	// newProjFocus selects which field (0 = name, 1 = description) receives
+	// keystrokes.
+	mode         uiMode
+	cmdInput     string
+	newProjName  string
+	newProjDesc  string
+	newProjFocus int
+	newProjErr   string
+	// archiveTarget is the .project.yaml path captured when `:archive` opens
+	// the confirm modal, so the move acts on the project that was selected at
+	// the time even if a background scan reconciles projSel meanwhile.
+	archiveTarget string
 	// newTaskDesc / newTaskErr drive the new-task modal's free-form
 	// description field and its inline error line. Populated only while
 	// mode == modeNewTask.
@@ -291,6 +309,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleNewProjectKey(msg)
 		case modeNewTask:
 			return m.handleNewTaskKey(msg)
+		case modeConfirmArchive:
+			return m.handleConfirmArchiveKey(msg)
 		}
 		return m.handleNormalKey(msg)
 	}
@@ -320,14 +340,15 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showACP = true
 			m.statusMsg = ""
 		}
-	case "left", "h":
-		// Left/right move the selection (or scroll) WITHIN the focused pane:
-		// previous/next project in Work Streams, previous/next task in Tasks,
-		// previous/next session in Agent Sessions, line-scroll in the YAML pane.
-		// Pane focus itself is moved with up/down (see below).
+	case "k", "h":
+		// j/k move the selection (or scroll) WITHIN the focused pane; k is the
+		// vim "up" (previous project/task/session, or a line-scroll up in the
+		// YAML pane), h is kept as a horizontal alias. Pane focus itself moves
+		// with alt-j/alt-k (see below). Cursor keys are intentionally unbound.
 		m = m.moveSelectionInPane(-1)
 		m.statusMsg = ""
-	case "right", "l":
+	case "j", "l":
+		// Next item within the focused pane (j is the vim "down").
 		m = m.moveSelectionInPane(1)
 		m.statusMsg = ""
 	case "p":
@@ -336,14 +357,14 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// stays on the project file.
 		if m.yamlSrc != yamlSourceProject {
 			m.yamlSrc = yamlSourceProject
-			m.yamlScroll = 0
+			m.yamlScroll, m.yamlCursor = 0, 0
 		}
 		m.statusMsg = ""
 	case "t":
 		// Switch the YAML viewer to task content.
 		if m.yamlSrc != yamlSourceTask {
 			m.yamlSrc = yamlSourceTask
-			m.yamlScroll = 0
+			m.yamlScroll, m.yamlCursor = 0, 0
 		}
 		m.statusMsg = ""
 	case "ctrl+f":
@@ -354,26 +375,29 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// renderProjectYAML clamps yamlScroll on overflow, so we don't need
 		// the line count here.
 		if page := yamlPageSize(m); page > 0 {
-			m.yamlScroll += page
+			m = m.pageYAML(page)
 		}
 		m.statusMsg = ""
 	case "ctrl+b":
 		// Vim-style page-up on whichever YAML view is currently visible.
 		if page := yamlPageSize(m); page > 0 {
-			m.yamlScroll -= page
-			if m.yamlScroll < 0 {
-				m.yamlScroll = 0
-			}
+			m = m.pageYAML(-page)
 		}
 		m.statusMsg = ""
-	case "up":
-		// Up/down move focus between panes (previous/next in the cycle),
-		// replacing the former Tab/Shift+Tab. Selection within a pane is moved
-		// with left/right (see above).
-		m.focus = shiftTogglePane(m.focus)
-		m.statusMsg = ""
-	case "down":
+	case "alt+j", "∆":
+		// ⌥j/⌥k shift focus between the stacked panes ("tabs"), matching the
+		// in-pane j/k direction: ⌥j moves to the next pane DOWN the stack, ⌥k
+		// to the previous one UP. Selection within a pane is j/k (see above);
+		// cursor keys are unbound.
+		//
+		// "∆"/"˚" are the glyphs a default macOS terminal emits for Option-j /
+		// Option-k when Option isn't configured as a Meta key — accepting them
+		// too means the binding works out of the box there, while "alt+j"/
+		// "alt+k" covers terminals that do send Meta (or tmux with xterm-keys).
 		m.focus = togglePane(m.focus)
+		m.statusMsg = ""
+	case "alt+k", "˚":
+		m.focus = shiftTogglePane(m.focus)
 		m.statusMsg = ""
 	case "z":
 		// Toggle maximize of the focused pane: fill the body with it, or
@@ -403,37 +427,93 @@ func (m model) moveSelectionInPane(delta int) model {
 		prev := m.projSel
 		m.projSel = moveProjectSelection(m.projects, m.projSel, delta)
 		if m.projSel != prev && m.yamlSrc == yamlSourceProject {
-			m.yamlScroll = 0
+			m.yamlScroll, m.yamlCursor = 0, 0
 		}
 		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 	case paneProjectYAML:
-		m.yamlScroll += delta
-		if m.yamlScroll < 0 {
-			m.yamlScroll = 0
-		}
+		// j/k move the highlighted cursor line; the view follows it.
+		m = m.moveYAMLCursor(delta)
 	case paneTasks:
 		prev := m.taskSel
 		m.taskSel = moveTaskSelection(m.selectedProjectTasks(), m.taskSel, delta)
 		if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
-			m.yamlScroll = 0
+			m.yamlScroll, m.yamlCursor = 0, 0
 		}
 	}
 	return m
 }
 
+// yamlViewport returns the YAML pane's inner content width and visible row
+// count from the current layout, or ok=false when the pane isn't in the
+// layout. It mirrors renderProjectYAML's frame math (border + horizontal
+// padding, and title + blank rows) so a cursor/scroll computed here lines up
+// with what's drawn.
+func (m model) yamlViewport() (innerWidth, contentRows int, ok bool) {
+	l := m.computeLayout()
+	if l.yamlH <= 0 {
+		return 0, 0, false
+	}
+	bs := m.borderStyle(paneProjectYAML)
+	innerWidth = l.bodyW - bs.GetHorizontalFrameSize()
+	contentRows = l.yamlH - bs.GetVerticalFrameSize() - 2 // title + blank
+	if innerWidth < 0 {
+		innerWidth = 0
+	}
+	if contentRows < 0 {
+		contentRows = 0
+	}
+	return innerWidth, contentRows, true
+}
+
+// moveYAMLCursor shifts the YAML viewer's cursor line by delta and re-derives
+// the scroll offset so the cursor stays visible. A no-op when the pane isn't
+// laid out or the body has nothing navigable (an error/placeholder).
+func (m model) moveYAMLCursor(delta int) model {
+	iw, rows, ok := m.yamlViewport()
+	if !ok {
+		return m
+	}
+	lines, isErr := m.yamlLines(iw)
+	if isErr || len(lines) == 0 {
+		return m
+	}
+	m.yamlCursor, m.yamlScroll = reconcileYAMLView(m.yamlCursor+delta, m.yamlScroll, len(lines), rows)
+	return m
+}
+
+// pageYAML scrolls the YAML viewport by delta rows (ctrl+f / ctrl+b), carrying
+// the cursor along by the same amount so it keeps its position relative to the
+// visible window. Like moveYAMLCursor it is a no-op when the pane isn't laid
+// out or the body isn't navigable.
+func (m model) pageYAML(delta int) model {
+	iw, rows, ok := m.yamlViewport()
+	if !ok {
+		return m
+	}
+	lines, isErr := m.yamlLines(iw)
+	if isErr || len(lines) == 0 {
+		return m
+	}
+	m.yamlCursor, m.yamlScroll = reconcileYAMLView(m.yamlCursor+delta, m.yamlScroll+delta, len(lines), rows)
+	return m
+}
+
 // handleACPKey processes a keystroke while the full-window ACP tab view is open.
-// Left/right switch tabs; esc (or `a`) returns to the normal two-pane UI; q and
-// ctrl+c still quit the whole TUI. The Tab key no longer switches tabs.
+// alt-j/alt-k (or h/l) switch tabs; esc (or `a`) returns to the normal two-pane
+// UI; q and ctrl+c still quit the whole TUI. Cursor keys are unbound.
 func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q":
 		return m, tea.Quit
 	case "esc", "a":
 		m.showACP = false
-	case "right", "l":
+	case "alt+j", "∆", "l":
+		// ⌥j / l → next tab, ⌥k / h → previous — same direction as the main
+		// screen's ⌥j/⌥k pane switch. "∆"/"˚" are the macOS Option-j/-k glyph
+		// fallbacks (see handleNormalKey). Cursor keys unbound.
 		m.acp.next()
-	case "left", "h":
+	case "alt+k", "˚", "h":
 		m.acp.prev()
 	case "z":
 		m.acpToolsExpanded = !m.acpToolsExpanded
@@ -886,9 +966,9 @@ type sessionColumns struct {
 // shrink no smaller than their mins when the pane can't fit every column at
 // its content width; status and age are short and pinned to their content.
 const (
-	sessionMarkerWidth = 2
-	sessionColGap      = 1
-	sessionColGapCount = 5 // six columns → five inter-column gaps
+	sessionMarkerWidth   = 2
+	sessionColGap        = 1
+	sessionColGapCount   = 5 // six columns → five inter-column gaps
 	sessionColMinAgent   = 6
 	sessionColMinProject = 4
 	sessionColMinTask    = 6
@@ -1337,6 +1417,16 @@ func renderProjectCard(v ProjectView, width int, selected bool) string {
 	}
 
 	name := cardNameStyle.Render(truncate(v.Name, inner))
+
+	// A project whose .project.yaml failed to parse gets an error card instead
+	// of a normal status/branch/task line: a red badge plus the parse message,
+	// so it stays visible and the user can select it to inspect the raw YAML.
+	if v.LoadErr != "" {
+		badge := statusErrStyle.Render(truncate("⚠ parse error", inner))
+		detail := dimStyle.Render(truncate(v.LoadErr, inner))
+		return style.Render(name + "\n" + badge + "\n" + detail)
+	}
+
 	statusLine := renderStatus(string(v.Status))
 	if v.Branch != "" {
 		branchTxt := dimStyle.Render(v.Branch)
@@ -1621,6 +1711,9 @@ func (m model) View() string {
 	}
 	if m.mode == modeNewTask {
 		return m.renderNewTaskModal()
+	}
+	if m.mode == modeConfirmArchive {
+		return m.renderConfirmArchiveModal()
 	}
 
 	// The ACP tab view takes over the whole window when open.
@@ -2021,14 +2114,14 @@ func (m model) renderFooter() string {
 		if m.zoomed {
 			zoomHint = "z: restore panes"
 		}
-		base := "↑/↓: switch pane  •  ←/→: select in pane  •  " + zoomHint + "  •  p/t: project/task yaml  •  enter/click: attach  •  q: quit"
+		base := "⌥j/⌥k: switch pane  •  j/k: select in pane  •  " + zoomHint + "  •  p/t: project/task yaml  •  enter/click: attach  •  q: quit"
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}
 		if m.focus == paneProjects {
 			base += "  •  :new: create project"
 			if m.projSel != "" {
-				base += "  •  :task: add task  •  :wolf: summon wolf"
+				base += "  •  :task: add task  •  :wolf: summon wolf  •  :archive: archive"
 			}
 		}
 		text = base + "  •  focus: " + paneName(m.focus)

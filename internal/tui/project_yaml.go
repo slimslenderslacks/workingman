@@ -58,27 +58,26 @@ func (m model) renderProjectYAML(width, height int) string {
 	body, isErr := projectYAMLBody(path)
 	lines := wrapDisplayWidth(body, innerWidth)
 
-	// Scroll clamp: never let scroll push the content entirely out of view,
-	// but allow scrolling far enough to reveal the last line.
-	maxScroll := len(lines) - contentRows
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	scroll := m.yamlScroll
-	if scroll > maxScroll {
-		scroll = maxScroll
-	}
-	if scroll < 0 {
-		scroll = 0
-	}
+	// Derive the cursor line and scroll offset together so the highlighted
+	// line stays within the viewport. An error/placeholder body has nothing to
+	// navigate, so no cursor is shown; the cursor is only drawn while this pane
+	// holds focus, so it reads as "the active line here".
+	cursor, scroll := reconcileYAMLView(m.yamlCursor, m.yamlScroll, len(lines), contentRows)
+	showCursor := !isErr && len(lines) > 0 && m.focus == paneProjectYAML
+
 	end := scroll + contentRows
 	if end > len(lines) {
 		end = len(lines)
 	}
 	for i := scroll; i < end; i++ {
 		line := lines[i]
-		if isErr {
+		switch {
+		case isErr:
 			line = statusErrStyle.Render(line)
+		case showCursor && i == cursor:
+			// Width pads the highlight to a full-width bar so the cursor line
+			// reads clearly even on short/blank YAML lines.
+			line = yamlCursorStyle.Width(innerWidth).Render(line)
 		}
 		b.WriteString(line)
 		if i < end-1 {
@@ -87,6 +86,56 @@ func (m model) renderProjectYAML(width, height int) string {
 	}
 
 	return style.Render(clampLines(b.String(), innerHeight))
+}
+
+// yamlCursorStyle highlights the current line in the YAML viewer as a reversed
+// bar. Applied only while the pane is focused (see renderProjectYAML).
+var yamlCursorStyle = lipgloss.NewStyle().Reverse(true)
+
+// yamlLines returns the wrapped display lines for the currently-selected YAML
+// source (project when yamlSrc is project, else the selected task) at the given
+// inner width, plus whether the body is an error/placeholder (in which case
+// there's nothing to put a cursor on). Shared by the renderer and the key
+// handler so cursor math matches exactly what's on screen.
+func (m model) yamlLines(innerWidth int) ([]string, bool) {
+	path := m.projSel
+	if m.yamlSrc == yamlSourceTask {
+		path = m.taskSel
+	}
+	body, isErr := projectYAMLBody(path)
+	return wrapDisplayWidth(body, innerWidth), isErr
+}
+
+// reconcileYAMLView clamps a cursor line index into [0, n-1] and derives the
+// scroll offset (index of the first visible line) so the cursor sits within a
+// contentRows-tall viewport. n is the total number of display lines. Returns
+// (0, 0) for an empty body.
+func reconcileYAMLView(cursor, scroll, n, contentRows int) (int, int) {
+	if n == 0 {
+		return 0, 0
+	}
+	if contentRows < 1 {
+		contentRows = 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > n-1 {
+		cursor = n - 1
+	}
+	if cursor < scroll {
+		scroll = cursor
+	}
+	if cursor >= scroll+contentRows {
+		scroll = cursor - contentRows + 1
+	}
+	if maxScroll := n - contentRows; scroll > maxScroll {
+		scroll = maxScroll
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	return cursor, scroll
 }
 
 // projectYAMLBody returns the raw content of the selected project's

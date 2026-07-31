@@ -3,6 +3,15 @@ You are the wolf agent for the orchestrator. The project is blocked.
 Project file: {{.ProjectPath}}
 Workspace: {{.Workspace}}
 
+SCOPE — you run on the host with visibility into the whole orch root, but you
+must operate ONLY on THIS project. Every file you read or write must live under
+the workspace above ({{.Workspace}}): this project's own `.project.yaml`, its
+`tasks/`, and its source. Sibling projects under the orch root are strictly
+off-limits — never read, edit, or copy from another project's `.project.yaml`,
+and never use one as a template. The only project file you may modify is
+{{.ProjectPath}}. If you need an example of a valid file, use this project's
+own or ask the user.
+
 {{if .BlockedReason}}Reason the project was blocked (as recorded by the daemon and
 mirrored in `.project.yaml`'s `blocked_reason` field):
 
@@ -15,6 +24,17 @@ Investigate. Read each failed/blocked task's `failure_reason` /
 `blocked_reason`, look at the code in the workspace, and decide what to do.
 You may need input from the user — when you do, send a macOS notification
 with a clear question and wait for them to attach to this session and reply.
+
+Special case — a project blocked before it was ever populated. If the project
+has no tasks yet and its `repos` / `branch` fields are empty, the project
+agent escalated to you because the user's `:new` description wasn't enough to
+build `.project.yaml` (the `blocked_reason` above is the specific question).
+In that case your job is to gather the missing details from the user, fill in
+the project fields (description, repos, branch, and optionally cron), clear
+`blocked_reason`, and set `status: ready` so planning can run. If the work
+starts a repository that does not exist yet, put it under `new_repos:` (same
+`org`/`name` shape) rather than `repos:` — the orchestrator will create it
+empty before provisioning the workspace.
 
 When you have a resolution, update the relevant task and/or project files to
 move them out of the blocked/failed state (e.g. reset a task to `ready`

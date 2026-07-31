@@ -3,6 +3,7 @@ package project
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -28,14 +29,63 @@ type Repo struct {
 	// workspace creation — once the workspace exists, the agent's commits
 	// own the branch's HEAD.
 	BaseBranch string `yaml:"base_branch,omitempty"`
+	// Visibility is only meaningful for entries under `new_repos:` — it sets
+	// the visibility of the repo the orchestrator creates ("private" or
+	// "public"). Empty defaults to private. Ignored for existing `repos:`.
+	Visibility string `yaml:"visibility,omitempty"`
+}
+
+// UnmarshalYAML accepts a repo written either as the canonical mapping
+//
+//   - org: docker
+//     name: desktop
+//     base_branch: integration   # optional
+//
+// or as the "org/name" string shorthand agents tend to write naturally
+// (optionally "org/name@base_branch"). Supporting the shorthand keeps a
+// single malformed-looking entry from failing the whole file's parse — which
+// otherwise makes the project silently vanish from the TUI.
+func (r *Repo) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		spec := value.Value
+		base := ""
+		if at := strings.IndexByte(spec, '@'); at >= 0 {
+			spec, base = spec[:at], spec[at+1:]
+		}
+		parts := strings.SplitN(spec, "/", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("invalid repo %q: want \"org/name\" or an {org, name} mapping", value.Value)
+		}
+		r.Org, r.Name, r.BaseBranch = parts[0], parts[1], base
+		return nil
+	}
+	// Mapping form. Decode via an alias type so we don't recurse into this
+	// method.
+	type rawRepo Repo
+	var raw rawRepo
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	*r = Repo(raw)
+	return nil
 }
 
 type Project struct {
 	Description string `yaml:"description"`
 	Repos       []Repo `yaml:"repos"`
-	Branch      string `yaml:"branch"`
-	Status      Status `yaml:"status"`
-	Cron        string `yaml:"cron,omitempty"`
+	// NewRepos are repositories that do NOT yet exist and must be created
+	// (empty) on the remote before the workspace is provisioned — for a
+	// project whose description asks to start a brand-new repo. They're
+	// created at workspace-provisioning time (the planning dispatch) and
+	// included in the workspace alongside `Repos`. Same shape as Repos; the
+	// per-entry `visibility` applies here (default private).
+	NewRepos []Repo `yaml:"new_repos,omitempty"`
+	Branch   string `yaml:"branch"`
+	// Status omits itself when empty so a `:new` seed (description only, no
+	// status yet) doesn't write `status: ""` — which the Status unmarshaler
+	// would otherwise have to special-case on every read.
+	Status Status `yaml:"status,omitempty"`
+	Cron   string `yaml:"cron,omitempty"`
 	// BlockedReason is set by the daemon when transitioning a project to
 	// `status: blocked` so the cause survives a daemon restart and is
 	// visible to both humans reading the file and the wolf agent. Left
@@ -55,7 +105,18 @@ type Project struct {
 // agent is meant to fill in. An empty file on disk is the canonical signal,
 // but we also treat a parsed-but-fieldless document as empty.
 func (p *Project) Empty() bool {
-	return p.Description == "" && len(p.Repos) == 0 && p.Branch == "" && p.Status == ""
+	return p.Description == "" && len(p.Repos) == 0 && len(p.NewRepos) == 0 &&
+		p.Branch == "" && p.Status == ""
+}
+
+// Unpopulated reports whether the project still needs the project agent to
+// fill it in. A populated project always carries a status (the project agent
+// sets `ready` when it finishes); a truly empty file *and* a description-only
+// seed (written by `:new`) both have an empty status. This is the broader
+// signal the daemon routes on — Empty() only catches the fully blank file,
+// which would miss a seed that already has a description.
+func (p *Project) Unpopulated() bool {
+	return p.Status == ""
 }
 
 func Load(path string) (*Project, error) {

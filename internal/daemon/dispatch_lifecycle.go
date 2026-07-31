@@ -182,7 +182,7 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 	plan := runner.Plan{
 		Kind:        agent.CommitAgent,
 		Branch:      p.Branch,
-		Repos:       toWorkspaceRepos(p.Repos),
+		Repos:       workspaceReposFor(p),
 		ProjectPath: projectPath,
 		TasksDir:    filepath.Join(root, "tasks"),
 		TaskPath:    t.Path,
@@ -272,7 +272,7 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 		ProjectPath:   projectPath,
 		TasksDir:      tasksDir,
 		Branch:        p.Branch,
-		Repos:         toWorkspaceRepos(p.Repos),
+		Repos:         workspaceReposFor(p),
 		FailedTasks:   failedOrBlockedTaskPaths(tasksDir),
 		BlockedReason: reason,
 	}

@@ -424,14 +424,14 @@ func TestModelACPKeyNavigatesTabs(t *testing.T) {
 	}
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	m = step.(model)
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 	m = step.(model)
 	if m.acp.sel != 1 {
 		t.Errorf("after right, sel = %d, want 1", m.acp.sel)
 	}
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}, Alt: true})
 	m = step.(model)
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}, Alt: true})
 	m = step.(model)
 	if m.acp.sel != 2 {
 		t.Errorf("after wrapping left, sel = %d, want 2", m.acp.sel)

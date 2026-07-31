@@ -94,7 +94,7 @@ func TestSessionsMsgPreservesSelectionAcrossRefresh(t *testing.T) {
 	}})
 	m = step1.(model)
 	// Move selection to "b".
-	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step2.(model)
 	if m.sessSel != "b" {
 		t.Fatalf("after Right, sessSel = %q, want %q", m.sessSel, "b")
@@ -116,7 +116,7 @@ func TestSessionsMsgFallsBackWhenSelectionDisappears(t *testing.T) {
 		{ID: "a"}, {ID: "b"},
 	}})
 	m = step1.(model)
-	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step2.(model)
 	if m.sessSel != "b" {
 		t.Fatalf("setup: sessSel = %q, want %q", m.sessSel, "b")
@@ -134,14 +134,14 @@ func TestArrowKeysOnlyAffectSessionsWhenFocused(t *testing.T) {
 	step1, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a"}, {ID: "b"}}})
 	m = step1.(model)
 	// Focus the projects pane (down cycles pane focus).
-	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 	m = step2.(model)
 	if m.focus != paneProjects {
 		t.Fatalf("expected projects focus after Down, got %v", m.focus)
 	}
 	// The selection key (right) should move the project selection, not the
 	// sessions selection, while the projects pane is focused.
-	step3, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	step3, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step3.(model)
 	if m.sessSel != "a" {
 		t.Errorf("Right moved sessSel while projects focused: got %q, want %q", m.sessSel, "a")

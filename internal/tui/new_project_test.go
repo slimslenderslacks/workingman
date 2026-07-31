@@ -24,7 +24,7 @@ func typeChars(t *testing.T, m model, s string) model {
 func focusProjectsPane(t *testing.T, m model) model {
 	t.Helper()
 	// Down once to land on projects (sessions → projects → yaml cycle).
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 	m = step.(model)
 	if m.focus != paneProjects {
 		t.Fatalf("expected projects focus after one down, got %v", m.focus)
@@ -114,7 +114,7 @@ func TestCommandLineBackspaceTrimsInput(t *testing.T) {
 	}
 }
 
-func TestNewProjectModalCreatesEmptyYAML(t *testing.T) {
+func TestNewProjectModalCreatesSeedYAML(t *testing.T) {
 	root := t.TempDir()
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m.projectRoot = root
@@ -122,7 +122,11 @@ func TestNewProjectModalCreatesEmptyYAML(t *testing.T) {
 	m = typeChars(t, m, ":new")
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = step.(model)
+	// Name field first, then tab to the description field and type the seed.
 	m = typeChars(t, m, "widget")
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = step.(model)
+	m = typeChars(t, m, "build a widget in acme/widgets")
 	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = step.(model)
 
@@ -134,12 +138,35 @@ func TestNewProjectModalCreatesEmptyYAML(t *testing.T) {
 	}
 
 	path := filepath.Join(root, "widget", ".project.yaml")
-	info, err := os.Stat(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("expected .project.yaml at %s, got err: %v", path, err)
 	}
-	if info.Size() != 0 {
-		t.Errorf("expected empty .project.yaml, got %d bytes", info.Size())
+	// The seed carries the user's description (unpopulated otherwise) so the
+	// daemon routes it to the project agent, which fills in the rest.
+	if !strings.Contains(string(data), "build a widget in acme/widgets") {
+		t.Errorf("seed .project.yaml missing description; got:\n%s", string(data))
+	}
+	if !strings.Contains(string(data), "updated_by: agent") {
+		t.Errorf("seed should be written as updated_by: agent; got:\n%s", string(data))
+	}
+}
+
+func TestNewProjectModalRejectsEmptyDescription(t *testing.T) {
+	root := t.TempDir()
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m.projectRoot = root
+	m.mode = modeNewProject
+	// A name but no description: submit must be rejected and the modal stays.
+	m = typeChars(t, m, "widget")
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = step.(model)
+
+	if m.mode != modeNewProject {
+		t.Errorf("missing description should keep modal open; mode = %v", m.mode)
+	}
+	if m.newProjErr == "" {
+		t.Errorf("expected newProjErr to be set for empty description")
 	}
 }
 
@@ -167,7 +194,7 @@ func TestNewProjectModalRefusesSlashes(t *testing.T) {
 	m.mode = modeNewProject
 
 	// `/` is gated by isProjectNameChar so it never lands in the buffer in
-	// the first place; check that here, then test the createEmptyProject
+	// the first place; check that here, then test the createProjectSeed
 	// guard for callers that bypass the keystroke filter.
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	m = step.(model)
@@ -175,8 +202,8 @@ func TestNewProjectModalRefusesSlashes(t *testing.T) {
 		t.Errorf("slash should not be accepted; newProjName = %q", m.newProjName)
 	}
 
-	if err := createEmptyProject(root, "bad/name"); err == nil {
-		t.Errorf("createEmptyProject should refuse a name containing /")
+	if err := createProjectSeed(root, "bad/name", "desc"); err == nil {
+		t.Errorf("createProjectSeed should refuse a name containing /")
 	}
 }
 
@@ -189,8 +216,8 @@ func TestNewProjectModalRefusesDuplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := createEmptyProject(root, "dup"); err == nil {
-		t.Errorf("createEmptyProject should refuse to clobber an existing .project.yaml")
+	if err := createProjectSeed(root, "dup", "desc"); err == nil {
+		t.Errorf("createProjectSeed should refuse to clobber an existing .project.yaml")
 	}
 
 	// And the existing file content must remain intact.

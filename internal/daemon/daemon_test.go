@@ -143,8 +143,26 @@ func TestEmptyFileLogged(t *testing.T) {
 	if err := writeFile(path, nil); err != nil {
 		t.Fatalf("write empty: %v", err)
 	}
-	if ok, snap := waitFor(t, buf, "project_empty"); !ok {
-		t.Fatalf("no project_empty event seen.\naudit:\n%s", snap)
+	if ok, snap := waitFor(t, buf, "project_unpopulated"); !ok {
+		t.Fatalf("no project_unpopulated event seen.\naudit:\n%s", snap)
+	}
+}
+
+// TestSeedFileRoutesToProjectAgent covers the `:new` seed: a .project.yaml
+// that already carries a description but no status yet. It is not Empty() (the
+// description is set), so it must be caught by the broader Unpopulated() check
+// and routed to the project agent just like a blank file.
+func TestSeedFileRoutesToProjectAgent(t *testing.T) {
+	root := t.TempDir()
+	buf, _ := startDaemon(t, root)
+
+	path := filepath.Join(root, ".project.yaml")
+	seed := &project.Project{Description: "build a widget in acme/widgets on branch feat/widget"}
+	if err := project.SaveAs(path, seed, project.WriterAgent); err != nil {
+		t.Fatalf("SaveAs seed: %v", err)
+	}
+	if ok, snap := waitFor(t, buf, "project_unpopulated"); !ok {
+		t.Fatalf("description seed not routed as unpopulated.\naudit:\n%s", snap)
 	}
 }
 
@@ -217,7 +235,27 @@ func TestNewDirWithFileIsPickedUp(t *testing.T) {
 		t.Fatalf("writeFile: %v", err)
 	}
 
-	if ok, snap := waitFor(t, buf, "project_empty"); !ok {
+	if ok, snap := waitFor(t, buf, "project_unpopulated"); !ok {
 		t.Fatalf("daemon did not observe empty .project.yaml in new dir.\naudit:\n%s", snap)
+	}
+}
+
+func TestWorkspaceReposForCombinesAndFlags(t *testing.T) {
+	p := &project.Project{
+		Repos:    []project.Repo{{Org: "docker", Name: "desktop"}},
+		NewRepos: []project.Repo{{Org: "slimslenderslacks", Name: "weather-tui-madness", Visibility: "public"}},
+	}
+	got := workspaceReposFor(p)
+	if len(got) != 2 {
+		t.Fatalf("want 2 repos, got %d: %+v", len(got), got)
+	}
+	// Existing repo: cloned as-is, not flagged for creation.
+	if got[0].Identity != "github.com/docker/desktop" || got[0].Create {
+		t.Errorf("existing repo = %+v, want github.com/docker/desktop Create=false", got[0])
+	}
+	// New repo: flagged Create with visibility carried through.
+	if got[1].Identity != "github.com/slimslenderslacks/weather-tui-madness" ||
+		!got[1].Create || got[1].Visibility != "public" {
+		t.Errorf("new repo = %+v, want Create=true visibility=public", got[1])
 	}
 }

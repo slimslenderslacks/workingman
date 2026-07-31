@@ -138,7 +138,7 @@ func TestScanProjectsReturnsViews(t *testing.T) {
 	}
 }
 
-func TestScanProjectsSkipsBrokenAndDedupes(t *testing.T) {
+func TestScanProjectsSurfacesBrokenAndDedupes(t *testing.T) {
 	root := t.TempDir()
 
 	goodDir := filepath.Join(root, "good")
@@ -161,16 +161,29 @@ func TestScanProjectsSkipsBrokenAndDedupes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Passing the same root twice must not double-report the good project.
+	// Passing the same root twice must not double-report either project.
 	views, err := ScanProjects([]string{root, root})
 	if err != nil {
 		t.Fatalf("ScanProjects: %v", err)
 	}
-	if len(views) != 1 {
-		t.Fatalf("want 1 view (bad skipped, dup elided), got %d: %+v", len(views), views)
+	// A malformed file is now surfaced with a LoadErr rather than dropped, so
+	// the user can see and fix it — both projects appear, and the dup is elided.
+	if len(views) != 2 {
+		t.Fatalf("want 2 views (good + broken, dup elided), got %d: %+v", len(views), views)
 	}
-	if views[0].Name != "good" {
-		t.Errorf("Name = %q, want %q", views[0].Name, "good")
+	byName := map[string]ProjectView{}
+	for _, v := range views {
+		byName[v.Name] = v
+	}
+	if g, ok := byName["good"]; !ok || g.LoadErr != "" {
+		t.Errorf("good project should load cleanly, got %+v (ok=%v)", g, ok)
+	}
+	bad, ok := byName["bad"]
+	if !ok {
+		t.Fatalf("broken project missing from views: %+v", views)
+	}
+	if bad.LoadErr == "" {
+		t.Errorf("broken project should carry a LoadErr, got %+v", bad)
 	}
 }
 

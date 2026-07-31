@@ -47,9 +47,9 @@ func (s *fakeSession) Close() error {
 }
 
 func TestDefaultCommandBuilderModes(t *testing.T) {
-	// Autonomous kinds (planning/task/commit) run with --print so claude
-	// executes one turn and exits, closing the tmux window and letting the
-	// daemon advance project state. Interactive kinds (project/wolf) omit
+	// Autonomous kinds (project/planning/task/commit) run with --print so
+	// claude executes one turn and exits, closing the tmux window and letting
+	// the daemon advance project state. The only interactive kind (wolf) omits
 	// --print so the human can drive the conversation. Every kind carries
 	// --dangerously-skip-permissions and the initial prompt on argv.
 	cases := []struct {
@@ -57,7 +57,7 @@ func TestDefaultCommandBuilderModes(t *testing.T) {
 		wantPrint   bool
 		description string
 	}{
-		{agent.ProjectAgent, false, "project agent interviews the user"},
+		{agent.ProjectAgent, true, "project agent runs one autonomous turn"},
 		{agent.WolfAgent, false, "wolf agent asks for guidance"},
 		{agent.PlanningAgent, true, "planning agent runs one autonomous turn"},
 		{agent.TaskAgent, true, "task agent runs one autonomous turn"},
@@ -88,7 +88,7 @@ func TestSandboxNameFor(t *testing.T) {
 		taskName string
 		want     string
 	}{
-		{"project", agent.ProjectAgent, "", ""},
+		{"project", agent.ProjectAgent, "", "myproj-project"},
 		{"planning", agent.PlanningAgent, "", "myproj"},
 		{"wolf", agent.WolfAgent, "", ""},
 		{"task", agent.TaskAgent, "scaffold", "myproj-scaffold"},
@@ -218,17 +218,23 @@ func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
 	}
 }
 
-func TestProjectAgentSkipsSandbox(t *testing.T) {
+// TestProjectAgentIsSandboxed pins the post-redesign behavior: the project
+// agent is autonomous, so on the legacy tmux path it is sandboxed like the
+// planning agent — the sandbox creator is called with "<work-stream>-project"
+// and the command is wrapped in `sbx exec`. (Previously it was interactive and
+// ran in a bare workspace.)
+func TestProjectAgentIsSandboxed(t *testing.T) {
 	workingDir := t.TempDir()
 	projectPath := filepath.Join(workingDir, ".project.yaml")
 	_ = os.WriteFile(projectPath, nil, 0o644)
 
 	launcher := &fakeLauncher{}
+	var gotSandbox string
 	r := &Runner{
 		Launcher: launcher,
 		Command:  func(_ agent.Kind, _ string) []string { return []string{"claude", "hi"} },
-		Sandbox: func(_ context.Context, _ SandboxSpec) error {
-			t.Fatal("sandbox creator must not be called for the project agent")
+		Sandbox: func(_ context.Context, s SandboxSpec) error {
+			gotSandbox = s.Name
 			return nil
 		},
 	}
@@ -239,8 +245,12 @@ func TestProjectAgentSkipsSandbox(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if launcher.last.Command[0] == "sbx" {
-		t.Errorf("project agent command must not be wrapped in sbx exec: %v", launcher.last.Command)
+	want := filepath.Base(workingDir) + "-project"
+	if gotSandbox != want {
+		t.Errorf("sandbox name = %q, want %q", gotSandbox, want)
+	}
+	if launcher.last.Command[0] != "sbx" {
+		t.Errorf("project agent command should be wrapped in sbx exec: %v", launcher.last.Command)
 	}
 }
 

@@ -34,16 +34,18 @@ func (k Kind) String() string {
 	return "unknown"
 }
 
-// Interactive reports whether this Kind expects a human in the loop. The
-// project agent interviews the user to fill in `.project.yaml`; the wolf
-// agent asks for guidance when a project is blocked. The planning, task,
-// and commit agents are autonomous — they run under `claude --print`,
-// finish one turn, and exit without prompting.
+// Interactive reports whether this Kind expects a human in the loop. Only the
+// wolf agent does: it asks for guidance when a project is blocked. The project,
+// planning, task, and commit agents are all autonomous — they run under
+// `claude --print`, finish one turn, and exit without prompting. The project
+// agent generates `.project.yaml` from the user's seed description and, when
+// the description is insufficient, escalates by blocking the project (which
+// summons the wolf) rather than interviewing the user itself.
 //
 // The runner uses this to pick the right claude flags; the TUI uses it to
 // highlight sessions that won't make progress until someone attaches.
 func (k Kind) Interactive() bool {
-	return k == ProjectAgent || k == WolfAgent
+	return k == WolfAgent
 }
 
 // Spec is the minimum a Launcher needs to start a session. Command is

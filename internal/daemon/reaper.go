@@ -122,13 +122,13 @@ const (
 // (so any further wrapper lifetime is pure zombie) and a short grace has elapsed,
 // or it has produced no ACP stream activity for longer than the idle timeout.
 func (d *Daemon) strandedVerdict(key string, e sessionEntry) reapVerdict {
-	// Interactive sessions are never reaped by any timer. Both the project agent
-	// (interviews the user to fill in .project.yaml) and the wolf agent
-	// (dispatched to unblock a stuck project) are human-driven: they have no
-	// terminal-status signal (stageComplete returns false for them) and may sit
-	// idle indefinitely while a human thinks or steps away. Killing one on an idle
+	// Interactive sessions are never reaped by any timer. The wolf agent
+	// (dispatched to unblock a stuck project) is human-driven: it has no
+	// terminal-status signal (stageComplete returns false for it) and may sit
+	// idle indefinitely while a human thinks or steps away. Killing it on an idle
 	// timeout would silently discard that context, so it holds its slot until it
-	// exits on its own.
+	// exits on its own. (The project agent used to be interactive too but now
+	// runs autonomously; it has a terminal signal in stageComplete.)
 	if e.kind.Interactive() {
 		return reapVerdict{}
 	}
@@ -164,8 +164,8 @@ func (d *Daemon) sessionIdle(e sessionEntry) time.Duration {
 // stageComplete reports whether the agent for this session has declared its work
 // done by advancing the on-disk state to a status terminal for its kind — after
 // which a still-running wrapper is stranded, not working. Kinds without a single
-// terminal-status signal (project, wolf) return false and are covered only by
-// the idle timeout.
+// terminal-status signal (the interactive wolf) return false and are covered
+// only by the idle timeout.
 func (d *Daemon) stageComplete(key string, e sessionEntry) bool {
 	switch e.kind {
 	case agent.TaskAgent, agent.CommitAgent:
@@ -194,6 +194,15 @@ func (d *Daemon) stageComplete(key string, e sessionEntry) bool {
 		// Planning is done once it moves the project off ready (to working, or
 		// blocked/done if it gave up).
 		return p.Status != project.StatusReady
+	case agent.ProjectAgent:
+		p, err := project.Load(key)
+		if err != nil {
+			return false
+		}
+		// The project agent is done once it populates the file — status:ready
+		// on success, or status:blocked if it escalated to the wolf. Either
+		// way status is no longer empty (the unpopulated seed state).
+		return !p.Unpopulated()
 	default:
 		return false
 	}

@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -10,6 +11,26 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/project"
 )
+
+// writeManyLineProject writes a .project.yaml whose body is far taller than any
+// test viewport, so cursor/scroll behaviour has room to move. Returns its path.
+func writeManyLineProject(t *testing.T, lines int) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".project.yaml")
+	var b strings.Builder
+	b.WriteString("description: |\n")
+	for i := 0; i < lines; i++ {
+		b.WriteString("  line ")
+		b.WriteString(strconv.Itoa(i))
+		b.WriteByte('\n')
+	}
+	b.WriteString("status: ready\n")
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func TestProjectYAMLBodyReturnsRawFileContent(t *testing.T) {
 	dir := t.TempDir()
@@ -89,35 +110,74 @@ func TestProjectYAMLPaneRendersSelectedProject(t *testing.T) {
 	}
 }
 
-func TestProjectYAMLScrollAdvancesOnRight(t *testing.T) {
-	m := model{focus: paneProjectYAML}
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
-	m = step.(model)
-	if m.yamlScroll != 1 {
-		t.Errorf("right arrow on yaml pane: scroll = %d, want 1", m.yamlScroll)
+func TestReconcileYAMLView(t *testing.T) {
+	// contentRows=5, n=20.
+	if c, s := reconcileYAMLView(3, 0, 20, 5); c != 3 || s != 0 {
+		t.Errorf("in-view: got (%d,%d), want (3,0)", c, s)
 	}
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
-	m = step.(model)
-	if m.yamlScroll != 0 {
-		t.Errorf("left arrow on yaml pane: scroll = %d, want 0", m.yamlScroll)
+	if c, s := reconcileYAMLView(10, 0, 20, 5); c != 10 || s != 6 {
+		t.Errorf("scroll down to keep cursor last-visible: got (%d,%d), want (10,6)", c, s)
 	}
-	// Left at zero must clamp to zero (no underflow).
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if c, s := reconcileYAMLView(2, 8, 20, 5); c != 2 || s != 2 {
+		t.Errorf("scroll up to cursor: got (%d,%d), want (2,2)", c, s)
+	}
+	if c, s := reconcileYAMLView(999, 0, 20, 5); c != 19 || s != 15 {
+		t.Errorf("clamp bottom: got (%d,%d), want (19,15)", c, s)
+	}
+	if c, s := reconcileYAMLView(-5, 3, 20, 5); c != 0 || s != 0 {
+		t.Errorf("clamp top: got (%d,%d), want (0,0)", c, s)
+	}
+	if c, s := reconcileYAMLView(0, 0, 0, 5); c != 0 || s != 0 {
+		t.Errorf("empty body: got (%d,%d), want (0,0)", c, s)
+	}
+}
+
+func TestYAMLCursorAdvancesOnJK(t *testing.T) {
+	path := writeManyLineProject(t, 80)
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
+	m = sized.(model)
+	step, _ := m.Update(projectsMsg{views: []ProjectView{
+		{Name: "alpha", Path: path, Status: project.StatusReady},
+	}})
 	m = step.(model)
+	m.projSel = path
+	m.focus = paneProjectYAML
+
+	// j advances the cursor; the body is far taller than the viewport so the
+	// first step stays scrolled at the top.
+	j, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = j.(model)
+	if m.yamlCursor != 1 {
+		t.Errorf("after j: yamlCursor = %d, want 1", m.yamlCursor)
+	}
 	if m.yamlScroll != 0 {
-		t.Errorf("left arrow at zero scroll: scroll = %d, want 0", m.yamlScroll)
+		t.Errorf("after j near top: yamlScroll = %d, want 0", m.yamlScroll)
+	}
+	// k moves it back; k at the top clamps to 0 (no underflow).
+	k, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m = k.(model)
+	if m.yamlCursor != 0 {
+		t.Errorf("after k: yamlCursor = %d, want 0", m.yamlCursor)
+	}
+	k2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m = k2.(model)
+	if m.yamlCursor != 0 || m.yamlScroll != 0 {
+		t.Errorf("k at top: cursor=%d scroll=%d, want 0/0", m.yamlCursor, m.yamlScroll)
 	}
 }
 
 func TestCtrlFCtrlBPageYAMLRegardlessOfFocus(t *testing.T) {
+	path := writeManyLineProject(t, 200)
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	// Use a window tall enough that the YAML pane gets a meaningful slice.
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
-		{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusReady},
+		{Name: "alpha", Path: path, Status: project.StatusReady},
 	}})
 	m = step.(model)
+	m.projSel = path
 
 	// Force focus to projects so we prove the binding is independent of
 	// pane focus.
@@ -157,9 +217,9 @@ func TestProjectYAMLScrollResetsWhenSelectionChanges(t *testing.T) {
 	m.yamlScroll = 5
 
 	// Down once to land on projects, then right-arrow to advance selection.
-	focused, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	focused, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 	m = focused.(model)
-	right, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	right, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = right.(model)
 
 	if m.projSel != "/x/bravo/.project.yaml" {

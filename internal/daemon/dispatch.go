@@ -84,8 +84,12 @@ func (d *Daemon) revisitProject(path string) {
 // daemon-write filter (otherwise our own created_at stamp save, also
 // written as `daemon`, would silence every subsequent cron firing).
 func (d *Daemon) dispatchProject(path string, p *project.Project) {
-	if p.Empty() {
-		d.audit.Log("project_empty", "path", path)
+	if p.Unpopulated() {
+		// Covers both the legacy zero-byte file and the `:new` description
+		// seed (a file with only `description:` set). Either way the project
+		// agent runs next to fill in the rest; we return before the created_at
+		// stamp, which lands when the agent later saves status:ready.
+		d.audit.Log("project_unpopulated", "path", path)
 		d.launchProjectRootAgent(path, agent.ProjectAgent, p)
 		return
 	}
@@ -157,28 +161,32 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 		ProjectPath: projectPath,
 		TasksDir:    filepath.Join(root, "tasks"),
 		Branch:      p.Branch,
-		Repos:       toWorkspaceRepos(p.Repos),
+		Repos:       workspaceReposFor(p),
 	}
 	err := d.startSession(projectPath, plan, func(waitErr error) {
-		// The planning agent gets a circuit breaker: its session ending
-		// with the project still in status:ready means no progress was
-		// made, and an unbounded relaunch on that condition is what turns a
-		// broken sandbox (or any failing planning run) into a crash loop.
-		// afterPlanningSession bounds the retries and blocks the project
-		// instead. Other project-root kinds just re-evaluate.
-		if kind == agent.PlanningAgent {
+		// The planning and project agents each get a circuit breaker: now that
+		// both run under `claude --print` and exit every turn, a session that
+		// ends without advancing the project (planning still status:ready, or
+		// the project agent leaving the file still unpopulated) would be
+		// relaunched unbounded — a crash loop when the sandbox is broken.
+		// afterPlanningSession / afterProjectSession bound the retries and
+		// block the project instead. Wolf just re-evaluates.
+		switch kind {
+		case agent.PlanningAgent:
 			d.afterPlanningSession(projectPath, waitErr)
-			return
+		case agent.ProjectAgent:
+			d.afterProjectSession(projectPath, waitErr)
+		default:
+			d.revisitProject(projectPath)
 		}
-		d.revisitProject(projectPath)
 	})
-	// Project agent failure leaves an empty file — nothing to block.
 	// Wolf agent failure: the project is already blocked, recursing won't
-	// help. Planning agent failure should block so the project doesn't
-	// strand in status: ready forever.
-	if err != nil && kind == agent.PlanningAgent {
+	// help. Planning and project agent failures should block so the project
+	// doesn't strand — planning in status:ready, the project agent in an
+	// unpopulated seed the daemon would otherwise keep relaunching.
+	if err != nil && (kind == agent.PlanningAgent || kind == agent.ProjectAgent) {
 		d.transitionProjectBlocked(projectPath, p,
-			fmt.Sprintf("planning agent failed to start: %v", err))
+			fmt.Sprintf("%s agent failed to start: %v", kind.String(), err))
 	}
 }
 
@@ -240,6 +248,79 @@ func (d *Daemon) afterPlanningSession(projectPath string, waitErr error) {
 		return
 	}
 	d.revisitProject(projectPath)
+}
+
+// afterProjectSession is the project agent's session-end callback and its
+// crash-loop circuit breaker — the project-bootstrap analogue of
+// afterPlanningSession.
+//
+// The project agent's job is to turn the `:new` description seed into a
+// populated `.project.yaml` (status:ready), or, when the description isn't
+// enough, to escalate by setting status:blocked with a specific question.
+// Either outcome moves the project off the unpopulated (status:"") state the
+// daemon routes to the project agent. A session that ends with the file still
+// unpopulated made no progress, and relaunching it unbounded is what would let
+// a broken environment spin the daemon.
+//
+// Decision table mirrors afterPlanningSession:
+//   - populated (status set) → productive; reset the counter and dispatch
+//     whatever the agent left behind (ready→planning, blocked→wolf).
+//   - still unpopulated, non-nil waitErr → the agent process failed to run;
+//     an environment error a relaunch can't fix, so block (→wolf) immediately.
+//   - still unpopulated, clean exit → ran but produced nothing; retry up to
+//     maxProjectRetries with backoff, then block (→wolf).
+func (d *Daemon) afterProjectSession(projectPath string, waitErr error) {
+	p, err := project.Load(projectPath)
+	if err != nil {
+		d.resetProjectFailures(projectPath)
+		if !errors.Is(err, fs.ErrNotExist) {
+			d.audit.Log("project_load_error", "path", projectPath, "err", err.Error())
+		}
+		return
+	}
+	if !p.Unpopulated() {
+		// The project agent populated the file (status:ready) or escalated
+		// (status:blocked). Clear the counter and dispatch the new state.
+		d.resetProjectFailures(projectPath)
+		d.dispatchProject(projectPath, p)
+		return
+	}
+	if waitErr != nil {
+		d.resetProjectFailures(projectPath)
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("project agent could not run (session exited with error: %v); not retrying", waitErr))
+		return
+	}
+	n := d.bumpProjectFailures(projectPath)
+	if n >= maxProjectRetries {
+		d.resetProjectFailures(projectPath)
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("project agent made no progress after %d attempts; .project.yaml still unpopulated", n))
+		return
+	}
+	d.audit.Log("project_retry", "path", projectPath, "attempt", fmt.Sprintf("%d", n))
+	if !d.backoffPlanning(n) {
+		// ctx cancelled during backoff (daemon shutting down).
+		return
+	}
+	d.revisitProject(projectPath)
+}
+
+// bumpProjectFailures / resetProjectFailures track the project agent's
+// consecutive non-productive cycles, mirroring the planning counters. They key
+// on the same project file path but a separate map so a project-bootstrap loop
+// and a later planning loop don't share a budget.
+func (d *Daemon) bumpProjectFailures(projectPath string) int {
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	d.projectFailures[projectPath]++
+	return d.projectFailures[projectPath]
+}
+
+func (d *Daemon) resetProjectFailures(projectPath string) {
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	delete(d.projectFailures, projectPath)
 }
 
 // bumpPlanningFailures increments and returns the consecutive non-productive
@@ -364,6 +445,25 @@ func toWorkspaceRepos(in []project.Repo) []workspace.Repo {
 	return out
 }
 
+// workspaceReposFor is the full repo set for a project's workspace: its
+// existing repos (cloned as-is) followed by its new_repos, flagged Create so
+// the workspace manager creates them empty on the remote before cloning. Both
+// land in the same wsp workspace, so agents can work in either. Every launch
+// that provisions or references the branch workspace uses this so the new
+// repos are present from the first provision (the planning dispatch) onward.
+func workspaceReposFor(p *project.Project) []workspace.Repo {
+	out := toWorkspaceRepos(p.Repos)
+	for _, r := range p.NewRepos {
+		out = append(out, workspace.Repo{
+			Identity:   "github.com/" + r.Org + "/" + r.Name,
+			BaseBranch: r.BaseBranch,
+			Create:     true,
+			Visibility: r.Visibility,
+		})
+	}
+	return out
+}
+
 // dispatchNextTask loads the task graph for projectPath and decides what to
 // run next. This is the single recovery point called from every angle —
 // status=working observation, startup_scan, cron firings — so it must be
@@ -434,7 +534,7 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 		Kind: agent.TaskAgent,
 		// No WorkingDir: workspace.Manager creates one keyed on Branch.
 		Branch:      p.Branch,
-		Repos:       toWorkspaceRepos(p.Repos),
+		Repos:       workspaceReposFor(p),
 		ProjectPath: projectPath,
 		TasksDir:    filepath.Join(root, "tasks"),
 		// Use the path the task was loaded from — filenames may carry

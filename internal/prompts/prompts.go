@@ -30,6 +30,7 @@ type Data struct {
 	Kind          agent.Kind
 	Workspace     string   // absolute path to the workspace root
 	ProjectPath   string   // absolute path to .project.yaml
+	ProjectName   string   // work-stream name: basename of the dir holding .project.yaml
 	TasksDir      string   // absolute path to the tasks/ directory
 	Branch        string   // target branch (also the workspace name)
 	TaskPath      string   // for TaskAgent: path to this task's yaml

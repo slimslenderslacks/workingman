@@ -46,6 +46,12 @@ type ProjectView struct {
 	// the daemon the first time it observed the populated project. Zero
 	// for projects created before the field existed; those sort last.
 	CreatedAt time.Time
+	// LoadErr is the parse error when the project's .project.yaml exists but
+	// couldn't be decoded (e.g. an agent wrote a malformed field). Empty for a
+	// healthy project. When set, the other structured fields are zero and the
+	// gallery renders the card with an error badge instead of dropping it —
+	// so a bad file is visible and debuggable rather than silently missing.
+	LoadErr string
 }
 
 // TaskView is the snapshot the Tasks pane renders for one task: name, model,
@@ -123,13 +129,22 @@ func ScanProjects(roots []string) ([]ProjectView, error) {
 }
 
 func loadProjectView(path string) (ProjectView, bool) {
-	pr, err := project.Load(path)
-	if err != nil {
-		return ProjectView{}, false
-	}
 	var mtime time.Time
 	if info, err := os.Stat(path); err == nil {
 		mtime = info.ModTime()
+	}
+	pr, err := project.Load(path)
+	if err != nil {
+		// A malformed file used to be dropped, which made the project vanish
+		// from the gallery with no clue why. Surface it instead: a card with
+		// the parse error, so the user can select it and read the raw YAML in
+		// the pane below to spot the bad field.
+		return ProjectView{
+			Name:       filepath.Base(filepath.Dir(path)),
+			Path:       path,
+			LastUpdate: mtime,
+			LoadErr:    err.Error(),
+		}, true
 	}
 	counts, tasks := tasksFor(filepath.Join(filepath.Dir(path), "tasks"))
 	var createdAt time.Time
@@ -391,7 +406,8 @@ func moveTaskSelection(tasks []TaskView, currentPath string, delta int) string {
 func projectViewEqual(a, b ProjectView) bool {
 	if a.Name != b.Name || a.Path != b.Path ||
 		a.Description != b.Description || a.Branch != b.Branch ||
-		a.Status != b.Status || !a.LastUpdate.Equal(b.LastUpdate) {
+		a.Status != b.Status || a.LoadErr != b.LoadErr ||
+		!a.LastUpdate.Equal(b.LastUpdate) {
 		return false
 	}
 	if len(a.Repos) != len(b.Repos) {

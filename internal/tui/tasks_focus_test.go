@@ -70,7 +70,7 @@ func focusPane(t *testing.T, m model, target pane) model {
 			return m
 		}
 		// Down cycles pane focus forward (replaced the former Tab key).
-		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 		m = step.(model)
 	}
 	t.Fatalf("could not focus %v in 4 presses (current=%v)", target, m.focus)
@@ -97,7 +97,7 @@ func TestDownCyclesPanes(t *testing.T) {
 	// yaml, so down cycles: sessions → projects → tasks → yaml → sessions.
 	want := []pane{paneProjects, paneTasks, paneProjectYAML, paneSessions}
 	for i, expected := range want {
-		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 		m = step.(model)
 		if m.focus != expected {
 			t.Errorf("down #%d focus = %v, want %v", i+1, m.focus, expected)
@@ -116,14 +116,14 @@ func TestRightArrowOnTasksPaneAdvancesSelection(t *testing.T) {
 	m, taskAPath, taskBPath := withTaskFixtures(t)
 	m = focusPane(t, m, paneTasks)
 
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step.(model)
 	if m.taskSel != taskBPath {
 		t.Errorf("after right on tasks pane, taskSel = %q, want %q", m.taskSel, taskBPath)
 	}
 
 	// Left returns to the first task.
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 	m = step.(model)
 	if m.taskSel != taskAPath {
 		t.Errorf("after left, taskSel = %q, want %q", m.taskSel, taskAPath)
@@ -135,7 +135,7 @@ func TestArrowsLeaveProjectSelectionAloneWhenTasksFocused(t *testing.T) {
 	projBefore := m.projSel
 	m = focusPane(t, m, paneTasks)
 
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step.(model)
 
 	if m.projSel != projBefore {
@@ -165,7 +165,7 @@ func TestYAMLViewerSwapsTaskFilesOnSelectionChange(t *testing.T) {
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	m = step.(model)
 	m = focusPane(t, m, paneTasks)
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step.(model)
 
 	view := m.View()
@@ -186,7 +186,7 @@ func TestYAMLViewerStaysOnTaskWhenFocusMovesAway(t *testing.T) {
 	// Cycle pane focus with down. The viewer should keep showing task YAML
 	// regardless of which pane is focused — p/t are the only switches now.
 	for i := 0; i < 4; i++ {
-		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 		m = step.(model)
 		if !strings.Contains(m.View(), "Task YAML") {
 			t.Errorf("Task YAML title lost after down #%d (focus=%v)", i+1, m.focus)
@@ -209,7 +209,7 @@ func TestYamlScrollResetsOnTaskSelectionChange(t *testing.T) {
 	m = focusPane(t, m, paneTasks)
 	m.yamlScroll = 7
 
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step.(model)
 
 	if m.yamlScroll != 0 {

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadExample(t *testing.T) {
@@ -150,5 +152,85 @@ func TestEmptyFile(t *testing.T) {
 	}
 	if !p.Empty() {
 		t.Errorf("Empty() = false for zero-byte file: %+v", p)
+	}
+}
+
+func TestRepoShorthandUnmarshal(t *testing.T) {
+	cases := []struct {
+		name           string
+		yaml           string
+		wantOrg, wantN string
+		wantBase       string
+		wantErr        bool
+	}{
+		{"string shorthand", "repos:\n  - docker/desktop\nstatus: ready\n", "docker", "desktop", "", false},
+		{"shorthand with base", "repos:\n  - docker/desktop@integration\nstatus: ready\n", "docker", "desktop", "integration", false},
+		{"mapping form", "repos:\n  - org: docker\n    name: desktop\nstatus: ready\n", "docker", "desktop", "", false},
+		{"missing slash", "repos:\n  - justname\nstatus: ready\n", "", "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var p Project
+			err := yaml.Unmarshal([]byte(tc.yaml), &p)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got repos=%+v", p.Repos)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if len(p.Repos) != 1 {
+				t.Fatalf("want 1 repo, got %d", len(p.Repos))
+			}
+			r := p.Repos[0]
+			if r.Org != tc.wantOrg || r.Name != tc.wantN || r.BaseBranch != tc.wantBase {
+				t.Errorf("got %+v, want {Org:%s Name:%s Base:%s}", r, tc.wantOrg, tc.wantN, tc.wantBase)
+			}
+		})
+	}
+}
+
+func TestNewReposParsing(t *testing.T) {
+	src := "" +
+		"description: build a thing\n" +
+		"repos:\n" +
+		"  - docker/desktop\n" +
+		"new_repos:\n" +
+		"  - slimslenderslacks/weather-tui-madness\n" +
+		"  - org: acme\n" +
+		"    name: gizmo\n" +
+		"    visibility: public\n" +
+		"branch: main\n" +
+		"status: ready\n"
+	var p Project
+	if err := yaml.Unmarshal([]byte(src), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(p.Repos) != 1 || p.Repos[0].Org != "docker" || p.Repos[0].Name != "desktop" {
+		t.Errorf("repos = %+v", p.Repos)
+	}
+	if len(p.NewRepos) != 2 {
+		t.Fatalf("want 2 new_repos, got %d: %+v", len(p.NewRepos), p.NewRepos)
+	}
+	// Shorthand form, default (empty) visibility.
+	if p.NewRepos[0].Org != "slimslenderslacks" || p.NewRepos[0].Name != "weather-tui-madness" ||
+		p.NewRepos[0].Visibility != "" {
+		t.Errorf("new_repos[0] = %+v", p.NewRepos[0])
+	}
+	// Mapping form with explicit visibility.
+	if p.NewRepos[1].Org != "acme" || p.NewRepos[1].Name != "gizmo" ||
+		p.NewRepos[1].Visibility != "public" {
+		t.Errorf("new_repos[1] = %+v", p.NewRepos[1])
+	}
+}
+
+func TestEmptyIgnoresNewReposPresence(t *testing.T) {
+	// A project that carries only new_repos is NOT empty — it's a populated
+	// intent the daemon should act on.
+	p := Project{NewRepos: []Repo{{Org: "x", Name: "y"}}}
+	if p.Empty() {
+		t.Errorf("project with new_repos should not be Empty()")
 	}
 }

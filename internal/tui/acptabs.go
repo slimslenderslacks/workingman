@@ -533,7 +533,7 @@ func (m model) renderACPView() string {
 	if m.acpToolsExpanded {
 		toolHint = "z: collapse tools"
 	}
-	hint := hintStyle.Render("←/→: switch tab  •  " + toolHint + "  •  esc: back  •  q: quit")
+	hint := hintStyle.Render("⌥j/⌥k: switch tab  •  " + toolHint + "  •  esc: back  •  q: quit")
 
 	if len(m.acp.tabs) == 0 {
 		body := dimStyle.Render("(no active ACP sessions)")

@@ -19,7 +19,7 @@ import (
 //
 // When constructed without WithRunner the daemon is observation-only: it
 // records what it *would* dispatch in the audit log but does not launch any
-// agents. WithRunner wires it to runner.Runner so the project_empty path
+// agents. WithRunner wires it to runner.Runner so the unpopulated-project path
 // actually starts a ProjectAgent session.
 type Daemon struct {
 	roots     []string
@@ -33,14 +33,16 @@ type Daemon struct {
 	sessionsMu sync.Mutex
 	sessions   map[string]sessionEntry // keyed by project file path
 
-	// planningMu guards planningFailures, the per-project count of
-	// consecutive planning cycles that ended without advancing the project
-	// off status:ready. It drives the planning circuit breaker
-	// (afterPlanningSession) so a planning agent that can't make progress —
-	// e.g. its sandbox won't build — blocks the project instead of being
-	// relaunched in a tight loop.
+	// planningMu guards planningFailures and projectFailures, the per-project
+	// counts of consecutive agent cycles that ended without advancing the
+	// project — planning that didn't move off status:ready, or a project agent
+	// that left the file unpopulated. They drive the planning/project circuit
+	// breakers (afterPlanningSession / afterProjectSession) so an agent that
+	// can't make progress — e.g. its sandbox won't build — blocks the project
+	// instead of being relaunched in a tight loop.
 	planningMu       sync.Mutex
 	planningFailures map[string]int // keyed by project file path
+	projectFailures  map[string]int // keyed by project file path
 
 	// sessionIdleTimeout bounds how long a tracked session may go without any
 	// ACP stream activity before the stranded-session reaper terminates it.
@@ -54,6 +56,11 @@ const (
 	// before blocking the project. A hard launch failure (non-nil wait
 	// error) blocks immediately and does not consume a retry.
 	maxPlanningRetries = 3
+	// maxProjectRetries is the same tolerance for the project agent: how many
+	// consecutive cycles that left .project.yaml unpopulated the daemon
+	// tolerates before blocking (which summons the wolf). A hard launch
+	// failure blocks immediately and does not consume a retry.
+	maxProjectRetries = 3
 	// planningBackoffStep / planningBackoffMax bound the delay inserted
 	// before relaunching a planning agent after a non-productive cycle, so
 	// even within the retry budget the daemon cannot spin.
@@ -124,6 +131,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		notifier:           notify.Noop{},
 		sessions:           map[string]sessionEntry{},
 		planningFailures:   map[string]int{},
+		projectFailures:    map[string]int{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 	}
 	for _, opt := range opts {

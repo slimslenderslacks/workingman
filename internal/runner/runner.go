@@ -297,6 +297,16 @@ func (r *Runner) UsesACP(kind agent.Kind) bool {
 
 // Start is non-blocking: it returns the Session once the launcher accepts it.
 // The caller owns Wait/Close on the returned Session.
+// projectNameFromPath returns the work-stream name for a .project.yaml path:
+// the basename of the directory that holds it (which is also the sandbox
+// prefix and the TUI display name). Empty when projectPath is empty.
+func projectNameFromPath(projectPath string) string {
+	if projectPath == "" {
+		return ""
+	}
+	return filepath.Base(filepath.Dir(projectPath))
+}
+
 func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	workingDir, err := r.resolveWorkingDir(ctx, p)
 	if err != nil {
@@ -319,6 +329,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		Workspace:     workingDir,
 		Branch:        p.Branch,
 		ProjectPath:   p.ProjectPath,
+		ProjectName:   projectNameFromPath(p.ProjectPath),
 		TasksDir:      p.TasksDir,
 		TaskPath:      p.TaskPath,
 		TaskName:      p.TaskName,
@@ -620,8 +631,12 @@ func sessionName(p Plan) string {
 
 // SandboxNameFor derives the sbx sandbox name for a given launch:
 //
-//   - Project agent → "" (no sandbox; the project agent interviews the user
-//     in the bare workspace and writes the initial .project.yaml).
+//   - Project agent → "<work-stream>-project" where work-stream is the
+//     basename of the project's control dir. The project agent is autonomous
+//     (runs under ACP like planning) and reads the seed / writes .project.yaml
+//     in the control dir. It gets its OWN sandbox — distinct from planning's —
+//     so the two agents, which run back-to-back on the same control dir, don't
+//     collide on one sandbox with different mounts.
 //   - Wolf agent → "" (runs outside the sandbox so it can advise on the
 //     project from the host, including for sandbox-related blocks).
 //   - Planning → basename of the project's control dir (the dir holding
@@ -648,6 +663,8 @@ func SandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 	base := filepath.Base(filepath.Dir(projectPath))
 	var name string
 	switch kind {
+	case agent.ProjectAgent:
+		name = base + "-project"
 	case agent.PlanningAgent:
 		name = base
 	case agent.TaskAgent, agent.CommitAgent:

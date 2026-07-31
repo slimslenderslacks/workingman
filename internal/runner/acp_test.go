@@ -347,14 +347,14 @@ func TestInteractiveAgentNeverUsesACP(t *testing.T) {
 		Command:      func(_ agent.Kind, _ string) []string { return []string{"claude", "hi"} },
 	}
 	if _, err := r.Start(context.Background(), Plan{
-		Kind:        agent.ProjectAgent,
+		Kind:        agent.WolfAgent,
 		WorkingDir:  workingDir,
 		ProjectPath: projectPath,
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if tmux.last.Command[0] != "claude" {
-		t.Errorf("project agent should use the tmux launcher with the built command, got %v", tmux.last.Command)
+		t.Errorf("wolf agent should use the tmux launcher with the built command, got %v", tmux.last.Command)
 	}
 }
 

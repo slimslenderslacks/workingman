@@ -247,3 +247,45 @@ func TestWspManagerRemoveIsIdempotent_Integration(t *testing.T) {
 		t.Errorf("second Remove (idempotent): %v", err)
 	}
 }
+
+func TestGhOwnerName(t *testing.T) {
+	cases := []struct {
+		identity string
+		want     string
+		wantErr  bool
+	}{
+		{"github.com/slimslenderslacks/weather-tui-madness", "slimslenderslacks/weather-tui-madness", false},
+		{"github.com/docker/desktop", "docker/desktop", false},
+		{"gitlab.com/org/repo", "", true},       // non-github
+		{"github.com/onlyowner", "", true},      // no name
+		{"github.com/org/name/extra", "", true}, // too many segments
+		{"github.com/org/", "", true},           // trailing slash
+	}
+	for _, tc := range cases {
+		got, err := ghOwnerName(tc.identity)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("ghOwnerName(%q) = %q, want error", tc.identity, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("ghOwnerName(%q) = (%q, %v), want (%q, nil)", tc.identity, got, err, tc.want)
+		}
+	}
+}
+
+func TestGhCreateArgs(t *testing.T) {
+	priv := ghCreateArgs("acme/gizmo", "")
+	if strings.Join(priv, " ") != "repo create acme/gizmo --private --add-readme" {
+		t.Errorf("default visibility args = %v", priv)
+	}
+	pub := ghCreateArgs("acme/gizmo", "public")
+	if strings.Join(pub, " ") != "repo create acme/gizmo --public --add-readme" {
+		t.Errorf("public visibility args = %v", pub)
+	}
+	// Any non-"public" value falls back to private.
+	if got := ghCreateArgs("a/b", "weird"); got[3] != "--private" {
+		t.Errorf("unknown visibility should be private, got %v", got)
+	}
+}

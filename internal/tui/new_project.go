@@ -9,6 +9,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/slimslenderslacks/work/internal/project"
 )
 
 // handleCommandLineKey processes a keystroke while the user is typing a vim
@@ -36,6 +38,8 @@ func (m model) handleCommandLineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "new":
 			m.mode = modeNewProject
 			m.newProjName = ""
+			m.newProjDesc = ""
+			m.newProjFocus = 0
 			m.newProjErr = ""
 		case "task":
 			// `:task` seeds a new task into the selected project and re-runs
@@ -48,6 +52,17 @@ func (m model) handleCommandLineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = modeNewTask
 			m.newTaskDesc = ""
 			m.newTaskErr = ""
+		case "archive":
+			// `:archive` moves the selected project's tree out of the
+			// workspace root into the sibling backup dir. It's destructive
+			// (the project leaves the active workspace), so it goes through a
+			// yes/no confirm modal rather than acting immediately.
+			if m.projSel == "" {
+				m.statusMsg = "no project selected"
+				return m, nil
+			}
+			m.archiveTarget = m.projSel
+			m.mode = modeConfirmArchive
 		case "wolf":
 			// `:wolf` summons the wolf agent for the selected project. The
 			// daemon launches the wolf in response to status:blocked, so this
@@ -74,49 +89,82 @@ func (m model) handleCommandLineKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleNewProjectKey processes a keystroke while the new-project modal is
-// open. Enter creates the empty .project.yaml and dismisses the modal on
-// success or surfaces the OS error inline so the user can fix the name and
-// retry. Esc cancels.
+// open. The modal has two fields: a short Name (the on-disk directory /
+// work-stream identity) and a free-form description that seeds the
+// .project.yaml. Tab / shift+tab switches focus between them; enter submits;
+// esc cancels. On submit it writes the project seed and dismisses the modal on
+// success, or surfaces the error inline so the user can fix it and retry.
 func (m model) handleNewProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.mode = modeNormal
 		m.newProjName = ""
+		m.newProjDesc = ""
+		m.newProjFocus = 0
 		m.newProjErr = ""
 		return m, nil
+	case "tab", "shift+tab":
+		// Two fields, so tab just toggles between them. (Cursor keys are
+		// unbound app-wide; the name field can't repurpose j/k since they're
+		// literal input, so tab is the field switch here.)
+		m.newProjFocus ^= 1
+		return m, nil
 	case "backspace":
-		if n := len(m.newProjName); n > 0 {
-			m.newProjName = m.newProjName[:n-1]
+		if m.newProjFocus == 0 {
+			if n := len(m.newProjName); n > 0 {
+				m.newProjName = m.newProjName[:n-1]
+			}
+		} else {
+			if n := len(m.newProjDesc); n > 0 {
+				m.newProjDesc = m.newProjDesc[:n-1]
+			}
 		}
 		m.newProjErr = ""
 		return m, nil
 	case "enter":
 		name := strings.TrimSpace(m.newProjName)
-		if err := createEmptyProject(m.projectRoot, name); err != nil {
+		desc := strings.TrimSpace(m.newProjDesc)
+		if err := createProjectSeed(m.projectRoot, name, desc); err != nil {
 			m.newProjErr = err.Error()
 			return m, nil
 		}
 		m.mode = modeNormal
 		m.newProjName = ""
+		m.newProjDesc = ""
+		m.newProjFocus = 0
 		m.newProjErr = ""
 		m.statusMsg = "created project " + name
 		return m, nil
 	}
-	if len(msg.Runes) == 1 && isProjectNameChar(msg.Runes[0]) {
-		m.newProjName += string(msg.Runes[0])
+	// Route printable input to the focused field. The name field is restricted
+	// to filesystem-safe characters (single keystrokes only); the description
+	// takes any printable prose and accepts multi-line pastes, collapsing them
+	// to spaces the same way the new-task modal does.
+	if m.newProjFocus == 0 {
+		if len(msg.Runes) == 1 && isProjectNameChar(msg.Runes[0]) {
+			m.newProjName += string(msg.Runes[0])
+			m.newProjErr = ""
+		}
+		return m, nil
+	}
+	if runes := sanitizePastedRunes(msg.Runes); runes != "" {
+		m.newProjDesc += runes
 		m.newProjErr = ""
 	}
 	return m, nil
 }
 
-// createEmptyProject writes an empty `<root>/<name>/.project.yaml` so the
-// daemon's project watcher will pick it up on its next scan. The file is
-// intentionally empty — the project agent fills it in later.
+// createProjectSeed writes `<root>/<name>/.project.yaml` as a project seed: a
+// file carrying only the user's free-form description, written as `agent` so
+// the daemon acts on it. The daemon sees an unpopulated project (no status
+// yet) and launches the project agent, which reads the description and fills
+// in the rest — the project analogue of the task seed queueTaskForPlanning
+// writes for `:task`.
 //
 // Refuses to clobber an existing file: if `<root>/<name>/.project.yaml`
 // already exists we surface that to the user instead of silently truncating
 // what may be work-in-progress on disk.
-func createEmptyProject(root, name string) error {
+func createProjectSeed(root, name, description string) error {
 	if root == "" {
 		return errors.New("no orch root configured")
 	}
@@ -130,6 +178,9 @@ func createEmptyProject(root, name string) error {
 	if strings.ContainsAny(name, `/\`) {
 		return fmt.Errorf("invalid project name %q (no slashes)", name)
 	}
+	if strings.TrimSpace(description) == "" {
+		return errors.New("description required")
+	}
 	dir := filepath.Join(root, name)
 	path := filepath.Join(dir, ".project.yaml")
 	if _, err := os.Stat(path); err == nil {
@@ -140,29 +191,37 @@ func createEmptyProject(root, name string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte{}, 0o644)
+	return project.SaveAs(path, &project.Project{Description: description}, project.WriterAgent)
 }
 
 // renderNewProjectModal draws the centered prompt that asks for a project
-// name. Returned as a full-screen string so View() can substitute it in for
-// the normal body when modeNewProject is active — bubbletea has no native
-// overlay primitive, so the modal takes over the whole screen.
+// name and description. Returned as a full-screen string so View() can
+// substitute it in for the normal body when modeNewProject is active —
+// bubbletea has no native overlay primitive, so the modal takes over the whole
+// screen. The cursor sits on whichever field currently has focus.
 func (m model) renderNewProjectModal() string {
 	cursor := "▌"
-	field := "Name: " + m.newProjName + cursor
+	nameCursor, descCursor := "", ""
+	if m.newProjFocus == 0 {
+		nameCursor = cursor
+	} else {
+		descCursor = cursor
+	}
 
 	var b strings.Builder
 	b.WriteString(paneTitleStyle.Render("New work stream"))
 	b.WriteString("\n\n")
-	b.WriteString(field)
+	b.WriteString("Name: " + m.newProjName + nameCursor)
+	b.WriteString("\n\n")
+	b.WriteString("Describe the project:\n\n" + m.newProjDesc + descCursor)
 	if m.newProjErr != "" {
 		b.WriteString("\n\n")
 		b.WriteString(statusErrStyle.Render(m.newProjErr))
 	}
 	b.WriteString("\n\n")
-	b.WriteString(hintStyle.Render("enter: create  •  esc: cancel"))
+	b.WriteString(hintStyle.Render("tab: switch field  •  enter: create & plan  •  esc: cancel"))
 
-	width := 48
+	width := 60
 	if m.width > 0 && m.width-4 < width {
 		width = m.width - 4
 	}

@@ -23,6 +23,14 @@ type Repo struct {
 	Identity   string
 	Shortname  string
 	BaseBranch string
+	// Create asks the manager to ensure this repo exists on the remote,
+	// creating it empty if missing, before the workspace is cloned. Set for
+	// a project's `new_repos` — repositories the work will start from scratch.
+	Create bool
+	// Visibility is the visibility to create the repo with when Create is set
+	// ("private" or "public"). Empty defaults to private. Ignored when Create
+	// is false.
+	Visibility string
 }
 
 // Ref returns the string form wsp prefers — identity if known, otherwise the

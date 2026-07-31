@@ -190,9 +190,9 @@ func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
 	}
 
 	// Down to the projects pane, then right-arrow to select bravo.
-	focused, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	focused, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 	m = focused.(model)
-	right, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	right, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = right.(model)
 
 	v2 := m.View()
@@ -286,5 +286,25 @@ func TestSelectedCardBorderUsesAccentColor(t *testing.T) {
 	}
 	if sel != focused {
 		t.Errorf("cardSelectedBorder should share the focus accent colour; got %v, want %v", sel, focused)
+	}
+}
+
+// TestOptionGlyphSwitchesPane covers the macOS Option-key fallback: a default
+// macOS terminal emits "∆"/"˚" for ⌥j/⌥k (no Meta), so those glyphs must
+// switch panes just like "alt+j"/"alt+k".
+func TestOptionGlyphSwitchesPane(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	start := m.focus
+	// "˚" (⌥k) advances focus like alt+k.
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'˚'}})
+	m = step.(model)
+	if m.focus == start {
+		t.Fatalf("⌥k glyph did not switch pane: focus still %v", m.focus)
+	}
+	// "∆" (⌥j) moves back to where we started.
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'∆'}})
+	m = step.(model)
+	if m.focus != start {
+		t.Errorf("⌥j glyph should invert ⌥k: focus = %v, want %v", m.focus, start)
 	}
 }

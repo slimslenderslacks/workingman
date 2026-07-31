@@ -24,6 +24,9 @@ import (
 type WspManager struct {
 	// Binary is the wsp executable. Defaults to "wsp" on PATH.
 	Binary string
+	// GH is the GitHub CLI executable used to create `new_repos` before they
+	// are cloned. Defaults to "gh" on PATH.
+	GH string
 }
 
 func NewWsp() *WspManager { return &WspManager{} }
@@ -35,9 +38,23 @@ func (m *WspManager) binary() string {
 	return "wsp"
 }
 
+func (m *WspManager) gh() string {
+	if m.GH != "" {
+		return m.GH
+	}
+	return "gh"
+}
+
 func (m *WspManager) Create(ctx context.Context, branch string, repos []Repo) (string, error) {
 	if branch == "" {
 		return "", fmt.Errorf("workspace: branch is required")
+	}
+	// A repo flagged Create (a project's `new_repos`) doesn't exist on the
+	// remote yet, so wsp couldn't clone it. Create it empty first. This is the
+	// first thing that runs at workspace provisioning — i.e. the planning
+	// dispatch — and is idempotent, so later task/commit provisions no-op.
+	if err := m.ensureCreated(ctx, repos); err != nil {
+		return "", err
 	}
 	// Bootstrap: a task or commit agent's workspace cannot be created
 	// until its repos are present in wsp's global registry. Auto-register
@@ -154,6 +171,69 @@ func (m *WspManager) Remove(ctx context.Context, branch string) error {
 		return nil
 	}
 	return fmt.Errorf("wsp rm %s: %s", branch, errMsg)
+}
+
+// ensureCreated creates any repo flagged Create that isn't already on the
+// remote, so `wsp new` has something to clone. Existence is checked with
+// `gh repo view`; missing repos are created empty with `gh repo create`.
+// Idempotent: an already-present repo (or a create that races into "already
+// exists") is a no-op.
+func (m *WspManager) ensureCreated(ctx context.Context, repos []Repo) error {
+	for _, r := range repos {
+		if !r.Create {
+			continue
+		}
+		ownerName, err := ghOwnerName(r.Identity)
+		if err != nil {
+			return err
+		}
+		if m.ghRepoExists(ctx, ownerName) {
+			continue
+		}
+		args := ghCreateArgs(ownerName, r.Visibility)
+		if out, err := exec.CommandContext(ctx, m.gh(), args...).CombinedOutput(); err != nil {
+			if isAlreadyExists(string(out)) {
+				continue
+			}
+			return fmt.Errorf("gh repo create %s: %w: %s", ownerName, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+// ghRepoExists reports whether owner/name already exists on GitHub. A zero
+// exit from `gh repo view` means it does; any error (not found, no auth) is
+// treated as "does not exist" so ensureCreated attempts creation and surfaces
+// the real error there if creation also fails.
+func (m *WspManager) ghRepoExists(ctx context.Context, ownerName string) bool {
+	return exec.CommandContext(ctx, m.gh(), "repo", "view", ownerName).Run() == nil
+}
+
+// ghOwnerName converts a wsp identity ("github.com/<org>/<name>") to the
+// "<org>/<name>" gh expects. New-repo creation via gh is GitHub-specific, so
+// non-github identities are rejected with a clear error.
+func ghOwnerName(identity string) (string, error) {
+	const host = "github.com/"
+	if !strings.HasPrefix(identity, host) {
+		return "", fmt.Errorf("cannot create repo for non-github identity %q", identity)
+	}
+	rest := strings.TrimPrefix(identity, host)
+	if strings.Count(rest, "/") != 1 || strings.HasPrefix(rest, "/") || strings.HasSuffix(rest, "/") {
+		return "", fmt.Errorf("cannot derive owner/name from identity %q", identity)
+	}
+	return rest, nil
+}
+
+// ghCreateArgs builds the `gh repo create` argv for a new empty repo.
+// Visibility defaults to private; only "public" opts out. --add-readme seeds a
+// default branch so the subsequent `wsp new` clone + feature-branch checkout
+// has a base to fork from (a zero-commit repo has no branch).
+func ghCreateArgs(ownerName, visibility string) []string {
+	vis := "--private"
+	if visibility == "public" {
+		vis = "--public"
+	}
+	return []string{"repo", "create", ownerName, vis, "--add-readme"}
 }
 
 // ensureRegistered makes sure every repo in repos is present in wsp's
