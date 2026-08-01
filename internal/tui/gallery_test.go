@@ -189,9 +189,8 @@ func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
 		t.Errorf("initial view should show alpha-only and not bravo-only:\n%s", v1)
 	}
 
-	// Down to the projects pane, then right-arrow to select bravo.
-	focused, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
-	m = focused.(model)
+	// Focus the projects pane, then advance the selection to bravo with j.
+	m = focusProjectsPane(t, m)
 	right, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = right.(model)
 

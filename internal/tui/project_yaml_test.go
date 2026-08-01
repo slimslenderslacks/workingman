@@ -216,9 +216,8 @@ func TestProjectYAMLScrollResetsWhenSelectionChanges(t *testing.T) {
 	m = step.(model)
 	m.yamlScroll = 5
 
-	// Down once to land on projects, then right-arrow to advance selection.
-	focused, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
-	m = focused.(model)
+	// Focus the projects pane, then advance the selection with j.
+	m = focusProjectsPane(t, m)
 	right, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = right.(model)
 

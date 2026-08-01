@@ -65,7 +65,7 @@ func withTaskFixtures(t *testing.T) (m model, taskAPath, taskBPath string) {
 
 func focusPane(t *testing.T, m model, target pane) model {
 	t.Helper()
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 5; i++ {
 		if m.focus == target {
 			return m
 		}
@@ -73,7 +73,7 @@ func focusPane(t *testing.T, m model, target pane) model {
 		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 		m = step.(model)
 	}
-	t.Fatalf("could not focus %v in 4 presses (current=%v)", target, m.focus)
+	t.Fatalf("could not focus %v in 5 presses (current=%v)", target, m.focus)
 	return m
 }
 
@@ -93,9 +93,10 @@ func TestTaskViewCarriesPathFromDisk(t *testing.T) {
 
 func TestDownCyclesPanes(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
-	// Visual order top-to-bottom in the right column is projects → tasks →
-	// yaml, so down cycles: sessions → projects → tasks → yaml → sessions.
-	want := []pane{paneProjects, paneTasks, paneProjectYAML, paneSessions}
+	// Visual order top-to-bottom is projects → tasks → yaml → sessions →
+	// audit, so down from the default (sessions) cycles: audit → projects →
+	// tasks → yaml → sessions.
+	want := []pane{paneAudit, paneProjects, paneTasks, paneProjectYAML, paneSessions}
 	for i, expected := range want {
 		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 		m = step.(model)
