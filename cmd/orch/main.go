@@ -207,7 +207,7 @@ func runDaemon(args []string) {
 		}
 	}
 
-	tuiErr := tui.Run(ctx, roots, sessCh, *auditPath, acpSessionsRoot)
+	tuiErr := tui.Run(ctx, roots, sessCh, *auditPath, acpSessionsRoot, interactiveLauncher{d})
 
 	// TUI exited — either the user quit or ctx was already cancelled. Cancel
 	// to be sure, then wait for the daemon to wind down so its shutdown
@@ -311,9 +311,24 @@ func runTUI(args []string) {
 	// sessions pane gets a nil source — the pane renders "(none)" in that
 	// case. To see live sessions, run `orch --root=...` (the integrated
 	// mode wires the daemon's WatchSessions into the TUI).
-	if err := tui.Run(ctx, roots, nil, *auditPath, ""); err != nil {
+	// Standalone tui has no daemon/runner, so :dir and :session are unavailable
+	// (nil launcher). Run `orch --root=...` for the integrated experience.
+	if err := tui.Run(ctx, roots, nil, *auditPath, "", nil); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// interactiveLauncher adapts the daemon's interactive-session methods to the
+// tui.InteractiveLauncher interface, keeping the tui package decoupled from the
+// daemon the same way adaptSessionFeed does for the sessions feed.
+type interactiveLauncher struct{ d *daemon.Daemon }
+
+func (l interactiveLauncher) OpenShell(ctx context.Context, projectPath string) (string, error) {
+	return l.d.OpenInteractiveShell(ctx, projectPath)
+}
+
+func (l interactiveLauncher) OpenSession(ctx context.Context, projectPath string) (string, error) {
+	return l.d.OpenInteractiveSession(ctx, projectPath)
 }
 
 // onePasswordAgentSock returns the path to 1Password's SSH agent socket when

@@ -32,18 +32,40 @@ func focusProjectsPane(t *testing.T, m model) model {
 	return m
 }
 
-func TestColonOpensCommandLineFromProjectsPane(t *testing.T) {
+// openCommandPicker presses `:` (the projects pane must already be focused)
+// and asserts the command menu opened.
+func openCommandPicker(t *testing.T, m model) model {
+	t.Helper()
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
+	m = step.(model)
+	if m.mode != modeCommandPicker {
+		t.Fatalf("after `:`, mode = %v, want modeCommandPicker", m.mode)
+	}
+	return m
+}
+
+// runProjectCommand opens the `:` menu and runs the command with the given key
+// via its first-letter shortcut, returning the resulting model and any command
+// (e.g. an interactive launch) the dispatch produced.
+func runProjectCommand(t *testing.T, m model, key string) (model, tea.Cmd) {
+	t.Helper()
+	m = openCommandPicker(t, m)
+	step, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(key[0])}})
+	return step.(model), cmd
+}
+
+func TestColonOpensCommandPickerFromProjectsPane(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m = focusProjectsPane(t, m)
 
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
 	m = step.(model)
 
-	if m.mode != modeCommandLine {
-		t.Errorf("after `:`, mode = %v, want modeCommandLine", m.mode)
+	if m.mode != modeCommandPicker {
+		t.Errorf("after `:`, mode = %v, want modeCommandPicker", m.mode)
 	}
-	if m.cmdInput != "" {
-		t.Errorf("cmdInput = %q, want empty on entry", m.cmdInput)
+	if m.cmdPickerIdx != 0 {
+		t.Errorf("cmdPickerIdx = %d, want 0 on entry", m.cmdPickerIdx)
 	}
 }
 
@@ -57,60 +79,53 @@ func TestColonIgnoredOutsideProjectsPane(t *testing.T) {
 	}
 }
 
-func TestCommandLineNewOpensModal(t *testing.T) {
+func TestCommandPickerNewOpensModal(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m = focusProjectsPane(t, m)
-	m = typeChars(t, m, ":new")
-
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = step.(model)
+	m, _ = runProjectCommand(t, m, "new")
 
 	if m.mode != modeNewProject {
-		t.Errorf("after :new<enter>, mode = %v, want modeNewProject", m.mode)
-	}
-	if m.cmdInput != "" {
-		t.Errorf("cmdInput = %q, want empty after command executed", m.cmdInput)
+		t.Errorf("after picking `new`, mode = %v, want modeNewProject", m.mode)
 	}
 }
 
-func TestCommandLineUnknownCommandSurfacesError(t *testing.T) {
+func TestCommandPickerEnterRunsHighlighted(t *testing.T) {
+	// The first row is `task`; with no work stream selected it should surface
+	// the "no work stream" error rather than opening the task modal.
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m = focusProjectsPane(t, m)
-	m = typeChars(t, m, ":wat")
+	m = openCommandPicker(t, m)
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = step.(model)
-
 	if m.mode != modeNormal {
-		t.Errorf("after unknown command, mode = %v, want modeNormal", m.mode)
+		t.Errorf("after enter on `task` with no selection, mode = %v, want modeNormal", m.mode)
 	}
-	if !strings.Contains(m.statusMsg, "wat") {
-		t.Errorf("statusMsg = %q, want it to mention the bad command", m.statusMsg)
+	if !strings.Contains(m.statusMsg, "no work stream") {
+		t.Errorf("statusMsg = %q, want a no-work-stream message", m.statusMsg)
 	}
 }
 
-func TestCommandLineEscapeCancels(t *testing.T) {
+func TestCommandPickerUnknownLetterIgnored(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m = focusProjectsPane(t, m)
-	m = typeChars(t, m, ":new")
+	m = openCommandPicker(t, m)
+	// `z` matches no command's first letter — the menu stays open.
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	m = step.(model)
+	if m.mode != modeCommandPicker {
+		t.Errorf("after an unmatched letter, mode = %v, want modeCommandPicker", m.mode)
+	}
+}
+
+func TestCommandPickerEscapeCancels(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m = focusProjectsPane(t, m)
+	m = openCommandPicker(t, m)
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = step.(model)
 
 	if m.mode != modeNormal {
 		t.Errorf("after esc, mode = %v, want modeNormal", m.mode)
-	}
-	if m.cmdInput != "" {
-		t.Errorf("cmdInput = %q, want cleared on cancel", m.cmdInput)
-	}
-}
-
-func TestCommandLineBackspaceTrimsInput(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	m = focusProjectsPane(t, m)
-	m = typeChars(t, m, ":new")
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-	m = step.(model)
-	if m.cmdInput != "ne" {
-		t.Errorf("after backspace, cmdInput = %q, want %q", m.cmdInput, "ne")
 	}
 }
 
@@ -119,12 +134,10 @@ func TestNewProjectModalCreatesSeedYAML(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m.projectRoot = root
 	m = focusProjectsPane(t, m)
-	m = typeChars(t, m, ":new")
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = step.(model)
+	m, _ = runProjectCommand(t, m, "new")
 	// Name field first, then tab to the description field and type the seed.
 	m = typeChars(t, m, "widget")
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = step.(model)
 	m = typeChars(t, m, "build a widget in acme/widgets")
 	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -253,13 +266,14 @@ func TestNewProjectModalEscapeCancels(t *testing.T) {
 	}
 }
 
-func TestProjectsFooterHintIncludesNew(t *testing.T) {
+func TestProjectsFooterShowsColonMenuWithoutSelection(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	m = sized.(model)
 	m = focusProjectsPane(t, m)
-	if !strings.Contains(m.View(), ":new") {
-		t.Errorf("projects footer should advertise :new; got:\n%s", m.View())
+	// The footer advertises the `:` menu, not the individual commands.
+	if !strings.Contains(m.View(), "  •  :  •  ") {
+		t.Errorf("projects footer should advertise the `:` command menu; got:\n%s", m.View())
 	}
 }
 

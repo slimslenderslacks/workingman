@@ -431,6 +431,96 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	return sess, nil
 }
 
+// InteractiveSpec describes an ad-hoc interactive sandbox window opened on the
+// user's request from the TUI — the `:dir` shell and the `:session` claude
+// session. Unlike Start's agent launches these have no task/lifecycle and no
+// daemon session tracking: the runner just ensures the sandbox exists, wraps
+// Inner in `sbx exec -it`, and hands the window to the tmux launcher.
+type InteractiveSpec struct {
+	// SandboxName is the sbx sandbox to create/reuse, deterministic per work
+	// stream so re-opening the window lands in the same sandbox. Empty means
+	// run the command directly on the host (no sandbox, no `sbx exec`) — that's
+	// how `:dir` opens a plain host shell in the workspace dir.
+	SandboxName string
+	// Workspaces are the host paths to bind-mount (first is primary). Required
+	// when SandboxName is set; ignored for a host command (empty SandboxName).
+	Workspaces []string
+	// Cwd is the working directory inside the sandbox (`sbx exec -w`). Usually
+	// the first workspace.
+	Cwd string
+	// Inner is the command run inside the sandbox, e.g. ["bash"] or
+	// ["claude", "--dangerously-skip-permissions", "--session-id", uuid].
+	Inner []string
+	// WindowName is the tmux window name inside the umbrella session.
+	WindowName string
+}
+
+// LaunchInteractive opens an interactive window in the umbrella tmux session
+// and returns the tmux target ("session:window") so the caller can switch a
+// client to it. It is the shared machinery behind the TUI's `:dir` and
+// `:session` commands.
+//
+// When spec.SandboxName is set (`:session`), it first ensures the sandbox
+// exists (idempotently, via DefaultSandboxCreator — a plain `sbx create claude`
+// with the given mounts, no acp-kit, since the window runs claude directly
+// rather than the ACP bridge) and wraps the command in `sbx exec -it`. Nothing
+// removes these sandboxes, so a `:session` sandbox persists and claude resumes
+// the same conversation on the next open.
+//
+// When spec.SandboxName is empty (`:dir`), the command runs directly on the
+// host — no sandbox, no `sbx exec` — in spec.Cwd. That's a plain host shell.
+func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (string, error) {
+	if r.Launcher == nil {
+		return "", fmt.Errorf("runner: no tmux launcher configured for interactive sessions")
+	}
+	if len(spec.Inner) == 0 {
+		return "", fmt.Errorf("runner: interactive session needs a command to run")
+	}
+
+	command := spec.Inner
+	if spec.SandboxName != "" {
+		if len(spec.Workspaces) == 0 {
+			return "", fmt.Errorf("runner: sandboxed interactive session needs at least one workspace")
+		}
+		ensure := r.Sandbox
+		if ensure == nil {
+			// Production wires the ACP path and leaves r.Sandbox nil; the
+			// interactive session sandbox still needs a plain sandbox, so fall
+			// back to the default creator.
+			ensure = DefaultSandboxCreator
+		}
+		if err := ensure(ctx, SandboxSpec{Name: spec.SandboxName, Workspaces: spec.Workspaces}); err != nil {
+			return "", fmt.Errorf("runner: ensure interactive sandbox %q: %w", spec.SandboxName, err)
+		}
+		sbxBin := r.SbxPath
+		if sbxBin == "" {
+			sbxBin = "sbx"
+		}
+		command = append([]string{sbxBin, "exec", "-it", "-w", spec.Cwd, spec.SandboxName}, spec.Inner...)
+	}
+
+	sess, err := r.Launcher.Launch(ctx, agent.Spec{
+		Name:      spec.WindowName,
+		Workspace: spec.Cwd,
+		Command:   command,
+	})
+	if err != nil {
+		return "", fmt.Errorf("runner: launch interactive window %q: %w", spec.WindowName, err)
+	}
+	if r.Audit != nil {
+		sandbox := spec.SandboxName
+		if sandbox == "" {
+			sandbox = "(host)"
+		}
+		r.Audit.Log("interactive_session_started",
+			"window", spec.WindowName,
+			"sandbox", sandbox,
+			"cwd", spec.Cwd,
+		)
+	}
+	return sess.Name(), nil
+}
+
 // startACP launches a non-interactive agent as an acp-wrapper-backed ACP
 // session. It allocates a session id, writes the initial session.json (so the
 // daemon and a restarting TUI can discover the session before the wrapper has

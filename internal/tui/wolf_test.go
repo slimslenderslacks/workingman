@@ -11,16 +11,14 @@ import (
 	"github.com/slimslenderslacks/work/internal/project"
 )
 
-func TestCommandLineWolfBlocksProjectAndSummons(t *testing.T) {
+func TestCommandPickerWolfBlocksProjectAndSummons(t *testing.T) {
 	root := t.TempDir()
 	m, projPath := selectProject(t, root, "widget")
 
-	m = typeChars(t, m, ":wolf")
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = step.(model)
+	m, _ = runProjectCommand(t, m, "wolf")
 
 	if m.mode != modeNormal {
-		t.Errorf(":wolf should not open a modal; mode = %v", m.mode)
+		t.Errorf("`wolf` should not open a modal; mode = %v", m.mode)
 	}
 	if !strings.Contains(m.statusMsg, "wolf") {
 		t.Errorf("statusMsg = %q, want it to confirm the summon", m.statusMsg)
@@ -41,15 +39,13 @@ func TestCommandLineWolfBlocksProjectAndSummons(t *testing.T) {
 	}
 }
 
-func TestCommandLineWolfWithoutSelectionSurfacesError(t *testing.T) {
+func TestCommandPickerWolfWithoutSelectionSurfacesError(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m = focusProjectsPane(t, m)
-	m = typeChars(t, m, ":wolf")
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = step.(model)
+	m, _ = runProjectCommand(t, m, "wolf")
 
-	if !strings.Contains(m.statusMsg, "no project") {
-		t.Errorf("statusMsg = %q, want it to explain no project is selected", m.statusMsg)
+	if !strings.Contains(m.statusMsg, "no work stream") {
+		t.Errorf("statusMsg = %q, want it to explain no work stream is selected", m.statusMsg)
 	}
 }
 
@@ -87,12 +83,16 @@ func TestSummonWolfWithoutProjectErrors(t *testing.T) {
 	}
 }
 
-func TestProjectsFooterHintIncludesWolfWhenSelected(t *testing.T) {
+func TestProjectsFooterAdvertisesCommandMenuForWolf(t *testing.T) {
 	root := t.TempDir()
 	m, _ := selectProject(t, root, "widget")
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 220, Height: 40})
 	m = sized.(model)
-	if !strings.Contains(m.View(), ":wolf") {
-		t.Errorf("projects footer should advertise :wolf when a project is selected; got:\n%s", m.View())
+	// Commands (including wolf) now live behind the `:` menu, not the footer.
+	if strings.Contains(m.View(), ":wolf") {
+		t.Errorf("footer should no longer list :wolf inline; got:\n%s", m.View())
+	}
+	if !strings.Contains(m.View(), "  •  :  •  ") {
+		t.Errorf("footer should advertise the `:` command menu; got:\n%s", m.View())
 	}
 }

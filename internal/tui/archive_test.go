@@ -81,19 +81,17 @@ func TestArchiveCommandOpensConfirmModal(t *testing.T) {
 	m.projSel = filepath.Join(root, "alpha", ".project.yaml")
 	m = focusProjectsPane(t, m)
 
-	m = typeChars(t, m, ":archive")
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = step.(model)
+	m, _ = runProjectCommand(t, m, "archive")
 
 	if m.mode != modeConfirmArchive {
-		t.Fatalf("after :archive, mode = %v, want modeConfirmArchive", m.mode)
+		t.Fatalf("after picking `archive`, mode = %v, want modeConfirmArchive", m.mode)
 	}
 	if m.archiveTarget != m.projSel {
 		t.Errorf("archiveTarget = %q, want %q", m.archiveTarget, m.projSel)
 	}
 
 	// n cancels without touching disk.
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	m = step.(model)
 	if m.mode != modeNormal {
 		t.Errorf("after n, mode = %v, want modeNormal", m.mode)

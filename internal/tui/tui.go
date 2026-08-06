@@ -28,15 +28,20 @@ const (
 )
 
 // uiMode is the input mode the TUI is currently capturing keystrokes for.
-// Modes don't change pane focus — they layer a text-entry overlay on top of
-// it. modeCommandLine is vim-style: the user has pressed `:` and is typing a
-// command at the bottom of the screen. modeNewProject is the modal dialog
-// that prompts for a project name after `:new` is executed.
+// Modes don't change pane focus — they layer a modal overlay on top of it.
+// modeCommandPicker is the command menu the user gets after pressing `:` on
+// the work-streams pane; modeNewProject is the modal dialog that prompts for a
+// project name after the "new" command is chosen.
 type uiMode int
 
 const (
 	modeNormal uiMode = iota
-	modeCommandLine
+	// modeCommandPicker is the menu shown after `:` on the work-streams pane.
+	// It lists the project commands (task/dir/session/wolf/new/archive); the
+	// user moves with j/k, runs one with enter (or its first letter), and
+	// cancels with esc. It replaces the old free-form `:command` line so the
+	// commands are discoverable rather than memorised.
+	modeCommandPicker
 	modeNewProject
 	// modeNewTask is the modal that prompts for a free-form task description
 	// after `:task`. On enter it seeds a task file in the selected project's
@@ -125,13 +130,13 @@ type model struct {
 	projectRoot string
 
 	// Input-mode state. mode gates which key handler the Update loop hands
-	// the next keystroke to. cmdInput holds the characters typed after `:`
-	// in command-line mode; newProjName / newProjDesc / newProjErr drive the
-	// new-project modal's two input fields and its inline error line, and
-	// newProjFocus selects which field (0 = name, 1 = description) receives
-	// keystrokes.
+	// the next keystroke to. cmdPickerIdx is the highlighted row of the
+	// command-picker menu (modeCommandPicker); newProjName / newProjDesc /
+	// newProjErr drive the new-project modal's two input fields and its inline
+	// error line, and newProjFocus selects which field (0 = name, 1 =
+	// description) receives keystrokes.
 	mode         uiMode
-	cmdInput     string
+	cmdPickerIdx int
 	newProjName  string
 	newProjDesc  string
 	newProjFocus int
@@ -161,6 +166,12 @@ type model struct {
 	// default (keeping the transcript readable); the `z` key toggles this to
 	// reveal every tool call's output.
 	acpToolsExpanded bool
+
+	// interactive opens the ad-hoc `:dir` shell and `:session` claude windows
+	// for a work stream. Wired by Run in integrated daemon mode; nil in
+	// standalone `orch tui` (and most tests), where those commands report that
+	// interactive sessions aren't available.
+	interactive InteractiveLauncher
 }
 
 func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh <-chan []string, attacher tmuxAttacher) model {
@@ -284,6 +295,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = ""
 		}
 		return m, nil
+	case interactiveLaunchedMsg:
+		return m.handleInteractiveLaunched(msg)
 	case tea.MouseMsg:
 		// Mouse events get suspended while a modal or the ACP tab view is open —
 		// the user is committed to that flow until they leave it.
@@ -303,8 +316,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleACPKey(msg)
 		}
 		switch m.mode {
-		case modeCommandLine:
-			return m.handleCommandLineKey(msg)
+		case modeCommandPicker:
+			return m.handleCommandPickerKey(msg)
 		case modeNewProject:
 			return m.handleNewProjectKey(msg)
 		case modeNewTask:
@@ -325,12 +338,13 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return m, tea.Quit
 	case ":":
-		// Vim-style command-line entry, but only when the projects pane is
-		// focused — `:new` is currently the only command and it's a
-		// project-pane action. Future commands could relax this.
+		// `:` opens the command-picker menu, but only when the work-streams
+		// pane is focused — every command is a work-stream action. The menu
+		// replaces the old free-form `:command` line so the commands are
+		// discoverable instead of memorised.
 		if m.focus == paneProjects {
-			m.mode = modeCommandLine
-			m.cmdInput = ""
+			m.mode = modeCommandPicker
+			m.cmdPickerIdx = 0
 			m.statusMsg = ""
 		}
 	case "a":
@@ -1706,6 +1720,9 @@ func (m model) View() string {
 	// Bubbletea has no native overlay primitive, so blanking the body is
 	// the simplest reliable approach — the user dismisses the modal with
 	// esc/enter and the regular UI returns intact.
+	if m.mode == modeCommandPicker {
+		return m.renderCommandPickerModal()
+	}
 	if m.mode == modeNewProject {
 		return m.renderNewProjectModal()
 	}
@@ -2086,27 +2103,18 @@ func (m model) renderAudit(width, height int) string {
 	return style.Render(clampLines(b.String(), innerHeight))
 }
 
-// renderFooter draws the bottom hint line. Four variants, in precedence
-// order:
+// renderFooter draws the bottom hint line. Variants, in precedence order:
 //
-//   - Command-line mode: shows the vim-style `:cmd` prompt with a cursor so
-//     the user sees what they're typing.
 //   - statusMsg set (e.g. tmux-attach failure, "created project foo"): the
 //     message replaces the hint so the user can't miss it.
-//   - Projects pane focused: hint includes the `:new` discovery affordance.
+//   - Work-streams pane focused: the hint advertises `:` — the single entry
+//     point to the command menu — rather than listing every command inline.
 //   - Default: the regular keybinding hint.
 //
 // All variants are truncated to the terminal width so a long string can't
 // push the line past the screen edge (which on bubbletea altscreen wraps it
 // onto a phantom row that scrolls the rest of the UI up).
 func (m model) renderFooter() string {
-	if m.mode == modeCommandLine {
-		text := ":" + m.cmdInput + "▌"
-		if m.width > 0 {
-			text = truncate(text, m.width)
-		}
-		return hintStyle.Render(text)
-	}
 	text := m.statusMsg
 	style := statusErrStyle
 	if text == "" {
@@ -2119,10 +2127,7 @@ func (m model) renderFooter() string {
 			base += "  •  a: acp tabs"
 		}
 		if m.focus == paneProjects {
-			base += "  •  :new: create project"
-			if m.projSel != "" {
-				base += "  •  :task: add task  •  :wolf: summon wolf  •  :archive: archive"
-			}
+			base += "  •  :"
 		}
 		text = base + "  •  focus: " + paneName(m.focus)
 		style = hintStyle
@@ -2157,7 +2162,7 @@ func paneName(p pane) string {
 // Mouse cell-motion is enabled so the sessions pane responds to clicks. The
 // tmux-attach plumbing opens a new Terminal.app window via osascript, so the
 // TUI keeps running while the user works in the attached session.
-func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, auditPath, sessionsRoot string) error {
+func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, auditPath, sessionsRoot string, interactive InteractiveLauncher) error {
 	tuiCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -2171,6 +2176,10 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, audit
 	}
 
 	m := newModel(ch, sessCh, auditCh, newTmuxAttacher())
+	// The `:dir`/`:session` commands need a launcher wired to the daemon's
+	// runner (integrated mode). Standalone `orch tui` passes nil and those
+	// commands report they're unavailable.
+	m.interactive = interactive
 	// Watch ACP sessions for the tab view when a sessions root is configured
 	// (daemon mode with --acp-kit). Standalone `orch tui` passes "" and gets no
 	// ACP tabs, matching its nil sessions source.

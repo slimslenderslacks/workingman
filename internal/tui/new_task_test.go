@@ -34,29 +34,25 @@ func selectProject(t *testing.T, root, name string) (model, string) {
 	return m, path
 }
 
-func TestCommandLineTaskOpensModal(t *testing.T) {
+func TestCommandPickerTaskOpensModal(t *testing.T) {
 	m, _ := selectProject(t, t.TempDir(), "widget")
-	m = typeChars(t, m, ":task")
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = step.(model)
+	m, _ = runProjectCommand(t, m, "task")
 
 	if m.mode != modeNewTask {
-		t.Errorf("after :task<enter>, mode = %v, want modeNewTask", m.mode)
+		t.Errorf("after picking `task`, mode = %v, want modeNewTask", m.mode)
 	}
 }
 
-func TestCommandLineTaskWithoutSelectionSurfacesError(t *testing.T) {
+func TestCommandPickerTaskWithoutSelectionSurfacesError(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m = focusProjectsPane(t, m)
-	m = typeChars(t, m, ":task")
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = step.(model)
+	m, _ = runProjectCommand(t, m, "task")
 
 	if m.mode != modeNormal {
-		t.Errorf(":task with no project should stay normal; mode = %v", m.mode)
+		t.Errorf("`task` with no project should stay normal; mode = %v", m.mode)
 	}
-	if !strings.Contains(m.statusMsg, "no project") {
-		t.Errorf("statusMsg = %q, want it to explain no project is selected", m.statusMsg)
+	if !strings.Contains(m.statusMsg, "no work stream") {
+		t.Errorf("statusMsg = %q, want it to explain no work stream is selected", m.statusMsg)
 	}
 }
 
@@ -64,12 +60,10 @@ func TestNewTaskModalSeedsTaskAndReplans(t *testing.T) {
 	root := t.TempDir()
 	m, projPath := selectProject(t, root, "widget")
 
-	m = typeChars(t, m, ":task")
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = step.(model)
+	m, _ = runProjectCommand(t, m, "task")
 
 	m = typeChars(t, m, "Add a /healthz endpoint")
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = step.(model)
 
 	if m.mode != modeNormal {
@@ -213,11 +207,9 @@ func TestSecondSeedDoesNotClobberFirst(t *testing.T) {
 	m, _ := selectProject(t, root, "widget")
 
 	queue := func(desc string) model {
-		mm := typeChars(t, m, ":task")
-		step, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
-		mm = step.(model)
+		mm, _ := runProjectCommand(t, m, "task")
 		mm = typeChars(t, mm, desc)
-		step, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		step, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
 		return step.(model)
 	}
 	// Two descriptions that slug to the same stem.
@@ -253,12 +245,13 @@ func TestTaskSlug(t *testing.T) {
 	}
 }
 
-func TestProjectsFooterHintIncludesTaskWhenSelected(t *testing.T) {
+func TestProjectsFooterAdvertisesCommandMenu(t *testing.T) {
 	root := t.TempDir()
 	m, _ := selectProject(t, root, "widget")
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
-	if !strings.Contains(m.View(), ":task") {
-		t.Errorf("projects footer should advertise :task when a project is selected; got:\n%s", m.View())
+	// The footer advertises the `:` menu rather than listing each command.
+	if !strings.Contains(m.View(), "  •  :  •  ") {
+		t.Errorf("projects footer should advertise the `:` command menu; got:\n%s", m.View())
 	}
 }
