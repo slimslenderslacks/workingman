@@ -331,6 +331,59 @@ func TestACPLaunchTaskAgentForwardsPolicies(t *testing.T) {
 	}
 }
 
+func TestACPLaunchTaskAgentForwardsSandboxCleanupFlags(t *testing.T) {
+	wsRoot := t.TempDir()
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	taskPath := filepath.Join(orchDir, "tasks", "first.yaml")
+
+	// A task without save_sandbox: --task-path is forwarded (so the wrapper can
+	// re-read the final status) but --save-sandbox is absent.
+	acp := &fakeLauncher{}
+	r := &Runner{
+		Workspaces:   workspace.NewStub(wsRoot),
+		Launcher:     &fakeLauncher{},
+		AcpLauncher:  acp,
+		Kit:          "kit-ref",
+		SessionsRoot: t.TempDir(),
+	}
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.TaskAgent,
+		Branch:      "feat-x",
+		ProjectPath: projectPath,
+		TaskPath:    taskPath,
+		TaskName:    "first",
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := argValue(acp.last.Command, "--task-path"); got != taskPath {
+		t.Errorf("--task-path = %q, want %q", got, taskPath)
+	}
+	if hasFlag(acp.last.Command, "--save-sandbox") {
+		t.Errorf("--save-sandbox present without SaveSandbox set: %v", acp.last.Command)
+	}
+
+	// A task with SaveSandbox=true forwards --save-sandbox.
+	acp2 := &fakeLauncher{}
+	r.AcpLauncher = acp2
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.TaskAgent,
+		Branch:      "feat-x",
+		ProjectPath: projectPath,
+		TaskPath:    taskPath,
+		TaskName:    "first",
+		SaveSandbox: true,
+	}); err != nil {
+		t.Fatalf("Start (save): %v", err)
+	}
+	if !hasFlag(acp2.last.Command, "--save-sandbox") {
+		t.Errorf("--save-sandbox missing with SaveSandbox set: %v", acp2.last.Command)
+	}
+}
+
 func TestInteractiveAgentNeverUsesACP(t *testing.T) {
 	workingDir := t.TempDir()
 	projectPath := filepath.Join(workingDir, ".project.yaml")

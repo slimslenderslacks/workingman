@@ -97,6 +97,17 @@ type Task struct {
 	// loosen filesystem access for a task that needs more.
 	Policies []policy.Rule `yaml:"policies,omitempty"`
 
+	// SaveSandbox, when true, tells the acp-wrapper to leave this task's
+	// sandbox in place when its agent exits instead of tearing it down with
+	// `sbx rm --force`. It defaults to false so per-task sandboxes are cleaned
+	// up as tasks complete and don't accumulate across a project's run. The
+	// daemon flips it to true when a task fails terminally (retries exhausted,
+	// or the agent reported blocked) so the retained sandbox is available for
+	// the wolf agent to inspect; a human or the planner may also set it to
+	// preserve in-sandbox state that should remain acquirable. omitempty so it
+	// stays out of the YAML for the common (false) case.
+	SaveSandbox bool `yaml:"save_sandbox,omitempty"`
+
 	// Model is the claude model the task agent should run under. For now
 	// every task uses "default", which lets claude pick its own current
 	// default; the field is reserved so a future planner can choose a

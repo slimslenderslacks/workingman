@@ -202,6 +202,8 @@ func main() {
 	kitPath := fs.String("kit", "", "acp-kit reference to layer onto the claude sandbox: a local kit dir or published ref (required)")
 	sbxPath := fs.String("sbx", "", "path to the sbx binary (default: sbx on PATH)")
 	exitWhenEmpty := fs.Bool("exit-when-empty", false, "shut down once the last connected TUI disconnects (after at least one has connected); used by orch's autonomous single-turn flow")
+	taskPath := fs.String("task-path", "", "path to the task's YAML file; when set, its final status is re-read on exit to decide whether to keep the sandbox for debugging")
+	saveSandbox := fs.Bool("save-sandbox", false, "keep the sandbox when the agent exits instead of removing it with `sbx rm --force` (the task's save_sandbox override)")
 	var workspaces workspacesFlag
 	fs.Var(&workspaces, "workspace", "host path to mount into the sandbox; the first is the ACP client cwd (repeatable, at least one required)")
 	var staticMCPs staticMCPsFlag
@@ -223,6 +225,8 @@ func main() {
 		SbxPath:       *sbxPath,
 		Workspaces:    workspaces,
 		ExitWhenEmpty: *exitWhenEmpty,
+		TaskPath:      *taskPath,
+		SaveSandbox:   *saveSandbox,
 		StaticMCPs:    staticMCPs,
 		Policies:      policies,
 		GitName:       gitName,

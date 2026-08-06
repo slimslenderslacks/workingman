@@ -65,6 +65,12 @@ type Plan struct {
 	// the task's sandbox; the rules already on it remain in effect).
 	Policies []policy.Rule
 
+	// SaveSandbox forwards the task's save_sandbox field to the acp-wrapper so
+	// it preserves the sandbox on exit instead of removing it. Only meaningful
+	// for the task and commit agents (the ones with a per-task sandbox);
+	// planning/project/wolf leave it false. See task.Task.SaveSandbox.
+	SaveSandbox bool
+
 	// BlockedReason, when set, is the message surfaced to the wolf agent
 	// describing why the project entered status:blocked. Ignored for any
 	// other Kind. Mirrors the project file's blocked_reason field but is
@@ -470,7 +476,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
 	}
 
-	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, workspaces, p.StaticMCPs, p.Policies)
+	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, workspaces, p.StaticMCPs, p.Policies, p.TaskPath, p.SaveSandbox)
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionID,
@@ -498,7 +504,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 // acpWrapperCommand builds the argv that launches one acp-wrapper host process
 // for an ACP session. The wrapper resolves --workspace paths to absolute itself,
 // but they already are (workspace.Manager and the orch dir both yield abs paths).
-func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, workspaces, staticMCPs []string, policies []policy.Rule) []string {
+func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, workspaces, staticMCPs []string, policies []policy.Rule, taskPath string, saveSandbox bool) []string {
 	bin := r.AcpWrapperPath
 	if bin == "" {
 		bin = "acp-wrapper"
@@ -519,6 +525,17 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, 
 	}
 	if r.SbxPath != "" {
 		args = append(args, "--sbx", r.SbxPath)
+	}
+	// The wrapper tears the sandbox down when its agent exits so per-task
+	// sandboxes don't pile up. --task-path lets it re-read the task's final
+	// status and keep the sandbox on a failed/blocked/crashed run (for the wolf
+	// to inspect); --save-sandbox is the task's explicit "keep it" override.
+	// Empty taskPath (planning) simply means no status-based retention.
+	if taskPath != "" {
+		args = append(args, "--task-path", taskPath)
+	}
+	if saveSandbox {
+		args = append(args, "--save-sandbox")
 	}
 	for _, m := range staticMCPs {
 		args = append(args, "--static-mcp", m)

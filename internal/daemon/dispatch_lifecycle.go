@@ -57,6 +57,9 @@ func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Proje
 	case task.StatusFailed, task.StatusRunning, task.StatusReady:
 		d.handleTaskFailure(projectPath, taskPath, p, t)
 	case task.StatusBlocked:
+		// The agent chose to block; the wolf will investigate. Keep the
+		// sandbox for it to inspect (durably, across a manual relaunch).
+		d.retainSandbox(taskPath, t)
 		d.transitionProjectBlocked(projectPath, p,
 			fmt.Sprintf("task %q reported blocked: %s", t.Name, t.BlockedReason))
 	case task.StatusCommitted:
@@ -76,6 +79,11 @@ func (d *Daemon) handleTaskFailure(projectPath, taskPath string, p *project.Proj
 			"task", t.Name,
 			"attempts", fmt.Sprintf("%d", t.Attempts),
 		)
+		// Retries are done and the project is about to block for the wolf.
+		// Keep this task's sandbox so it can be inspected — the failed run's
+		// wrapper already preserved it; persist the flag so it survives a
+		// manual relaunch and shows up in the task file.
+		d.retainSandbox(taskPath, t)
 		reason := fmt.Sprintf("task %q failed after %d attempts", t.Name, t.Attempts)
 		if t.FailureReason != "" {
 			reason += ": " + t.FailureReason
@@ -97,6 +105,27 @@ func (d *Daemon) handleTaskFailure(projectPath, taskPath string, p *project.Proj
 		"attempts", fmt.Sprintf("%d", updated.Attempts),
 	)
 	d.launchTaskAgent(projectPath, p, &updated)
+}
+
+// retainSandbox persists save_sandbox: true on a task whose sandbox should be
+// kept for post-mortem inspection — a terminal failure (retries exhausted) or
+// an agent-reported block, both of which route to the wolf agent. The wrapper
+// of the run that just ended already preserved the live sandbox by reading the
+// task's non-success status; this write makes that retention visible in the
+// task file and durable across a manual relaunch. It is only called on terminal
+// paths with no further automatic retry, so a later successful run can't inherit
+// the flag and leak its sandbox. Best-effort: a save failure is logged, not
+// fatal — the project is being blocked regardless. No-op if already set.
+func (d *Daemon) retainSandbox(taskPath string, t *task.Task) {
+	if t.SaveSandbox {
+		return
+	}
+	t.SaveSandbox = true
+	if err := task.Save(taskPath, t); err != nil {
+		d.audit.Log("task_save_error", "task", taskPath, "err", err.Error())
+		return
+	}
+	d.audit.Log("sandbox_retained", "task", t.Name)
 }
 
 // afterCommitSession runs after a commit agent's session has ended. The
@@ -193,8 +222,9 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		// policies typically remain whatever the task agent's first create
 		// applied — we forward them here for the case where commit happens
 		// to be the first launch (retry after a crash, etc.).
-		StaticMCPs: t.StaticMCPs,
-		Policies:   t.Policies,
+		StaticMCPs:  t.StaticMCPs,
+		Policies:    t.Policies,
+		SaveSandbox: t.SaveSandbox,
 	}
 	err := d.startSession(projectPath, plan, func(error) {
 		d.afterCommitSession(projectPath, plan.TaskPath, p)

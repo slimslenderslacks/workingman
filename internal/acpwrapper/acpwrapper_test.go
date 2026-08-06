@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/policy"
+	"github.com/slimslenderslacks/work/internal/task"
 )
 
 func TestNormalizeDefaults(t *testing.T) {
@@ -381,6 +382,109 @@ func TestSameWorkspaceSet(t *testing.T) {
 		if got := sameWorkspaceSet(tt.a, tt.b); got != tt.want {
 			t.Errorf("sameWorkspaceSet(%v,%v) = %v, want %v", tt.a, tt.b, got, tt.want)
 		}
+	}
+}
+
+func TestKeepForTaskStatus(t *testing.T) {
+	keep := []task.Status{task.StatusFailed, task.StatusBlocked, task.StatusRunning}
+	drop := []task.Status{task.StatusSuccess, task.StatusCommitted, task.StatusReady}
+	for _, s := range keep {
+		if !keepForTaskStatus(s) {
+			t.Errorf("keepForTaskStatus(%q) = false, want true", s)
+		}
+	}
+	for _, s := range drop {
+		if keepForTaskStatus(s) {
+			t.Errorf("keepForTaskStatus(%q) = true, want false", s)
+		}
+	}
+}
+
+// writeTaskFile writes a minimal task YAML for the removeSandboxOnExit tests and
+// returns its path.
+func writeTaskFile(t *testing.T, status task.Status, saveSandbox bool) string {
+	t.Helper()
+	tk := &task.Task{Name: "first", Status: status, SaveSandbox: saveSandbox}
+	path := filepath.Join(t.TempDir(), "first.yaml")
+	if err := task.Save(path, tk); err != nil {
+		t.Fatalf("save task: %v", err)
+	}
+	return path
+}
+
+func TestRemoveSandboxOnExit(t *testing.T) {
+	base := Config{SessionID: "s", SandboxName: "acp-s", SbxPath: "sbx"}
+
+	tests := []struct {
+		name         string
+		cfg          func(Config) Config
+		shuttingDown bool
+		wantRemove   bool
+	}{
+		{
+			name:       "success task is removed",
+			cfg:        func(c Config) Config { c.TaskPath = writeTaskFile(t, task.StatusSuccess, false); return c },
+			wantRemove: true,
+		},
+		{
+			name:       "committed task is removed",
+			cfg:        func(c Config) Config { c.TaskPath = writeTaskFile(t, task.StatusCommitted, false); return c },
+			wantRemove: true,
+		},
+		{
+			name:       "failed task is kept",
+			cfg:        func(c Config) Config { c.TaskPath = writeTaskFile(t, task.StatusFailed, false); return c },
+			wantRemove: false,
+		},
+		{
+			name:       "blocked task is kept",
+			cfg:        func(c Config) Config { c.TaskPath = writeTaskFile(t, task.StatusBlocked, false); return c },
+			wantRemove: false,
+		},
+		{
+			name:       "save_sandbox in task file is kept",
+			cfg:        func(c Config) Config { c.TaskPath = writeTaskFile(t, task.StatusSuccess, true); return c },
+			wantRemove: false,
+		},
+		{
+			name:       "save_sandbox config override is kept",
+			cfg:        func(c Config) Config { c.SaveSandbox = true; return c },
+			wantRemove: false,
+		},
+		{
+			name:       "no task path (planning) is removed",
+			cfg:        func(c Config) Config { return c },
+			wantRemove: true,
+		},
+		{
+			name:       "unreadable task file is kept",
+			cfg:        func(c Config) Config { c.TaskPath = "/no/such/task.yaml"; return c },
+			wantRemove: false,
+		},
+		{
+			name:         "shutdown never removes",
+			cfg:          func(c Config) Config { c.TaskPath = writeTaskFile(t, task.StatusSuccess, false); return c },
+			shuttingDown: true,
+			wantRemove:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeSbx{}
+			removeSandboxOnExit(context.Background(), f.run, tt.cfg(base), tt.shuttingDown)
+			var removed bool
+			for _, call := range f.calls {
+				if len(call) >= 2 && call[1] == "rm" {
+					removed = true
+					if want := []string{"sbx", "rm", "--force", "acp-s"}; !reflect.DeepEqual(call, want) {
+						t.Errorf("rm call = %v, want %v", call, want)
+					}
+				}
+			}
+			if removed != tt.wantRemove {
+				t.Errorf("sandbox removed = %v, want %v (calls: %v)", removed, tt.wantRemove, f.calls)
+			}
+		})
 	}
 }
 

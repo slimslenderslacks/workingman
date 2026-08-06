@@ -31,6 +31,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/session"
+	"github.com/slimslenderslacks/work/internal/task"
 )
 
 // SocketName is the unix-domain socket the wrapper creates inside a session
@@ -93,6 +94,22 @@ type Config struct {
 	// Leave false for interactive/long-lived sessions that should survive
 	// transient TUI disconnects.
 	ExitWhenEmpty bool
+
+	// TaskPath, when set, is the host path to the task's YAML file. On exit the
+	// wrapper re-reads it to decide whether to keep the sandbox: a task left in
+	// a failed/blocked state (or still "running" — the agent crashed mid-task)
+	// has its sandbox preserved for post-mortem inspection, while a clean
+	// success/committed run has it torn down. Empty (planning, which has no
+	// single task) means no status-based retention — only SaveSandbox and the
+	// shutdown check apply.
+	TaskPath string
+
+	// SaveSandbox, when true, makes the wrapper leave the sandbox in place when
+	// the agent exits instead of removing it with `sbx rm --force`. It is the
+	// task's explicit "keep it" override (task.Task.SaveSandbox), forwarded by
+	// the daemon. False by default so per-task sandboxes are cleaned up as tasks
+	// complete rather than accumulating across a project's run.
+	SaveSandbox bool
 
 	// StaticMCPs are sbx static-MCP names to attach to the sandbox when it
 	// is created (each becomes a `--static-mcp <name>` flag on `sbx create`).
@@ -429,6 +446,73 @@ func sameWorkspaceSet(a, b []string) bool {
 	return true
 }
 
+// keepForTaskStatus reports whether a sandbox should be preserved given the
+// task's final status. A failed or blocked task keeps its sandbox so a human or
+// the wolf agent can inspect what went wrong; a task still marked "running" kept
+// its sandbox too, because that means the agent exited without writing a
+// terminal status (it crashed mid-task), which is exactly when the post-mortem
+// state matters. A clean success/committed run — or a task never started
+// (ready) — is torn down.
+func keepForTaskStatus(s task.Status) bool {
+	switch s {
+	case task.StatusFailed, task.StatusBlocked, task.StatusRunning:
+		return true
+	default:
+		return false
+	}
+}
+
+// removeSandboxOnExit tears down the session's sbx sandbox after its agent has
+// exited, so per-task sandboxes don't accumulate across a project's run. It is
+// best-effort: a failure to remove is logged, never returned, because the
+// session has already ended cleanly and a lingering sandbox is a resource leak,
+// not a correctness bug.
+//
+// The sandbox is KEPT (not removed) when any of the following hold:
+//   - shuttingDown: we're exiting on a signal rather than the agent finishing on
+//     its own. A restart should find its sandboxes intact so it can resume, so a
+//     signal-driven teardown must not delete them.
+//   - c.SaveSandbox: the task carried save_sandbox: true — an explicit request
+//     to preserve in-sandbox state.
+//   - the task's final status warrants it (keepForTaskStatus). This is what
+//     actually retains a failed run's sandbox: the daemon only learns the run
+//     failed after this wrapper has exited, so it can't set save_sandbox in
+//     time — reading the status here is the wrapper's own decision.
+//
+// A fresh ctx is required from the caller: the wrapper's run context is already
+// cancelled by the agent's exit, and reusing it would kill `sbx rm` before it ran.
+func removeSandboxOnExit(ctx context.Context, run commandFunc, c Config, shuttingDown bool) {
+	if shuttingDown {
+		return
+	}
+	if c.SaveSandbox {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: keeping sandbox %q (save_sandbox set)\n",
+			c.SessionID, c.SandboxName)
+		return
+	}
+	if c.TaskPath != "" {
+		t, err := task.Load(c.TaskPath)
+		if err != nil {
+			// Can't tell how the task ended; preserve the sandbox and say why —
+			// an unreadable task file is itself worth investigating.
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: keeping sandbox %q (task file %s unreadable: %v)\n",
+				c.SessionID, c.SandboxName, c.TaskPath, err)
+			return
+		}
+		if t.SaveSandbox || keepForTaskStatus(t.Status) {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: keeping sandbox %q (task status %q, save_sandbox=%v)\n",
+				c.SessionID, c.SandboxName, t.Status, t.SaveSandbox)
+			return
+		}
+	}
+	if out, err := run(ctx, c.SbxPath, "rm", "--force", c.SandboxName); err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: sbx rm --force %q failed: %v: %s\n",
+			c.SessionID, c.SandboxName, err, strings.TrimSpace(string(out)))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: removed sandbox %q\n", c.SessionID, c.SandboxName)
+}
+
 // signingPreflight verifies, once the sandbox exists, that the SSH agent sbx
 // forwards into it actually holds a key — the runtime precondition ssh-keygen
 // needs to sign. Config resolution (main's readGitSigningConfig) proves signing
@@ -493,7 +577,11 @@ func Run(ctx context.Context, c Config) error {
 	}
 
 	// Cancelling this child context tears down the ACP client process when the
-	// listener stops (and vice versa), so neither outlives the other.
+	// listener stops (and vice versa), so neither outlives the other. Keep a
+	// handle on the parent so the exit path can tell an external signal
+	// (parent cancelled) from the agent finishing on its own (only the child
+	// cancelled) — the two want opposite sandbox-cleanup behavior.
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -563,6 +651,17 @@ func Run(ctx context.Context, c Config) error {
 	}()
 
 	serve(ctx, ln, procStdin, procStdout, logW, c.ExitWhenEmpty)
+
+	// The agent has exited: tear the sandbox down so per-task sandboxes don't
+	// accumulate across a project's run — unless we're shutting down on a
+	// signal, the task asked to keep it, or its final status warrants a
+	// post-mortem (see removeSandboxOnExit). Do this before removing the session
+	// dir so a failure there can't skip cleanup. A fresh context is required:
+	// the run ctx above is already cancelled by the agent's exit, so reusing it
+	// would kill `sbx rm` before it ran.
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 30*time.Second)
+	removeSandboxOnExit(cleanupCtx, execCommand, c, parentCtx.Err() != nil)
+	cancelCleanup()
 
 	// The ACP client has exited and the session's transport is gone: remove the
 	// whole session directory (session.json and the socket together) so a

@@ -119,6 +119,11 @@ func TestTaskFailureRetries(t *testing.T) {
 	if reloaded.FailureReason != "" {
 		t.Errorf("failure_reason should be cleared on retry, got %q", reloaded.FailureReason)
 	}
+	// A retryable failure must NOT set save_sandbox: the retry gets a fresh run,
+	// and a persisted flag would leak the sandbox if that retry succeeded.
+	if reloaded.SaveSandbox {
+		t.Errorf("save_sandbox should stay false on a retryable failure")
+	}
 
 	if !strings.Contains(buf.String(), "task_retry") {
 		t.Errorf("expected task_retry in audit:\n%s", buf.String())
@@ -189,6 +194,19 @@ func TestTaskFailureExhaustsRetriesAndBlocks(t *testing.T) {
 	// Audit recorded the retry exhaustion.
 	if !strings.Contains(buf.String(), "task_retry_exhausted") {
 		t.Errorf("expected task_retry_exhausted in audit:\n%s", buf.String())
+	}
+
+	// The doomed task's sandbox must be retained for the wolf: save_sandbox is
+	// persisted to the task file when retries are exhausted.
+	reloadedTask, err := task.Load(taskPath)
+	if err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if !reloadedTask.SaveSandbox {
+		t.Errorf("save_sandbox = false, want true after retries exhausted")
+	}
+	if !strings.Contains(buf.String(), "sandbox_retained") {
+		t.Errorf("expected sandbox_retained in audit:\n%s", buf.String())
 	}
 
 	// No further task or commit agents launched after the block.
@@ -319,5 +337,14 @@ func TestTaskBlockedStatusBlocksProject(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "needs human input") {
 		t.Errorf("blocked_reason not propagated through audit/notify:\n%s", buf.String())
+	}
+
+	// An agent-reported block retains the sandbox for the wolf to inspect.
+	reloadedTask, err := task.Load(taskPath)
+	if err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if !reloadedTask.SaveSandbox {
+		t.Errorf("save_sandbox = false, want true after agent-reported block")
 	}
 }
