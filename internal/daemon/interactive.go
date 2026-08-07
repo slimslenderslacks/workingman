@@ -70,11 +70,9 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 			// tasks. cwd is the worktree.
 			Workspaces: []string{workspaceDir, orchDir},
 			Cwd:        workspaceDir,
-			// A stable per-work-stream session id: --session-id creates the
-			// conversation on first launch and resumes the same one every time
-			// after, non-interactively. No prompt is injected — claude opens at
-			// its prompt awaiting the user.
-			Inner:      []string{"claude", "--dangerously-skip-permissions", "--session-id", sessionUUID(workStream)},
+			// Open (or resume) a stable per-work-stream claude conversation. No
+			// prompt is injected — claude opens at its prompt awaiting the user.
+			Inner:      sessionCommand(sessionUUID(workStream)),
 			WindowName: "session-" + workStream,
 		}
 	} else {
@@ -111,6 +109,31 @@ func interactiveKindName(claudeSession bool) string {
 // mirroring runner.SandboxNameFor so the name we ask for is the one sbx registers.
 func sanitizeSandboxName(name string) string {
 	return strings.ReplaceAll(name, "_", "-")
+}
+
+// sessionCommand builds the claude invocation for a `:session` window. It runs
+// inside the sandbox as a bash wrapper that decides, at launch time, whether to
+// resume or create the conversation with the given stable id.
+//
+// This matters because `claude --session-id <uuid>` only *creates* a
+// conversation with that id — it errors ("Session ID <uuid> is already in
+// use") and exits if one already exists. Passing it on every open therefore
+// worked the first time but crashed instantly on every reopen, closing the
+// tmux window. The sandbox's ~/.claude/projects is a persistent volume that
+// survives sandbox restarts, so the wrapper checks it: `--resume` when the
+// transcript already exists, `--session-id` (to create with the stable id)
+// when it doesn't. `exec` replaces the shell with claude so the window's
+// process is claude itself, keeping lifecycle and signals identical to running
+// it directly. The uuid is a v5 UUID (hex + hyphens only), so it's safe to
+// interpolate unquoted into the shell.
+func sessionCommand(uuid string) []string {
+	script := fmt.Sprintf(
+		`uuid=%s; `+
+			`if ls ~/.claude/projects/*/"$uuid".jsonl >/dev/null 2>&1; then `+
+			`exec claude --dangerously-skip-permissions --resume "$uuid"; `+
+			`else exec claude --dangerously-skip-permissions --session-id "$uuid"; fi`,
+		uuid)
+	return []string{"bash", "-lc", script}
 }
 
 // sessionUUID derives a stable RFC-4122 v5 UUID from the work stream name so the
