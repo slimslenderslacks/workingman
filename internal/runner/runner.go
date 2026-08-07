@@ -199,6 +199,17 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 	return nil
 }
 
+// defaultSandboxExists reports whether a sandbox by the given name exists in
+// any state (running or stopped), via the same `sbx ls --json` read interface
+// used by DefaultSandboxCreator. It backs Runner.SandboxExists when unset.
+func defaultSandboxExists(ctx context.Context, name string) (bool, error) {
+	ws, err := readSandboxWorkspaces(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	return ws != nil, nil
+}
+
 // readSandboxWorkspaces returns the workspace list for the named sandbox,
 // or nil if no sandbox by that name exists. `sbx ls --json` is the only
 // stable read interface sbx exposes.
@@ -263,6 +274,13 @@ type Runner struct {
 	// retained for interactive-agent dev/tests that exercise the generic
 	// launcher without ACP.
 	Sandbox SandboxCreator
+
+	// SandboxExists, when non-nil, reports whether a sandbox by the given name
+	// already exists (in any state, including stopped). LaunchInteractive uses
+	// it to decide whether to reuse an existing `:session` sandbox via `sbx run`
+	// instead of creating a second one by the same name. Defaults to an
+	// `sbx ls --json` lookup when nil; tests inject a fake to avoid shelling out.
+	SandboxExists func(ctx context.Context, name string) (bool, error)
 
 	// AcpLauncher, when non-nil, switches non-interactive agents
 	// (planning/task/commit) from the tmux + `sbx exec claude -p` path to a
@@ -460,12 +478,15 @@ type InteractiveSpec struct {
 // client to it. It is the shared machinery behind the TUI's `:dir` and
 // `:session` commands.
 //
-// When spec.SandboxName is set (`:session`), it first ensures the sandbox
-// exists (idempotently, via DefaultSandboxCreator — a plain `sbx create claude`
-// with the given mounts, no acp-kit, since the window runs claude directly
-// rather than the ACP bridge) and wraps the command in `sbx exec -it`. Nothing
-// removes these sandboxes, so a `:session` sandbox persists and claude resumes
-// the same conversation on the next open.
+// When spec.SandboxName is set (`:session`), it checks whether a sandbox by
+// that name already exists (in any state). If it does, it reuses it with
+// `sbx run --name <name> -- <args>`, which starts the sandbox (even if stopped)
+// and re-runs the agent from its spec — never creating a second sandbox by the
+// same name. If it doesn't exist, it creates one (via DefaultSandboxCreator — a
+// plain `sbx create claude` with the given mounts, no acp-kit, since the window
+// runs claude directly rather than the ACP bridge) and wraps the command in
+// `sbx exec -it`. Nothing removes these sandboxes, so a `:session` sandbox
+// persists and claude resumes the same conversation on the next open.
 //
 // When spec.SandboxName is empty (`:dir`), the command runs directly on the
 // host — no sandbox, no `sbx exec` — in spec.Cwd. That's a plain host shell.
@@ -482,21 +503,41 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 		if len(spec.Workspaces) == 0 {
 			return "", fmt.Errorf("runner: sandboxed interactive session needs at least one workspace")
 		}
-		ensure := r.Sandbox
-		if ensure == nil {
-			// Production wires the ACP path and leaves r.Sandbox nil; the
-			// interactive session sandbox still needs a plain sandbox, so fall
-			// back to the default creator.
-			ensure = DefaultSandboxCreator
-		}
-		if err := ensure(ctx, SandboxSpec{Name: spec.SandboxName, Workspaces: spec.Workspaces}); err != nil {
-			return "", fmt.Errorf("runner: ensure interactive sandbox %q: %w", spec.SandboxName, err)
-		}
 		sbxBin := r.SbxPath
 		if sbxBin == "" {
 			sbxBin = "sbx"
 		}
-		command = append([]string{sbxBin, "exec", "-it", "-w", spec.Cwd, spec.SandboxName}, spec.Inner...)
+		exists := r.SandboxExists
+		if exists == nil {
+			exists = defaultSandboxExists
+		}
+		present, err := exists(ctx, spec.SandboxName)
+		if err != nil {
+			return "", fmt.Errorf("runner: check interactive sandbox %q: %w", spec.SandboxName, err)
+		}
+		if present {
+			// A sandbox by this name already exists (possibly stopped). Reuse it
+			// via `sbx run --name` — which starts it and re-runs the agent read
+			// from its spec — rather than creating a second sandbox by the same
+			// name. The agent's args (Inner[1:], e.g. --session-id) are re-passed
+			// after `--` so claude resumes the same conversation.
+			command = []string{sbxBin, "run", "--name", spec.SandboxName}
+			if len(spec.Inner) > 1 {
+				command = append(append(command, "--"), spec.Inner[1:]...)
+			}
+		} else {
+			ensure := r.Sandbox
+			if ensure == nil {
+				// Production wires the ACP path and leaves r.Sandbox nil; the
+				// interactive session sandbox still needs a plain sandbox, so fall
+				// back to the default creator.
+				ensure = DefaultSandboxCreator
+			}
+			if err := ensure(ctx, SandboxSpec{Name: spec.SandboxName, Workspaces: spec.Workspaces}); err != nil {
+				return "", fmt.Errorf("runner: ensure interactive sandbox %q: %w", spec.SandboxName, err)
+			}
+			command = append([]string{sbxBin, "exec", "-it", "-w", spec.Cwd, spec.SandboxName}, spec.Inner...)
+		}
 	}
 
 	sess, err := r.Launcher.Launch(ctx, agent.Spec{
