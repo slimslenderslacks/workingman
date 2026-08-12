@@ -90,9 +90,17 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.newTaskErr = ""
 	case "archive":
 		// `archive` moves the selected work stream's tree into the sibling
-		// backup dir. It's destructive, so it goes through a yes/no confirm.
+		// backup dir and removes its wsp workspace. It's destructive, so it
+		// goes through a yes/no confirm.
 		if m.projSel == "" {
 			m.statusMsg = "no work stream selected"
+			return m, nil
+		}
+		// Only a cleaned-up work stream can be archived. Check before opening
+		// the confirm modal: a dialog whose only possible answer is "no" is a
+		// poor affordance, so the refusal lands directly on the status line.
+		if _, err := loadArchivable(m.projSel); err != nil {
+			m.statusMsg = "archive: " + err.Error()
 			return m, nil
 		}
 		m.archiveTarget = m.projSel

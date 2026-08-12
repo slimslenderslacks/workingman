@@ -1,15 +1,31 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/slimslenderslacks/work/internal/project"
 )
+
+// workspaceRemover is the sliver of workspace.Manager `:archive` needs: tearing
+// down the wsp workspace belonging to the work stream being archived. Narrowing
+// it to the one method keeps the TUI decoupled from the concrete wsp driver and
+// lets tests substitute a fake that records the branch it was asked to remove.
+type workspaceRemover interface {
+	Remove(ctx context.Context, branch string) error
+}
+
+// archiveWorkspaceTimeout bounds the `wsp rm` shell-out. The archive runs
+// inline on the UI goroutine, so a wedged wsp would otherwise freeze the TUI.
+const archiveWorkspaceTimeout = 30 * time.Second
 
 // handleConfirmArchiveKey processes a keystroke while the `:archive` confirm
 // modal is open. `y` performs the move; `n`/esc cancels. Any other key is
@@ -18,7 +34,7 @@ func (m model) handleConfirmArchiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		name := projectDisplayName(m.archiveTarget)
-		if err := archiveProject(m.projectRoot, m.archiveTarget); err != nil {
+		if err := archiveProject(m.projectRoot, m.archiveTarget, m.wspRemover); err != nil {
 			m.statusMsg = "archive: " + err.Error()
 		} else {
 			m.statusMsg = "archived " + name + " to " + backupRootFor(m.projectRoot)
@@ -44,21 +60,58 @@ func backupRootFor(root string) string {
 	return filepath.Clean(root) + ".backup"
 }
 
+// loadArchivable loads the project at projectPath and reports whether it may be
+// archived at all. Only a work stream the cleanup agent has already finished —
+// `archive: true` in its .project.yaml — is eligible; anything else is a
+// refusal, including a project file that won't load (we can't tell whether it
+// was cleaned up, so we don't touch it). Callers turn the error into the status
+// message, so the wording is user-facing and points at the next step.
+func loadArchivable(projectPath string) (*project.Project, error) {
+	if projectPath == "" {
+		return nil, errors.New("no work stream selected")
+	}
+	p, err := project.Load(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	if !p.Archive {
+		return nil, fmt.Errorf("%s has not been cleaned up — run :cleanup first", projectDisplayName(projectPath))
+	}
+	return p, nil
+}
+
 // archiveProject moves the project whose .project.yaml is at projectPath out of
 // the workspace root and into the sibling backup root, keeping its directory
-// name (e.g. ~/orch/weather-tui -> ~/orch.backup/weather-tui). Because it's a
-// move, the project leaves the workspace root immediately and the daemon's
-// project scan drops the entry on its next pass — no explicit cleanup needed.
+// name (e.g. ~/orch/weather-tui -> ~/orch.backup/weather-tui), and removes the
+// project's wsp workspace along the way. Because it's a move, the project
+// leaves the workspace root immediately and the daemon's project scan drops the
+// entry on its next pass — no explicit cleanup needed.
+//
+// Only a cleaned-up project (`archive: true`) is archivable; see loadArchivable.
 //
 // Refuses to overwrite an existing archive of the same name so a prior backup
 // is never clobbered, and only archives a direct child of the configured root
 // so a bad selection can't move an arbitrary directory.
-func archiveProject(root, projectPath string) error {
+//
+// Ordering and failure policy: every validation runs first, then the wsp
+// workspace is removed, and only then does the project directory move. Doing
+// the removal first means a failure there aborts the archive with the project
+// still in its original place — nothing is lost and the user can retry once wsp
+// is healthy — whereas moving first would leave a half-archived work stream
+// whose workspace still exists. The removal error is reported to the caller
+// (and so to the status line) rather than swallowed. wsp is nil in models with
+// no workspace manager wired in (standalone `orch tui`); removal is skipped
+// then, as it is for a project with no `branch`.
+func archiveProject(root, projectPath string, wsp workspaceRemover) error {
 	if root == "" {
 		return errors.New("no orch root configured")
 	}
 	if projectPath == "" {
 		return errors.New("no project selected")
+	}
+	p, err := loadArchivable(projectPath)
+	if err != nil {
+		return err
 	}
 	projectDir := filepath.Dir(projectPath)
 	name := filepath.Base(projectDir)
@@ -74,6 +127,13 @@ func archiveProject(root, projectPath string) error {
 		return fmt.Errorf("already archived at %s", dest)
 	} else if !os.IsNotExist(err) {
 		return err
+	}
+	if wsp != nil && p.Branch != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), archiveWorkspaceTimeout)
+		defer cancel()
+		if err := wsp.Remove(ctx, p.Branch); err != nil {
+			return fmt.Errorf("workspace %s not removed (%v); %s left in place", p.Branch, err, name)
+		}
 	}
 	if err := os.MkdirAll(backupRoot, 0o755); err != nil {
 		return err
@@ -97,6 +157,11 @@ func (m model) renderConfirmArchiveModal() string {
 	b.WriteString(dimStyle.Render(src))
 	b.WriteString("\n  → ")
 	b.WriteString(dimStyle.Render(dest))
+	b.WriteString("\n\n")
+	// State the two things the confirm is really agreeing to: the wsp
+	// workspace goes away too, and only a cleaned-up work stream qualifies
+	// (the guard already rejected the others before this modal opened).
+	b.WriteString(dimStyle.Render("Its wsp workspace is removed too. Requires :cleanup (archive: true)."))
 	b.WriteString("\n\n")
 	b.WriteString(hintStyle.Render("y: archive  •  n/esc: cancel"))
 

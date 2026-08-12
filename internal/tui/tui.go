@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/slimslenderslacks/work/internal/task"
+	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
 type pane int
@@ -146,6 +147,11 @@ type model struct {
 	// the confirm modal, so the move acts on the project that was selected at
 	// the time even if a background scan reconciles projSel meanwhile.
 	archiveTarget string
+	// wspRemover tears down a work stream's wsp workspace as part of
+	// `:archive`. Defaulted to the real wsp manager by newModel; tests swap in
+	// a fake. A nil remover means "no workspace manager wired in" and archive
+	// skips the removal.
+	wspRemover workspaceRemover
 	// newTaskDesc / newTaskErr drive the new-task modal's free-form
 	// description field and its inline error line. Populated only while
 	// mode == modeNewTask.
@@ -195,6 +201,7 @@ func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh 
 		auditCh:    auditCh,
 		sessLoaded: sessCh == nil,
 		attacher:   attacher,
+		wspRemover: workspace.NewWsp(),
 	}
 }
 
