@@ -46,6 +46,10 @@ type ProjectView struct {
 	// the daemon the first time it observed the populated project. Zero
 	// for projects created before the field existed; those sort last.
 	CreatedAt time.Time
+	// Archive mirrors the project file's `archive` flag: the cleanup agent
+	// has pushed a final commit, so the project is ready for `:archive`.
+	// The gallery renders those cards with a blue border.
+	Archive bool
 	// LoadErr is the parse error when the project's .project.yaml exists but
 	// couldn't be decoded (e.g. an agent wrote a malformed field). Empty for a
 	// healthy project. When set, the other structured fields are zero and the
@@ -162,6 +166,7 @@ func loadProjectView(path string) (ProjectView, bool) {
 		Tasks:       tasks,
 		LastUpdate:  mtime,
 		CreatedAt:   createdAt,
+		Archive:     pr.Archive,
 	}, true
 }
 
@@ -407,6 +412,7 @@ func projectViewEqual(a, b ProjectView) bool {
 	if a.Name != b.Name || a.Path != b.Path ||
 		a.Description != b.Description || a.Branch != b.Branch ||
 		a.Status != b.Status || a.LoadErr != b.LoadErr ||
+		a.Archive != b.Archive ||
 		!a.LastUpdate.Equal(b.LastUpdate) {
 		return false
 	}

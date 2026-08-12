@@ -911,6 +911,15 @@ var (
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("212")).
 				Padding(0, 1)
+	// cardArchivedBorder marks a project whose cleanup agent has finished
+	// (`archive: true` in the project file), i.e. one that `:archive` will
+	// accept. Blue "39" — the same colour as statusReady — reads as calm and
+	// finished, and is clearly distinct from both the "212" selection accent
+	// and the "240" default border.
+	cardArchivedBorder = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("39")).
+				Padding(0, 1)
 	sessionRowSelectedStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("212")).
@@ -1470,11 +1479,26 @@ func renderProjectGrid(views []ProjectView, selPath string, innerWidth, rowBudge
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
-func renderProjectCard(v ProjectView, width int, selected bool) string {
-	border := cardBorder
-	if selected {
-		border = cardSelectedBorder
+// projectCardBorder picks the border style for one card. Precedence is
+// deliberate: selection wins over the archived blue. Selection is transient
+// user state that must stay visible wherever the cursor lands — if the blue
+// won, moving onto an archived card would make the cursor disappear. The
+// archive flag is durable and stays legible the moment the cursor moves on.
+// Split out from renderProjectCard so tests can assert the choice: lipgloss
+// strips colour without a TTY, so rendered output can't be compared.
+func projectCardBorder(v ProjectView, selected bool) lipgloss.Style {
+	switch {
+	case selected:
+		return cardSelectedBorder
+	case v.Archive:
+		return cardArchivedBorder
+	default:
+		return cardBorder
 	}
+}
+
+func renderProjectCard(v ProjectView, width int, selected bool) string {
+	border := projectCardBorder(v, selected)
 	// width is the desired display width on screen; lipgloss .Width(N) sets
 	// the content+padding size and adds borders outside, so subtract the
 	// border size before handing it over. Skipping this fragments the

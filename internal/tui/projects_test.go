@@ -363,6 +363,57 @@ func TestScanProjectsKeepsTasksWithUnnamedSeed(t *testing.T) {
 	}
 }
 
+func TestScanProjectsCarriesArchiveFlag(t *testing.T) {
+	root := t.TempDir()
+
+	mk := func(name string, archive bool) {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
+			Description: name,
+			Branch:      "feat/" + name,
+			Status:      project.StatusDone,
+			Archive:     archive,
+		}, project.WriterAgent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("cleaned", true)
+	mk("dirty", false)
+
+	views, err := ScanProjects([]string{root})
+	if err != nil {
+		t.Fatalf("ScanProjects: %v", err)
+	}
+	got := map[string]bool{}
+	for _, v := range views {
+		got[v.Name] = v.Archive
+	}
+	if !got["cleaned"] {
+		t.Errorf("project with archive: true should set ProjectView.Archive")
+	}
+	if got["dirty"] {
+		t.Errorf("project without archive should leave ProjectView.Archive false")
+	}
+}
+
+// A project flipping to archive: true must make the poller emit a new
+// snapshot, otherwise the blue border waits for some unrelated field to
+// change before it appears.
+func TestProjectViewEqualDetectsArchiveFlip(t *testing.T) {
+	base := ProjectView{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusDone}
+	archived := base
+	archived.Archive = true
+	if projectViewEqual(base, archived) {
+		t.Errorf("projectViewEqual must report a difference when Archive flips")
+	}
+	if !projectViewEqual(archived, archived) {
+		t.Errorf("projectViewEqual must still report identical views as equal")
+	}
+}
+
 func taskCountsEqual(a, b map[task.Status]int) bool {
 	if len(a) != len(b) {
 		return false

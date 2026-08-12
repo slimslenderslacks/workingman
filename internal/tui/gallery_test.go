@@ -285,6 +285,69 @@ func TestSelectedCardBorderUsesAccentColor(t *testing.T) {
 	}
 }
 
+func TestArchivedCardBorderIsBlueAndDistinct(t *testing.T) {
+	// Same constraint as TestSelectedCardBorderUsesAccentColor: colours are
+	// stripped in a non-TTY test run, so inspect the style values directly.
+	archived := cardArchivedBorder.GetBorderTopForeground()
+	plain := cardBorder.GetBorderTopForeground()
+	sel := cardSelectedBorder.GetBorderTopForeground()
+	if archived == plain {
+		t.Errorf("cardArchivedBorder must differ from cardBorder; both = %v", plain)
+	}
+	if archived == sel {
+		t.Errorf("cardArchivedBorder must differ from cardSelectedBorder; both = %v", sel)
+	}
+	// Blue comes from the same 256-colour family as statusReady.
+	if want := statusReady.GetForeground(); archived != want {
+		t.Errorf("cardArchivedBorder colour = %v, want the blue %v", archived, want)
+	}
+	// The archived card must keep the same border geometry as the others, or
+	// the width arithmetic in renderProjectCard fragments the card.
+	if got, want := cardArchivedBorder.GetHorizontalBorderSize(), cardBorder.GetHorizontalBorderSize(); got != want {
+		t.Errorf("cardArchivedBorder horizontal border size = %d, want %d", got, want)
+	}
+}
+
+func TestProjectCardBorderPrefersSelectionOverArchive(t *testing.T) {
+	archived := ProjectView{Name: "alpha", Status: project.StatusDone, Archive: true}
+	normal := ProjectView{Name: "bravo", Status: project.StatusWorking}
+
+	cases := []struct {
+		name     string
+		view     ProjectView
+		selected bool
+		want     lipgloss.Style
+	}{
+		{"archived unselected", archived, false, cardArchivedBorder},
+		{"archived selected", archived, true, cardSelectedBorder},
+		{"normal unselected", normal, false, cardBorder},
+		{"normal selected", normal, true, cardSelectedBorder},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := projectCardBorder(tc.view, tc.selected).GetBorderTopForeground()
+			if want := tc.want.GetBorderTopForeground(); got != want {
+				t.Errorf("border colour = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestRenderArchivedProjectCardStaysIntact(t *testing.T) {
+	// The archived style must not change the card's shape: same line count and
+	// same width as a normal card, so a blue card doesn't fragment the grid.
+	archived := renderProjectCard(ProjectView{Name: "alpha", Status: project.StatusDone, Archive: true}, 32, false)
+	plain := renderProjectCard(ProjectView{Name: "alpha", Status: project.StatusDone}, 32, false)
+	for _, line := range strings.Split(archived, "\n") {
+		if got := lipgloss.Width(line); got != 32 {
+			t.Errorf("archived card line width = %d, want 32; line=%q", got, line)
+		}
+	}
+	if got, want := strings.Count(archived, "\n"), strings.Count(plain, "\n"); got != want {
+		t.Errorf("archived card has %d line breaks, want %d", got, want)
+	}
+}
+
 // TestOptionGlyphSwitchesPane covers the macOS Option-key fallback: a default
 // macOS terminal emits "∆"/"˚" for ⌥j/⌥k (no Meta), so those glyphs must
 // switch panes just like "alt+j"/"alt+k".
