@@ -1,8 +1,8 @@
 # orch — autonomous claude-code project daemon
 
 `orch` watches one or more directories for `.project.yaml` files and runs
-claude-code agents (project, planning, task, commit, wolf) through a state
-machine until the project is done — or blocked, in which case you get a
+claude-code agents (project, planning, task, commit, wolf, archive) through a
+state machine until the project is done — or blocked, in which case you get a
 macOS notification and a wolf-agent session to drop into.
 
 ```
@@ -10,6 +10,9 @@ status: ready    → planning agent (writes tasks/*.yaml, sets status: working)
 status: working  → task agent → commit agent → next task → ... → status: done
 status: blocked  → wolf agent + osascript notification
 status: done     → terminal
+
+cleanup: true    → archive agent (checked ahead of the status routing;
+                   commits + pushes, then sets archive: true)
 ```
 
 The daemon also reads each project's `cron:` field; firings re-evaluate the
@@ -152,13 +155,78 @@ repos:
 branch: feat/healthz-probe
 status: ready
 cron: "*/15 * * * *"   # optional; daemon re-evaluates every 15 minutes
+cleanup: true          # optional; "please run the archive agent" (set by :cleanup)
+archive: true          # optional; "the cleanup finished" (set by the archive agent)
 updated_by: agent
 ```
 
 See `examples/.project.yaml` and `examples/tasks/*.yaml` for the full
 schemas.
 
-## Cleanup
+## Cleanup and archiving
+
+A finished project is retired in two steps — a **cleanup** that leaves every
+repo committed and pushed, then an **archive** that moves the project out of
+the watched root. Both are driven from the TUI's `:` command menu on the work
+streams pane, and both are recorded on `.project.yaml` by two independent
+boolean flags (neither one is a `status:`, so a project keeps whatever status
+it already had):
+
+| Field      | Meaning                                             | Written by |
+|------------|-----------------------------------------------------|------------|
+| `cleanup:` | *request*: "run the archive agent on this project"  | the TUI's `:cleanup` (as `updated_by: agent`, so the daemon sees the event); cleared by the daemon when the agent's session ends |
+| `archive:` | *result*: the cleanup succeeded, safe to archive     | the archive agent, on success only |
+
+### `:cleanup` — the archive agent
+
+`:cleanup` sets `cleanup: true` and returns immediately; the daemon notices the
+flag ahead of its normal status routing and launches the **archive agent** in
+the project's wsp workspace. It's an interactive agent, so it may need you to
+attach. In every repo of the workspace it:
+
+1. Checks for uncommitted work (`git status --porcelain`).
+2. Classifies what's there. Anything that plainly doesn't belong in the repo
+   (build artifacts, editor scratch, local caches) is **not** committed and
+   **not** deleted — the agent *proposes* a `.gitignore` edit, notifies you, and
+   waits for approval before applying it. If approval never comes, it stops and
+   reports instead of committing.
+3. Makes one final commit.
+4. Pushes to the branch **actually checked out in that workspace**
+   (`git rev-parse --abbrev-ref HEAD`) — not a hardcoded branch name, and never
+   a force-push.
+
+There are no other pre-commit steps: no tests, no lint, no formatting, no
+scratch-file cleanup. On success the agent sets `archive: true` on
+`.project.yaml` and leaves `status:` untouched. If it can't finish, it leaves
+`archive` unset and says what's outstanding.
+
+The daemon clears `cleanup:` when the session ends either way (an unfinished run
+is logged as `archive_incomplete`), so a cleanup is never retried behind your
+back — re-run `:cleanup` yourself. Exactly one archive agent runs per request,
+and a second `:cleanup` while one is in flight is a no-op. A project that is
+already cleaned up (`archive: true`) is refused outright — its next step is
+`:archive`, not another cleanup.
+
+### `:archive`
+
+`:archive` only archives a project whose `.project.yaml` carries
+`archive: true`. Anything else is refused on the status line with "has not been
+cleaned up — run :cleanup first", and nothing moves. When the guard passes and
+you confirm, the archive:
+
+1. removes the project's **wsp workspace** (`wsp rm <branch>`), then
+2. moves the project directory to the sibling backup root, keeping its name
+   (`~/orch/my-feature` → `~/orch.backup/my-feature`).
+
+The workspace goes first on purpose: if `wsp rm` fails, the archive aborts with
+the project still in place and the failure on the status line. The daemon drops
+the project on its next scan — the move is the only cleanup needed.
+
+In the TUI's work-stream gallery, a project with `archive: true` is drawn with a
+**blue border** — it's cleaned up and waiting for `:archive`. Selection still
+wins over the blue, so the cursor never disappears onto a blue card.
+
+Doing it by hand instead:
 
 ```sh
 rm ~/orch/my-feature/.project.yaml

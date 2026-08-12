@@ -26,6 +26,19 @@ status: ready
 # Empty / omitted means "no scheduled wake-ups, event-driven only".
 cron: "*/15 * * * *"
 
+# Cleanup request flag. Set by the TUI's `:cleanup` (as updated_by: agent, so
+# the daemon sees the event); the daemon dispatches the archive agent for it
+# ahead of the normal status routing and clears the flag when that agent's
+# session ends. Omitted until a cleanup is actually requested. Not a status:
+# the project keeps whatever status it had while the cleanup runs.
+cleanup: false
+
+# Set to true by the archive agent once every repo in the workspace is
+# committed and pushed. `:archive` refuses to archive a project without it, and
+# the TUI draws such a project with a blue border. Omitted until then; nothing
+# else writes it.
+archive: false
+
 # Who last wrote this file. Daemon ignores fsnotify events where this is "daemon".
 # Values: agent | daemon
 updated_by: agent
