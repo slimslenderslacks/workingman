@@ -29,9 +29,18 @@ func pressKey(m model, s string) model {
 func TestZoomTogglesFocusedPaneOnly(t *testing.T) {
 	m := zoomTestModel() // focus == paneSessions
 
+	// Panes no longer carry titles, so identify each by content unique to it:
+	// the projects card's "no tasks" breakdown, the tasks pane's "(none)"
+	// empty state, and the sessions table's "sandbox" column header.
+	const (
+		projectsSig = "no tasks"
+		tasksSig    = "(none)"
+		sessionsSig = "sandbox"
+	)
+
 	// Normal layout shows every pane.
 	normal := m.View()
-	for _, want := range []string{"Work Streams", "Tasks", "Agent Sessions"} {
+	for _, want := range []string{projectsSig, tasksSig, sessionsSig} {
 		if !strings.Contains(normal, want) {
 			t.Fatalf("normal view missing %q; got:\n%s", want, normal)
 		}
@@ -43,10 +52,10 @@ func TestZoomTogglesFocusedPaneOnly(t *testing.T) {
 		t.Fatal("z did not set zoomed")
 	}
 	zoomed := m.View()
-	if !strings.Contains(zoomed, "Agent Sessions") {
+	if !strings.Contains(zoomed, sessionsSig) {
 		t.Errorf("zoomed view should show the focused Sessions pane; got:\n%s", zoomed)
 	}
-	for _, gone := range []string{"Work Streams", "Tasks"} {
+	for _, gone := range []string{projectsSig, tasksSig} {
 		if strings.Contains(zoomed, gone) {
 			t.Errorf("zoomed view should hide %q; got:\n%s", gone, zoomed)
 		}
@@ -58,7 +67,7 @@ func TestZoomTogglesFocusedPaneOnly(t *testing.T) {
 		t.Fatal("second z did not clear zoomed")
 	}
 	restored := m.View()
-	for _, want := range []string{"Work Streams", "Tasks", "Agent Sessions"} {
+	for _, want := range []string{projectsSig, tasksSig, sessionsSig} {
 		if !strings.Contains(restored, want) {
 			t.Errorf("restored view missing %q; got:\n%s", want, restored)
 		}

@@ -39,18 +39,14 @@ func (m model) renderProjectYAML(width, height int) string {
 		innerWidth = 0
 	}
 
-	title := "Project YAML"
 	path := m.projSel
 	if m.yamlSrc == yamlSourceTask {
-		title = "Task YAML"
 		path = m.taskSel
 	}
 
 	var b strings.Builder
-	b.WriteString(paneTitleStyle.Render(title))
-	b.WriteString("\n\n")
 
-	contentRows := innerHeight - 2
+	contentRows := innerHeight
 	if contentRows < 0 {
 		contentRows = 0
 	}

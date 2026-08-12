@@ -150,10 +150,8 @@ func TestYAMLViewerShowsTaskFileAfterPressingT(t *testing.T) {
 	m = step.(model)
 
 	view := m.View()
-	if !strings.Contains(view, "Task YAML") {
-		t.Errorf("expected pane title 'Task YAML' after pressing t; got:\n%s", view)
-	}
-	// Default selection is the first task alphabetically — "alpha".
+	// Default selection is the first task alphabetically — "alpha". The task
+	// file content (not a pane title) is what proves the source flipped.
 	if !strings.Contains(view, "name: alpha") {
 		t.Errorf("expected YAML pane to show selected task's content (name: alpha); got:\n%s", view)
 	}
@@ -176,11 +174,12 @@ func TestYAMLViewerSwapsTaskFilesOnSelectionChange(t *testing.T) {
 
 func TestYAMLViewerStaysOnTaskWhenFocusMovesAway(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
-	// Flip to task source; the viewer now shows task YAML.
+	// Flip to task source; the viewer now shows task YAML (task content, not a
+	// pane title, is the tell now that titles are gone).
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	m = step.(model)
-	if !strings.Contains(m.View(), "Task YAML") {
-		t.Fatalf("expected Task YAML title after pressing t")
+	if !strings.Contains(m.View(), "name: alpha") {
+		t.Fatalf("expected task YAML content after pressing t")
 	}
 
 	// Cycle pane focus with down. The viewer should keep showing task YAML
@@ -188,16 +187,16 @@ func TestYAMLViewerStaysOnTaskWhenFocusMovesAway(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 		m = step.(model)
-		if !strings.Contains(m.View(), "Task YAML") {
-			t.Errorf("Task YAML title lost after down #%d (focus=%v)", i+1, m.focus)
+		if !strings.Contains(m.View(), "name: alpha") {
+			t.Errorf("task YAML content lost after down #%d (focus=%v)", i+1, m.focus)
 		}
 	}
 
-	// Pressing p flips back to project YAML.
+	// Pressing p flips back to project YAML (project fields reappear).
 	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
 	m = step.(model)
-	if !strings.Contains(m.View(), "Project YAML") {
-		t.Errorf("expected Project YAML title after pressing p")
+	if !strings.Contains(m.View(), "branch:") {
+		t.Errorf("expected project YAML content after pressing p")
 	}
 }
 
@@ -260,13 +259,12 @@ func TestMouseClickOnTaskRowSelectsIt(t *testing.T) {
 	m, taskAPath, taskBPath := withTaskFixtures(t)
 	l := m.computeLayout()
 	// Tasks pane sits directly below projects in the new bottom-yaml
-	// layout: header(1) + projectsH rows, then the tasks pane.
-	const headerRows = 1
-	tasksStart := headerRows + l.projectsH
-	// Inside the tasks pane: row 0 top border, row 1 "Tasks" title, row 2
-	// blank, row 3 column header, row 4 the first task, row 5 the second
-	// task. So the second-task row is at tasksStart + 5.
-	clickY := tasksStart + 5
+	// layout: projectsH rows, then the tasks pane (no header row anymore).
+	tasksStart := l.projectsH
+	// Inside the tasks pane: row 0 top border, row 1 column header, row 2 the
+	// first task, row 3 the second task. So the second-task row is at
+	// tasksStart + 3.
+	clickY := tasksStart + 3
 	step, _ := m.Update(tea.MouseMsg{
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,

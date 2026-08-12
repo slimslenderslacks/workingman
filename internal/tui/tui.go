@@ -461,8 +461,7 @@ func (m model) moveSelectionInPane(delta int) model {
 // yamlViewport returns the YAML pane's inner content width and visible row
 // count from the current layout, or ok=false when the pane isn't in the
 // layout. It mirrors renderProjectYAML's frame math (border + horizontal
-// padding, and title + blank rows) so a cursor/scroll computed here lines up
-// with what's drawn.
+// padding) so a cursor/scroll computed here lines up with what's drawn.
 func (m model) yamlViewport() (innerWidth, contentRows int, ok bool) {
 	l := m.computeLayout()
 	if l.yamlH <= 0 {
@@ -470,7 +469,7 @@ func (m model) yamlViewport() (innerWidth, contentRows int, ok bool) {
 	}
 	bs := m.borderStyle(paneProjectYAML)
 	innerWidth = l.bodyW - bs.GetHorizontalFrameSize()
-	contentRows = l.yamlH - bs.GetVerticalFrameSize() - 2 // title + blank
+	contentRows = l.yamlH - bs.GetVerticalFrameSize()
 	if innerWidth < 0 {
 		innerWidth = 0
 	}
@@ -560,10 +559,10 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	l := m.computeLayout()
 
-	// Vertical layout (top → bottom): header (1 row), projects, tasks,
-	// optional YAML, optional sessions. The bands here mirror View()'s
-	// stacking exactly so click routing and rendering can't drift.
-	const headerRows = 1
+	// Vertical layout (top → bottom): projects, tasks, optional YAML, optional
+	// sessions. The bands here mirror View()'s stacking exactly so click
+	// routing and rendering can't drift.
+	const headerRows = 0
 	projectsEnd := headerRows + l.projectsH
 	tasksStart := projectsEnd
 	tasksEnd := tasksStart + l.tasksH
@@ -642,9 +641,9 @@ func yamlPageSize(m model) int {
 	if l.yamlH <= 0 {
 		return 0
 	}
-	// Vertical chrome inside the pane: top border + bottom border + title +
-	// blank = 4 rows. The remainder is visible content.
-	const chromeRows = 4
+	// Vertical chrome inside the pane: top border + bottom border = 2 rows.
+	// The remainder is visible content.
+	const chromeRows = 2
 	contentRows := l.yamlH - chromeRows
 	if contentRows < 1 {
 		return 0
@@ -656,11 +655,11 @@ func yamlPageSize(m model) int {
 }
 
 // taskRowAtY maps an absolute y row to a task index using the tasks pane's
-// table layout: top border (1) + title (1) + blank (1) + column header (1) +
-// one row per task. Returns -1 for clicks on the chrome (incl. the header
-// row) or beyond the last task.
+// table layout: top border (1) + column header (1) + one row per task.
+// Returns -1 for clicks on the chrome (incl. the header row) or beyond the
+// last task.
 func taskRowAtY(y, paneTop, count int) int {
-	const chromeRows = 4 // top border + "Tasks" + blank + column header
+	const chromeRows = 2 // top border + column header
 	rel := y - paneTop - chromeRows
 	if rel < 0 || rel >= count {
 		return -1
@@ -703,16 +702,14 @@ func selectedTmuxTarget(views []SessionView, id string) (string, bool) {
 // pane (i.e. after subtracting m.sessionsWidth from msg.X). innerWidth is
 // the pane's inner content width (after borders).
 //
-// Returns -1 when the click lands in a gap, in the title/blank rows above
-// the cards, below the last row, or beyond the last card in its row.
+// Returns -1 when the click lands in a gap, above the cards, below the last
+// row, or beyond the last card in its row.
 func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 	if count <= 0 || innerWidth <= 0 || xRel < 0 || yRel < 0 {
 		return -1
 	}
 	const (
-		headerLines    = 1 // outer "orch" title
 		paneTopBorder  = 1
-		paneTitleLines = 2 // "Projects" + blank line
 		paneLeftBorder = 1
 		cardRows       = 3 // top border + body + bottom border (project card body always renders 1 row tall in our layout)
 	)
@@ -728,9 +725,9 @@ func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 		perRow = 1
 	}
 
-	// Vertical: skip the outer header, the projects pane's top border, and
-	// the title + blank rows; each card occupies cardRows.
-	yIn := yRel - (headerLines + paneTopBorder + paneTitleLines)
+	// Vertical: skip the projects pane's top border; each card occupies
+	// cardRows.
+	yIn := yRel - paneTopBorder
 	if yIn < 0 {
 		return -1
 	}
@@ -769,18 +766,16 @@ func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 // sessionRowAtY maps an absolute y row to a session index. paneStartY is the
 // absolute y of the sessions pane's top border (so this function works no
 // matter where the pane sits in the stack). Inside the pane:
-// top border(1) + "Agent Sessions" title(1) + blank(1) + column header(1) +
-// one row per session.
+// top border(1) + column header(1) + one row per session.
 func sessionRowAtY(y, paneStartY, count int) int {
 	const (
 		paneTopBorder   = 1
-		paneTitleLines  = 2 // title + blank
 		paneHeaderLines = 1 // column header
 	)
 	if count <= 0 {
 		return -1
 	}
-	rel := y - paneStartY - (paneTopBorder + paneTitleLines + paneHeaderLines)
+	rel := y - paneStartY - (paneTopBorder + paneHeaderLines)
 	if rel < 0 || rel >= count {
 		return -1
 	}
@@ -936,8 +931,6 @@ func (m model) renderSessions(width, height int) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(paneTitleStyle.Render("Agent Sessions"))
-	b.WriteString("\n\n")
 	if !m.sessLoaded {
 		b.WriteString(dimStyle.Render("(loading…)"))
 		return style.Render(clampLines(b.String(), innerHeight))
@@ -951,11 +944,11 @@ func (m model) renderSessions(width, height int) string {
 	cols := sessionColumnWidths(m.sessions, now, innerWidth)
 	b.WriteString(renderSessionHeader(cols))
 
-	// 3 chrome rows above (title, blank, header) — data rows fit in the
+	// 1 chrome row above (the column header) — data rows fit in the
 	// remaining inner height. Scroll the window so the selected row stays
 	// centered when the list outgrows the pane, rather than clipping to the
 	// first maxRows and hiding a selection below it.
-	maxRows := innerHeight - 3
+	maxRows := innerHeight - 1
 	if maxRows < 0 {
 		maxRows = 0
 	}
@@ -1223,11 +1216,11 @@ func padToWidth(s string, width int) string {
 }
 
 // listPaneChromeRows is the non-data height of the row-list panes (Tasks,
-// Agent Sessions): top + bottom border, the title, its blank line, and the
-// column header. maxRows of data = paneHeight - listPaneChromeRows. Both the
-// renderers and the mouse click-router derive the visible window from it, so
-// they must agree; keeping the count here is what keeps them in lockstep.
-const listPaneChromeRows = 5
+// Agent Sessions): top + bottom border and the column header. maxRows of data
+// = paneHeight - listPaneChromeRows. Both the renderers and the mouse
+// click-router derive the visible window from it, so they must agree; keeping
+// the count here is what keeps them in lockstep.
+const listPaneChromeRows = 3
 
 // listMaxRows is how many data rows fit in a row-list pane of the given total
 // height, floored at 0.
@@ -1334,8 +1327,6 @@ func (m model) renderProjects(width, height int) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(paneTitleStyle.Render("Work Streams"))
-	b.WriteString("\n\n")
 	if !m.loaded {
 		b.WriteString(dimStyle.Render("(loading…)"))
 		return style.Render(clampLines(b.String(), innerHeight))
@@ -1345,9 +1336,8 @@ func (m model) renderProjects(width, height int) string {
 		return style.Render(clampLines(b.String(), innerHeight))
 	}
 
-	// Two rows are already consumed by the title and the blank line that
-	// follows it, so cards have innerHeight-2 rows to play with.
-	cardsBudget := innerHeight - 2
+	// Cards have the full inner height to play with.
+	cardsBudget := innerHeight
 	if cardsBudget < 0 {
 		cardsBudget = 0
 	}
@@ -1361,9 +1351,9 @@ func (m model) renderProjects(width, height int) string {
 // matching selPath gets the highlighted-border treatment.
 //
 // rowBudget is the number of terminal rows available for cards (i.e. the
-// projects pane's inner height minus title and blank). The grid renders
-// only the card rows that fit entirely — a partial card with a missing
-// bottom border looks broken, so we drop the row instead.
+// projects pane's inner height). The grid renders only the card rows that fit
+// entirely — a partial card with a missing bottom border looks broken, so we
+// drop the row instead.
 func renderProjectGrid(views []ProjectView, selPath string, innerWidth, rowBudget int) string {
 	if innerWidth <= 0 || len(views) == 0 || rowBudget < cardDisplayRows {
 		return ""
@@ -1497,32 +1487,31 @@ const auditPaneHeight = 10
 
 // projectsMinHeight is the floor for the projects pane when the body height
 // is large enough to split. Sized so exactly one row of cards fits cleanly:
-// 2 border + 1 title + 1 blank + 5 card = 9 rows.
-const projectsMinHeight = 9
+// 2 border + 5 card = 7 rows.
+const projectsMinHeight = 7
 
 // tasksMinHeight is the floor for the tasks pane below the projects pane.
-// 6 rows = top border + "Tasks" title + blank + column header + 1 task row +
-// bottom border. Below this the table can't show even one task underneath
-// the column headers.
-const tasksMinHeight = 6
+// 4 rows = top border + column header + 1 task row + bottom border. Below
+// this the table can't show even one task underneath the column headers.
+const tasksMinHeight = 4
 
 // yamlMinHeight is the floor for the project-YAML pane stacked between
-// projects and tasks. 5 rows = top border + title + blank + 1 content line +
-// bottom border. Below this we drop the pane entirely and fall back to
-// projects + tasks the way it was before the YAML viewer existed.
-const yamlMinHeight = 5
+// projects and tasks. 3 rows = top border + 1 content line + bottom border.
+// Below this we drop the pane entirely and fall back to projects + tasks the
+// way it was before the YAML viewer existed.
+const yamlMinHeight = 3
 
 // sessionsBottomHeight is the target height of the sessions pane when it
-// sits at the bottom of the body stack. 10 rows = 5 chrome (top border,
-// title, blank, column header, bottom border) + 5 content, enough for five
-// rows of the table. The pane is deliberately short — sessions are
-// status-at-a-glance, not the primary workspace.
-const sessionsBottomHeight = 10
+// sits at the bottom of the body stack. 8 rows = 3 chrome (top border,
+// column header, bottom border) + 5 content, enough for five rows of the
+// table. The pane is deliberately short — sessions are status-at-a-glance,
+// not the primary workspace.
+const sessionsBottomHeight = 8
 
-// sessionsMinHeight is the absolute floor for the sessions pane: 5 chrome +
+// sessionsMinHeight is the absolute floor for the sessions pane: 3 chrome +
 // 1 content. Below this we drop it from the layout entirely so the projects/
 // tasks/yaml stack can still fit on a tiny terminal.
-const sessionsMinHeight = 6
+const sessionsMinHeight = 4
 
 // uiLayout caches the computed dimensions of every pane for a given window
 // size. View() and handleMouse() both use it so the rendering and the
@@ -1546,7 +1535,6 @@ func (m model) computeLayout() uiLayout {
 	// the body below a usable minimum. Otherwise the audit pane forces the
 	// body to overflow the terminal and the footer disappears off-screen.
 	const (
-		headerH   = 1
 		footerH   = 1
 		minBodyH  = 4
 		minAuditH = 5
@@ -1557,11 +1545,11 @@ func (m model) computeLayout() uiLayout {
 		if candidate > m.height/3 {
 			candidate = m.height / 3
 		}
-		if candidate >= minAuditH && m.height-headerH-footerH-candidate >= minBodyH {
+		if candidate >= minAuditH && m.height-footerH-candidate >= minBodyH {
 			audit = candidate
 		}
 	}
-	bodyH := m.height - headerH - footerH - audit
+	bodyH := m.height - footerH - audit
 	if bodyH < 1 {
 		bodyH = 1
 	}
@@ -1690,18 +1678,18 @@ func desiredProjectsHeight(projW, projCount int) int {
 		perRow = 1
 	}
 	totalRows := (projCount + perRow - 1) / perRow
-	// Pane chrome: top border + title + blank + bottom border = 4 rows. Each
-	// card row is cardDisplayRows tall.
+	// Pane chrome: top border + bottom border = 2 rows. Each card row is
+	// cardDisplayRows tall.
 	return paneChromeRows + totalRows*cardDisplayRows
 }
 
-// paneChromeRows is the non-content height every pane carries: two border
-// rows plus the title + blank header. Used by sizing math that needs to ask
-// "how many rows does N rows of content cost?".
-const paneChromeRows = 4
+// paneChromeRows is the non-content height every pane carries: the two border
+// rows. Used by sizing math that needs to ask "how many rows does N rows of
+// content cost?".
+const paneChromeRows = 2
 
 // Minimum terminal dimensions below which we don't try to lay out the full
-// UI — the panes' titles and a single row of content can't fit, so we show
+// UI — the panes' borders and a single row of content can't fit, so we show
 // a one-line "terminal too small" message instead of a garbled grid.
 const (
 	minTerminalWidth  = 24
@@ -1738,19 +1726,18 @@ func (m model) View() string {
 		return m.renderACPView()
 	}
 
-	header := titleStyle.Render("orch")
 	footer := m.renderFooter()
 
-	// Maximized: the focused pane fills the whole region between header and
-	// footer, reclaiming even the audit strip for the most vertical space.
+	// Maximized: the focused pane fills the whole region above the footer,
+	// reclaiming even the audit strip for the most vertical space.
 	if m.zoomed {
-		const headerH, footerH = 1, 1
-		zoomH := m.height - headerH - footerH
+		const footerH = 1
+		zoomH := m.height - footerH
 		if zoomH < 1 {
 			zoomH = 1
 		}
 		pane := m.renderFocusedPane(m.width, zoomH)
-		return lipgloss.JoinVertical(lipgloss.Left, header, pane, footer)
+		return lipgloss.JoinVertical(lipgloss.Left, pane, footer)
 	}
 
 	l := m.computeLayout()
@@ -1768,9 +1755,9 @@ func (m model) View() string {
 
 	if l.auditH > 0 {
 		audit := m.renderAudit(m.width, l.auditH)
-		return lipgloss.JoinVertical(lipgloss.Left, header, body, audit, footer)
+		return lipgloss.JoinVertical(lipgloss.Left, body, audit, footer)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+	return lipgloss.JoinVertical(lipgloss.Left, body, footer)
 }
 
 // renderFocusedPane draws whichever pane currently has focus at the given
@@ -1816,8 +1803,6 @@ func (m model) renderTasks(width, height int) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(paneTitleStyle.Render("Tasks"))
-	b.WriteString("\n\n")
 
 	tasks := m.selectedProjectTasks()
 	if len(tasks) == 0 {
@@ -1828,10 +1813,10 @@ func (m model) renderTasks(width, height int) string {
 	cols := taskColumnWidths(innerWidth)
 	b.WriteString(renderTaskHeader(cols))
 
-	// 3 chrome rows above (title, blank, header) and we just wrote the
-	// header — so task data rows fit in innerHeight-3. Scroll the window so the
-	// selected row stays centered when the list outgrows the pane.
-	maxRows := innerHeight - 3
+	// 1 chrome row above (the column header) which we just wrote — so task
+	// data rows fit in innerHeight-1. Scroll the window so the selected row
+	// stays centered when the list outgrows the pane.
+	maxRows := innerHeight - 1
 	if maxRows < 0 {
 		maxRows = 0
 	}
@@ -2077,15 +2062,12 @@ func (m model) renderAudit(width, height int) string {
 	if innerWidth < 0 {
 		innerWidth = 0
 	}
-	// Leave one row for the title + one blank line within the content area.
-	maxLines := innerHeight - 2
+	maxLines := innerHeight
 	if maxLines < 0 {
 		maxLines = 0
 	}
 
 	var b strings.Builder
-	b.WriteString(paneTitleStyle.Render("Audit log"))
-	b.WriteString("\n\n")
 	if len(m.auditLines) == 0 {
 		b.WriteString(dimStyle.Render("(empty)"))
 		return style.Render(clampLines(b.String(), innerHeight))

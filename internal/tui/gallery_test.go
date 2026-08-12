@@ -107,7 +107,7 @@ func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
 	m = step.(model)
 
 	view := m.View()
-	for _, want := range []string{"Tasks", "register-repo", "survey", "implement", "committed", "running", "ready"} {
+	for _, want := range []string{"register-repo", "survey", "implement", "committed", "running", "ready"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing %q:\n%s", want, view)
 		}
@@ -209,9 +209,6 @@ func TestRenderTasksEmptyState(t *testing.T) {
 		{Name: "empty", Path: "/x/empty/.project.yaml", Status: project.StatusReady},
 	}})
 	m = step.(model)
-	if !strings.Contains(m.View(), "Tasks") {
-		t.Errorf("tasks pane title missing")
-	}
 	if !strings.Contains(m.View(), "(none)") {
 		t.Errorf("empty tasks should show (none); got:\n%s", m.View())
 	}

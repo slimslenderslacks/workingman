@@ -102,9 +102,6 @@ func TestProjectYAMLPaneRendersSelectedProject(t *testing.T) {
 	m = step.(model)
 
 	view := m.View()
-	if !strings.Contains(view, "Project YAML") {
-		t.Errorf("view missing YAML pane title:\n%s", view)
-	}
 	if !strings.Contains(view, "branch:") {
 		t.Errorf("view missing YAML branch field:\n%s", view)
 	}
