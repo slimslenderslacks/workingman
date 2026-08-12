@@ -114,7 +114,12 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 		"status", string(p.Status),
 		"writer", string(p.UpdatedBy),
 	)
-	d.registerCronIfAny(path, p)
+	// A cron schedule with no stop condition blocks the project (and launches
+	// the wolf) from in here; there is nothing left for the status routing below
+	// to do in that case.
+	if !d.registerCronIfAny(path, p) {
+		return
+	}
 	// A cleanup request outranks status routing, so `:cleanup` works on a
 	// project sitting in any status (see project.Project.Cleanup). We return
 	// instead of also running the status's normal agent: that agent would be
@@ -422,22 +427,102 @@ func (d *Daemon) handleTask(path string) {
 }
 
 // registerCronIfAny registers the project's cron schedule with the
-// scheduler. On each firing the callback re-invokes handleProject as if a
+// scheduler. On each firing onCronFired re-evaluates the project as if a
 // fresh fsnotify event had arrived — that path already encodes every
 // dispatch decision the daemon makes, so cron firings get correct behaviour
 // for free (planning relaunch if status=ready, next-task dispatch if
 // status=working, wolf if blocked, no-op if done).
-func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) {
+//
+// Every schedule must carry a stop condition (`cron_until` or
+// `cron_max_runs`), and this is where both halves of that rule are enforced:
+//
+//   - Stop condition already met → do not register, and Unregister anything
+//     left over, so a daemon restart cannot revive an expired schedule.
+//   - No stop condition at all → refuse to register and block the project so
+//     the wolf agent can get a human to fix the file. We deliberately do not
+//     invent a default deadline.
+//
+// Returns false when the caller must abandon the rest of dispatch: the block
+// above already wrote status:blocked and launched the wolf, so running the
+// project's normal status routing on top of it would dispatch work the file no
+// longer asks for.
+func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) bool {
 	if d.scheduler == nil || p.Cron == "" {
-		return
+		return true
 	}
-	err := d.scheduler.Register(projectPath, p.Cron, func() {
-		d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
-		d.revisitProject(projectPath)
-	})
+	if p.CronUnbounded() {
+		// Nothing should be registered, but a schedule may predate the
+		// requirement — clear it before blocking.
+		d.scheduler.Unregister(projectPath)
+		d.audit.Log("cron_missing_stop_condition",
+			"path", projectPath,
+			"spec", p.Cron,
+			"missing", "cron_until|cron_max_runs",
+		)
+		if p.Status == project.StatusBlocked {
+			// Already blocked (typically by this very check on an earlier
+			// observation). Re-blocking would rewrite the file and re-launch
+			// the wolf on every event; the status routing below sends it to the
+			// wolf anyway.
+			return true
+		}
+		d.transitionProjectBlocked(projectPath, p, fmt.Sprintf(
+			"cron %q has no stop condition: add `cron_until: <RFC3339 timestamp>` "+
+				"or `cron_max_runs: <int>` to .project.yaml so the schedule can "+
+				"unschedule itself", p.Cron))
+		return false
+	}
+	if reason := p.CronStopReason(); reason != "" {
+		d.scheduler.Unregister(projectPath)
+		d.audit.Log("cron_unscheduled", "path", projectPath, "spec", p.Cron, "reason", reason)
+		return true
+	}
+	err := d.scheduler.Register(projectPath, p.Cron, func() { d.onCronFired(projectPath) })
 	if err != nil {
 		d.audit.Log("cron_register_error", "path", projectPath, "spec", p.Cron, "err", err.Error())
 	}
+	return true
+}
+
+// onCronFired is the scheduler callback for a project's cron schedule. It
+// re-reads the project file rather than closing over the *project.Project the
+// registration was made from: the file changes under a long-lived schedule
+// (agents write it, the daemon stamps it), and the run counter below is a
+// read-modify-write that must not be based on stale fields.
+//
+// Each firing consumes one run: the counter is incremented and persisted with
+// project.Save (the daemon writer, which self-filters in handleProject so this
+// bookkeeping write cannot itself retrigger dispatch), then the stop condition
+// is re-evaluated against the new count. The firing that trips it is spent on
+// unscheduling rather than on work — so `cron_max_runs: N` yields N firings,
+// the last of which ends the schedule.
+func (d *Daemon) onCronFired(projectPath string) {
+	p, err := project.Load(projectPath)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			d.audit.Log("project_load_error", "path", projectPath, "err", err.Error())
+		}
+		return
+	}
+	d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
+
+	counted := *p
+	counted.CronRuns++
+	if err := project.Save(projectPath, &counted); err != nil {
+		// The counter didn't persist, so this firing can't be counted against
+		// the run limit. Keep re-evaluating the project — dropping the wake-up
+		// would be the worse failure — and let the deadline (or the next
+		// successful save) stop the schedule.
+		d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
+	} else {
+		p = &counted
+	}
+	if reason := p.CronStopReason(); reason != "" {
+		d.scheduler.Unregister(projectPath)
+		d.audit.Log("cron_unscheduled", "path", projectPath, "spec", p.Cron, "reason", reason)
+		return
+	}
+	d.revisitProject(projectPath)
 }
 
 // toWorkspaceRepos converts the project's repo schema into workspace.Repo

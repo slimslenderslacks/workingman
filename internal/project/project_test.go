@@ -31,6 +31,14 @@ func TestLoadExample(t *testing.T) {
 	if p.Cron != "*/15 * * * *" {
 		t.Errorf("Cron = %q", p.Cron)
 	}
+	// The example's schedule must carry a stop condition — a `cron:` without one
+	// is a project the daemon refuses to schedule.
+	if p.CronUnbounded() {
+		t.Errorf("example cron has no stop condition: cron_until/cron_max_runs unset")
+	}
+	if p.CronMaxRuns != 96 {
+		t.Errorf("CronMaxRuns = %d, want 96", p.CronMaxRuns)
+	}
 }
 
 func TestSaveForcesDaemonWriter(t *testing.T) {
@@ -453,6 +461,162 @@ func TestCleanupRoundTrip(t *testing.T) {
 	}
 	if after.Status != StatusWorking {
 		t.Errorf("Status = %q after clear, want working", after.Status)
+	}
+}
+
+func TestCronStopCondition(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+
+	cases := []struct {
+		name          string
+		p             Project
+		wantExpired   bool
+		wantUnbounded bool
+		// wantReason is a substring the stop reason must name, so the audit
+		// entry says which condition tripped. Empty when nothing tripped.
+		wantReason string
+	}{
+		{
+			name:          "no cron at all",
+			p:             Project{},
+			wantExpired:   false,
+			wantUnbounded: false,
+		},
+		{
+			// The case the daemon refuses to register.
+			name:          "cron with no stop condition",
+			p:             Project{Cron: "@every 1s"},
+			wantExpired:   false,
+			wantUnbounded: true,
+		},
+		{
+			name:        "deadline passed",
+			p:           Project{Cron: "@every 1s", CronUntil: &past},
+			wantExpired: true,
+			wantReason:  "cron_until",
+		},
+		{
+			name:        "deadline not passed",
+			p:           Project{Cron: "@every 1s", CronUntil: &future},
+			wantExpired: false,
+		},
+		{
+			name:        "run limit reached",
+			p:           Project{Cron: "@every 1s", CronMaxRuns: 3, CronRuns: 3},
+			wantExpired: true,
+			wantReason:  "cron_max_runs",
+		},
+		{
+			// >= not ==, so an overshoot (a counter bumped past the limit by an
+			// edited file) still stops.
+			name:        "run limit exceeded",
+			p:           Project{Cron: "@every 1s", CronMaxRuns: 3, CronRuns: 9},
+			wantExpired: true,
+			wantReason:  "cron_max_runs",
+		},
+		{
+			name:        "run limit not reached",
+			p:           Project{Cron: "@every 1s", CronMaxRuns: 3, CronRuns: 2},
+			wantExpired: false,
+		},
+		{
+			// A counter with no limit set is not a stop condition on its own.
+			name:          "runs without a limit",
+			p:             Project{Cron: "@every 1s", CronRuns: 100},
+			wantExpired:   false,
+			wantUnbounded: true,
+		},
+		{
+			name:        "both set, deadline trips first",
+			p:           Project{Cron: "@every 1s", CronUntil: &past, CronMaxRuns: 10, CronRuns: 1},
+			wantExpired: true,
+			wantReason:  "cron_until",
+		},
+		{
+			name:        "both set, run limit trips first",
+			p:           Project{Cron: "@every 1s", CronUntil: &future, CronMaxRuns: 10, CronRuns: 10},
+			wantExpired: true,
+			wantReason:  "cron_max_runs",
+		},
+		{
+			name:        "both set, neither trips",
+			p:           Project{Cron: "@every 1s", CronUntil: &future, CronMaxRuns: 10, CronRuns: 4},
+			wantExpired: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := tc.p.CronStopReason()
+			if got := tc.p.CronExpired(); got != tc.wantExpired {
+				t.Errorf("CronExpired() = %v, want %v (reason %q)", got, tc.wantExpired, reason)
+			}
+			if tc.wantReason == "" {
+				if reason != "" {
+					t.Errorf("CronStopReason() = %q, want empty", reason)
+				}
+			} else if !strings.Contains(reason, tc.wantReason) {
+				t.Errorf("CronStopReason() = %q, want it to name %q", reason, tc.wantReason)
+			}
+			if got := tc.p.CronUnbounded(); got != tc.wantUnbounded {
+				t.Errorf("CronUnbounded() = %v, want %v", got, tc.wantUnbounded)
+			}
+		})
+	}
+}
+
+func TestCronFieldsRoundTripAndOmitEmpty(t *testing.T) {
+	// A project without the new fields must not grow the keys, so files
+	// predating them stay byte-identical.
+	bare := filepath.Join(t.TempDir(), ".project.yaml")
+	if err := SaveAs(bare, &Project{
+		Description: "x", Branch: "feat/y", Status: StatusWorking, Cron: "@every 1h",
+	}, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(bare)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, key := range []string{"cron_until", "cron_max_runs", "cron_runs"} {
+		if strings.Contains(string(raw), key) {
+			t.Errorf("unset %s should not be emitted; got:\n%s", key, string(raw))
+		}
+	}
+
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	until := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	src := &Project{
+		Description: "x",
+		Branch:      "feat/y",
+		Status:      StatusWorking,
+		Repos:       []Repo{{Org: "slimslenderslacks", Name: "workingman"}},
+		Cron:        "@every 1h",
+		CronUntil:   &until,
+		CronMaxRuns: 24,
+		CronRuns:    3,
+	}
+	if err := SaveAs(dst, src, WriterDaemon); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	reloaded, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if reloaded.CronUntil == nil || !reloaded.CronUntil.Equal(until) {
+		t.Errorf("CronUntil = %v, want %v", reloaded.CronUntil, until)
+	}
+	if reloaded.CronMaxRuns != 24 || reloaded.CronRuns != 3 {
+		t.Errorf("CronMaxRuns/CronRuns = %d/%d, want 24/3", reloaded.CronMaxRuns, reloaded.CronRuns)
+	}
+	// Compare the rest structurally. CronUntil is checked with Equal above and
+	// then aliased, because a round-tripped time.Time is only Equal, never
+	// DeepEqual, to the original (the internal wall/monotonic representation
+	// differs). Same normalization as UpdatedBy, which SaveAs stamps.
+	reloaded.CronUntil = src.CronUntil
+	reloaded.UpdatedBy = src.UpdatedBy
+	if !reflect.DeepEqual(src, reloaded) {
+		t.Errorf("round-trip mismatch:\n src=%+v\n got=%+v", src, reloaded)
 	}
 }
 

@@ -26,6 +26,21 @@ status: ready
 # Empty / omitted means "no scheduled wake-ups, event-driven only".
 cron: "*/15 * * * *"
 
+# Stop condition for the schedule above — REQUIRED whenever `cron` is set, so a
+# schedule can end instead of waking the project up forever. `cron_until` is an
+# absolute RFC3339 deadline, `cron_max_runs` a firing limit; they are two ways
+# of saying the same thing, either one is enough, and if both are set whichever
+# trips first wins. A `cron` with neither is not scheduled at all: the daemon
+# blocks the project (→ wolf agent) rather than invent a default deadline.
+#
+#   cron_until: 2026-07-01T00:00:00Z
+cron_max_runs: 96
+
+# Firing counter, maintained by the daemon: it increments and persists this on
+# every firing, then re-checks the stop condition. Daemon-owned bookkeeping —
+# never written by an agent or the TUI.
+cron_runs: 0
+
 # Cleanup request flag. Set by the TUI's `:cleanup` (as updated_by: agent, so
 # the daemon sees the event); the daemon dispatches the archive agent for it
 # ahead of the normal status routing and clears the flag when that agent's

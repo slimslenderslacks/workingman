@@ -86,6 +86,23 @@ type Project struct {
 	// would otherwise have to special-case on every read.
 	Status Status `yaml:"status,omitempty"`
 	Cron   string `yaml:"cron,omitempty"`
+	// CronUntil is an absolute deadline for the cron schedule: once the current
+	// time is at or past it the schedule is finished and the daemon unregisters
+	// it. It and CronMaxRuns are alternative expressions of the same idea — an
+	// explicit, machine-checkable stop condition — and setting `cron` requires
+	// one of them (a schedule with neither is refused and the project blocked,
+	// see the daemon's registerCronIfAny). If both are set, whichever trips
+	// first wins. `omitempty` keeps the key out of files that don't use it.
+	CronUntil *time.Time `yaml:"cron_until,omitempty"`
+	// CronMaxRuns stops the schedule after this many firings — the run-count
+	// form of the same stop condition CronUntil expresses as a deadline; either
+	// one satisfies the requirement. Zero or absent means no run limit.
+	CronMaxRuns int `yaml:"cron_max_runs,omitempty"`
+	// CronRuns is the firing counter the daemon maintains: it increments and
+	// persists it on every cron firing, then re-checks the stop condition. This
+	// is daemon-owned bookkeeping — never written by an agent or the TUI, though
+	// both round-trip it like any other field.
+	CronRuns int `yaml:"cron_runs,omitempty"`
 	// BlockedReason is set by the daemon when transitioning a project to
 	// `status: blocked` so the cause survives a daemon restart and is
 	// visible to both humans reading the file and the wolf agent. Left
@@ -151,6 +168,41 @@ func (p *Project) Empty() bool {
 // which would miss a seed that already has a description.
 func (p *Project) Unpopulated() bool {
 	return p.Status == ""
+}
+
+// CronStopReason is the single definition of the cron stop condition: it
+// returns a human-readable description of why the schedule is finished, or ""
+// while it should keep firing. The daemon consults it in two places — before
+// registering a schedule (so a restart can't revive an expired one) and again
+// after each firing increments CronRuns.
+//
+// CronUntil and CronMaxRuns are checked in sequence, which gives the
+// "whichever trips first wins" behaviour for free when both are set. A project
+// with no cron, or with neither field, never expires here — the missing stop
+// condition is a separate, blocking condition (see CronUnbounded).
+func (p *Project) CronStopReason() string {
+	if p.CronUntil != nil && !time.Now().Before(*p.CronUntil) {
+		return fmt.Sprintf("cron_until %s has passed", p.CronUntil.UTC().Format(time.RFC3339))
+	}
+	if p.CronMaxRuns > 0 && p.CronRuns >= p.CronMaxRuns {
+		return fmt.Sprintf("cron_max_runs %d reached (cron_runs: %d)", p.CronMaxRuns, p.CronRuns)
+	}
+	return ""
+}
+
+// CronExpired is the boolean form of CronStopReason, for callers that only
+// need the predicate.
+func (p *Project) CronExpired() bool {
+	return p.CronStopReason() != ""
+}
+
+// CronUnbounded reports whether the project asks for a cron schedule without
+// giving it any way to end — `cron` set, but neither CronUntil nor
+// CronMaxRuns. Such a schedule would wake the project up forever, so the
+// daemon refuses to register it and blocks the project for the wolf agent
+// instead of inventing a default deadline.
+func (p *Project) CronUnbounded() bool {
+	return p.Cron != "" && p.CronUntil == nil && p.CronMaxRuns <= 0
 }
 
 func Load(path string) (*Project, error) {

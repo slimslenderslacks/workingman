@@ -16,7 +16,9 @@ cleanup: true    → archive agent (checked ahead of the status routing;
 ```
 
 The daemon also reads each project's `cron:` field; firings re-evaluate the
-project as if its `.project.yaml` had been edited.
+project as if its `.project.yaml` had been edited. Every schedule needs an
+explicit stop condition (`cron_until:` or `cron_max_runs:`) — see
+[Example `.project.yaml`](#example-projectyaml).
 
 ## Prerequisites
 
@@ -155,10 +157,22 @@ repos:
 branch: feat/healthz-probe
 status: ready
 cron: "*/15 * * * *"   # optional; daemon re-evaluates every 15 minutes
+cron_max_runs: 96      # required with cron (or cron_until): stop after 96 firings
+cron_runs: 12          # daemon-owned firing counter
 cleanup: true          # optional; "please run the archive agent" (set by :cleanup)
 archive: true          # optional; "the cleanup finished" (set by the archive agent)
 updated_by: agent
 ```
+
+A `cron:` schedule must come with a stop condition — either
+`cron_until: <RFC3339 timestamp>` (an absolute deadline) or
+`cron_max_runs: <int>` (a firing limit). They are two expressions of the same
+idea, either one is enough, and if both are set whichever trips first wins. The
+daemon counts firings in `cron_runs`, unregisters the schedule as soon as the
+condition is met (logging `cron_unscheduled`), and reaching `status: done`
+unschedules it too. A project with `cron:` and *no* stop condition is not
+scheduled at all: the daemon blocks it and summons the wolf agent, since a
+schedule that can never end would wake the project up forever.
 
 See `examples/.project.yaml` and `examples/tasks/*.yaml` for the full
 schemas.
