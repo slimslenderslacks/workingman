@@ -72,6 +72,7 @@ func TestRenderArchive(t *testing.T) {
 		"WAIT",                        // ...and that it must not apply it alone
 		"notification",                // approval arrives via the interactive session
 		"rev-parse --abbrev-ref HEAD", // step 4: branch is read, not assumed
+		"@{upstream}..HEAD",           // ...and so is how far ahead it is
 		"archive: true",               // step 5: success marker
 		"updated_by: agent",
 	} {
@@ -87,6 +88,19 @@ func TestRenderArchive(t *testing.T) {
 	// No pre-commit busywork: the agent is told to skip tests and lint.
 	if !strings.Contains(out, "No tests, no lint") {
 		t.Errorf("expected the no-extra-work instruction in:\n%s", out)
+	}
+	// A repo that is already clean and already up to date must be left alone:
+	// no empty commit, no no-op push — and that is still a success.
+	for _, want := range []string{
+		"Commit ONLY if there is something to commit",
+		"--allow-empty",
+		"Push ONLY if the repo has commits the upstream does not",
+		"run a no-op push",
+		"needed neither a commit nor a push is a success",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
 	}
 }
 

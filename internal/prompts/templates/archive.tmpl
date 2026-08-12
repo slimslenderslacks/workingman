@@ -18,7 +18,8 @@ repo at its root. Do the following in EVERY repo it contains.
 
      git -C <repo> status --porcelain
 
-   If it is clean, there is nothing to commit — move on to the next repo.
+   If the output is empty there is nothing to commit: skip steps 2 and 3 and go
+   straight to step 4, which decides whether anything still needs pushing.
 
 2. Classify what is uncommitted. Some paths plainly do not belong in the repo:
 
@@ -37,26 +38,45 @@ repo at its root. Do the following in EVERY repo it contains.
    not apply it and do not commit those paths — go to step 5 and report that
    you could not finish.
 
-3. Once the tree holds only changes that belong in the repo (either it always
-   did, or the approved `.gitignore` edit took the rest out of the way), make
-   ONE final commit with a short message describing what is being wrapped up.
-   Stage with `git -C <repo> add -A` after the ignore rules are in place, so
-   the artifacts above stay out.
+3. Commit ONLY if there is something to commit. Once the tree holds only
+   changes that belong in the repo (either it always did, or the approved
+   `.gitignore` edit took the rest out of the way), make ONE final commit with a
+   short message describing what is being wrapped up. Stage with
+   `git -C <repo> add -A` after the ignore rules are in place, so the artifacts
+   above stay out.
+
+   If `git -C <repo> status --porcelain` is empty there is nothing to record:
+   do NOT commit, and never reach for `--allow-empty`. An empty commit is not
+   an acceptable way to "finish" a repo.
 
    Your git identity comes from the environment (GIT_AUTHOR_* /
    GIT_COMMITTER_*). Do NOT run `git config user.name` / `user.email` or pass
    `--author`.
 
-4. Push to the branch that is actually checked out in this workspace. Determine
-   it per repo:
+4. Push ONLY if the repo has commits the upstream does not. Read both the
+   branch and how far ahead it is per repo — never assume either:
 
      branch=$(git -C <repo> rev-parse --abbrev-ref HEAD)
-     git -C <repo> push origin "$branch"
+     ahead=$(git -C <repo> rev-list --count @{upstream}..HEAD)
 
    Do not hardcode `working`, and do not push to any other branch name — if
    what is checked out disagrees with what you expected, the checked-out branch
-   wins. If the push is rejected (non-fast-forward, no upstream, auth failure),
-   stop and go to step 5; do not force-push and do not rewrite history.
+   wins.
+
+     - ahead is greater than 0 — there is work to publish, so push it:
+
+         git -C <repo> push origin "$branch"
+
+     - ahead is 0 — the branch is already up to date with its upstream. Do NOT
+       run a no-op push. Report the repo as already clean and move on; a repo
+       that needed neither a commit nor a push is a success, not a failure.
+
+     - `@{upstream}` does not resolve (no upstream configured) — the branch has
+       never been published, so its commits still need pushing: push it as
+       above.
+
+   If a push is rejected (non-fast-forward, auth failure), stop and go to step
+   5; do not force-push and do not rewrite history.
 
 DO NO OTHER PRE-COMMIT WORK. No tests, no lint, no formatting, no scratch-file
 cleanup, no refactors, no dependency updates. The checks above plus
@@ -65,7 +85,8 @@ commit-and-push are the whole job.
 5. Report the outcome by editing {{.ProjectPath}}:
 
      - If every repo is now committed and pushed (including repos that were
-       already clean), set
+       already clean, and repos that were already up to date with their
+       upstream and so needed no push), set
 
          archive: true
 

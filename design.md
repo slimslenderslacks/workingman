@@ -54,16 +54,16 @@ The archive agent (the "cleanup" agent) prepares a finished project to be archiv
 
 * checks for uncommitted changes;
 * classifies them — anything that plainly does not belong in the repo (build artifacts, editor scratch files, local caches) is neither committed nor deleted. The agent instead PROPOSES the exact `.gitignore` edit, notifies the user, and waits for approval; it applies the edit only if the human says yes, and gives up (reporting what is outstanding) if they say no or never answer;
-* makes one final commit;
-* pushes to the branch that is actually checked out in the workspace — read per repo with `git rev-parse --abbrev-ref HEAD`, never a hardcoded branch, never a force-push.
+* makes one final commit — only if there is something to commit; an already-clean tree gets no empty commit;
+* pushes to the branch that is actually checked out in the workspace — read per repo with `git rev-parse --abbrev-ref HEAD`, never a hardcoded branch, never a force-push — and only if that branch is ahead of its upstream (`git rev-list --count @{upstream}..HEAD`). A repo already up to date is reported as clean rather than given a no-op push.
 
 There are no other pre-commit steps: no tests, no lint, no formatting, no scratch-file cleanup. Those checks plus commit-and-push are the whole job.
 
-On success — every repo committed and pushed — the agent sets `archive: true` on the project file and leaves `status:` alone. If it cannot finish, it leaves `archive` unset and says what a human needs to do. It never writes the `cleanup` request flag itself; the daemon owns clearing that.
+On success — every repo committed and pushed, including repos that needed neither — the agent sets `archive: true` on the project file and leaves `status:` alone. If it cannot finish, it leaves `archive` unset and says what a human needs to do. It never writes the `cleanup` request flag itself; the daemon owns clearing that.
 
 # archiving a project
 
-`:archive` in the TUI retires a project, and it refuses to run on a project that has not been cleaned up: without `archive: true` it warns "has not been cleaned up — run :cleanup first" and touches nothing. When the guard passes and the user confirms, the archive removes the project's wsp workspace and then moves the project directory to the sibling backup root (`<root>/<name>` → `<root>.backup/<name>`). The workspace is removed first so that a `wsp rm` failure aborts the archive with the project still in place, rather than leaving a half-archived project whose workspace still exists. The daemon needs no notification: the project has left the watched root, so the next scan drops it.
+`:archive` in the TUI retires a project, and it refuses to run on a project that has not been cleaned up: without `archive: true` it warns "has not been cleaned up — run :cleanup first" and touches nothing. When the guard passes and the user confirms, the archive deletes the `.orch` directory at the root of the project's wsp workspace, removes the workspace itself, and then moves the project directory to the sibling backup root (`<root>/<name>` → `<root>.backup/<name>`). `.orch` — the orchestrator's own control directory, resolved from the same project `branch` the workspace removal keys off — goes first so wsp neither trips over it nor leaves it behind; a workspace with no branch, no resolvable path, or no `.orch` skips that step cleanly. Both removals precede the move so that a failure in either aborts the archive with the project still in place, rather than leaving a half-archived project whose workspace still exists. The daemon needs no notification: the project has left the watched root, so the next scan drops it.
 
 # daemon
 

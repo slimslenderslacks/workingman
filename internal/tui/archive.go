@@ -16,10 +16,13 @@ import (
 )
 
 // workspaceRemover is the sliver of workspace.Manager `:archive` needs: tearing
-// down the wsp workspace belonging to the work stream being archived. Narrowing
-// it to the one method keeps the TUI decoupled from the concrete wsp driver and
-// lets tests substitute a fake that records the branch it was asked to remove.
+// down the wsp workspace belonging to the work stream being archived, plus
+// resolving where that workspace lives so the orchestrator's own `.orch`
+// control directory can be cleared out of it first. Narrowing it to those two
+// methods keeps the TUI decoupled from the concrete wsp driver and lets tests
+// substitute a fake that records the branch it was asked to remove.
 type workspaceRemover interface {
+	Path(branch string) (string, error)
 	Remove(ctx context.Context, branch string) error
 }
 
@@ -93,15 +96,16 @@ func loadArchivable(projectPath string) (*project.Project, error) {
 // is never clobbered, and only archives a direct child of the configured root
 // so a bad selection can't move an arbitrary directory.
 //
-// Ordering and failure policy: every validation runs first, then the wsp
-// workspace is removed, and only then does the project directory move. Doing
-// the removal first means a failure there aborts the archive with the project
-// still in its original place — nothing is lost and the user can retry once wsp
-// is healthy — whereas moving first would leave a half-archived work stream
-// whose workspace still exists. The removal error is reported to the caller
-// (and so to the status line) rather than swallowed. wsp is nil in models with
-// no workspace manager wired in (standalone `orch tui`); removal is skipped
-// then, as it is for a project with no `branch`.
+// Ordering and failure policy: every validation runs first, then the workspace
+// is torn down — its `.orch` directory first, then the workspace itself — and
+// only then does the project directory move. Doing the removals first means a
+// failure there aborts the archive with the project still in its original
+// place — nothing is lost and the user can retry once wsp is healthy — whereas
+// moving first would leave a half-archived work stream whose workspace still
+// exists. Removal errors are reported to the caller (and so to the status line)
+// rather than swallowed. wsp is nil in models with no workspace manager wired in
+// (standalone `orch tui`); both removals are skipped then, as they are for a
+// project with no `branch`.
 func archiveProject(root, projectPath string, wsp workspaceRemover) error {
 	if root == "" {
 		return errors.New("no orch root configured")
@@ -129,6 +133,9 @@ func archiveProject(root, projectPath string, wsp workspaceRemover) error {
 		return err
 	}
 	if wsp != nil && p.Branch != "" {
+		if err := removeWorkspaceOrch(wsp, p.Branch); err != nil {
+			return fmt.Errorf("workspace %s: .orch not removed (%v); %s left in place", p.Branch, err, name)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), archiveWorkspaceTimeout)
 		defer cancel()
 		if err := wsp.Remove(ctx, p.Branch); err != nil {
@@ -139,6 +146,39 @@ func archiveProject(root, projectPath string, wsp workspaceRemover) error {
 		return err
 	}
 	return os.Rename(projectDir, dest)
+}
+
+// removeWorkspaceOrch deletes the `.orch` directory at the root of the wsp
+// workspace for branch — the orchestrator's own control directory (agent
+// instructions and context), not repo content. It runs before the workspace
+// itself is removed so wsp never has to step over it or leave it behind.
+//
+// The workspace is keyed on the project's `branch`, exactly as the wsp removal
+// that follows is. Nothing to do is not an error: a branchless project, a branch
+// wsp cannot resolve (there is then no workspace to clean, and the removal that
+// follows is a no-op for it too), or a workspace with no `.orch` directory all
+// return nil. A resolved root that is the filesystem root is refused rather than
+// trusted, so a bad wsp answer can't turn into `rm -rf /.orch`.
+func removeWorkspaceOrch(wsp workspaceRemover, branch string) error {
+	if wsp == nil || branch == "" {
+		return nil
+	}
+	root, err := wsp.Path(branch)
+	if err != nil || root == "" {
+		return nil
+	}
+	root = filepath.Clean(root)
+	if root == string(filepath.Separator) || root == "." {
+		return fmt.Errorf("refusing to clean .orch under %q", root)
+	}
+	dir := filepath.Join(root, ".orch")
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	return os.RemoveAll(dir)
 }
 
 // renderConfirmArchiveModal draws the centered yes/no dialog for `:archive`.
