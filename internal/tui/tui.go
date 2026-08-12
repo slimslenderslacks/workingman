@@ -39,8 +39,8 @@ type uiMode int
 const (
 	modeNormal uiMode = iota
 	// modeCommandPicker is the menu shown after `:` on the work-streams pane.
-	// It lists the project commands (task/dir/session/wolf/new/archive); the
-	// user moves with j/k, runs one with enter (or its first letter), and
+	// It lists the project commands (task/dir/session/wolf/new/cleanup/archive);
+	// the user moves with j/k, runs one with enter (or its first letter), and
 	// cancels with esc. It replaces the old free-form `:command` line so the
 	// commands are discoverable rather than memorised.
 	modeCommandPicker
