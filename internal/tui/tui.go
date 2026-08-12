@@ -920,6 +920,15 @@ var (
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("39")).
 				Padding(0, 1)
+	// cardCronActiveBorder marks a project with a live `cron:` schedule — one
+	// whose stop condition hasn't tripped yet, so it still wakes itself up.
+	// Green "82" — the same colour as statusRunning, which is what a live
+	// schedule amounts to — and distinct from the "39" archive blue, the "212"
+	// selection accent and the "240" default border.
+	cardCronActiveBorder = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("82")).
+				Padding(0, 1)
 	sessionRowSelectedStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("212")).
@@ -1480,10 +1489,17 @@ func renderProjectGrid(views []ProjectView, selPath string, innerWidth, rowBudge
 }
 
 // projectCardBorder picks the border style for one card. Precedence is
-// deliberate: selection wins over the archived blue. Selection is transient
-// user state that must stay visible wherever the cursor lands — if the blue
-// won, moving onto an archived card would make the cursor disappear. The
-// archive flag is durable and stays legible the moment the cursor moves on.
+// deliberate: selected > archive > cron-active > default.
+//
+// Selection wins over everything. It is transient user state that must stay
+// visible wherever the cursor lands — if a card colour won, moving onto that
+// card would make the cursor disappear. Both durable flags stay legible the
+// moment the cursor moves on.
+//
+// Archive sits above cron-active because the blue border is what tells a human
+// `:archive` will now be accepted, and a cleaned-up project is effectively
+// finished even if a schedule is still registered against it.
+//
 // Split out from renderProjectCard so tests can assert the choice: lipgloss
 // strips colour without a TTY, so rendered output can't be compared.
 func projectCardBorder(v ProjectView, selected bool) lipgloss.Style {
@@ -1492,6 +1508,8 @@ func projectCardBorder(v ProjectView, selected bool) lipgloss.Style {
 		return cardSelectedBorder
 	case v.Archive:
 		return cardArchivedBorder
+	case v.CronActive:
+		return cardCronActiveBorder
 	default:
 		return cardBorder
 	}

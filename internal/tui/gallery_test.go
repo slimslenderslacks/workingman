@@ -308,9 +308,38 @@ func TestArchivedCardBorderIsBlueAndDistinct(t *testing.T) {
 	}
 }
 
+func TestCronActiveCardBorderIsGreenAndDistinct(t *testing.T) {
+	// Mirrors TestArchivedCardBorderIsBlueAndDistinct: colours are stripped in
+	// a non-TTY test run, so inspect the style values directly.
+	cronActive := cardCronActiveBorder.GetBorderTopForeground()
+	plain := cardBorder.GetBorderTopForeground()
+	sel := cardSelectedBorder.GetBorderTopForeground()
+	archived := cardArchivedBorder.GetBorderTopForeground()
+	if cronActive == plain {
+		t.Errorf("cardCronActiveBorder must differ from cardBorder; both = %v", plain)
+	}
+	if cronActive == sel {
+		t.Errorf("cardCronActiveBorder must differ from cardSelectedBorder; both = %v", sel)
+	}
+	if cronActive == archived {
+		t.Errorf("cardCronActiveBorder must differ from cardArchivedBorder; both = %v", archived)
+	}
+	// Green comes from the same 256-colour family as statusRunning.
+	if want := statusRunning.GetForeground(); cronActive != want {
+		t.Errorf("cardCronActiveBorder colour = %v, want the green %v", cronActive, want)
+	}
+	// Same border geometry as the others, or the width arithmetic in
+	// renderProjectCard fragments the card.
+	if got, want := cardCronActiveBorder.GetHorizontalBorderSize(), cardBorder.GetHorizontalBorderSize(); got != want {
+		t.Errorf("cardCronActiveBorder horizontal border size = %d, want %d", got, want)
+	}
+}
+
 func TestProjectCardBorderPrefersSelectionOverArchive(t *testing.T) {
 	archived := ProjectView{Name: "alpha", Status: project.StatusDone, Archive: true}
 	normal := ProjectView{Name: "bravo", Status: project.StatusWorking}
+	cronActive := ProjectView{Name: "charlie", Status: project.StatusWorking, CronActive: true}
+	both := ProjectView{Name: "delta", Status: project.StatusDone, Archive: true, CronActive: true}
 
 	cases := []struct {
 		name     string
@@ -322,6 +351,10 @@ func TestProjectCardBorderPrefersSelectionOverArchive(t *testing.T) {
 		{"archived selected", archived, true, cardSelectedBorder},
 		{"normal unselected", normal, false, cardBorder},
 		{"normal selected", normal, true, cardSelectedBorder},
+		{"cron-active unselected", cronActive, false, cardCronActiveBorder},
+		{"cron-active selected", cronActive, true, cardSelectedBorder},
+		{"archived and cron-active unselected", both, false, cardArchivedBorder},
+		{"archived and cron-active selected", both, true, cardSelectedBorder},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

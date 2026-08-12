@@ -238,7 +238,8 @@ the project on its next scan — the move is the only cleanup needed.
 
 In the TUI's work-stream gallery, a project with `archive: true` is drawn with a
 **blue border** — it's cleaned up and waiting for `:archive`. Selection still
-wins over the blue, so the cursor never disappears onto a blue card.
+wins over the blue, so the cursor never disappears onto a blue card. See
+[Gallery border colours](#gallery-border-colours) for the full precedence.
 
 Doing it by hand instead:
 
@@ -247,3 +248,27 @@ rm ~/orch/my-feature/.project.yaml
 rm -rf ~/orch/my-feature/{tasks,.orch}
 wsp rm feat/healthz-probe
 ```
+
+## Gallery border colours
+
+Each card in the TUI's work-streams gallery carries one border colour, so a scan
+of the pane tells you what state its project is in:
+
+| Border | Meaning |
+|--------|---------|
+| **pink** | the selected card — where the cursor is |
+| **blue** | `archive: true` — cleaned up, waiting for `:archive` |
+| **green** | a live `cron:` schedule — the stop condition hasn't tripped, so the project still wakes itself up |
+| grey | nothing special |
+
+Only one colour shows at a time, and they win in that order: **selected > blue
+archive > green cron > grey**. Selection is on top so the cursor never
+disappears onto a coloured card. Blue beats green because the blue border is
+what tells you `:archive` will be accepted, and a cleaned-up project is
+effectively finished even if a schedule is still registered against it — so a
+project that is both loses its green border until it's archived.
+
+The green border tracks the same stop condition the daemon unschedules on
+(`cron_until` / `cron_max_runs` vs. `cron_runs`, see
+[Example `.project.yaml`](#example-projectyaml)), so it clears itself on the
+gallery's next refresh once a schedule expires — no file edit needed.

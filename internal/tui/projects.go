@@ -50,6 +50,13 @@ type ProjectView struct {
 	// has pushed a final commit, so the project is ready for `:archive`.
 	// The gallery renders those cards with a blue border.
 	Archive bool
+	// CronActive means the project has a `cron:` schedule that is still live —
+	// set, and with its stop condition (`cron_until` / `cron_max_runs`) not yet
+	// tripped. The gallery renders those cards with a green border so a scan of
+	// the pane shows which streams still wake themselves up. Derived from
+	// project.CronStopReason, the same predicate the daemon unschedules on, so
+	// the border and the schedule can't disagree.
+	CronActive bool
 	// LoadErr is the parse error when the project's .project.yaml exists but
 	// couldn't be decoded (e.g. an agent wrote a malformed field). Empty for a
 	// healthy project. When set, the other structured fields are zero and the
@@ -167,6 +174,7 @@ func loadProjectView(path string) (ProjectView, bool) {
 		LastUpdate:  mtime,
 		CreatedAt:   createdAt,
 		Archive:     pr.Archive,
+		CronActive:  pr.Cron != "" && !pr.CronExpired(),
 	}, true
 }
 
@@ -412,7 +420,7 @@ func projectViewEqual(a, b ProjectView) bool {
 	if a.Name != b.Name || a.Path != b.Path ||
 		a.Description != b.Description || a.Branch != b.Branch ||
 		a.Status != b.Status || a.LoadErr != b.LoadErr ||
-		a.Archive != b.Archive ||
+		a.Archive != b.Archive || a.CronActive != b.CronActive ||
 		!a.LastUpdate.Equal(b.LastUpdate) {
 		return false
 	}
