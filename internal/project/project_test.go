@@ -226,6 +226,105 @@ func TestNewReposParsing(t *testing.T) {
 	}
 }
 
+func TestArchiveFlagLoad(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "archive true",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\narchive: true\n",
+			want: true,
+		},
+		{
+			name: "archive false",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\narchive: false\n",
+			want: false,
+		},
+		{
+			// The common case: a project file written before the flag existed.
+			name: "key absent",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\n",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), ".project.yaml")
+			if err := os.WriteFile(dst, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			p, err := Load(dst)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if p.Archive != tc.want {
+				t.Errorf("Archive = %v, want %v", p.Archive, tc.want)
+			}
+			// The other fields must survive alongside it.
+			if p.Description != "x" || p.Branch != "feat/y" || p.Status != StatusWorking {
+				t.Errorf("other fields disturbed: %+v", p)
+			}
+		})
+	}
+}
+
+func TestArchiveOmitEmpty(t *testing.T) {
+	// A project without the flag must re-save without adding an `archive:`
+	// key, so files predating the flag stay byte-identical.
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	if err := SaveAs(dst, &Project{
+		Description: "x", Branch: "feat/y", Status: StatusWorking,
+	}, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(raw), "archive") {
+		t.Errorf("false Archive should not emit an archive line; got:\n%s", string(raw))
+	}
+}
+
+func TestArchiveRoundTrip(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	src := &Project{
+		Description: "x",
+		Branch:      "feat/y",
+		Status:      StatusWorking,
+		Repos:       []Repo{{Org: "slimslenderslacks", Name: "workingman"}},
+		Archive:     true,
+	}
+	if err := SaveAs(dst, src, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), "archive: true") {
+		t.Errorf("want `archive: true` on disk; got:\n%s", string(raw))
+	}
+	reloaded, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reloaded.Archive {
+		t.Errorf("Archive = false after round-trip")
+	}
+	// Nothing else may shift: the flag is independent of Status.
+	if reloaded.Status != StatusWorking {
+		t.Errorf("Status = %q, want working", reloaded.Status)
+	}
+	// SaveAs stamps the writer on the copy it writes, not on src.
+	reloaded.UpdatedBy = src.UpdatedBy
+	if !reflect.DeepEqual(src, reloaded) {
+		t.Errorf("round-trip mismatch:\n src=%+v\n got=%+v", src, reloaded)
+	}
+}
+
 func TestEmptyIgnoresNewReposPresence(t *testing.T) {
 	// A project that carries only new_repos is NOT empty — it's a populated
 	// intent the daemon should act on.

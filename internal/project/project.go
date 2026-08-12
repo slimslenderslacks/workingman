@@ -92,6 +92,13 @@ type Project struct {
 	// empty for any non-blocked state. Cleared by whichever agent moves
 	// the project back out of blocked (planning, wolf).
 	BlockedReason string `yaml:"blocked_reason,omitempty"`
+	// Archive means the project has been cleaned up (final commit pushed) and
+	// is now safe to archive. It is written by the cleanup/archive agent on
+	// success; `:archive` refuses to archive a project without it, and the TUI
+	// renders such a project with a blue border. It is an independent flag,
+	// not a Status. `omitempty` keeps existing project files byte-identical
+	// until the flag is actually set.
+	Archive bool `yaml:"archive,omitempty"`
 	// CreatedAt is stamped by the daemon the first time it observes a
 	// populated .project.yaml (i.e. just after the project agent fills in
 	// description/branch/status). Used by the TUI to order work streams
