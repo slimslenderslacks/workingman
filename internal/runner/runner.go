@@ -41,8 +41,10 @@ type Plan struct {
 	// (project, planning, wolf).
 	//
 	// Leave WorkingDir empty for agents that need a wsp workspace (task,
-	// commit); in that case Branch + Repos are required so workspace.Manager
-	// can provision one.
+	// commit, archive); in that case Branch + Repos are required so
+	// workspace.Manager can provision one. The archive agent is in that group
+	// because its whole job — inspecting `git status`, committing, pushing —
+	// happens in the repos, not in the control dir.
 	WorkingDir string
 	Branch     string
 	Repos      []workspace.Repo
@@ -95,13 +97,15 @@ const initialPrompt = "Read .orch/instructions.md and .orch/context.yaml, then f
 // DefaultCommandBuilder returns the production command: claude-code, told to
 // read the instructions and context the orchestrator just wrote.
 //
-// Autonomous kinds (planning, task, commit) use --print so claude executes
-// one turn — including any tool use needed to complete the task — and exits.
-// That exit closes the tmux window and lets the daemon chain to the next
-// phase.
+// Autonomous kinds (project, planning, task, commit) use --print so claude
+// executes one turn — including any tool use needed to complete the task —
+// and exits. That exit closes the tmux window and lets the daemon chain to the
+// next phase.
 //
-// Interactive kinds (project, wolf) omit --print: a human attaches via tmux
-// and drives the conversation, so claude must remain at the prompt.
+// Interactive kinds (wolf, archive) omit --print: a human attaches via tmux
+// and drives the conversation, so claude must remain at the prompt. The wolf
+// waits for guidance on a blocked project; the archive agent waits for the
+// user to approve a proposed `.gitignore` change.
 //
 // Sandbox wrapping (running claude inside an `sbx exec`) is layered on by
 // Runner.Start *after* this builder returns — keeping the builder pure of
@@ -757,6 +761,12 @@ func sessionName(p Plan) string {
 //     basename of the project's control dir. Each task gets its OWN sandbox
 //     so its `--static-mcp` set can differ from siblings; the commit agent
 //     for that task reuses the same sandbox so it sees the task's git work.
+//   - Archive → "<work-stream>-archive". It runs against the project's wsp
+//     workspace (not a per-task sandbox: it is a whole-project wrap-up), so it
+//     gets a name of its own rather than reusing any task's. Note that the
+//     archive agent is interactive, so it takes the tmux path, and production
+//     wires the ACP launcher with a nil Sandbox creator — meaning this name is
+//     only used by the legacy sandboxed tmux path (dev/tests).
 //
 // sbx rejects sandbox names containing underscores, so any "_" in the derived
 // name is rewritten to "-" here — that matches the normalization the
@@ -784,6 +794,8 @@ func SandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 			return ""
 		}
 		name = base + "-" + taskName
+	case agent.ArchiveAgent:
+		name = base + "-archive"
 	default:
 		return ""
 	}
@@ -800,6 +812,12 @@ func SandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 // task agent's status writeback to `tasks/<name>.yaml` fails because the
 // directory simply doesn't exist inside the sandbox.
 //
+// The archive agent needs the same two mounts and for the same reason: it does
+// its git work in the wsp workspace but writes `archive: true` back to
+// `.project.yaml` in the orch dir. (It is interactive, so it only ever reaches
+// this function on the legacy tmux path — production leaves Sandbox nil and
+// runs it on the host, where both paths are visible anyway.)
+//
 // Planning's primary mount is the project's orch dir (where .orch/ lives).
 // When planningWorktree is non-empty, it is mounted as a second workspace so
 // the planner can read source code from the wsp-provisioned worktree without
@@ -807,7 +825,7 @@ func SandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 // stuck thrashing on auth failures). Empty falls back to one mount.
 func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath, planningWorktree string) []string {
 	switch kind {
-	case agent.TaskAgent, agent.CommitAgent:
+	case agent.TaskAgent, agent.CommitAgent, agent.ArchiveAgent:
 		orchDir := filepath.Dir(projectPath)
 		if orchDir == "" || orchDir == workingDir {
 			return []string{workingDir}

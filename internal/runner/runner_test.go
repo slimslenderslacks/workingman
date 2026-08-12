@@ -49,8 +49,8 @@ func (s *fakeSession) Close() error {
 func TestDefaultCommandBuilderModes(t *testing.T) {
 	// Autonomous kinds (project/planning/task/commit) run with --print so
 	// claude executes one turn and exits, closing the tmux window and letting
-	// the daemon advance project state. The only interactive kind (wolf) omits
-	// --print so the human can drive the conversation. Every kind carries
+	// the daemon advance project state. The interactive kinds (wolf, archive)
+	// omit --print so the human can drive the conversation. Every kind carries
 	// --dangerously-skip-permissions and the initial prompt on argv.
 	cases := []struct {
 		kind        agent.Kind
@@ -62,6 +62,7 @@ func TestDefaultCommandBuilderModes(t *testing.T) {
 		{agent.PlanningAgent, true, "planning agent runs one autonomous turn"},
 		{agent.TaskAgent, true, "task agent runs one autonomous turn"},
 		{agent.CommitAgent, true, "commit agent runs one autonomous turn"},
+		{agent.ArchiveAgent, false, "archive agent may need a .gitignore change approved"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.kind.String(), func(t *testing.T) {
@@ -95,6 +96,10 @@ func TestSandboxNameFor(t *testing.T) {
 		{"commit", agent.CommitAgent, "scaffold", "myproj-scaffold"},
 		{"task-no-name", agent.TaskAgent, "", ""},
 		{"commit-no-name", agent.CommitAgent, "", ""},
+		// The archive agent wraps up the whole project, not one task, so its
+		// name is task-independent.
+		{"archive", agent.ArchiveAgent, "", "myproj-archive"},
+		{"archive-ignores-task-name", agent.ArchiveAgent, "scaffold", "myproj-archive"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,6 +220,65 @@ func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
 	}
 	if len(got.mcps) != 2 || got.mcps[0] != "github" || got.mcps[1] != "web-search" {
 		t.Errorf("static_mcps = %v, want [github web-search]", got.mcps)
+	}
+}
+
+// The archive agent supplies no WorkingDir: it works in the project's wsp
+// workspace (git status / commit / push across every repo) and must have that
+// workspace provisioned for it. It also writes `archive: true` back to
+// `.project.yaml`, which lives outside the workspace — so like task/commit it
+// needs the orch dir as a second mount.
+func TestArchiveAgentResolvesWorkspaceAndMountsOrchDir(t *testing.T) {
+	wsRoot := t.TempDir()
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	_ = os.WriteFile(projectPath, nil, 0o644)
+
+	launcher := &fakeLauncher{}
+	var gotSpec SandboxSpec
+	r := &Runner{
+		Workspaces: workspace.NewStub(wsRoot),
+		Launcher:   launcher,
+		Command:    func(_ agent.Kind, _ string) []string { return []string{"claude", "hi"} },
+		Sandbox: func(_ context.Context, s SandboxSpec) error {
+			gotSpec = s
+			gotSpec.Workspaces = append([]string(nil), s.Workspaces...)
+			return nil
+		},
+	}
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.ArchiveAgent,
+		Branch:      "feat-x",
+		ProjectPath: projectPath,
+		TasksDir:    filepath.Join(orchDir, "tasks"),
+		Repos:       []workspace.Repo{{Identity: "github.com/acme/widget", Shortname: "widget"}},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	wantWorkspace := filepath.Join(wsRoot, "feat-x")
+	if launcher.last.Workspace != wantWorkspace {
+		t.Errorf("workspace = %q, want the provisioned wsp workspace %q", launcher.last.Workspace, wantWorkspace)
+	}
+	wantName := filepath.Base(orchDir) + "-archive"
+	if gotSpec.Name != wantName {
+		t.Errorf("sandbox name = %q, want %q", gotSpec.Name, wantName)
+	}
+	if len(gotSpec.Workspaces) != 2 || gotSpec.Workspaces[0] != wantWorkspace || gotSpec.Workspaces[1] != orchDir {
+		t.Errorf("workspaces = %v, want [%q %q]", gotSpec.Workspaces, wantWorkspace, orchDir)
+	}
+}
+
+// The archive agent is interactive, so even with an ACP launcher configured it
+// must take the legacy tmux path — a human has to be able to attach and approve
+// the .gitignore proposal.
+func TestArchiveAgentTakesTmuxPathNotACP(t *testing.T) {
+	r := &Runner{AcpLauncher: &fakeLauncher{}}
+	if r.UsesACP(agent.ArchiveAgent) {
+		t.Error("archive agent must not use the ACP path")
+	}
+	if !r.UsesACP(agent.CommitAgent) {
+		t.Error("commit agent should still use the ACP path")
 	}
 }
 

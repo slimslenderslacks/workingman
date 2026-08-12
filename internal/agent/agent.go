@@ -16,6 +16,12 @@ const (
 	TaskAgent
 	WolfAgent
 	CommitAgent
+	// ArchiveAgent cleans a project up before it can be archived: it checks
+	// the workspace for uncommitted work, proposes a `.gitignore` edit when
+	// the leftovers are build artifacts (waiting for human approval), makes a
+	// final commit + push, and sets `archive: true` on the project file. New
+	// kinds are appended so the iota values of the existing ones don't shift.
+	ArchiveAgent
 )
 
 func (k Kind) String() string {
@@ -30,22 +36,26 @@ func (k Kind) String() string {
 		return "wolf"
 	case CommitAgent:
 		return "commit"
+	case ArchiveAgent:
+		return "archive"
 	}
 	return "unknown"
 }
 
-// Interactive reports whether this Kind expects a human in the loop. Only the
-// wolf agent does: it asks for guidance when a project is blocked. The project,
-// planning, task, and commit agents are all autonomous — they run under
-// `claude --print`, finish one turn, and exit without prompting. The project
-// agent generates `.project.yaml` from the user's seed description and, when
-// the description is insufficient, escalates by blocking the project (which
-// summons the wolf) rather than interviewing the user itself.
+// Interactive reports whether this Kind expects a human in the loop. Two kinds
+// do: the wolf agent asks for guidance when a project is blocked, and the
+// archive agent may have to get a proposed `.gitignore` change approved before
+// it commits. The project, planning, task, and commit agents are all
+// autonomous — they run under `claude --print`, finish one turn, and exit
+// without prompting. The project agent generates `.project.yaml` from the
+// user's seed description and, when the description is insufficient, escalates
+// by blocking the project (which summons the wolf) rather than interviewing the
+// user itself.
 //
 // The runner uses this to pick the right claude flags; the TUI uses it to
 // highlight sessions that won't make progress until someone attaches.
 func (k Kind) Interactive() bool {
-	return k == WolfAgent
+	return k == WolfAgent || k == ArchiveAgent
 }
 
 // Spec is the minimum a Launcher needs to start a session. Command is
