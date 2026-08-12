@@ -325,6 +325,137 @@ func TestArchiveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCleanupFlagLoad(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "cleanup requested",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\ncleanup: true\n",
+			want: true,
+		},
+		{
+			// What the daemon writes when it clears a finished request.
+			name: "cleanup false",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\ncleanup: false\n",
+			want: false,
+		},
+		{
+			// Every project file predating the flag.
+			name: "key absent",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\n",
+			want: false,
+		},
+		{
+			// The mid-run shape: the agent has reported success but the daemon
+			// hasn't cleared the request yet. The two flags are independent.
+			name: "alongside archive",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\narchive: true\ncleanup: true\n",
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), ".project.yaml")
+			if err := os.WriteFile(dst, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			p, err := Load(dst)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if p.Cleanup != tc.want {
+				t.Errorf("Cleanup = %v, want %v", p.Cleanup, tc.want)
+			}
+			// Requesting a cleanup must not disturb the status routing the
+			// daemon falls back to once the request is cleared.
+			if p.Description != "x" || p.Branch != "feat/y" || p.Status != StatusWorking {
+				t.Errorf("other fields disturbed: %+v", p)
+			}
+		})
+	}
+}
+
+func TestCleanupOmitEmpty(t *testing.T) {
+	// No request → no `cleanup:` key, so files that have never had a cleanup
+	// requested stay byte-identical.
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	if err := SaveAs(dst, &Project{
+		Description: "x", Branch: "feat/y", Status: StatusWorking,
+	}, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(raw), "cleanup") {
+		t.Errorf("false Cleanup should not emit a cleanup line; got:\n%s", string(raw))
+	}
+}
+
+func TestCleanupRoundTrip(t *testing.T) {
+	// The `:cleanup` write: flag set, saved as the agent so the daemon's
+	// own-write filter doesn't swallow the fsnotify event.
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	src := &Project{
+		Description: "x",
+		Branch:      "feat/y",
+		Status:      StatusWorking,
+		Repos:       []Repo{{Org: "slimslenderslacks", Name: "workingman"}},
+		Cleanup:     true,
+	}
+	if err := SaveAs(dst, src, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), "cleanup: true") {
+		t.Errorf("want `cleanup: true` on disk; got:\n%s", string(raw))
+	}
+	reloaded, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reloaded.Cleanup {
+		t.Errorf("Cleanup = false after round-trip")
+	}
+	if reloaded.UpdatedBy != WriterAgent {
+		t.Errorf("UpdatedBy = %q, want agent (the daemon ignores its own writes)", reloaded.UpdatedBy)
+	}
+	if reloaded.Status != StatusWorking {
+		t.Errorf("Status = %q, want working — cleanup is a flag, not a status", reloaded.Status)
+	}
+	reloaded.UpdatedBy = src.UpdatedBy
+	if !reflect.DeepEqual(src, reloaded) {
+		t.Errorf("round-trip mismatch:\n src=%+v\n got=%+v", src, reloaded)
+	}
+
+	// The daemon's clear: same file, flag off, written as the daemon.
+	cleared := *reloaded
+	cleared.Cleanup = false
+	if err := Save(dst, &cleared); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	after, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load after clear: %v", err)
+	}
+	if after.Cleanup {
+		t.Errorf("Cleanup still true after the daemon cleared it")
+	}
+	if after.UpdatedBy != WriterDaemon {
+		t.Errorf("UpdatedBy = %q, want daemon", after.UpdatedBy)
+	}
+	if after.Status != StatusWorking {
+		t.Errorf("Status = %q after clear, want working", after.Status)
+	}
+}
+
 func TestEmptyIgnoresNewReposPresence(t *testing.T) {
 	// A project that carries only new_repos is NOT empty — it's a populated
 	// intent the daemon should act on.

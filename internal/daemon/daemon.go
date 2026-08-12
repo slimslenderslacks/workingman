@@ -44,6 +44,13 @@ type Daemon struct {
 	planningFailures map[string]int // keyed by project file path
 	projectFailures  map[string]int // keyed by project file path
 
+	// cleanupMu guards cleanupInFlight, the set of projects whose archive
+	// (cleanup) agent has been dispatched and whose `cleanup: true` request
+	// flag has not been cleared yet. See beginCleanup for why the session map
+	// can't serve as this guard on its own.
+	cleanupMu       sync.Mutex
+	cleanupInFlight map[string]bool // keyed by project file path
+
 	// sessionIdleTimeout bounds how long a tracked session may go without any
 	// ACP stream activity before the stranded-session reaper terminates it.
 	// See reaper.go.
@@ -132,6 +139,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		sessions:           map[string]sessionEntry{},
 		planningFailures:   map[string]int{},
 		projectFailures:    map[string]int{},
+		cleanupInFlight:    map[string]bool{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 	}
 	for _, opt := range opts {

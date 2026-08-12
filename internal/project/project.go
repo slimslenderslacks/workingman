@@ -99,6 +99,33 @@ type Project struct {
 	// not a Status. `omitempty` keeps existing project files byte-identical
 	// until the flag is actually set.
 	Archive bool `yaml:"archive,omitempty"`
+	// Cleanup is the *request* flag for the archive (cleanup) agent — "please
+	// run a cleanup on this project", as opposed to Archive, which is the
+	// agent's "the cleanup succeeded" result. It is deliberately not a Status:
+	// the status enum is fixed (ready|working|blocked|done) and the loader
+	// rejects anything else, so a cleanup has to be requestable for a project
+	// sitting in any status, and the project keeps that status while the agent
+	// runs.
+	//
+	// The contract between the TUI, the daemon, and the agent, in order:
+	//
+	//  1. The TUI's `:cleanup` command loads the project, sets Cleanup = true,
+	//     and writes it with SaveAs(path, p, WriterAgent) — writing as the
+	//     agent matters, because the daemon drops fsnotify events for its own
+	//     (`updated_by: daemon`) writes and would never see the request.
+	//  2. The daemon checks this flag ahead of its status routing and launches
+	//     the archive agent under a session key of its own. A second `:cleanup`
+	//     while that run is in flight is a no-op.
+	//  3. When the agent's session ends the daemon clears the flag — as the
+	//     daemon, so the clear can't retrigger dispatch — whether or not the
+	//     agent set Archive, then resumes normal status routing. The flag
+	//     surviving a daemon crash mid-run is intentional: the request is still
+	//     on disk, so the restarted daemon retries the cleanup.
+	//
+	// Nothing but the requester sets this to true; the agent never writes it
+	// (its output is Archive). `omitempty` keeps the key out of files that have
+	// never had a cleanup requested.
+	Cleanup bool `yaml:"cleanup,omitempty"`
 	// CreatedAt is stamped by the daemon the first time it observes a
 	// populated .project.yaml (i.e. just after the project agent fills in
 	// description/branch/status). Used by the TUI to order work streams

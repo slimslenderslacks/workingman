@@ -317,6 +317,145 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	})
 }
 
+// launchArchiveAgent starts the archive (cleanup) agent for a project whose
+// `cleanup: true` request flag the daemon has just observed (see
+// project.Project.Cleanup for the full contract). Unlike the other project-root
+// agents it gets no WorkingDir: its job — `git status`, a final commit, a push —
+// happens in the repos, so the runner provisions/resolves the project's wsp
+// workspace from Branch + Repos exactly as it does for task and commit agents.
+//
+// Like the wolf, it is tracked under a key of its own so it can run in tandem
+// with whatever the project's main slot is doing and dedup independently of it.
+// Dedup is against the in-flight guard rather than that key, because the guard
+// also covers the window between the session ending and the request flag being
+// cleared — see beginCleanup.
+//
+// On session end afterArchiveSession clears the flag and resumes normal routing.
+func (d *Daemon) launchArchiveAgent(projectPath string, p *project.Project) {
+	if d.runner == nil {
+		return
+	}
+	if !d.beginCleanup(projectPath) {
+		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.ArchiveAgent.String())
+		return
+	}
+	root := filepath.Dir(projectPath)
+	plan := runner.Plan{
+		Kind: agent.ArchiveAgent,
+		// No WorkingDir on purpose: the runner resolves the wsp workspace.
+		Branch:      p.Branch,
+		Repos:       workspaceReposFor(p),
+		ProjectPath: projectPath,
+		TasksDir:    filepath.Join(root, "tasks"),
+	}
+	d.audit.Log("archive_dispatch", "path", projectPath, "branch", p.Branch)
+	if err := d.startSession(archiveSessionKey(projectPath), plan, func(waitErr error) {
+		d.afterArchiveSession(projectPath, waitErr)
+	}); err != nil {
+		// Nothing started, so afterArchiveSession will never run to release the
+		// guard — release it here. `cleanup: true` deliberately stays on disk:
+		// the request is still outstanding, so the next project event (or a
+		// daemon restart) retries it. We don't block the project either; a
+		// cleanup that couldn't start shouldn't derail the work itself. The
+		// session_start_error entry startSession logged carries the reason.
+		d.endCleanup(projectPath)
+	}
+}
+
+// afterArchiveSession is the archive agent's session-end callback. It re-reads
+// the project file and does two things, in this order:
+//
+//  1. Clears the `cleanup: true` request flag, written as the daemon. This is
+//     the crash guard for the whole feature: while the flag is set every
+//     dispatch of this project launches the archive agent, so leaving it set
+//     would relaunch in a loop. It is cleared whether the agent succeeded (it
+//     set `archive: true`) or not — an agent that gave up should not be
+//     restarted on the next unrelated file event; the user re-issues `:cleanup`.
+//  2. Revisits the project so normal status routing resumes.
+//
+// The order matters. revisitProject deliberately bypasses handleProject's
+// daemon-write filter and re-reads from disk, so it must not run until the
+// cleared flag has landed — otherwise it would read the request back and
+// dispatch a second archive agent. If the clear fails to persist we skip the
+// revisit entirely for the same reason.
+//
+// An agent that ended without setting `archive: true` is recorded, not
+// punished: the project is left exactly as it was (`:archive` already refuses
+// to archive a project without the flag), so there is nothing here worth
+// blocking over.
+func (d *Daemon) afterArchiveSession(projectPath string, waitErr error) {
+	// Held until every step below is done, so a late .project.yaml event — the
+	// agent's own `archive: true` write, typically — can't slip in and launch a
+	// second agent while we are still clearing the request.
+	defer d.endCleanup(projectPath)
+
+	p, err := project.Load(projectPath)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			d.audit.Log("project_load_error", "path", projectPath, "err", err.Error())
+		}
+		return
+	}
+	if !p.Archive {
+		reason := "session ended without the agent setting archive: true"
+		if waitErr != nil {
+			reason = fmt.Sprintf("archive session exited with error: %v", waitErr)
+		}
+		d.audit.Log("archive_incomplete", "path", projectPath, "reason", reason)
+	}
+	if p.Cleanup {
+		cleared := *p
+		cleared.Cleanup = false
+		if err := project.Save(projectPath, &cleared); err != nil {
+			d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
+			return
+		}
+		d.audit.Log("cleanup_flag_cleared",
+			"path", projectPath,
+			"archive", fmt.Sprintf("%t", p.Archive),
+		)
+	}
+	d.revisitProject(projectPath)
+}
+
+// beginCleanup reserves the archive slot for projectPath, returning false if a
+// cleanup run is already in flight (the caller should treat its launch as a
+// duplicate). endCleanup releases it.
+//
+// The reservation spans from the launch until the request flag has been cleared
+// — strictly wider than the session's lifetime, which is why it, and not
+// hasSession(archiveSessionKey(...)), is the dedup check. The session entry is
+// removed the moment the agent exits, leaving a window in which a .project.yaml
+// event still carrying `cleanup: true` (the agent's own write of `archive:
+// true`, delivered late) would dispatch a second archive agent. Guarding the
+// whole span is what makes one `:cleanup` produce exactly one archive session.
+func (d *Daemon) beginCleanup(projectPath string) bool {
+	d.cleanupMu.Lock()
+	defer d.cleanupMu.Unlock()
+	if d.cleanupInFlight[projectPath] {
+		return false
+	}
+	d.cleanupInFlight[projectPath] = true
+	return true
+}
+
+func (d *Daemon) endCleanup(projectPath string) {
+	d.cleanupMu.Lock()
+	defer d.cleanupMu.Unlock()
+	delete(d.cleanupInFlight, projectPath)
+}
+
+// archiveSessionKey is the session-map key for a project's archive (cleanup)
+// agent — the same trick as wolfSessionKey, with an "#archive" marker. It keeps
+// the archive agent out of the single slot the project's other agents share, so
+// a cleanup requested mid-flight starts immediately instead of queueing behind
+// them. As with the wolf marker it is appended to the final path element, not
+// added as a path segment, so filepath.Dir(key) still yields the project dir
+// ListSessions labels the sessions pane from.
+func archiveSessionKey(projectPath string) string {
+	return projectPath + "#archive"
+}
+
 // wolfSessionKey is the session-map key for a project's wolf agent. It appends
 // a "#wolf" marker to the project path so the wolf occupies a slot separate
 // from the one every other agent (project/planning/task/commit) shares under

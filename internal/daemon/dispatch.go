@@ -41,11 +41,11 @@ func (d *Daemon) handle(ev fsnotify.Event) {
 //
 // Wired:
 //   - empty file       → project agent
+//   - cleanup: true    → archive agent (checked ahead of the status routing)
 //   - status: ready    → planning agent
 //   - status: working  → dispatch first ready task
+//   - status: blocked  → wolf agent
 //   - status: done     → no-op
-//
-// Still TODO: status: blocked → wolf agent (slice c.2).
 func (d *Daemon) handleProject(path string) {
 	p, err := project.Load(path)
 	if err != nil {
@@ -115,6 +115,17 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 		"writer", string(p.UpdatedBy),
 	)
 	d.registerCronIfAny(path, p)
+	// A cleanup request outranks status routing, so `:cleanup` works on a
+	// project sitting in any status (see project.Project.Cleanup). We return
+	// instead of also running the status's normal agent: that agent would be
+	// working — and committing — in the very workspace the archive agent is
+	// trying to leave clean and pushed. Normal routing resumes from
+	// afterArchiveSession, which revisits the project once the request flag has
+	// been cleared.
+	if p.Cleanup {
+		d.launchArchiveAgent(path, p)
+		return
+	}
 	switch p.Status {
 	case project.StatusReady:
 		d.launchProjectRootAgent(path, agent.PlanningAgent, p)
