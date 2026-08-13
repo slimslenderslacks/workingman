@@ -91,8 +91,9 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.newTaskErr = ""
 	case "cleanup":
 		// `cleanup` sets the work stream's cleanup request flag; the daemon
-		// launches the archive agent in response, which commits and pushes and
-		// then marks the work stream `archive: true`. Immediate — no modal.
+		// launches the archive agent in response, which commits and pushes
+		// whatever still needs it and then marks the work stream
+		// `archive: true`. Immediate — no modal.
 		if m.projSel == "" {
 			m.statusMsg = "no work stream selected"
 			return m, nil

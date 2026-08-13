@@ -50,16 +50,16 @@ The commit agent is given a task when a change is complete in a wsp workspace. C
 
 # archive agent
 
-The archive agent (the "cleanup" agent) prepares a finished project to be archived. It is dispatched by the daemon when it observes `cleanup: true` on a `.project.yaml`, and it runs interactively in the project's wsp workspace. For each repo in that workspace it:
+The archive agent (the "cleanup" agent) prepares a finished project to be archived. It is dispatched by the daemon when it observes `cleanup: true` on a `.project.yaml`, and it runs interactively in the project's wsp workspace. Its job is to leave every repo clean, committing and pushing only what actually needs it — a repo with nothing to commit and nothing to publish is finished as-is. For each repo in that workspace it:
 
 * checks for uncommitted changes;
 * classifies them — anything that plainly does not belong in the repo (build artifacts, editor scratch files, local caches) is neither committed nor deleted. The agent instead PROPOSES the exact `.gitignore` edit, notifies the user, and waits for approval; it applies the edit only if the human says yes, and gives up (reporting what is outstanding) if they say no or never answer;
 * makes one final commit — only if there is something to commit; an already-clean tree gets no empty commit;
-* pushes to the branch that is actually checked out in the workspace — read per repo with `git rev-parse --abbrev-ref HEAD`, never a hardcoded branch, never a force-push — and only if that branch is ahead of its upstream (`git rev-list --count @{upstream}..HEAD`). A repo already up to date is reported as clean rather than given a no-op push.
+* pushes to the branch that is actually checked out in the workspace — read per repo with `git rev-parse --abbrev-ref HEAD`, never a hardcoded branch, never a force-push — and only if that branch is ahead of its upstream. Whether an upstream exists is settled first, with `git rev-parse --abbrev-ref --symbolic-full-name @{upstream}`, and only then is the distance counted with `git rev-list --count @{upstream}..HEAD`; the count is never used to infer that no upstream is configured, since it also fails (empty, non-zero exit) in exactly that case. So the push happens in two situations only — an upstream exists and the count is above zero, or the `rev-parse` positively reported no upstream at all. A repo already level with its upstream is reported as "already clean, nothing to push", with no no-op push and no `--allow-empty` / `--force` / `--set-upstream` workaround to manufacture one.
 
-There are no other pre-commit steps: no tests, no lint, no formatting, no scratch-file cleanup. Those checks plus commit-and-push are the whole job.
+There are no other pre-commit steps: no tests, no lint, no formatting, no scratch-file cleanup. Those checks, plus whichever of the commit and the push they show is actually needed, are the whole job.
 
-On success — every repo committed and pushed, including repos that needed neither — the agent sets `archive: true` on the project file and leaves `status:` alone. If it cannot finish, it leaves `archive` unset and says what a human needs to do. It never writes the `cleanup` request flag itself; the daemon owns clearing that.
+On success — every repo left clean, including repos that needed neither a commit nor a push — the agent sets `archive: true` on the project file and leaves `status:` alone. If it cannot finish, it leaves `archive` unset and says what a human needs to do. It never writes the `cleanup` request flag itself; the daemon owns clearing that.
 
 # archiving a project
 

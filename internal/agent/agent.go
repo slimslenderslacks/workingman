@@ -19,7 +19,8 @@ const (
 	// ArchiveAgent cleans a project up before it can be archived: it checks
 	// the workspace for uncommitted work, proposes a `.gitignore` edit when
 	// the leftovers are build artifacts (waiting for human approval), makes a
-	// final commit + push, and sets `archive: true` on the project file. New
+	// final commit and pushes — but only where there is actually something to
+	// commit or push — and sets `archive: true` on the project file. New
 	// kinds are appended so the iota values of the existing ones don't shift.
 	ArchiveAgent
 )

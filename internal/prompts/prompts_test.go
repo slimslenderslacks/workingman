@@ -102,6 +102,42 @@ func TestRenderArchive(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
+	// The push has to be gated from the framing down, not just in step 4: the
+	// agent reads the top of the prompt first, so nothing above may promise a
+	// push the conditional then withholds.
+	for _, unwanted := range []string{
+		"committed and pushed",
+		"commit-and-push are the whole job",
+	} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("push described as unconditional (%q) in:\n%s", unwanted, out)
+		}
+	}
+	if !strings.Contains(out, "ONLY what actually needs it") {
+		t.Errorf("expected the conditional framing of the job in:\n%s", out)
+	}
+	// Whether an upstream exists is settled by rev-parse, whose failure mode is
+	// "do not push" — not by an empty `ahead` from a rev-list that errored.
+	for _, want := range []string{
+		"rev-parse --abbrev-ref --symbolic-full-name @{upstream}",
+		"ONLY if $upstream is non-empty",
+		"never read it as \"no upstream, therefore push\"",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing upstream-detection guidance %q in:\n%s", want, out)
+		}
+	}
+	// The already-level repo is an explicit success with an explicit report,
+	// and no workaround may be used to manufacture a push.
+	for _, want := range []string{
+		`"already clean, nothing to push"`,
+		"--force",
+		"--set-upstream",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing already-clean success wording %q in:\n%s", want, out)
+		}
+	}
 }
 
 func TestRenderAllKinds(t *testing.T) {

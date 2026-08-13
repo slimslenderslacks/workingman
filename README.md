@@ -12,7 +12,7 @@ status: blocked  → wolf agent + osascript notification
 status: done     → terminal
 
 cleanup: true    → archive agent (checked ahead of the status routing;
-                   commits + pushes, then sets archive: true)
+                   commits + pushes whatever needs it, then sets archive: true)
 ```
 
 The daemon also reads each project's `cron:` field; firings re-evaluate the
@@ -180,7 +180,8 @@ schemas.
 ## Cleanup and archiving
 
 A finished project is retired in two steps — a **cleanup** that leaves every
-repo committed and pushed, then an **archive** that moves the project out of
+repo clean, committing and pushing only what needs it, then an **archive**
+that moves the project out of
 the watched root. Both are driven from the TUI's `:` command menu on the work
 streams pane, and both are recorded on `.project.yaml` by two independent
 boolean flags (neither one is a `status:`, so a project keeps whatever status
@@ -204,13 +205,21 @@ attach. In every repo of the workspace it:
    **not** deleted — the agent *proposes* a `.gitignore` edit, notifies you, and
    waits for approval before applying it. If approval never comes, it stops and
    reports instead of committing.
-3. Makes one final commit.
+3. Makes one final commit — only if there is something to commit.
 4. Pushes to the branch **actually checked out in that workspace**
    (`git rev-parse --abbrev-ref HEAD`) — not a hardcoded branch name, and never
-   a force-push.
+   a force-push — and only if there is something to push. It first asks whether
+   an upstream exists at all (`git rev-parse --abbrev-ref
+   --symbolic-full-name @{upstream}`), then counts the distance
+   (`git rev-list --count @{upstream}..HEAD`). It pushes when that count is
+   above zero, or when there genuinely is no upstream configured. A repo
+   already level with its upstream is reported as *"already clean, nothing to
+   push"* — no no-op push, and no empty commit or force/`--set-upstream`
+   workaround to invent one.
 
 There are no other pre-commit steps: no tests, no lint, no formatting, no
-scratch-file cleanup. On success the agent sets `archive: true` on
+scratch-file cleanup. A repo that needed neither a commit nor a push is a
+success. On success the agent sets `archive: true` on
 `.project.yaml` and leaves `status:` untouched. If it can't finish, it leaves
 `archive` unset and says what's outstanding.
 
