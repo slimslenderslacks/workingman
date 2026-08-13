@@ -40,6 +40,75 @@ func TestRenderTask(t *testing.T) {
 	}
 }
 
+// TestRenderPlanningModesAreExclusive checks the planning template's two
+// re-invocation modes don't bleed into each other. They give directly opposing
+// instructions about the same task files — a re-plan may delete them, an
+// incremental run must preserve them — so a render that showed both would leave
+// the agent to guess which one applies.
+func TestRenderPlanningModesAreExclusive(t *testing.T) {
+	const (
+		replanMarker      = "RE-PLANNING cycle"
+		incrementalMarker = "Preserve every existing task"
+	)
+	cases := []struct {
+		name          string
+		replan        bool
+		want, notWant string
+	}{
+		{"cron re-plan", true, replanMarker, incrementalMarker},
+		{"first plan or human-added task", false, incrementalMarker, replanMarker},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := Render(agent.PlanningAgent, Data{
+				Workspace:   "/ws",
+				ProjectPath: "/ws/.project.yaml",
+				TasksDir:    "/ws/tasks",
+				Replan:      tc.replan,
+			})
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("missing %q in:\n%s", tc.want, out)
+			}
+			if strings.Contains(out, tc.notWant) {
+				t.Errorf("the other mode's instructions leaked in (%q):\n%s", tc.notWant, out)
+			}
+		})
+	}
+}
+
+// TestRenderPlanningReplanSpellsOutTheResetRules pins the details a re-plan gets
+// wrong silently. A carried-forward task that keeps last cycle's `summary:` or
+// `completed_at:` misreports what happened, and deleting a task without pruning
+// the `depends_on` entries naming it fails the whole graph load — which strands
+// the project rather than erroring on that one task.
+func TestRenderPlanningReplanSpellsOutTheResetRules(t *testing.T) {
+	out, err := Render(agent.PlanningAgent, Data{
+		Workspace:   "/ws",
+		ProjectPath: "/ws/.project.yaml",
+		TasksDir:    "/ws/tasks",
+		Replan:      true,
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"status: ready",     // survivors go back to ready to be picked up
+		"attempts: 0",       // and lose the previous cycle's retry count
+		"completed_at:",     // stale completion records must be dropped
+		"summary:",          //  "
+		"depends_on",        // dangling deps after a delete
+		"status: committed", // the keep-it-settled option
+		"updated_by: agent", // how the cycle ends
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("re-plan instructions never mention %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderWolfWithFailedTasks(t *testing.T) {
 	out, err := Render(agent.WolfAgent, Data{
 		ProjectPath: "/ws/.project.yaml",

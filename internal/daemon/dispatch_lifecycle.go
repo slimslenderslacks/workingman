@@ -236,9 +236,21 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 }
 
 // transitionProjectDone writes the project file with status:done and
-// updated_by:daemon, then unregisters its cron schedule so a finished
-// project does not keep waking up. The daemon write self-filters in
-// handleProject so this will not retrigger dispatch.
+// updated_by:daemon. The daemon write self-filters in handleProject so this
+// will not retrigger dispatch.
+//
+// A project with a live cron schedule keeps it: `done` is the resting state
+// between cycles, not the end of the work stream, and the next firing is what
+// flips it back to ready for a re-plan (see requestCronReplan). Unregistering
+// here — which this function used to do unconditionally — made every cron
+// project a one-shot, because the schedule died on the first completion and
+// nothing re-registered it while the file sat untouched.
+//
+// What stops such a project waking up forever is its stop condition, not this
+// transition: every schedule must declare `cron_until` or `cron_max_runs` (see
+// registerCronIfAny), and once that trips the schedule unregisters itself. So a
+// finished one-shot — no cron, or a cron that has expired — still gets dropped
+// here.
 func (d *Daemon) transitionProjectDone(projectPath string, p *project.Project) {
 	updated := *p
 	updated.Status = project.StatusDone
@@ -247,7 +259,11 @@ func (d *Daemon) transitionProjectDone(projectPath string, p *project.Project) {
 		return
 	}
 	if d.scheduler != nil {
-		d.scheduler.Unregister(projectPath)
+		if recurring := updated.Cron != "" && !updated.CronExpired(); recurring {
+			d.audit.Log("cron_kept_on_done", "path", projectPath, "spec", updated.Cron)
+		} else {
+			d.scheduler.Unregister(projectPath)
+		}
 	}
 	d.audit.Log("project_done", "path", projectPath)
 }

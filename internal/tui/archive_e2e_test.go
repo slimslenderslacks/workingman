@@ -308,13 +308,15 @@ func TestCleanupToArchiveEndToEnd(t *testing.T) {
 
 	// 4. The gallery picks the flag up on its next scan and gives the card the
 	// blue border. Colours are stripped without a TTY, so assert on the style
-	// the renderer chooses (see projectCardBorder).
+	// the renderer chooses (see projectCardBorder). This card is also the
+	// selected one, and the blue still has to win: selection is drawn as a ring
+	// outside this border precisely so the archive signal survives the cursor.
 	h.refresh(t)
 	view := h.selectedView(t)
 	if !view.Archive {
 		t.Fatalf("gallery view missing the archive flag: %+v", view)
 	}
-	got := projectCardBorder(view, false).GetBorderTopForeground()
+	got := projectCardBorder(view).GetBorderTopForeground()
 	if want := cardArchivedBorder.GetBorderTopForeground(); got != want {
 		t.Errorf("card border = %v, want the archived blue %v", got, want)
 	}

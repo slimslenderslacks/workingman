@@ -34,6 +34,7 @@ type Context struct {
 	TaskName      string   `yaml:"task_name,omitempty"`
 	FailedTasks   []string `yaml:"failed_tasks,omitempty"`
 	BlockedReason string   `yaml:"blocked_reason,omitempty"`
+	Replan        bool     `yaml:"replan,omitempty"`
 	Worktree      string   `yaml:"worktree,omitempty"`
 }
 

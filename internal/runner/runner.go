@@ -73,6 +73,11 @@ type Plan struct {
 	// planning/project/wolf leave it false. See task.Task.SaveSandbox.
 	SaveSandbox bool
 
+	// Replan asks the planning agent to re-plan the project's existing tasks
+	// rather than treat them as settled — set by the daemon on a cron firing.
+	// Only the planning agent's prompt reads it. See project.Project.Replan.
+	Replan bool
+
 	// BlockedReason, when set, is the message surfaced to the wolf agent
 	// describing why the project entered status:blocked. Ignored for any
 	// other Kind. Mirrors the project file's blocked_reason field but is
@@ -345,6 +350,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		TaskName:      p.TaskName,
 		FailedTasks:   p.FailedTasks,
 		BlockedReason: p.BlockedReason,
+		Replan:        p.Replan,
 		Worktree:      planningWorktree,
 	}
 	instructions, err := prompts.Render(p.Kind, data)
@@ -362,6 +368,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		TaskName:      p.TaskName,
 		FailedTasks:   p.FailedTasks,
 		BlockedReason: p.BlockedReason,
+		Replan:        p.Replan,
 		Worktree:      planningWorktree,
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {

@@ -37,6 +37,7 @@ type Data struct {
 	TaskName      string   // for TaskAgent: name field of the task
 	FailedTasks   []string // for WolfAgent: paths to failed/blocked task yamls
 	BlockedReason string   // for WolfAgent: why the project was blocked
+	Replan        bool     // for PlanningAgent: re-plan the existing tasks (a cron cycle) instead of preserving them
 	Worktree      string   // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
 }
 

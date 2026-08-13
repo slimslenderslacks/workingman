@@ -94,14 +94,33 @@ type Project struct {
 	// see the daemon's registerCronIfAny). If both are set, whichever trips
 	// first wins. `omitempty` keeps the key out of files that don't use it.
 	CronUntil *time.Time `yaml:"cron_until,omitempty"`
-	// CronMaxRuns stops the schedule after this many firings — the run-count
+	// CronMaxRuns stops the schedule after this many *cycles* — the run-count
 	// form of the same stop condition CronUntil expresses as a deadline; either
 	// one satisfies the requirement. Zero or absent means no run limit.
+	//
+	// It counts work, not wake-ups: `cron_max_runs: 30` means 30 firings that
+	// actually started a cycle, and the 30th does its work before the schedule
+	// is retired. Firings that start no cycle — one landing on a project still
+	// `working` through the previous cycle, or `blocked`, or being archived —
+	// are not charged (the daemon logs `cron_run_not_counted`). The tradeoff is
+	// that a project wedged in a non-idle status keeps waking up past this
+	// limit; CronUntil is the absolute wall-clock bound for that case.
 	CronMaxRuns int `yaml:"cron_max_runs,omitempty"`
-	// CronRuns is the firing counter the daemon maintains: it increments and
-	// persists it on every cron firing, then re-checks the stop condition. This
-	// is daemon-owned bookkeeping — never written by an agent or the TUI, though
-	// both round-trip it like any other field.
+	// CronRuns is the cycle counter the daemon maintains: on a firing that
+	// starts a cycle it increments and persists this, then re-checks the stop
+	// condition against the new count. This is daemon-owned bookkeeping — never
+	// written by an agent or the TUI, though both round-trip it like any other
+	// field.
+	//
+	// Hazard, since it is the one field with a cross-writer read-modify-write:
+	// every writer here marshals the WHOLE struct, so an agent write landing
+	// between the daemon's Load and Save is lost, and symmetrically an agent
+	// saving a copy it read before the increment rolls this counter backwards.
+	// The daemon narrows the window by re-reading immediately before the counter
+	// save (see the daemon's countCronRun), but does not close it — doing that
+	// needs either field-level merging or a lock in the project writer, which is
+	// a broader change than the counter warrants. A lost increment costs at most
+	// one extra cycle; the schedule still ends, via this counter or CronUntil.
 	CronRuns int `yaml:"cron_runs,omitempty"`
 	// BlockedReason is set by the daemon when transitioning a project to
 	// `status: blocked` so the cause survives a daemon restart and is
@@ -143,6 +162,29 @@ type Project struct {
 	// (its output is Archive). `omitempty` keeps the key out of files that have
 	// never had a cleanup requested.
 	Cleanup bool `yaml:"cleanup,omitempty"`
+	// Replan tells the next planning run to re-plan the project's existing tasks
+	// instead of treating them as settled. It is the signal behind a cron
+	// project's recurring cycle: on each firing the daemon flips an idle project
+	// back to `status: ready` with this flag set, so the planning agent runs
+	// again — reading the previous cycle's tasks for context, then deleting,
+	// reusing, or replacing them and leaving whatever survives in `ready` for the
+	// task agents to pick up.
+	//
+	// Without it the planning agent cannot tell a recurring wake-up from the
+	// incremental case it must NOT disturb: a human adding one task via the UI
+	// leaves a nameless seed behind and expects every existing task preserved
+	// (see the planning template). Same status, same tasks dir, opposite
+	// instructions — so the distinction has to be explicit on disk rather than
+	// inferred.
+	//
+	// Like Cleanup this is a *request* flag with a daemon-owned lifecycle: the
+	// daemon sets it (cron firing), forwards it to the agent through the rendered
+	// prompt and .orch/context.yaml, and clears it — as the daemon, so the clear
+	// cannot retrigger dispatch — once a planning session has moved the project
+	// off `ready`. A flag surviving a crash mid-run is intentional: the restarted
+	// daemon still owes that re-plan. `omitempty` keeps the key out of files that
+	// have never had one requested.
+	Replan bool `yaml:"replan,omitempty"`
 	// CreatedAt is stamped by the daemon the first time it observes a
 	// populated .project.yaml (i.e. just after the project agent fills in
 	// description/branch/status). Used by the TUI to order work streams
@@ -172,9 +214,11 @@ func (p *Project) Unpopulated() bool {
 
 // CronStopReason is the single definition of the cron stop condition: it
 // returns a human-readable description of why the schedule is finished, or ""
-// while it should keep firing. The daemon consults it in two places — before
-// registering a schedule (so a restart can't revive an expired one) and again
-// after each firing increments CronRuns.
+// while it should keep firing. The daemon consults it before registering a
+// schedule (so a restart can't revive an expired one), on entry to each firing
+// (against the count already on disk), and once more after a firing that
+// started a cycle increments CronRuns — that last check is what retires the
+// schedule *after* the CronMaxRuns'th cycle has done its work.
 //
 // CronUntil and CronMaxRuns are checked in sequence, which gives the
 // "whichever trips first wins" behaviour for free when both are set. A project

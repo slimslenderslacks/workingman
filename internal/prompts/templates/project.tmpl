@@ -43,13 +43,21 @@ interactively. Fill in these fields:
   unschedule itself — one of:
 
       cron_until: 2026-07-01T00:00:00Z   # absolute deadline (RFC3339)
-      cron_max_runs: 24                  # stop after this many firings
+      cron_max_runs: 24                  # stop after this many cycles
 
   Either field satisfies the requirement; if you set both, whichever trips
   first wins. Derive the value from what the user asked for (e.g. "check every
   hour for the next day" → `cron: "0 * * * *"` with `cron_max_runs: 24`). A
   project with `cron` and NO stop condition is blocked by the daemon instead of
   scheduled, so never write one.
+
+  `cron_max_runs` counts cycles the project actually ran, not wake-ups: a
+  firing that lands while the previous cycle is still working is not charged.
+  So set it to the number of times the user wants the WORK done — "ping me 30
+  times" is `cron_max_runs: 30`, and they will get 30 pings. Use `cron_until`
+  when what they asked for is really a window in time ("every hour until
+  Friday"), since it is also the only bound on a project that stops going
+  idle.
 
 Sensible defaults exist for everything except which repositories the work
 touches. If the description gives you enough to identify at least one
