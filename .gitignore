@@ -2,3 +2,6 @@
 /logs/
 /.task/
 /acp-wrapper
+# Playwright MCP artifacts — page snapshots/screenshots can contain
+# candidate PII when driving the interview-feedback skill.
+/.playwright-mcp/
