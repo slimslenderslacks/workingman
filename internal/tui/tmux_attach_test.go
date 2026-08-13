@@ -153,11 +153,7 @@ func TestEnterIgnoredWhenProjectsFocused(t *testing.T) {
 		{ID: "a", TmuxTarget: "orch:task-alpha"},
 	}})
 	m = step.(model)
-	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
-	m = step2.(model)
-	if m.focus != paneProjects {
-		t.Fatalf("focus = %v, want projects", m.focus)
-	}
+	m = focusProjectsPane(t, m)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	_ = runCmd(t, cmd)
 	if len(att.targets) != 0 {

@@ -23,11 +23,18 @@ func typeChars(t *testing.T, m model, s string) model {
 
 func focusProjectsPane(t *testing.T, m model) model {
 	t.Helper()
-	// Down once to land on projects (sessions → projects → yaml cycle).
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
-	m = step.(model)
+	// Cycle pane focus forward (⌥j) until the projects pane is active. The
+	// default focus is sessions and the cycle now includes the audit pane, so
+	// the number of steps varies — loop rather than assume a fixed count.
+	for i := 0; i < 5; i++ {
+		if m.focus == paneProjects {
+			return m
+		}
+		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
+		m = step.(model)
+	}
 	if m.focus != paneProjects {
-		t.Fatalf("expected projects focus after one down, got %v", m.focus)
+		t.Fatalf("expected projects focus after cycling, got %v", m.focus)
 	}
 	return m
 }

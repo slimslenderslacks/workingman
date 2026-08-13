@@ -25,6 +25,7 @@ const (
 	paneProjectYAML
 	paneProjects
 	paneTasks
+	paneAudit
 )
 
 // uiMode is the input mode the TUI is currently capturing keystrokes for.
@@ -153,6 +154,15 @@ type model struct {
 
 	auditLines []string
 	auditCh    <-chan []string
+	// auditCursor is the index into auditLines of the highlighted line, drawn
+	// only while the Audit pane is focused; j/k move it (see moveAuditCursor).
+	// auditScroll is the index of the first visible line, derived from the
+	// cursor so it stays in view. When the cursor sits on the last line the
+	// pane follows the tail — new lines keep the cursor pinned to the bottom
+	// (see the auditMsg handler) so it behaves like `tail -f` until the user
+	// scrolls up.
+	auditCursor int
+	auditScroll int
 
 	// acp holds the ACP-session tab view: one tab per live non-interactive ACP
 	// session, fed by acpCh. showACP toggles the full-window tab view on top of
@@ -274,7 +284,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, waitForSessions(m.sessCh)
 	case auditMsg:
+		// Keep the cursor pinned to the newest line while it's already there so
+		// the pane tails the log; once the user has scrolled up, hold position
+		// (only clamping if lines dropped off the tail window shrank the list).
+		atBottom := m.auditCursor >= len(m.auditLines)-1
 		m.auditLines = msg.lines
+		if atBottom || m.auditCursor > len(m.auditLines)-1 {
+			m.auditCursor = len(m.auditLines) - 1
+		}
+		if m.auditCursor < 0 {
+			m.auditCursor = 0
+		}
 		return m, waitForAudit(m.auditCh)
 	case acpTabEvent:
 		switch msg.kind {
@@ -454,6 +474,10 @@ func (m model) moveSelectionInPane(delta int) model {
 		if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
 			m.yamlScroll, m.yamlCursor = 0, 0
 		}
+	case paneAudit:
+		// j/k move the highlighted cursor line through the audit tail; the view
+		// follows it.
+		m = m.moveAuditCursor(delta)
 	}
 	return m
 }
@@ -509,6 +533,36 @@ func (m model) pageYAML(delta int) model {
 		return m
 	}
 	m.yamlCursor, m.yamlScroll = reconcileYAMLView(m.yamlCursor+delta, m.yamlScroll+delta, len(lines), rows)
+	return m
+}
+
+// auditViewport returns the Audit pane's visible row count from the current
+// layout, or ok=false when the pane isn't laid out (too short a terminal, or
+// no audit source wired in). It mirrors renderAudit's frame math (border +
+// title + blank rows) so a cursor/scroll computed here lines up with what's
+// drawn.
+func (m model) auditViewport() (contentRows int, ok bool) {
+	l := m.computeLayout()
+	if l.auditH <= 0 {
+		return 0, false
+	}
+	bs := m.borderStyle(paneAudit)
+	contentRows = l.auditH - bs.GetVerticalFrameSize() - 2 // title + blank
+	if contentRows < 0 {
+		contentRows = 0
+	}
+	return contentRows, true
+}
+
+// moveAuditCursor shifts the Audit pane's cursor line by delta and re-derives
+// the scroll offset so the cursor stays visible. A no-op when the pane isn't
+// laid out or the log is empty.
+func (m model) moveAuditCursor(delta int) model {
+	rows, ok := m.auditViewport()
+	if !ok || len(m.auditLines) == 0 {
+		return m
+	}
+	m.auditCursor, m.auditScroll = reconcileYAMLView(m.auditCursor+delta, m.auditScroll, len(m.auditLines), rows)
 	return m
 }
 
@@ -784,7 +838,7 @@ func sessionRowAtY(y, paneStartY, count int) int {
 
 // togglePane cycles forward through the focusable panes in the order they
 // appear on screen, top-to-bottom: projects → tasks → project-YAML →
-// sessions → projects. shiftTogglePane is the inverse cycle.
+// sessions → audit → projects. shiftTogglePane is the inverse cycle.
 func togglePane(p pane) pane {
 	switch p {
 	case paneProjects:
@@ -793,7 +847,9 @@ func togglePane(p pane) pane {
 		return paneProjectYAML
 	case paneProjectYAML:
 		return paneSessions
-	default:
+	case paneSessions:
+		return paneAudit
+	default: // paneAudit
 		return paneProjects
 	}
 }
@@ -801,12 +857,14 @@ func togglePane(p pane) pane {
 func shiftTogglePane(p pane) pane {
 	switch p {
 	case paneProjects:
+		return paneAudit
+	case paneAudit:
 		return paneSessions
 	case paneSessions:
 		return paneProjectYAML
 	case paneProjectYAML:
 		return paneTasks
-	default:
+	default: // paneTasks
 		return paneProjects
 	}
 }
@@ -1772,6 +1830,8 @@ func (m model) renderFocusedPane(width, height int) string {
 		return m.renderProjectYAML(width, height)
 	case paneSessions:
 		return m.renderSessions(width, height)
+	case paneAudit:
+		return m.renderAudit(width, height)
 	default: // paneProjects
 		return m.renderProjects(width, height)
 	}
@@ -2052,7 +2112,8 @@ func taskStatusStyle(s task.Status) lipgloss.Style {
 // content height (borders add 2), so we subtract the frame size before
 // handing it to .Height().
 func (m model) renderAudit(width, height int) string {
-	base := unfocusedBorder.Width(width - unfocusedBorder.GetHorizontalBorderSize())
+	bs := m.borderStyle(paneAudit)
+	base := bs.Width(width - bs.GetHorizontalBorderSize())
 	innerHeight := height - base.GetVerticalFrameSize()
 	if innerHeight < 0 {
 		innerHeight = 0
@@ -2072,6 +2133,33 @@ func (m model) renderAudit(width, height int) string {
 		b.WriteString(dimStyle.Render("(empty)"))
 		return style.Render(clampLines(b.String(), innerHeight))
 	}
+
+	// When focused, draw a cursor line and scroll to keep it visible so j/k can
+	// walk the tail. Otherwise the pane stays display-only, pinning the newest
+	// lines to the bottom the way `tail -f` does.
+	if m.focus == paneAudit {
+		cursor, scroll := reconcileYAMLView(m.auditCursor, m.auditScroll, len(m.auditLines), maxLines)
+		end := scroll + maxLines
+		if end > len(m.auditLines) {
+			end = len(m.auditLines)
+		}
+		for i := scroll; i < end; i++ {
+			line := truncate(m.auditLines[i], innerWidth)
+			if i == cursor {
+				// Width pads the highlight to a full-width bar so the cursor
+				// line reads clearly regardless of the log line's length.
+				line = yamlCursorStyle.Width(innerWidth).Render(line)
+			} else {
+				line = dimStyle.Render(line)
+			}
+			b.WriteString(line)
+			if i < end-1 {
+				b.WriteString("\n")
+			}
+		}
+		return style.Render(clampLines(b.String(), innerHeight))
+	}
+
 	lines := m.auditLines
 	if len(lines) > maxLines {
 		lines = lines[len(lines)-maxLines:]
@@ -2154,7 +2242,9 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, audit
 	}
 	var auditCh <-chan []string
 	if auditPath != "" {
-		auditCh = TailAudit(tuiCtx, auditPath, 250*time.Millisecond, 0)
+		// Keep a deeper tail than the pane shows so the Audit pane's cursor
+		// (j/k) has real scrollback to walk, bounded by TailAudit's byte window.
+		auditCh = TailAudit(tuiCtx, auditPath, 250*time.Millisecond, 200)
 	}
 
 	m := newModel(ch, sessCh, auditCh, newTmuxAttacher())
