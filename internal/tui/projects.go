@@ -85,10 +85,12 @@ type TaskView struct {
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
-// of every project it can load, sorted by path for determinism. Individual
-// project- or task-file load failures are skipped rather than aborting the
-// whole scan: a half-written file on disk shouldn't blank the gallery.
-// A walk error on a root (e.g. root does not exist) is surfaced.
+// of every project it can load, sorted by CronActive (live cron schedules
+// last, so the gallery keeps quiescent projects up front), then by CreatedAt
+// descending (zero last), then by Path ascending as the final tie-break.
+// Individual project- or task-file load failures are skipped rather than
+// aborting the whole scan: a half-written file on disk shouldn't blank the
+// gallery. A walk error on a root (e.g. root does not exist) is surfaced.
 func ScanProjects(roots []string) ([]ProjectView, error) {
 	var views []ProjectView
 	seen := map[string]struct{}{}
@@ -123,6 +125,9 @@ func ScanProjects(roots []string) ([]ProjectView, error) {
 	}
 
 	sort.Slice(views, func(i, j int) bool {
+		if views[i].CronActive != views[j].CronActive {
+			return !views[i].CronActive // cron-active projects sink to the end
+		}
 		ai, aj := views[i].CreatedAt, views[j].CreatedAt
 		if !ai.IsZero() && !aj.IsZero() {
 			if !ai.Equal(aj) {

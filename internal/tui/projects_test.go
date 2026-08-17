@@ -447,6 +447,63 @@ func TestScanProjectsCarriesCronActiveFlag(t *testing.T) {
 	}
 }
 
+// Cron-active projects must sink to the end of the gallery regardless of how
+// recently they were created, while the existing CreatedAt-descending /
+// Path-ascending order is preserved within each of the two groups.
+func TestScanProjectsSortsCronActiveLast(t *testing.T) {
+	root := t.TempDir()
+
+	future := time.Now().Add(24 * time.Hour).UTC()
+	now := time.Now().UTC()
+	older := now.Add(-1 * time.Hour)
+	newer := now
+
+	mk := func(name string, created *time.Time, cron string) {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := project.Project{
+			Description: name,
+			Branch:      "feat/" + name,
+			Status:      project.StatusReady,
+			CreatedAt:   created,
+		}
+		if cron != "" {
+			p.Cron = cron
+			p.CronUntil = &future
+		}
+		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &p, project.WriterAgent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Non-cron-active group.
+	mk("bravo", &newer, "")
+	mk("alpha", &older, "")
+	mk("charlie", nil, "") // un-stamped — sorts last within its group
+	// Cron-active group: newer CreatedAt than any non-cron-active project,
+	// yet must still sort after all of them.
+	veryNew := now.Add(1 * time.Hour)
+	mk("delta", &veryNew, "@every 15m")
+	mk("echo", &now, "@every 15m")
+
+	views, err := ScanProjects([]string{root})
+	if err != nil {
+		t.Fatalf("ScanProjects: %v", err)
+	}
+	var got []string
+	for _, v := range views {
+		got = append(got, v.Name)
+	}
+	want := []string{"bravo", "alpha", "charlie", "delta", "echo"}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Errorf("order = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
 // A schedule expiring must make the poller emit a new snapshot, otherwise the
 // green border lingers until some unrelated field changes.
 func TestProjectViewEqualDetectsCronActiveFlip(t *testing.T) {
