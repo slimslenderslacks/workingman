@@ -46,16 +46,22 @@ const (
 	modeCommandPicker
 	modeNewProject
 	// modeNewTask is the modal that prompts for a free-form task description
-	// after `:task`. On enter it seeds a task file in the selected project's
-	// tasks/ dir and flips the project to status:ready so the daemon re-runs
-	// the planning agent, which fleshes out the seed and returns the project
-	// to status:working.
+	// after `:task`. On enter with a non-empty description it moves to
+	// modeConfirmNewTask to review the text; confirming there seeds a task
+	// file in the selected project's tasks/ dir and flips the project to
+	// status:ready so the daemon re-runs the planning agent, which fleshes
+	// out the seed and returns the project to status:working.
 	modeNewTask
 	// modeConfirmArchive is the yes/no confirmation shown after `:archive`.
 	// On confirm it moves the selected project's tree out of the workspace
 	// root into the sibling ~/<root>.backup dir; the project then disappears
 	// from the gallery on the next scan.
 	modeConfirmArchive
+	// modeConfirmNewTask is the yes/no confirmation shown after `enter` on a
+	// non-empty new-task description. It echoes the trimmed description back
+	// so the human can review it before it's seeded as a task file; `n`/esc
+	// returns to modeNewTask with the text still editable.
+	modeConfirmNewTask
 )
 
 // yamlSource picks what the YAML viewer pane renders: the selected
@@ -157,6 +163,10 @@ type model struct {
 	// mode == modeNewTask.
 	newTaskDesc string
 	newTaskErr  string
+	// newTaskPending is the trimmed description stashed when `enter` moves
+	// from modeNewTask to modeConfirmNewTask, mirroring archiveTarget. It's
+	// what the confirm modal echoes back and what gets seeded on `y`.
+	newTaskPending string
 
 	auditLines []string
 	auditCh    <-chan []string
@@ -351,6 +361,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleNewTaskKey(msg)
 		case modeConfirmArchive:
 			return m.handleConfirmArchiveKey(msg)
+		case modeConfirmNewTask:
+			return m.handleConfirmNewTaskKey(msg)
 		}
 		return m.handleNormalKey(msg)
 	}
@@ -1859,6 +1871,9 @@ func (m model) View() string {
 	}
 	if m.mode == modeConfirmArchive {
 		return m.renderConfirmArchiveModal()
+	}
+	if m.mode == modeConfirmNewTask {
+		return m.renderConfirmNewTaskModal()
 	}
 
 	// The ACP tab view takes over the whole window when open.

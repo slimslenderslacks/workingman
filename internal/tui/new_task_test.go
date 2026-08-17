@@ -66,6 +66,20 @@ func TestNewTaskModalSeedsTaskAndReplans(t *testing.T) {
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = step.(model)
 
+	if m.mode != modeConfirmNewTask {
+		t.Fatalf("after enter on a non-empty description, mode = %v, want modeConfirmNewTask", m.mode)
+	}
+	if m.newTaskPending != "Add a /healthz endpoint" {
+		t.Errorf("newTaskPending = %q, want the trimmed description", m.newTaskPending)
+	}
+	// Nothing should be written yet — the confirm step hasn't happened.
+	if _, err := os.Stat(filepath.Join(root, "widget", "tasks")); !os.IsNotExist(err) {
+		t.Errorf("reaching the confirm step must not create a tasks dir yet")
+	}
+
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = step.(model)
+
 	if m.mode != modeNormal {
 		t.Errorf("after creation, mode = %v, want modeNormal", m.mode)
 	}
@@ -131,6 +145,72 @@ func TestNewTaskModalRejectsEmptyDescription(t *testing.T) {
 	p, _ := project.Load(projPath)
 	if p.Status != project.StatusDone {
 		t.Errorf("project status = %q, want it untouched (done)", p.Status)
+	}
+}
+
+func TestNewTaskModalRejectsWhitespaceOnlyDescription(t *testing.T) {
+	root := t.TempDir()
+	m, projPath := selectProject(t, root, "widget")
+	m.mode = modeNewTask
+	m.newTaskDesc = "   "
+
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = step.(model)
+
+	if m.mode != modeNewTask {
+		t.Errorf("whitespace-only enter should keep modal open (not go to confirm); mode = %v", m.mode)
+	}
+	if m.newTaskErr == "" {
+		t.Errorf("expected newTaskErr for whitespace-only description")
+	}
+	if _, err := os.Stat(filepath.Join(root, "widget", "tasks")); !os.IsNotExist(err) {
+		t.Errorf("whitespace-only description must not create a tasks dir")
+	}
+	p, _ := project.Load(projPath)
+	if p.Status != project.StatusDone {
+		t.Errorf("project status = %q, want it untouched (done)", p.Status)
+	}
+}
+
+func TestNewTaskModalConfirmCancelPreservesDescription(t *testing.T) {
+	root := t.TempDir()
+	m, projPath := selectProject(t, root, "widget")
+	m.mode = modeNewTask
+
+	m = typeChars(t, m, "Add a /healthz endpoint")
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = step.(model)
+	if m.mode != modeConfirmNewTask {
+		t.Fatalf("mode = %v, want modeConfirmNewTask", m.mode)
+	}
+
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = step.(model)
+
+	if m.mode != modeNewTask {
+		t.Errorf("esc in confirm mode = %v, want back to modeNewTask", m.mode)
+	}
+	if m.newTaskDesc != "Add a /healthz endpoint" {
+		t.Errorf("newTaskDesc = %q, want the description preserved for further editing", m.newTaskDesc)
+	}
+	if _, err := os.Stat(filepath.Join(root, "widget", "tasks")); !os.IsNotExist(err) {
+		t.Errorf("cancelling the confirm modal must not create a tasks dir")
+	}
+	p, _ := project.Load(projPath)
+	if p.Status != project.StatusDone {
+		t.Errorf("project status = %q, want it untouched (done)", p.Status)
+	}
+
+	// 'n' behaves the same as esc.
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = step.(model)
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m = step.(model)
+	if m.mode != modeNewTask {
+		t.Errorf("'n' in confirm mode = %v, want back to modeNewTask", m.mode)
+	}
+	if m.newTaskDesc != "Add a /healthz endpoint" {
+		t.Errorf("newTaskDesc = %q, want the description preserved for further editing", m.newTaskDesc)
 	}
 }
 
@@ -210,6 +290,8 @@ func TestSecondSeedDoesNotClobberFirst(t *testing.T) {
 		mm, _ := runProjectCommand(t, m, "task")
 		mm = typeChars(t, mm, desc)
 		step, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		mm = step.(model)
+		step, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 		return step.(model)
 	}
 	// Two descriptions that slug to the same stem.
