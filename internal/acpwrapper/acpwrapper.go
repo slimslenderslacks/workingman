@@ -102,7 +102,20 @@ type Config struct {
 	// success/committed run has it torn down. Empty (planning, which has no
 	// single task) means no status-based retention — only SaveSandbox and the
 	// shutdown check apply.
+	//
+	// Also recorded verbatim into session.json (see sessionRecord) so a
+	// restarting daemon can find the same task file when reconciling session
+	// tracking.
 	TaskPath string
+
+	// ProjectPath is the host path to the .project.yaml driving this session,
+	// and Kind is the agent.Kind string ("project", "planning", "task",
+	// "commit") running it. Neither affects the sandbox or the ACP client —
+	// they are recorded into session.json purely so a restarting daemon can
+	// tell which project (and how) to resume dispatching for a session it
+	// did not itself launch. See the daemon package's startup reconciliation.
+	ProjectPath string
+	Kind        string
 
 	// SaveSandbox, when true, makes the wrapper leave the sandbox in place when
 	// the agent exits instead of removing it with `sbx rm --force`. It is the
@@ -187,6 +200,9 @@ func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.T
 		Workspaces:  c.Workspaces,
 		Kit:         c.KitPath,
 		LogPath:     c.LogPath(),
+		ProjectPath: c.ProjectPath,
+		TaskPath:    c.TaskPath,
+		Kind:        c.Kind,
 	}
 }
 

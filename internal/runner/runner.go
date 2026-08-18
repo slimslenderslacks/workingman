@@ -577,12 +577,15 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		SocketPath:  store.SocketPath(sessionID),
 		Workspaces:  workspaces,
 		Kit:         r.Kit,
+		ProjectPath: p.ProjectPath,
+		TaskPath:    p.TaskPath,
+		Kind:        p.Kind.String(),
 	}
 	if err := store.Write(rec); err != nil {
 		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
 	}
 
-	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, workspaces, p.StaticMCPs, p.Policies, p.TaskPath, p.SaveSandbox)
+	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, p.StaticMCPs, p.Policies, p.TaskPath, p.SaveSandbox)
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionID,
@@ -610,7 +613,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 // acpWrapperCommand builds the argv that launches one acp-wrapper host process
 // for an ACP session. The wrapper resolves --workspace paths to absolute itself,
 // but they already are (workspace.Manager and the orch dir both yield abs paths).
-func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, workspaces, staticMCPs []string, policies []policy.Rule, taskPath string, saveSandbox bool) []string {
+func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, staticMCPs []string, policies []policy.Rule, taskPath string, saveSandbox bool) []string {
 	bin := r.AcpWrapperPath
 	if bin == "" {
 		bin = "acp-wrapper"
@@ -631,6 +634,15 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot string, 
 	}
 	if r.SbxPath != "" {
 		args = append(args, "--sbx", r.SbxPath)
+	}
+	// --project-path and --kind carry no launch behavior of their own; the
+	// wrapper only forwards them into session.json (see sessionRecord) so a
+	// restarting daemon can reconcile session tracking against this session.
+	if projectPath != "" {
+		args = append(args, "--project-path", projectPath)
+	}
+	if kind != "" {
+		args = append(args, "--kind", kind)
 	}
 	// The wrapper tears the sandbox down when its agent exits so per-task
 	// sandboxes don't pile up. --task-path lets it re-read the task's final
@@ -666,6 +678,13 @@ func (r *Runner) sessionsRoot() (string, error) {
 		return abs, nil
 	}
 	return session.DefaultRoot()
+}
+
+// ResolveSessionsRoot is the exported form of sessionsRoot, used by the
+// daemon to open the same session.Store the ACP launch path writes to when
+// reconciling in-memory session tracking with on-disk state at startup.
+func (r *Runner) ResolveSessionsRoot() (string, error) {
+	return r.sessionsRoot()
 }
 
 // SessionLogPath returns the absolute path to the ACP stream log for the session

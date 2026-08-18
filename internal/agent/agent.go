@@ -43,6 +43,28 @@ func (k Kind) String() string {
 	return "unknown"
 }
 
+// ParseKind is the inverse of Kind.String(). It is used by the daemon to
+// recover a session's Kind from the on-disk record it wrote (session.Session
+// carries the string, not the iota) when reconciling session tracking after a
+// restart. Returns false for an empty or unrecognized string.
+func ParseKind(s string) (Kind, bool) {
+	switch s {
+	case "project":
+		return ProjectAgent, true
+	case "planning":
+		return PlanningAgent, true
+	case "task":
+		return TaskAgent, true
+	case "wolf":
+		return WolfAgent, true
+	case "commit":
+		return CommitAgent, true
+	case "archive":
+		return ArchiveAgent, true
+	}
+	return 0, false
+}
+
 // Interactive reports whether this Kind expects a human in the loop. Two kinds
 // do: the wolf agent asks for guidance when a project is blocked, and the
 // archive agent may have to get a proposed `.gitignore` change approved before

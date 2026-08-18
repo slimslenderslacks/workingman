@@ -46,6 +46,16 @@ func (l *ProcessLauncher) Launch(_ context.Context, spec Spec) (Session, error) 
 	cmd := exec.Command(spec.Command[0], spec.Command[1:]...)
 	cmd.Dir = spec.Workspace
 	cmd.Stderr = l.Stderr
+	// Put the child in its own process group. Without this it inherits orch's
+	// group, so a terminal SIGINT (Ctrl-C, the normal way to stop/restart
+	// orch) is delivered to acp-wrapper directly by the kernel — independent
+	// of anything this package does — and acp-wrapper treats SIGINT as an
+	// ordinary shutdown request (see cmd/acp-wrapper/main.go), tearing down
+	// the very session a restart is supposed to leave behind for reconnection.
+	// Isolating the group means the only way this process receives a signal
+	// is an explicit one from Close(), which the daemon now reserves for
+	// sessions it actually means to end (see Daemon.shutdown's ACP detach path).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("agent: start %s: %w", spec.Command[0], err)
 	}

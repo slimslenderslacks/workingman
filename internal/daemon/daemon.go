@@ -162,6 +162,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		d.audit.Log("watch_root", "path", r)
 	}
+	// Reconcile against on-disk sessions before startupScan: adopting any
+	// still-running ACP session into d.sessions first means startupScan's
+	// revisitProject calls see hasSession(key) == true and skip re-dispatching
+	// a duplicate agent for a project a prior orch process already has a
+	// live session for.
+	d.reconcileSessions()
 	d.startupScan()
 	go d.reapLoop(ctx)
 	for {
@@ -182,6 +188,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
+// shutdown runs when ctx is cancelled — a normal orch exit/restart as well as
+// a crash-adjacent path. It must NOT tear down ACP-backed sessions: an
+// acp-wrapper process is meant to keep running (and its sandbox with it) so a
+// future orch process can reconnect over the session's socket. Only sessions
+// that aren't ACP-backed (the legacy tmux + `sbx exec` path, and interactive
+// project/wolf agents) are actually closed here — detachable ones are simply
+// dropped from local tracking, exactly like a deliberate detach.
 func (d *Daemon) shutdown() {
 	d.watcher.Close()
 	if d.scheduler != nil {
@@ -192,11 +205,27 @@ func (d *Daemon) shutdown() {
 	d.sessionsMu.Lock()
 	defer d.sessionsMu.Unlock()
 	for key, entry := range d.sessions {
+		if d.detachable(entry.kind) {
+			d.audit.Log("session_detached", "key", key, "kind", entry.kind.String())
+			delete(d.sessions, key)
+			continue
+		}
 		if err := entry.sess.Close(); err != nil {
 			d.audit.Log("session_close_error", "key", key, "err", err.Error())
 		}
 		delete(d.sessions, key)
 	}
+}
+
+// detachable reports whether a session of this kind should survive an orch
+// shutdown/restart rather than being closed: exactly the ACP-backed,
+// non-interactive kinds (project, planning, task, commit), which run as a
+// standalone acp-wrapper host process the daemon does not need to keep alive
+// to keep running. Interactive kinds (wolf, archive) and the legacy tmux path
+// (no AcpLauncher configured) are unaffected — those sessions are still
+// closed on shutdown as before.
+func (d *Daemon) detachable(kind agent.Kind) bool {
+	return d.runner != nil && d.runner.UsesACP(kind)
 }
 
 // trackSession registers sess under key and spawns a goroutine that waits for
@@ -229,8 +258,21 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, t
 	}
 	d.sessionsMu.Unlock()
 
+	// Detachable (ACP-backed) sessions must not be waited on under d.ctx:
+	// processSession.Wait itself closes the session (SIGTERM) the moment its
+	// ctx is cancelled, so feeding it the daemon's shutdown ctx would tear
+	// down the very acp-wrapper a restart is supposed to leave running —
+	// regardless of what shutdown()'s own loop does. Waiting under
+	// context.Background() instead means this goroutine only ends when the
+	// process actually exits; it is abandoned harmlessly when the daemon's
+	// own process later exits.
+	waitCtx := d.ctx
+	if d.detachable(kind) {
+		waitCtx = context.Background()
+	}
+
 	go func() {
-		waitErr := sess.Wait(d.ctx)
+		waitErr := sess.Wait(waitCtx)
 		d.sessionsMu.Lock()
 		delete(d.sessions, key)
 		d.sessionsMu.Unlock()
