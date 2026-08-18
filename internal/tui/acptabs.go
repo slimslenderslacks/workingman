@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -61,6 +62,10 @@ type acpTab struct {
 	// tool_call_update mutates the block in place instead of appending a copy.
 	// Lazily created; entries are only ever appended, so stored indices stay valid.
 	toolIdx map[string]int
+	// placeholder marks a tab created for a session still in session.StatusStarting
+	// — discovered but not yet dialed, so status/entries carry no real information
+	// yet. upsert (called once the session is actually watched) clears this.
+	placeholder bool
 }
 
 // acpTabs is the collection of tabs plus the selected index. The zero value is
@@ -80,23 +85,40 @@ func (a *acpTabs) indexOf(id string) int {
 	return -1
 }
 
+// appendTab adds t to the collection, selecting it if it's the first tab.
+func (a *acpTabs) appendTab(t acpTab) {
+	a.tabs = append(a.tabs, t)
+	if len(a.tabs) == 1 {
+		a.sel = 0
+	}
+}
+
 // upsert adds a tab for id when one doesn't already exist. Creating a tab the
 // moment a session starts is half the lifecycle contract; removeTab is the
 // other half. A new tab starts in StateConnecting with an empty transcript and
 // no in-progress message (curMsg -1). The first tab added becomes selected.
+// Calling upsert on an id that already has a (placeholder) tab clears the
+// placeholder flag — this is how a starting-session placeholder (see
+// upsertPlaceholder) turns into a real, actively-watched tab once the session
+// flips to running and watchOneACPSession takes over.
 func (a *acpTabs) upsert(id, title string) {
+	if i := a.indexOf(id); i >= 0 {
+		a.tabs[i].placeholder = false
+		return
+	}
+	a.appendTab(acpTab{id: id, title: title, status: acpclient.StateConnecting, curMsg: -1})
+}
+
+// upsertPlaceholder adds a placeholder tab for a session discovered in
+// session.StatusStarting — no watcher is dialing it yet, so there is no real
+// status or transcript to show, just a marker that the session exists. It is a
+// no-op if a tab for id already exists (placeholder or real), so it never
+// clobbers a tab that upsert has already promoted to real.
+func (a *acpTabs) upsertPlaceholder(id, title string) {
 	if a.indexOf(id) >= 0 {
 		return
 	}
-	a.tabs = append(a.tabs, acpTab{
-		id:     id,
-		title:  title,
-		status: acpclient.StateConnecting,
-		curMsg: -1,
-	})
-	if len(a.tabs) == 1 {
-		a.sel = 0
-	}
+	a.appendTab(acpTab{id: id, title: title, status: acpclient.StateConnecting, curMsg: -1, placeholder: true})
 }
 
 // remove drops the tab for id (a session whose resources were cleaned up) and
@@ -442,21 +464,77 @@ func acpBoxLines(label string, labelStyle lipgloss.Style, text string, box lipgl
 // line, and footer hint (one row each). The transcript box gets the rest.
 const acpChromeRows = 4
 
+// acpTabLabel is the unstyled text of a tab's cell: its status glyph (or a
+// "starting…" marker while the session is a placeholder, since it has no real
+// acpclient.State yet) followed by its title.
+func acpTabLabel(t acpTab) string {
+	if t.placeholder {
+		return "○ " + t.title + " (starting…)"
+	}
+	return acpStatusGlyph(t.status) + " " + t.title
+}
+
 // renderACPTabBar draws the row of tab labels, each carrying its status glyph,
-// with the selected tab highlighted. The caller clamps the result to the
-// terminal width (lipgloss MaxWidth is ANSI-aware, so clamping the styled bar
-// can't tear an escape sequence the way a byte-slice truncate would).
-func renderACPTabBar(tabs []acpTab, sel int) string {
-	cells := make([]string, 0, len(tabs))
+// with the selected tab highlighted. When the tabs don't all fit in width, it
+// shows a scrolled window that always contains the selected tab — sliding as
+// selection moves past either edge — plus a "«+N" / "+N»" affordance naming
+// how many tabs are hidden off that side. width <= 0 means "unbounded" (no
+// scrolling, used by tests that don't care about overflow).
+func renderACPTabBar(tabs []acpTab, sel int, width int) string {
+	if len(tabs) == 0 {
+		return ""
+	}
+	if sel < 0 || sel >= len(tabs) {
+		sel = 0
+	}
+
+	cells := make([]string, len(tabs))
 	for i, t := range tabs {
-		label := acpStatusGlyph(t.status) + " " + t.title
+		label := acpTabLabel(t)
 		if i == sel {
-			cells = append(cells, acpTabSelectedStyle.Render(label))
+			cells[i] = acpTabSelectedStyle.Render(label)
 		} else {
-			cells = append(cells, acpTabStyle.Render(label))
+			cells[i] = acpTabStyle.Render(label)
 		}
 	}
-	return strings.Join(cells, " ")
+
+	render := func(start, end int) string {
+		parts := make([]string, 0, end-start+2)
+		if start > 0 {
+			parts = append(parts, dimStyle.Render(fmt.Sprintf("«+%d", start)))
+		}
+		parts = append(parts, cells[start:end]...)
+		if end < len(tabs) {
+			parts = append(parts, dimStyle.Render(fmt.Sprintf("+%d»", len(tabs)-end)))
+		}
+		return strings.Join(parts, " ")
+	}
+
+	full := render(0, len(tabs))
+	if width <= 0 || lipgloss.Width(full) <= width {
+		return full
+	}
+
+	// Grow a window outward from the selected tab, alternating sides, for as
+	// long as the result (including whatever overflow indicators it needs)
+	// still fits. This keeps the window minimal (no tabs shown beyond what
+	// width allows) while guaranteeing sel is always inside it.
+	start, end := sel, sel+1
+	for start > 0 || end < len(tabs) {
+		grew := false
+		if end < len(tabs) && lipgloss.Width(render(start, end+1)) <= width {
+			end++
+			grew = true
+		}
+		if start > 0 && lipgloss.Width(render(start-1, end)) <= width {
+			start--
+			grew = true
+		}
+		if !grew {
+			break
+		}
+	}
+	return render(start, end)
 }
 
 // renderACPTabBody renders the selected tab's transcript into a width×height
@@ -540,10 +618,15 @@ func (m model) renderACPView() string {
 		return lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", hint)
 	}
 
-	bar := lipgloss.NewStyle().MaxWidth(width).Render(renderACPTabBar(m.acp.tabs, m.acp.sel))
+	bar := lipgloss.NewStyle().MaxWidth(width).Render(renderACPTabBar(m.acp.tabs, m.acp.sel, width))
 
 	t, _ := m.acp.selected()
-	statusLine := acpStatusStyle(t.status).Render(acpStatusGlyph(t.status) + " " + acpStatusLabel(t.status))
+	var statusLine string
+	if t.placeholder {
+		statusLine = dimStyle.Render("○ starting…")
+	} else {
+		statusLine = acpStatusStyle(t.status).Render(acpStatusGlyph(t.status) + " " + acpStatusLabel(t.status))
+	}
 
 	bodyOuterH := height - acpChromeRows
 	if bodyOuterH < 3 {

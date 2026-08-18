@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/slimslenderslacks/work/internal/acpclient"
 )
@@ -269,9 +271,67 @@ func TestRenderACPTabBarMarksSelected(t *testing.T) {
 		{id: "a", title: "task-a", status: acpclient.StateStreaming},
 		{id: "b", title: "plan-b", status: acpclient.StateConnected},
 	}
-	bar := renderACPTabBar(tabs, 1)
+	bar := renderACPTabBar(tabs, 1, 0)
 	if !strings.Contains(bar, "task-a") || !strings.Contains(bar, "plan-b") {
 		t.Errorf("bar missing a tab title; got:\n%s", bar)
+	}
+}
+
+func TestRenderACPTabBarScrollsToKeepSelectedVisible(t *testing.T) {
+	const n = 18
+	tabs := make([]acpTab, n)
+	for i := range tabs {
+		tabs[i] = acpTab{id: fmt.Sprintf("s%d", i), title: fmt.Sprintf("task-%02d", i), status: acpclient.StateConnected}
+	}
+	const width = 40
+
+	// With no scrolling at all, a narrow bar can't show every one of n tabs, so
+	// an overflow indicator must appear.
+	barAtStart := renderACPTabBar(tabs, 0, width)
+	if lipgloss.Width(barAtStart) > width {
+		t.Errorf("bar wider than terminal: width=%d, rendered width=%d\n%s", width, lipgloss.Width(barAtStart), barAtStart)
+	}
+	if !strings.Contains(barAtStart, "task-00") {
+		t.Errorf("bar should contain the selected (first) tab; got:\n%s", barAtStart)
+	}
+	if !strings.Contains(barAtStart, "»") {
+		t.Errorf("bar should show a right overflow indicator when tabs are hidden; got:\n%s", barAtStart)
+	}
+
+	// Selecting a tab deep in the middle must scroll the window so it's visible,
+	// with hidden tabs on both sides now.
+	mid := n / 2
+	barAtMid := renderACPTabBar(tabs, mid, width)
+	if lipgloss.Width(barAtMid) > width {
+		t.Errorf("bar wider than terminal: width=%d, rendered width=%d\n%s", width, lipgloss.Width(barAtMid), barAtMid)
+	}
+	wantTitle := fmt.Sprintf("task-%02d", mid)
+	if !strings.Contains(barAtMid, wantTitle) {
+		t.Errorf("bar should contain the selected tab %q; got:\n%s", wantTitle, barAtMid)
+	}
+	if !strings.Contains(barAtMid, "«") {
+		t.Errorf("bar should show a left overflow indicator once scrolled past the start; got:\n%s", barAtMid)
+	}
+	if !strings.Contains(barAtMid, "»") {
+		t.Errorf("bar should show a right overflow indicator when tabs remain beyond the window; got:\n%s", barAtMid)
+	}
+
+	// Selecting the last tab must scroll all the way to the right edge, leaving
+	// only a left indicator.
+	last := n - 1
+	barAtEnd := renderACPTabBar(tabs, last, width)
+	if lipgloss.Width(barAtEnd) > width {
+		t.Errorf("bar wider than terminal: width=%d, rendered width=%d\n%s", width, lipgloss.Width(barAtEnd), barAtEnd)
+	}
+	wantLastTitle := fmt.Sprintf("task-%02d", last)
+	if !strings.Contains(barAtEnd, wantLastTitle) {
+		t.Errorf("bar should contain the selected (last) tab; got:\n%s", barAtEnd)
+	}
+	if strings.Contains(barAtEnd, "»") {
+		t.Errorf("bar should have no right overflow indicator once scrolled to the end; got:\n%s", barAtEnd)
+	}
+	if !strings.Contains(barAtEnd, "«") {
+		t.Errorf("bar should show a left overflow indicator once scrolled to the end; got:\n%s", barAtEnd)
 	}
 }
 

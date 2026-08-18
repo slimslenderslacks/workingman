@@ -25,6 +25,11 @@ type acpEventKind int
 const (
 	// acpTabAdded creates a tab — a session just appeared and is being watched.
 	acpTabAdded acpEventKind = iota
+	// acpTabStarting creates a placeholder tab for a session discovered in
+	// session.StatusStarting — no watcher is dialing it yet (there is nothing to
+	// dial: the wrapper hasn't confirmed the ACP client is up), but the session
+	// exists and should already be visible in the tab bar.
+	acpTabStarting
 	// acpTabPrompt records a prompt the TUI sent to the session.
 	acpTabPrompt
 	// acpTabStream carries one acpclient.Event (lifecycle transition or streamed
@@ -166,8 +171,13 @@ type activeWatch struct {
 //
 // It polls the store on interval. A session in StatusRunning that isn't already
 // being watched gets a per-session goroutine (watchOneACPSession). A session
-// that has disappeared from the listing — its directory cleaned up — has its
-// watcher cancelled and an acpTabRemoved emitted so the tab goes away.
+// still in StatusStarting gets an immediate placeholder tab (acpTabStarting)
+// instead of being skipped — the wrapper can take a while to confirm the ACP
+// client is up (cold sandbox boot), and the session should already be visible
+// (and reachable via the tab bar's scrolling) before there's anything to dial.
+// A session that has disappeared from the listing — its directory cleaned up —
+// has its watcher (or placeholder) cancelled/dropped and an acpTabRemoved
+// emitted so the tab goes away.
 func watchACPSessions(ctx context.Context, root string, interval time.Duration, dial acpDialer, probe sandboxProbe, prompt string) <-chan acpTabEvent {
 	if interval <= 0 {
 		interval = 500 * time.Millisecond
@@ -181,6 +191,9 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 		}
 
 		active := map[string]activeWatch{}
+		// starting tracks sessions currently shown as a placeholder tab (see
+		// acpTabStarting) so each one is announced only once, not on every poll.
+		starting := map[string]bool{}
 		var wg sync.WaitGroup
 		defer func() {
 			for _, w := range active {
@@ -217,9 +230,16 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 					delete(active, s.ID)
 					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: s.ID})
 				}
+				if s.Status == session.StatusStarting {
+					if !starting[s.ID] {
+						starting[s.ID] = true
+						emitACP(ctx, out, acpTabEvent{kind: acpTabStarting, id: s.ID, title: acpTabTitle(s)})
+					}
+					continue
+				}
+				delete(starting, s.ID)
 				if s.Status != session.StatusRunning {
-					// Not yet live (starting) or already ended: nothing to watch.
-					// A later poll picks it up once it flips to running.
+					// Already ended without ever running: nothing to watch.
 					continue
 				}
 				wctx, cancel := context.WithCancel(ctx)
@@ -230,11 +250,17 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 					watchOneACPSession(wctx, out, dial, probe, store, s, prompt, acpHandshakeTimeout, acpTurnIdleTimeout)
 				}(s)
 			}
-			// Reap watchers whose session directory is gone.
+			// Reap watchers and placeholders whose session directory is gone.
 			for id, w := range active {
 				if !seen[id] {
 					w.cancel()
 					delete(active, id)
+					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: id})
+				}
+			}
+			for id := range starting {
+				if !seen[id] {
+					delete(starting, id)
 					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: id})
 				}
 			}

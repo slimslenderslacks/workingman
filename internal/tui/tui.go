@@ -317,6 +317,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.kind {
 		case acpTabAdded:
 			m.acp.upsert(msg.id, msg.title)
+		case acpTabStarting:
+			m.acp.upsertPlaceholder(msg.id, msg.title)
 		case acpTabPrompt:
 			m.acp.addPrompt(msg.id, msg.text)
 		case acpTabStream:
