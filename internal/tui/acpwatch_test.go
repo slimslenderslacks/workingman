@@ -665,6 +665,168 @@ func TestWatchStartingSessionGetsPlaceholderThenTransitionsToRunning(t *testing.
 	}, "session never transitioned from starting placeholder to a dialed, prompted watch")
 }
 
+// writeStartingSession persists a StatusStarting session.json under root,
+// with the given CreatedAt, so the watcher discovers it as a placeholder.
+func writeStartingSession(t *testing.T, root, id string, createdAt time.Time) session.Store {
+	t.Helper()
+	store := session.Store{Root: root}
+	rec := session.Session{
+		ID:          id,
+		SandboxName: id,
+		Status:      session.StatusStarting,
+		CreatedAt:   createdAt,
+		SocketPath:  store.SocketPath(id),
+		Workspaces:  []string{"/work/" + id},
+	}
+	if err := store.Write(rec); err != nil {
+		t.Fatalf("write session %s: %v", id, err)
+	}
+	return store
+}
+
+// TestWatchStartingSessionReapedWhenSandboxGoneAfterGrace asserts that a
+// StatusStarting session whose CreatedAt is already past acpStartingGracePeriod
+// and whose sandbox probe reports gone gets reaped: the placeholder is dropped
+// (acpTabRemoved) and its on-disk directory is removed. This is the "wrapper
+// crashed before ever creating the sandbox" case the task exists to fix.
+func TestWatchStartingSessionReapedWhenSandboxGoneAfterGrace(t *testing.T) {
+	root := t.TempDir()
+	store := writeStartingSession(t, root, "task-orphan-starting", time.Now().Add(-acpStartingGracePeriod-time.Second))
+
+	goneProbe := func(_ context.Context, _ string) (bool, error) { return false, nil }
+	var dialed atomic.Bool
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		dialed.Store(true)
+		return newFakeACPConn(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, goneProbe, "go read it")
+	defer stopWatch(cancel, ch)
+
+	ev := waitForKind(t, ch, acpTabRemoved, 2*time.Second)
+	if ev.id != "task-orphan-starting" {
+		t.Errorf("removed id = %q, want task-orphan-starting", ev.id)
+	}
+	waitForDirGone(t, store.Dir("task-orphan-starting"), 2*time.Second)
+	if dialed.Load() {
+		t.Error("a starting session must never be dialed")
+	}
+}
+
+// TestWatchStartingSessionNotReapedWithinGrace asserts a freshly-starting
+// session (CreatedAt just now) is NOT reaped even though its sandbox probe
+// reports gone — the brief window between store.Write(StatusStarting, ...)
+// and the wrapper's sbx create is a legitimate race, not staleness.
+func TestWatchStartingSessionNotReapedWithinGrace(t *testing.T) {
+	root := t.TempDir()
+	writeStartingSession(t, root, "task-fresh-starting", time.Now())
+
+	goneProbe := func(_ context.Context, _ string) (bool, error) { return false, nil }
+	var dialed atomic.Bool
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		dialed.Store(true)
+		return newFakeACPConn(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, goneProbe, "go read it")
+	defer stopWatch(cancel, ch)
+
+	waitForKind(t, ch, acpTabStarting, 2*time.Second)
+
+	// Give the watcher several poll intervals to (wrongly) reap it.
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.kind == acpTabRemoved {
+				t.Fatalf("starting session reaped within its grace period: %+v", ev)
+			}
+		case <-deadline:
+			if dialed.Load() {
+				t.Error("a starting session must never be dialed")
+			}
+			return
+		}
+	}
+}
+
+// TestWatchStartingSessionNotReapedWhenProbeErrors asserts that a starting
+// session past its grace period is NOT reaped when the sandbox probe is
+// inconclusive (errors) — the same conservative rule applied to running
+// sessions applies here too.
+func TestWatchStartingSessionNotReapedWhenProbeErrors(t *testing.T) {
+	root := t.TempDir()
+	writeStartingSession(t, root, "task-starting-probeerr", time.Now().Add(-acpStartingGracePeriod-time.Second))
+
+	errProbe := func(_ context.Context, _ string) (bool, error) {
+		return false, context.DeadlineExceeded
+	}
+	var dialed atomic.Bool
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		dialed.Store(true)
+		return newFakeACPConn(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, errProbe, "go read it")
+	defer stopWatch(cancel, ch)
+
+	waitForKind(t, ch, acpTabStarting, 2*time.Second)
+
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.kind == acpTabRemoved {
+				t.Fatalf("inconclusive probe wrongly reaped a starting session: %+v", ev)
+			}
+		case <-deadline:
+			if dialed.Load() {
+				t.Error("a starting session must never be dialed")
+			}
+			return
+		}
+	}
+}
+
+// TestWatchStartingSessionNotReapedWhenSandboxAlive asserts that a starting
+// session past its grace period whose sandbox the probe confirms alive is NOT
+// reaped — a slow-but-legitimate boot must survive as long as the sandbox
+// genuinely exists.
+func TestWatchStartingSessionNotReapedWhenSandboxAlive(t *testing.T) {
+	root := t.TempDir()
+	writeStartingSession(t, root, "task-starting-alive", time.Now().Add(-acpStartingGracePeriod-time.Second))
+
+	var dialed atomic.Bool
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		dialed.Store(true)
+		return newFakeACPConn(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, aliveProbe, "go read it")
+	defer stopWatch(cancel, ch)
+
+	waitForKind(t, ch, acpTabStarting, 2*time.Second)
+
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.kind == acpTabRemoved {
+				t.Fatalf("a starting session with a confirmed-alive sandbox was reaped: %+v", ev)
+			}
+		case <-deadline:
+			if dialed.Load() {
+				t.Error("a starting session must never be dialed")
+			}
+			return
+		}
+	}
+}
+
 // waitForCond polls cond until it returns true or the deadline elapses, failing
 // the test with msg on timeout.
 func waitForCond(t *testing.T, dur time.Duration, cond func() bool, msg string) {
