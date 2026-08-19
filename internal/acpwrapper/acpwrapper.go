@@ -167,6 +167,44 @@ type Config struct {
 	// sandboxd being started with the signing agent in its environment (see
 	// start-orch.sh), and the wrapper leaves SSH_AUTH_SOCK alone.
 	SigningKey string
+
+	// PoolRoot is the directory backing the warm-sandbox pool's metadata (see
+	// Pool in pool.go): which previously-created sandboxes are idle spares vs
+	// currently loaned out to a session. Defaults to <SessionsRoot>/pool.
+	// Left empty, the pool is disabled entirely — ensureSandbox always
+	// creates fresh and removeSandboxOnExit always removes, exactly as before
+	// this feature existed.
+	PoolRoot string
+
+	// PoolCap bounds how many idle spares removeSandboxOnExit keeps per
+	// signature before falling back to `sbx rm --force` so sandboxes don't
+	// accumulate unboundedly. Defaults to defaultPoolCap when <= 0.
+	PoolCap int
+}
+
+// pool returns the Config's warm-sandbox pool, or nil when PoolRoot is unset
+// (the feature is opt-in: a zero-value Config behaves exactly as it did
+// before pooling existed).
+func (c Config) pool() *Pool {
+	if strings.TrimSpace(c.PoolRoot) == "" {
+		return nil
+	}
+	return &Pool{Root: c.PoolRoot}
+}
+
+// poolCap resolves Config.PoolCap, defaulting to defaultPoolCap when unset.
+func (c Config) poolCap() int {
+	if c.PoolCap > 0 {
+		return c.PoolCap
+	}
+	return defaultPoolCap
+}
+
+// poolSignature is this Config's warm-pool signature: sandboxes are only ever
+// adopted from, or donated to, the pool bucket matching this exact shape. See
+// poolSignatureFor for what that means.
+func (c Config) poolSignature() string {
+	return poolSignatureFor(c.KitPath, c.Workspaces, c.StaticMCPs, c.Policies)
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -363,6 +401,13 @@ func (c *Config) normalize() error {
 	if c.SbxPath == "" {
 		c.SbxPath = "sbx"
 	}
+
+	if c.PoolRoot == "" {
+		c.PoolRoot = filepath.Join(c.SessionsRoot, "pool")
+	}
+	if c.PoolCap <= 0 {
+		c.PoolCap = defaultPoolCap
+	}
 	return nil
 }
 
@@ -375,54 +420,81 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
-// ensureSandbox makes the named sandbox exist with exactly c.Workspaces
-// mounted and the acp-kit kit layered on. It mirrors the daemon's idempotent
-// SandboxCreator so the wrapper is safe to relaunch:
+// ensureSandbox makes a sandbox exist with exactly c.Workspaces mounted and
+// the acp-kit kit layered on, and returns the name of the sandbox to actually
+// use — c.SandboxName unless a pooled spare was adopted instead. It mirrors
+// the daemon's idempotent SandboxCreator so the wrapper is safe to relaunch:
 //
-//  1. `sbx ls --json` to find an existing sandbox by name.
-//  2. Same workspace set → no-op.
-//  3. Different set → `sbx rm --force` then recreate (self-heals drift).
-//  4. Otherwise `sbx create claude --name <name> --kit <kit> [--static-mcp <m>...] <ws...>`,
+//  1. `sbx ls --json` to find an existing sandbox by c.SandboxName.
+//  2. Same workspace set → no-op, use c.SandboxName as-is. This is the
+//     existing task<->commit-agent reuse fast path (same derived name), and
+//     takes priority over the pool: a name match already proves the
+//     workspace/MCP/policy set lines up (see the Config.StaticMCPs doc).
+//  3. Different set → `sbx rm --force` then fall through (self-heals drift).
+//  4. No sandbox named c.SandboxName: check the warm pool (if configured)
+//     for an idle spare whose signature — kit + workspace set + StaticMCPs +
+//     Policies — matches exactly. If sbx ls confirms that spare still exists
+//     with the right workspace set, adopt it (skip `sbx create` and policy
+//     application entirely — a pooled spare already has both). A stale or
+//     mismatched pool entry is discarded and treated as a cache miss, not an
+//     error, so a broken pool entry never blocks the session.
+//  5. Otherwise `sbx create claude --name <name> --kit <kit> [--static-mcp <m>...] <ws...>`,
 //     then one `sbx policy <action> <kind> --sandbox <name> <resource>` per rule
 //     in c.Policies, in declaration order (so deny-all + allow-host stacks
 //     evaluate left-to-right).
-func ensureSandbox(ctx context.Context, run commandFunc, c Config) error {
-	existing, err := readSandboxWorkspaces(ctx, run, c.SbxPath, c.SandboxName)
+func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, error) {
+	sandboxes, err := listSandboxes(ctx, run, c.SbxPath)
 	if err != nil {
-		return fmt.Errorf("acpwrapper: sbx ls: %w", err)
+		return "", fmt.Errorf("acpwrapper: sbx ls: %w", err)
 	}
-	if existing != nil {
+	if existing, ok := sandboxes[c.SandboxName]; ok {
 		if sameWorkspaceSet(existing, c.Workspaces) {
-			return nil
+			return c.SandboxName, nil
 		}
 		if out, err := run(ctx, c.SbxPath, "rm", "--force", c.SandboxName); err != nil {
-			return fmt.Errorf("acpwrapper: sbx rm %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
+			return "", fmt.Errorf("acpwrapper: sbx rm %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
+		}
+		delete(sandboxes, c.SandboxName)
+	} else if pool := c.pool(); pool != nil {
+		sig := c.poolSignature()
+		if name, ok, err := pool.claim(sig); err != nil {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: pool claim error (falling back to sbx create): %v\n",
+				c.SessionID, err)
+		} else if ok {
+			if ws, present := sandboxes[name]; present && sameWorkspaceSet(ws, c.Workspaces) {
+				return name, nil
+			}
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: pool entry %q for signature %s is stale, "+
+				"discarding and falling back to sbx create\n", c.SessionID, name, sig)
+			pool.discard(sig, name)
 		}
 	}
+
 	args := []string{"create", "claude", "--name", c.SandboxName, "--kit", c.KitPath}
 	for _, m := range c.StaticMCPs {
 		args = append(args, "--static-mcp", m)
 	}
 	args = append(args, c.Workspaces...)
 	if out, err := run(ctx, c.SbxPath, args...); err != nil {
-		return fmt.Errorf("acpwrapper: sbx create %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("acpwrapper: sbx create %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
 	}
 	for _, r := range c.Policies {
 		if err := r.Validate(); err != nil {
-			return fmt.Errorf("acpwrapper: sbx policy %s: %w", c.SandboxName, err)
+			return "", fmt.Errorf("acpwrapper: sbx policy %s: %w", c.SandboxName, err)
 		}
 		if out, err := run(ctx, c.SbxPath, r.CLIArgs(c.SandboxName)...); err != nil {
-			return fmt.Errorf("acpwrapper: sbx policy %s %s %s %s: %w: %s",
+			return "", fmt.Errorf("acpwrapper: sbx policy %s %s %s %s: %w: %s",
 				r.Action, r.Kind, c.SandboxName, r.Resource, err, strings.TrimSpace(string(out)))
 		}
 	}
-	return nil
+	return c.SandboxName, nil
 }
 
-// readSandboxWorkspaces returns the workspace list for the named sandbox, or
-// nil if no sandbox by that name exists. `sbx ls --json` is the stable read
-// interface sbx exposes.
-func readSandboxWorkspaces(ctx context.Context, run commandFunc, sbxPath, name string) ([]string, error) {
+// listSandboxes returns every sandbox's workspace list, keyed by name, from
+// `sbx ls --json` — the stable read interface sbx exposes. Used both to find
+// an existing sandbox by c.SandboxName and to verify a pooled spare is still
+// genuinely present before adopting it, off the one call.
+func listSandboxes(ctx context.Context, run commandFunc, sbxPath string) (map[string][]string, error) {
 	out, err := run(ctx, sbxPath, "ls", "--json")
 	if err != nil {
 		return nil, err
@@ -436,12 +508,11 @@ func readSandboxWorkspaces(ctx context.Context, run commandFunc, sbxPath, name s
 	if err := json.Unmarshal(out, &data); err != nil {
 		return nil, fmt.Errorf("decode sbx ls output: %w", err)
 	}
+	m := make(map[string][]string, len(data.Sandboxes))
 	for _, s := range data.Sandboxes {
-		if s.Name == name {
-			return s.Workspaces, nil
-		}
+		m[s.Name] = s.Workspaces
 	}
-	return nil, nil
+	return m, nil
 }
 
 // sameWorkspaceSet reports whether a and b contain the same paths, ignoring
@@ -478,13 +549,15 @@ func keepForTaskStatus(s task.Status) bool {
 	}
 }
 
-// removeSandboxOnExit tears down the session's sbx sandbox after its agent has
-// exited, so per-task sandboxes don't accumulate across a project's run. It is
-// best-effort: a failure to remove is logged, never returned, because the
-// session has already ended cleanly and a lingering sandbox is a resource leak,
-// not a correctness bug.
+// removeSandboxOnExit disposes of the session's sbx sandbox after its agent
+// has exited, so per-task sandboxes don't accumulate across a project's run.
+// "Disposes of" means either donating it back to the warm pool as an idle
+// spare (see Pool) or `sbx rm --force`-ing it — best-effort either way: a
+// failure is logged, never returned, because the session has already ended
+// cleanly and a lingering sandbox is a resource leak, not a correctness bug.
 //
-// The sandbox is KEPT (not removed) when any of the following hold:
+// The sandbox is KEPT (not removed, and NOT pooled) when any of the following
+// hold:
 //   - shuttingDown: we're exiting on a signal rather than the agent finishing on
 //     its own. A restart should find its sandboxes intact so it can resume, so a
 //     signal-driven teardown must not delete them.
@@ -494,6 +567,12 @@ func keepForTaskStatus(s task.Status) bool {
 //     actually retains a failed run's sandbox: the daemon only learns the run
 //     failed after this wrapper has exited, so it can't set save_sandbox in
 //     time — reading the status here is the wrapper's own decision.
+//
+// Otherwise, when a pool is configured (c.PoolRoot set) and the signature's
+// idle count is below c.poolCap(), the sandbox is released back to the pool
+// as idle instead of removed. At or above the cap — or with no pool
+// configured at all — today's unconditional `sbx rm --force` behavior
+// applies, so sandboxes still can't accumulate without bound.
 //
 // A fresh ctx is required from the caller: the wrapper's run context is already
 // cancelled by the agent's exit, and reusing it would kill `sbx rm` before it ran.
@@ -521,12 +600,83 @@ func removeSandboxOnExit(ctx context.Context, run commandFunc, c Config, shuttin
 			return
 		}
 	}
+	if pool := c.pool(); pool != nil {
+		sig := c.poolSignature()
+		released, err := pool.release(sig, c.SandboxName, c.poolCap())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: pool release error for %q (falling back to sbx rm): %v\n",
+				c.SessionID, c.SandboxName, err)
+		} else if released {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: released sandbox %q to the warm pool (signature %s)\n",
+				c.SessionID, c.SandboxName, sig)
+			return
+		}
+	}
 	if out, err := run(ctx, c.SbxPath, "rm", "--force", c.SandboxName); err != nil {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: sbx rm --force %q failed: %v: %s\n",
 			c.SessionID, c.SandboxName, err, strings.TrimSpace(string(out)))
 		return
 	}
 	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: removed sandbox %q\n", c.SessionID, c.SandboxName)
+}
+
+// prewarmPool best-effort builds one replacement spare for sig in the
+// background so a soon-to-follow session with the same shape — the matching
+// commit agent, or the project's next task — is more likely to find a warm
+// hit instead of paying full cold-start cost. It is fired-and-forgotten by
+// Run when that session found the signature's pool empty: never awaited, and
+// any failure is only logged, because a failed pre-warm must not affect the
+// session that triggered it, only the next one's cold-start.
+//
+// A generous independent timeout (not the caller's ctx) is used deliberately:
+// the triggering session's own context is cancelled as soon as ITS agent
+// exits, but the spare being built here is for a session that hasn't started
+// yet and must be allowed to finish well after that.
+func prewarmPool(sessionID string, pool Pool, sig, sbxPath, kitPath string, workspaces, staticMCPs []string, policies []policy.Rule, poolCap int) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		name := poolSpareName(sig)
+		args := []string{"create", "claude", "--name", name, "--kit", kitPath}
+		for _, m := range staticMCPs {
+			args = append(args, "--static-mcp", m)
+		}
+		args = append(args, workspaces...)
+		if out, err := execCommand(ctx, sbxPath, args...); err != nil {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: background pre-warm sbx create %q failed: %v: %s\n",
+				sessionID, name, err, strings.TrimSpace(string(out)))
+			return
+		}
+		for _, r := range policies {
+			if out, err := execCommand(ctx, sbxPath, r.CLIArgs(name)...); err != nil {
+				fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: background pre-warm policy %s %s %s failed: %v: %s\n",
+					sessionID, r.Action, r.Kind, name, err, strings.TrimSpace(string(out)))
+				if out, err := execCommand(context.Background(), sbxPath, "rm", "--force", name); err != nil {
+					fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: cleanup of half-built pre-warm spare %q failed: %v: %s\n",
+						sessionID, name, err, strings.TrimSpace(string(out)))
+				}
+				return
+			}
+		}
+		released, err := pool.release(sig, name, poolCap)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: background pre-warm failed to record spare %q in pool: %v\n",
+				sessionID, name, err)
+			return
+		}
+		if !released {
+			// Someone else's spare (or this session's own donated sandbox) filled
+			// the pool while this one was building; don't exceed the cap.
+			if out, err := execCommand(context.Background(), sbxPath, "rm", "--force", name); err != nil {
+				fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: removing surplus pre-warm spare %q failed: %v: %s\n",
+					sessionID, name, err, strings.TrimSpace(string(out)))
+			}
+			return
+		}
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: background pre-warm added spare %q to the pool (signature %s)\n",
+			sessionID, name, sig)
+	}()
 }
 
 // signingPreflight verifies, once the sandbox exists, that the SSH agent sbx
@@ -574,9 +724,53 @@ func Run(ctx context.Context, c Config) error {
 		return err
 	}
 
-	if err := ensureSandbox(ctx, execCommand, c); err != nil {
+	// Reconcile the warm pool before touching it: a prior acp-wrapper that
+	// claimed a spare and then crashed (never reaching removeSandboxOnExit)
+	// would otherwise leave that entry "busy" forever, shrinking the usable
+	// pool with every crash. A busy entry is legitimate only while some
+	// session currently recorded as starting/running still claims that exact
+	// sandbox name; anything else is stale and goes back to idle. Mirrors the
+	// daemon's on-restart session reconciliation (internal/daemon/reconcile.go).
+	if pool := c.pool(); pool != nil {
+		if recs, err := store.List(); err != nil {
+			fmt.Fprintln(os.Stderr, "acp-wrapper: pool reconcile: list sessions:", err)
+		} else {
+			live := make(map[string]bool, len(recs))
+			for _, rec := range recs {
+				if rec.Status == session.StatusRunning || rec.Status == session.StatusStarting {
+					live[rec.SandboxName] = true
+				}
+			}
+			if err := pool.reconcile(live); err != nil {
+				fmt.Fprintln(os.Stderr, "acp-wrapper: pool reconcile error:", err)
+			}
+		}
+	}
+
+	sandboxName, err := ensureSandbox(ctx, execCommand, c)
+	if err != nil {
 		_ = store.Remove(c.SessionID) // never started — don't leave a stale record
 		return err
+	}
+	// ensureSandbox may have adopted a pooled spare under a different name
+	// than the one derived from this session; every downstream use (exec,
+	// session.json, signing preflight, removeSandboxOnExit) must target the
+	// sandbox actually in play.
+	c.SandboxName = sandboxName
+
+	// Best-effort background pre-warming: if this session emptied (or found
+	// empty) its signature's pool, kick off one async `sbx create` for a
+	// replacement spare so the next session with the same shape — typically
+	// the matching commit agent, or the project's next task — finds a warm
+	// hit instead of paying full cold-start cost. Never awaited: a failure
+	// here must not affect this session, only the next one's cold-start.
+	if pool := c.pool(); pool != nil {
+		sig := c.poolSignature()
+		if n, err := pool.idleCount(sig); err != nil {
+			fmt.Fprintln(os.Stderr, "acp-wrapper: pool idle count error:", err)
+		} else if n == 0 {
+			prewarmPool(c.SessionID, *pool, sig, c.SbxPath, c.KitPath, c.Workspaces, c.StaticMCPs, c.Policies, c.poolCap())
+		}
 	}
 
 	// Signing preflight: when signing is configured, confirm the forwarded agent
