@@ -9,11 +9,22 @@
 //
 // sbx itself has no pool concept, so membership is tracked in a small local
 // metadata store, analogous to the session package's on-disk layout. Entries
-// are keyed by a signature of the sandbox's shape (kit + workspace set +
-// static MCPs + policies) — see poolSignatureFor — because the existing
-// same-name reuse fast path in ensureSandbox relies on "the sandbox name
-// encodes the MCP/policy set" to skip reapplying them; a pooled sandbox must
-// only ever be adopted when that whole set matches exactly.
+// are keyed by a signature of the sandbox's shape — see poolSignatureFor.
+//
+// The signature deliberately does NOT include the workspace set. A sandbox's
+// workspace mounts are baked in at `sbx create` time and sbx has no way to
+// remount an existing sandbox, so a claimed entry's workspace is verified
+// against `sbx ls --json` at adoption time (see ensureSandbox) regardless of
+// what the signature says — the signature only decides which *bucket* of
+// spares a session looks in, not whether a given spare is immediately usable
+// as-is. Folding workspace into the key the way the existing same-name reuse
+// fast path does for MCPs/policies (see StaticMCPs/Policies docs on Config)
+// would mean two sessions for different projects/branches — and therefore
+// almost always different workspace paths — could never share a signature,
+// which defeats the point: the common slow case is a brand-new project's
+// first task, which by definition never matches any prior session's exact
+// workspace set. See ensureSandbox for what happens when an adopted entry's
+// workspace turns out to differ from what the claiming session needs.
 package acpwrapper
 
 import (
@@ -75,22 +86,27 @@ func (p Pool) idleDir(sig string) string { return filepath.Join(p.sigDir(sig), "
 func (p Pool) busyDir(sig string) string { return filepath.Join(p.sigDir(sig), "busy") }
 
 // poolSignatureFor computes the signature key two sandboxes must share to be
-// considered interchangeable. Workspaces and StaticMCPs are sorted before
-// hashing because sbx exposes no ordering semantics for either (mirrors
-// sameWorkspaceSet's set comparison); Policies are hashed in declaration
-// order because they apply in that order (see ensureSandbox) and a
-// deny-all-then-allow-host rule set is not equivalent to the reverse.
-func poolSignatureFor(kitPath string, workspaces, staticMCPs []string, policies []policy.Rule) string {
-	ws := append([]string(nil), workspaces...)
-	sort.Strings(ws)
+// considered interchangeable: kit + StaticMCPs + Policies. Deliberately NOT
+// included: the workspace set (see the package doc for why — it would
+// prevent sibling projects/branches from ever sharing a spare, which is
+// exactly the gap this signature is meant to close) and any notion of
+// "project identity" (e.g. ProjectPath) — the whole point of dropping
+// workspace is to let unrelated projects share a spare whenever their
+// kit/MCP/policy shape happens to match, so keying on project identity
+// instead would just recreate the old one-project-per-bucket exclusivity
+// under a different name.
+//
+// StaticMCPs is sorted before hashing because sbx exposes no ordering
+// semantics for it (mirrors sameWorkspaceSet's set comparison); Policies are
+// hashed in declaration order because they apply in that order (see
+// ensureSandbox) and a deny-all-then-allow-host rule set is not equivalent to
+// the reverse.
+func poolSignatureFor(kitPath string, staticMCPs []string, policies []policy.Rule) string {
 	mcps := append([]string(nil), staticMCPs...)
 	sort.Strings(mcps)
 
 	h := sha256.New()
 	fmt.Fprintf(h, "kit=%s\n", kitPath)
-	for _, w := range ws {
-		fmt.Fprintf(h, "ws=%s\n", w)
-	}
 	for _, m := range mcps {
 		fmt.Fprintf(h, "mcp=%s\n", m)
 	}
