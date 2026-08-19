@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // addTree walks root and registers a watch on every directory it finds.
@@ -23,6 +24,13 @@ func (d *Daemon) addTree(root string) error {
 	})
 }
 
+// startupScanConcurrency bounds how many projects' revisitProject calls run
+// at once during startupScan. Unbounded fan-out would let a daemon restart
+// with a large number of projects shell out to `wsp new` (or equivalent)
+// for all of them simultaneously; this caps that burst while still letting
+// N projects' first dispatch proceed independently of one another.
+const startupScanConcurrency = 8
+
 // startupScan re-evaluates every .project.yaml under each watched root.
 // fsnotify only fires on changes-from-now, so without this call a daemon
 // restart strands any project whose file is already on disk in a
@@ -30,9 +38,18 @@ func (d *Daemon) addTree(root string) error {
 // gotten around to dispatching). Running handleProject for each file is
 // safe — it's the same code path fsnotify events drive, including the
 // daemon-writer self-filter and session dedup.
+//
+// Each project's revisitProject call runs on its own goroutine (bounded by
+// startupScanConcurrency), so one project's first dispatch — which can block
+// for real wall-clock seconds inside workspace provisioning — does not delay
+// another project's from even starting. Run() still waits for the whole scan
+// to finish before entering its event loop, so this only parallelizes
+// projects against each other, not the scan against live fsnotify events.
 func (d *Daemon) startupScan() {
 	for _, root := range d.roots {
 		var found int
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, startupScanConcurrency)
 		_ = filepath.WalkDir(root, func(p string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
@@ -44,9 +61,16 @@ func (d *Daemon) startupScan() {
 				return nil
 			}
 			found++
-			d.revisitProject(p)
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(path string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				d.revisitProject(path)
+			}(p)
 			return nil
 		})
+		wg.Wait()
 		d.audit.Log("startup_scan", "root", root, "projects", strconv.Itoa(found))
 	}
 }

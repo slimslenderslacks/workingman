@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -50,6 +51,14 @@ type Daemon struct {
 	// can't serve as this guard on its own.
 	cleanupMu       sync.Mutex
 	cleanupInFlight map[string]bool // keyed by project file path
+
+	// dispatchMu guards dispatchChains, which chains fsnotify events keyed by
+	// their containing directory (see dispatchEvent) so that events for the
+	// same project still run in the order they arrived even though each is
+	// now handled on its own goroutine. Events in different directories carry
+	// no dependency and so run fully concurrently.
+	dispatchMu     sync.Mutex
+	dispatchChains map[string]chan struct{}
 
 	// sessionIdleTimeout bounds how long a tracked session may go without any
 	// ACP stream activity before the stranded-session reaper terminates it.
@@ -140,6 +149,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		planningFailures:   map[string]int{},
 		projectFailures:    map[string]int{},
 		cleanupInFlight:    map[string]bool{},
+		dispatchChains:     map[string]chan struct{}{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 	}
 	for _, opt := range opts {
@@ -178,7 +188,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			d.handle(ev)
+			// Ordering guarantee: events are dispatched concurrently across
+			// directories, but two events for the same directory (e.g. two
+			// rapid-fire writes to one project's .project.yaml) still run in
+			// the order they were received here. See dispatchEvent.
+			d.dispatchEvent(ev)
 		case err, ok := <-d.watcher.Errors:
 			if !ok {
 				return nil
@@ -186,6 +200,41 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.audit.Log("watcher_error", "err", err.Error())
 		}
 	}
+}
+
+// dispatchEvent runs d.handle(ev) on its own goroutine so that a slow
+// dispatch for one project (typically workspace provisioning blocking inside
+// runner.Runner.Start) cannot delay the Run() loop from picking up the next
+// fsnotify event for an unrelated project.
+//
+// Ordering within a single project is preserved by chaining: events are
+// keyed by their containing directory, and each event waits for the
+// previously-chained event for that same key to finish before it runs. Events
+// under different directories share no chain and so proceed in parallel.
+func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
+	key := filepath.Dir(ev.Name)
+
+	d.dispatchMu.Lock()
+	prev := d.dispatchChains[key]
+	done := make(chan struct{})
+	d.dispatchChains[key] = done
+	d.dispatchMu.Unlock()
+
+	go func() {
+		defer close(done)
+		if prev != nil {
+			<-prev
+		}
+		d.handle(ev)
+		// Drop the chain entry if nothing newer has queued behind us, so a
+		// project that goes quiet doesn't leave its key pinned in the map
+		// forever.
+		d.dispatchMu.Lock()
+		if d.dispatchChains[key] == done {
+			delete(d.dispatchChains, key)
+		}
+		d.dispatchMu.Unlock()
+	}()
 }
 
 // shutdown runs when ctx is cancelled — a normal orch exit/restart as well as
