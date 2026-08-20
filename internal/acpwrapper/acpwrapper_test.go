@@ -275,6 +275,33 @@ func TestEnsureSandboxCreatesWhenMissing(t *testing.T) {
 	}
 }
 
+// TestEnsureSandboxIgnoresOtherSandboxesOnCacheMiss confirms that a cache
+// miss (no sandbox named c.SandboxName) always issues a plain `sbx create
+// ... --name <c.SandboxName>` and never looks up or adopts any other
+// sandbox by a different name, even when other sandboxes exist and would
+// otherwise look like plausible spares.
+func TestEnsureSandboxIgnoresOtherSandboxesOnCacheMiss(t *testing.T) {
+	f := &fakeSbx{lsOutput: `{"sandboxes":[
+		{"name":"acp-some-other-session","workspaces":["/repo"]},
+		{"name":"acp-pool-deadbeef-1234","workspaces":["/repo"]}
+	]}`}
+	c := Config{SandboxName: "acp-s", KitPath: "/kits/acp", SbxPath: "sbx", Workspaces: []string{"/repo"}}
+	name, err := ensureSandbox(context.Background(), f.run, c)
+	if err != nil {
+		t.Fatalf("ensureSandbox: %v", err)
+	}
+	if name != "acp-s" {
+		t.Errorf("name = %q, want %q (fresh create under own name, no adoption)", name, "acp-s")
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("expected 2 sbx calls (ls, create), got %d: %v", len(f.calls), f.calls)
+	}
+	want := []string{"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp", "/repo"}
+	if !reflect.DeepEqual(f.calls[1], want) {
+		t.Errorf("create call = %v, want %v", f.calls[1], want)
+	}
+}
+
 func TestEnsureSandboxForwardsStaticMCPs(t *testing.T) {
 	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
 	c := Config{
@@ -488,388 +515,21 @@ func TestRemoveSandboxOnExit(t *testing.T) {
 	}
 }
 
-// TestRemoveSandboxOnExitReleasesToPoolWhenEmpty is the pool's basic donation
-// path: a clean exit with nothing yet idle for this signature should release
-// the sandbox into the pool instead of `sbx rm --force`-ing it.
-func TestRemoveSandboxOnExitReleasesToPoolWhenEmpty(t *testing.T) {
-	c := Config{
-		SessionID:   "s",
-		SandboxName: "acp-s",
-		SbxPath:     "sbx",
-		KitPath:     "/kits/acp",
-		Workspaces:  []string{"/repo"},
-		PoolRoot:    t.TempDir(),
-		PoolCap:     2,
-	}
+// TestRemoveSandboxOnExitAlwaysRemovesOnCleanExit confirms that a clean exit
+// with none of SaveSandbox/keepForTaskStatus/shuttingDown set always issues a
+// plain `sbx rm --force <c.SandboxName>` — there is no donate-to-pool path,
+// and exactly one sbx call is made.
+func TestRemoveSandboxOnExitAlwaysRemovesOnCleanExit(t *testing.T) {
+	c := Config{SessionID: "s", SandboxName: "acp-s", SbxPath: "sbx"}
 	f := &fakeSbx{}
 	removeSandboxOnExit(context.Background(), f.run, c, false)
 
-	for _, call := range f.calls {
-		if len(call) >= 2 && call[1] == "rm" {
-			t.Fatalf("unexpected sbx rm call: %v", call)
-		}
+	if len(f.calls) != 1 {
+		t.Fatalf("expected exactly 1 sbx call, got %d: %v", len(f.calls), f.calls)
 	}
-	pool := c.pool()
-	n, err := pool.idleCount(c.poolSignature())
-	if err != nil {
-		t.Fatalf("idleCount: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("idle count = %d, want 1", n)
-	}
-}
-
-// TestEnsureSandboxAdoptsIdlePoolEntryOnMatchingSignature is the pool's basic
-// adoption path: a session whose derived name has never been created should
-// find and claim a matching idle spare instead of issuing `sbx create`.
-func TestEnsureSandboxAdoptsIdlePoolEntryOnMatchingSignature(t *testing.T) {
-	root := t.TempDir()
-	c := Config{
-		SessionID:   "s2",
-		SandboxName: "acp-s2",
-		SbxPath:     "sbx",
-		KitPath:     "/kits/acp",
-		Workspaces:  []string{"/repo"},
-		PoolRoot:    root,
-		PoolCap:     2,
-	}
-	sig := c.poolSignature()
-	pool := c.pool()
-	if _, err := pool.release(sig, "acp-pool-spare", 2); err != nil {
-		t.Fatalf("seed pool: %v", err)
-	}
-
-	f := &fakeSbx{lsOutput: `{"sandboxes":[{"name":"acp-pool-spare","workspaces":["/repo"]}]}`}
-	name, err := ensureSandbox(context.Background(), f.run, c)
-	if err != nil {
-		t.Fatalf("ensureSandbox: %v", err)
-	}
-	if name != "acp-pool-spare" {
-		t.Errorf("adopted name = %q, want %q", name, "acp-pool-spare")
-	}
-	for _, call := range f.calls {
-		if len(call) >= 2 && call[1] == "create" {
-			t.Fatalf("unexpected sbx create call: %v", call)
-		}
-	}
-	if n, _ := pool.idleCount(sig); n != 0 {
-		t.Errorf("idle count after adoption = %d, want 0 (claimed as busy)", n)
-	}
-}
-
-// TestEnsureSandboxIgnoresPoolOnSignatureMismatch checks a session whose
-// signature (kit/workspaces/StaticMCPs/Policies) differs from every idle
-// spare's still creates fresh rather than adopting a mismatched entry, and
-// leaves that unrelated entry untouched.
-func TestEnsureSandboxIgnoresPoolOnSignatureMismatch(t *testing.T) {
-	root := t.TempDir()
-	seed := Config{KitPath: "/kits/acp", Workspaces: []string{"/repo"}, PoolRoot: root, PoolCap: 2}
-	seedSig := seed.poolSignature()
-	pool := seed.pool()
-	if _, err := pool.release(seedSig, "acp-pool-spare", 2); err != nil {
-		t.Fatalf("seed pool: %v", err)
-	}
-
-	c := Config{
-		SessionID:   "s3",
-		SandboxName: "acp-s3",
-		SbxPath:     "sbx",
-		KitPath:     "/kits/other", // different kit -> different signature
-		Workspaces:  []string{"/repo"},
-		PoolRoot:    root,
-		PoolCap:     2,
-	}
-	f := &fakeSbx{lsOutput: `{"sandboxes":[{"name":"acp-pool-spare","workspaces":["/repo"]}]}`}
-	name, err := ensureSandbox(context.Background(), f.run, c)
-	if err != nil {
-		t.Fatalf("ensureSandbox: %v", err)
-	}
-	if name != "acp-s3" {
-		t.Errorf("name = %q, want %q (fresh create, not adopted)", name, "acp-s3")
-	}
-	var created bool
-	for _, call := range f.calls {
-		if len(call) >= 2 && call[1] == "create" {
-			created = true
-		}
-	}
-	if !created {
-		t.Fatalf("expected sbx create call, got %v", f.calls)
-	}
-	// The other signature's idle entry must be untouched by this session.
-	if n, _ := pool.idleCount(seedSig); n != 1 {
-		t.Errorf("unrelated signature idle count = %d, want 1 (untouched)", n)
-	}
-}
-
-// TestEnsureSandboxRecreatesAdoptedPoolEntryOnWorkspaceMismatch is the other
-// half of broadening poolSignatureFor: a claimed idle spare's signature
-// (kit/StaticMCPs/Policies) matches, but it was warmed for a different
-// project's workspace set (exactly what happens once two different
-// projects/branches can share a bucket). ensureSandbox must never hand that
-// sandbox back with the wrong workspace mounted — since sbx can't remount an
-// existing sandbox, it must rm+recreate it in place, reusing the claimed
-// spare's name rather than abandoning it and minting a fresh one under
-// c.SandboxName.
-func TestEnsureSandboxRecreatesAdoptedPoolEntryOnWorkspaceMismatch(t *testing.T) {
-	root := t.TempDir()
-	c := Config{
-		SessionID:   "s5",
-		SandboxName: "acp-s5",
-		SbxPath:     "sbx",
-		KitPath:     "/kits/acp",
-		Workspaces:  []string{"/repo-b", "/orch-b"},
-		PoolRoot:    root,
-		PoolCap:     2,
-	}
-	sig := c.poolSignature()
-	pool := c.pool()
-	if _, err := pool.release(sig, "acp-pool-spare", 2); err != nil {
-		t.Fatalf("seed pool: %v", err)
-	}
-
-	// The spare exists but is mounted for a different project's workspace.
-	f := &fakeSbx{lsOutput: `{"sandboxes":[{"name":"acp-pool-spare","workspaces":["/repo-a","/orch-a"]}]}`}
-	name, err := ensureSandbox(context.Background(), f.run, c)
-	if err != nil {
-		t.Fatalf("ensureSandbox: %v", err)
-	}
-	if name != "acp-pool-spare" {
-		t.Errorf("name = %q, want %q (repaired in place, not abandoned for a fresh name)", name, "acp-pool-spare")
-	}
-	if len(f.calls) != 3 {
-		t.Fatalf("expected ls, rm, create, got %v", f.calls)
-	}
-	if f.calls[1][1] != "rm" || f.calls[1][len(f.calls[1])-1] != "acp-pool-spare" {
-		t.Errorf("call 1 = %v, want sbx rm --force acp-pool-spare", f.calls[1])
-	}
-	wantCreate := []string{"sbx", "create", "claude", "--name", "acp-pool-spare", "--kit", "/kits/acp", "/repo-b", "/orch-b"}
-	if !reflect.DeepEqual(f.calls[2], wantCreate) {
-		t.Errorf("call 2 = %v, want %v", f.calls[2], wantCreate)
-	}
-	// The pool bookkeeping must still show it busy (claimed and in use), not
-	// discarded — it's a perfectly good spare now, just repaired.
-	if n, _ := pool.idleCount(sig); n != 0 {
-		t.Errorf("idle count = %d, want 0 (still claimed/busy)", n)
-	}
-}
-
-// TestRemoveSandboxOnExitRemovesWhenPoolAtCap checks that donating a sandbox
-// back once its signature's idle pool is already at cap still falls back to
-// `sbx rm --force`, so the pool can't grow without bound.
-func TestRemoveSandboxOnExitRemovesWhenPoolAtCap(t *testing.T) {
-	root := t.TempDir()
-	seed := Config{KitPath: "/kits/acp", Workspaces: []string{"/repo"}, PoolRoot: root, PoolCap: 1}
-	sig := seed.poolSignature()
-	pool := seed.pool()
-	if _, err := pool.release(sig, "acp-existing-spare", 1); err != nil {
-		t.Fatalf("seed pool: %v", err)
-	}
-
-	c := Config{
-		SessionID:   "s4",
-		SandboxName: "acp-s4",
-		SbxPath:     "sbx",
-		KitPath:     "/kits/acp",
-		Workspaces:  []string{"/repo"},
-		PoolRoot:    root,
-		PoolCap:     1,
-	}
-	f := &fakeSbx{}
-	removeSandboxOnExit(context.Background(), f.run, c, false)
-
-	var removed bool
-	for _, call := range f.calls {
-		if len(call) >= 2 && call[1] == "rm" {
-			removed = true
-			want := []string{"sbx", "rm", "--force", "acp-s4"}
-			if !reflect.DeepEqual(call, want) {
-				t.Errorf("rm call = %v, want %v", call, want)
-			}
-		}
-	}
-	if !removed {
-		t.Fatalf("expected sbx rm --force when pool at cap, got %v", f.calls)
-	}
-	if n, _ := pool.idleCount(sig); n != 1 {
-		t.Errorf("idle count = %d, want 1 (unchanged, still at cap)", n)
-	}
-}
-
-// TestPoolSignatureIgnoresOrderExceptForPolicies checks that Workspaces and
-// StaticMCPs are treated as unordered sets (matching sameWorkspaceSet's own
-// semantics and sbx's lack of mount-order guarantees), while Policies are
-// NOT — their declaration order changes evaluation (deny-all + allow-host is
-// not the same rule set in reverse), so it must be part of the signature.
-func TestPoolSignatureIgnoresOrderExceptForPolicies(t *testing.T) {
-	mcps1, mcps2 := []string{"github", "web"}, []string{"web", "github"}
-	if got, want := poolSignatureFor("k", mcps1, nil), poolSignatureFor("k", mcps2, nil); got != want {
-		t.Errorf("signature depends on MCP order: %q != %q", got, want)
-	}
-
-	deny := policy.Rule{Action: policy.ActionDeny, Kind: policy.KindNetwork, Resource: "**"}
-	allow := policy.Rule{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.github.com"}
-	forward := poolSignatureFor("k", nil, []policy.Rule{deny, allow})
-	reverse := poolSignatureFor("k", nil, []policy.Rule{allow, deny})
-	if forward == reverse {
-		t.Errorf("signature must depend on policy declaration order, got same signature for both orders")
-	}
-
-	if got, want := poolSignatureFor("k1", nil, nil), poolSignatureFor("k2", nil, nil); got == want {
-		t.Errorf("different kit paths produced the same signature %q", got)
-	}
-}
-
-// TestPoolSignatureIgnoresWorkspace is the core of the broadened pool
-// signature this task adds: two Configs whose Workspaces differ entirely
-// (as they always will across projects/branches, since wsp keys a workspace
-// on the branch — see sandboxWorkspaces/resolveWorkingDir in the runner
-// package) but whose kit/StaticMCPs/Policies match must land in the SAME
-// pool bucket, so a brand-new project's first task can adopt a spare warmed
-// by a completely unrelated project instead of always cold-starting.
-func TestPoolSignatureIgnoresWorkspace(t *testing.T) {
-	a := Config{KitPath: "/kits/acp", Workspaces: []string{"/repo-a", "/orch-a"}}
-	b := Config{KitPath: "/kits/acp", Workspaces: []string{"/repo-b", "/orch-b", "/extra-b"}}
-	if got, want := a.poolSignature(), b.poolSignature(); got != want {
-		t.Errorf("signature depends on workspace set: %q != %q, want equal (workspace excluded from the key)", got, want)
-	}
-
-	// A kit/StaticMCPs/Policies mismatch must still force a different bucket,
-	// workspace aside.
-	c := Config{KitPath: "/kits/other", Workspaces: a.Workspaces}
-	if got, want := a.poolSignature(), c.poolSignature(); got == want {
-		t.Errorf("different kit paths produced the same signature %q", got)
-	}
-	d := Config{KitPath: a.KitPath, Workspaces: a.Workspaces, StaticMCPs: []string{"github"}}
-	if got, want := a.poolSignature(), d.poolSignature(); got == want {
-		t.Errorf("different StaticMCPs produced the same signature %q", got)
-	}
-}
-
-// TestPoolClaimIsExclusive checks that claiming an idle entry actually
-// removes it from idle (a second claim for the same signature must not see
-// the same spare again) and that a signature with nothing idle reports ok=false.
-func TestPoolClaimIsExclusive(t *testing.T) {
-	pool := Pool{Root: t.TempDir()}
-	const sig = "sig-a"
-
-	if _, ok, err := pool.claim(sig); err != nil || ok {
-		t.Fatalf("claim on empty pool: ok=%v err=%v, want ok=false err=nil", ok, err)
-	}
-
-	if _, err := pool.release(sig, "spare-1", 5); err != nil {
-		t.Fatalf("release: %v", err)
-	}
-	name, ok, err := pool.claim(sig)
-	if err != nil || !ok || name != "spare-1" {
-		t.Fatalf("claim = (%q, %v, %v), want (\"spare-1\", true, nil)", name, ok, err)
-	}
-	if _, ok, err := pool.claim(sig); err != nil || ok {
-		t.Fatalf("second claim: ok=%v err=%v, want ok=false (already claimed)", ok, err)
-	}
-}
-
-// TestPoolReleaseRespectsCap checks that release refuses once the signature's
-// idle count already meets the cap, and that a discarded stale entry frees up
-// room again.
-func TestPoolReleaseRespectsCap(t *testing.T) {
-	pool := Pool{Root: t.TempDir()}
-	const sig = "sig-b"
-
-	released, err := pool.release(sig, "spare-1", 1)
-	if err != nil || !released {
-		t.Fatalf("first release: released=%v err=%v, want true, nil", released, err)
-	}
-	released, err = pool.release(sig, "spare-2", 1)
-	if err != nil || released {
-		t.Fatalf("second release at cap: released=%v err=%v, want false, nil", released, err)
-	}
-	if n, err := pool.idleCount(sig); err != nil || n != 1 {
-		t.Fatalf("idleCount = %d, err %v, want 1", n, err)
-	}
-
-	pool.discard(sig, "spare-1")
-	if n, err := pool.idleCount(sig); err != nil || n != 0 {
-		t.Fatalf("idleCount after discard = %d, err %v, want 0", n, err)
-	}
-	released, err = pool.release(sig, "spare-2", 1)
-	if err != nil || !released {
-		t.Fatalf("release after discard: released=%v err=%v, want true, nil", released, err)
-	}
-}
-
-// TestPoolReconcileDemotesOrphanedBusyEntries is the crash-recovery path: a
-// busy entry with no corresponding live session must be moved back to idle
-// so it isn't stuck unusable forever, while a busy entry that IS still live
-// must be left alone.
-func TestPoolReconcileDemotesOrphanedBusyEntries(t *testing.T) {
-	pool := Pool{Root: t.TempDir()}
-	const sig = "sig-c"
-
-	if _, err := pool.release(sig, "orphan", 5); err != nil {
-		t.Fatalf("seed orphan: %v", err)
-	}
-	if _, ok, err := pool.claim(sig); err != nil || !ok {
-		t.Fatalf("claim orphan: ok=%v err=%v", ok, err)
-	}
-	if _, err := pool.release(sig, "still-live", 5); err != nil {
-		t.Fatalf("seed still-live: %v", err)
-	}
-	if _, ok, err := pool.claim(sig); err != nil || !ok {
-		t.Fatalf("claim still-live: ok=%v err=%v", ok, err)
-	}
-
-	if err := pool.reconcile(map[string]bool{"still-live": true}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-
-	// "orphan" has no live session backing it -> demoted to idle and
-	// claimable again; "still-live" has one -> must stay busy (not claimable).
-	name, ok, err := pool.claim(sig)
-	if err != nil || !ok || name != "orphan" {
-		t.Fatalf("claim after reconcile = (%q, %v, %v), want (\"orphan\", true, nil)", name, ok, err)
-	}
-	if _, ok, err := pool.claim(sig); err != nil || ok {
-		t.Fatalf("claim after reconcile (2nd) = ok=%v err=%v, want false (still-live must stay busy)", ok, err)
-	}
-}
-
-// TestMaybeEagerPrewarmFiresBelowCapNotOnlyAtZero exercises the eager
-// pre-warm path this task adds: it must fire as soon as the idle count is
-// below cap, without first waiting for a session to exhaust the pool to
-// zero. Seeded with 1 idle spare against a cap of 2 — short by one, but not
-// empty — which the old (idle == 0) gate would have ignored entirely.
-func TestMaybeEagerPrewarmFiresBelowCapNotOnlyAtZero(t *testing.T) {
-	pool := Pool{Root: t.TempDir()}
-	const sig = "sig-eager"
-	if _, err := pool.release(sig, "existing-spare", 2); err != nil {
-		t.Fatalf("seed pool: %v", err)
-	}
-
-	var warmed bool
-	maybeEagerPrewarm(pool, sig, 2, func() { warmed = true })
-	if !warmed {
-		t.Fatalf("expected eager pre-warm to fire when idle count (1) < cap (2), even though the pool is not empty")
-	}
-}
-
-// TestMaybeEagerPrewarmSkipsAtCap checks the other side: once idle count
-// already meets cap, no warming should be triggered (keeps the existing
-// cap-based release behavior in removeSandboxOnExit meaningful — there's no
-// point building spares release() would immediately refuse to keep).
-func TestMaybeEagerPrewarmSkipsAtCap(t *testing.T) {
-	pool := Pool{Root: t.TempDir()}
-	const sig = "sig-full"
-	for _, name := range []string{"spare-1", "spare-2"} {
-		if _, err := pool.release(sig, name, 2); err != nil {
-			t.Fatalf("seed pool: %v", err)
-		}
-	}
-
-	var warmed bool
-	maybeEagerPrewarm(pool, sig, 2, func() { warmed = true })
-	if warmed {
-		t.Fatalf("expected no eager pre-warm when idle count already meets cap")
+	want := []string{"sbx", "rm", "--force", "acp-s"}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Errorf("call = %v, want %v", f.calls[0], want)
 	}
 }
 
