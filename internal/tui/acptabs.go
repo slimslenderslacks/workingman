@@ -628,7 +628,17 @@ func (m model) renderACPView() string {
 		statusLine = acpStatusStyle(t.status).Render(acpStatusGlyph(t.status) + " " + acpStatusLabel(t.status))
 	}
 
-	bodyOuterH := height - acpChromeRows
+	// The body gets height - acpChromeRows - 1 rows, not height - acpChromeRows:
+	// composing header+bar+statusLine+box+hint to land on EXACTLY m.height rows
+	// leaves zero vertical slack, so a transient mismatch between the cached
+	// m.width/m.height and the real terminal size (a resize, or the frame right
+	// as this view is entered) renders one row too tall for the real viewport.
+	// A full-screen altscreen takeover overflowing by even one row scrolls the
+	// terminal, stranding the previous frame's tab bar above the current one —
+	// see acp-session-screen-rendering-glitch. Reserving this row means the
+	// composed view is always at least one row shorter than m.height, so that
+	// transient overshoot can never reach the real ceiling.
+	bodyOuterH := height - acpChromeRows - 1
 	if bodyOuterH < 3 {
 		bodyOuterH = 3
 	}
@@ -650,5 +660,12 @@ func (m model) renderACPView() string {
 		Width(innerW + unfocusedBorder.GetHorizontalPadding()).
 		Height(innerH).MaxWidth(width).Render(bodyContent)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, bar, statusLine, box, hint)
+	view := lipgloss.JoinVertical(lipgloss.Left, header, bar, statusLine, box, hint)
+	// Defensive clamp: whatever the pieces above composed to, never hand the
+	// altscreen more than m.height rows — a single bad line count upstream
+	// should not by itself be able to scroll the terminal.
+	if lines := strings.Split(view, "\n"); len(lines) > height {
+		view = strings.Join(lines[:height], "\n")
+	}
+	return view
 }

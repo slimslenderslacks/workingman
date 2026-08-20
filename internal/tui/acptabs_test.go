@@ -474,6 +474,64 @@ func TestRenderACPViewNestedBoxesIntact(t *testing.T) {
 	}
 }
 
+// TestRenderACPViewNeverExceedsHeight guards against the ghosted-tab-bar
+// glitch (acp-session-screen-rendering-glitch): renderACPView composed its
+// header+bar+statusLine+box+hint to exactly m.height rows with zero vertical
+// slack, so any transient overshoot in the body renderer overflowed the real
+// altscreen and scrolled it, stranding the previous frame's tab bar on
+// screen. It must now never emit more than m.height rows, across a range of
+// small and large heights, with several tabs and a long streamed message in
+// the transcript. At heights large enough that the transcript box's own
+// minimum-size floor doesn't dominate, it must also actually reserve the
+// one-row slack (strictly fewer than m.height rows) rather than merely being
+// clamped down to height after the fact.
+func TestRenderACPViewNeverExceedsHeight(t *testing.T) {
+	m := newModel(nil, nil, nil, nil)
+	m.showACP = true
+	for _, id := range []string{"t-1", "t-2", "t-3"} {
+		m.acp.appendTab(acpTab{id: id, title: "task-" + id, status: acpclient.StateStreaming, curMsg: -1})
+	}
+	m.acp.tabs[1].entries = []transcriptEntry{{kind: entryMessage, text: strings.Repeat("word ", 200)}}
+
+	for _, height := range []int{6, 8, 10, 20, 34} {
+		m.width, m.height = 90, height
+		out := m.renderACPView()
+		lines := strings.Split(out, "\n")
+		if len(lines) > height {
+			t.Errorf("height=%d: renderACPView returned %d lines, want <= %d\n%s", height, len(lines), height, out)
+		}
+		if height >= 8 && len(lines) >= height {
+			t.Errorf("height=%d: renderACPView returned %d lines, want < %d (no reserved slack row)\n%s", height, len(lines), height, out)
+		}
+	}
+}
+
+// TestModelACPViewShrinksWithoutOverflow drives a height-shrinking
+// WindowSizeMsg through the model while the ACP view is open with multiple
+// tabs — the exact scenario from the reported screenshot (resize/entry race
+// leaves the cached m.height briefly out of step with the real terminal) —
+// and checks the top-level View() output never overflows the new height.
+func TestModelACPViewShrinksWithoutOverflow(t *testing.T) {
+	m := newModel(nil, nil, nil, nil)
+	m.acpCh = make(chan acpTabEvent)
+	m.width, m.height = 100, 30
+	for _, id := range []string{"t-1", "t-2", "t-3"} {
+		step, _ := m.Update(acpTabEvent{kind: acpTabAdded, id: id, title: id})
+		m = step.(model)
+	}
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = step.(model)
+
+	step, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 10})
+	m = step.(model)
+
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) >= m.height {
+		t.Errorf("after shrink to height=%d, View() returned %d lines (want < %d):\n%s", m.height, len(lines), m.height, out)
+	}
+}
+
 func TestModelACPKeyNavigatesTabs(t *testing.T) {
 	m := newModel(nil, nil, nil, nil)
 	m.acpCh = make(chan acpTabEvent)
