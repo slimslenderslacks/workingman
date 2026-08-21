@@ -3,13 +3,12 @@ package tui
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"os"
-	"os/exec"
 	"sync"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/acpclient"
+	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
 )
 
@@ -25,6 +24,11 @@ type acpEventKind int
 const (
 	// acpTabAdded creates a tab — a session just appeared and is being watched.
 	acpTabAdded acpEventKind = iota
+	// acpTabStarting creates a placeholder tab for a session discovered in
+	// session.StatusStarting — no watcher is dialing it yet (there is nothing to
+	// dial: the wrapper hasn't confirmed the ACP client is up), but the session
+	// exists and should already be visible in the tab bar.
+	acpTabStarting
 	// acpTabPrompt records a prompt the TUI sent to the session.
 	acpTabPrompt
 	// acpTabStream carries one acpclient.Event (lifecycle transition or streamed
@@ -72,32 +76,6 @@ type acpDialer func(ctx context.Context, socketPath string) (acpConn, error)
 // letting the connection's own behavior decide.
 type sandboxProbe func(ctx context.Context, sandboxName string) (alive bool, err error)
 
-// sbxSandboxProbe is the production sandboxProbe. It lists the sandboxes via
-// `sbx ls --json` (the same stable read interface the wrapper and runner use)
-// and reports whether one named sandboxName exists. A query or decode failure is
-// returned as an error so the caller treats it as inconclusive rather than as
-// "gone".
-func sbxSandboxProbe(ctx context.Context, sandboxName string) (bool, error) {
-	out, err := exec.CommandContext(ctx, "sbx", "ls", "--json").Output()
-	if err != nil {
-		return false, err
-	}
-	var data struct {
-		Sandboxes []struct {
-			Name string `json:"name"`
-		} `json:"sandboxes"`
-	}
-	if err := json.Unmarshal(out, &data); err != nil {
-		return false, err
-	}
-	for _, s := range data.Sandboxes {
-		if s.Name == sandboxName {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // realDialer is the production dialer. It wraps acpclient.Dial so a dial failure
 // yields a genuinely nil interface (returning a typed-nil *Client would make the
 // interface non-nil and defeat the caller's err check).
@@ -132,6 +110,17 @@ const defaultACPPrompt = "Read .orch/instructions.md and .orch/context.yaml, the
 // can legitimately run for many minutes.
 const acpHandshakeTimeout = 2 * time.Minute
 
+// acpStartingGracePeriod bounds how long a session may sit in
+// session.StatusStarting before the watcher probes its sandbox and reaps it
+// as stale. It reuses acpHandshakeTimeout's value rather than a shorter one:
+// the same cold-sandbox-boot slack that a legitimately slow handshake needs
+// (see acpHandshakeTimeout) applies just as much to the earlier window before
+// the wrapper even starts the ACP client, so a starting session is never
+// mistaken for dead while it is still within a normal boot's timing. Do not
+// shrink acpHandshakeTimeout to tighten this — widen this constant
+// independently instead if the two ever need to diverge.
+const acpStartingGracePeriod = acpHandshakeTimeout
+
 // acpTurnIdleTimeout bounds how long a prompt turn may stream NOTHING before the
 // watcher gives up on it. It is an idle bound, not a total-duration cap: a turn
 // that keeps emitting frames (assistant text, tool calls and their updates)
@@ -148,7 +137,7 @@ const acpTurnIdleTimeout = 20 * time.Minute
 // root and returns a channel of tab mutations for the TUI to consume. The
 // channel is closed when ctx is cancelled. interval <= 0 defaults to 500ms.
 func WatchACPSessions(ctx context.Context, root string, interval time.Duration) <-chan acpTabEvent {
-	return watchACPSessions(ctx, root, interval, realDialer, sbxSandboxProbe, defaultACPPrompt)
+	return watchACPSessions(ctx, root, interval, realDialer, sbx.Alive, defaultACPPrompt)
 }
 
 // activeWatch is one live per-session watcher tracked by watchACPSessions.
@@ -166,8 +155,18 @@ type activeWatch struct {
 //
 // It polls the store on interval. A session in StatusRunning that isn't already
 // being watched gets a per-session goroutine (watchOneACPSession). A session
-// that has disappeared from the listing — its directory cleaned up — has its
-// watcher cancelled and an acpTabRemoved emitted so the tab goes away.
+// still in StatusStarting gets an immediate placeholder tab (acpTabStarting)
+// instead of being skipped — the wrapper can take a while to confirm the ACP
+// client is up (cold sandbox boot), and the session should already be visible
+// (and reachable via the tab bar's scrolling) before there's anything to dial.
+// Once a StatusStarting session has sat past acpStartingGracePeriod with no
+// live backing sandbox (startingSessionStale), it is reaped the same way a
+// dead StatusRunning session is: the placeholder is dropped and its directory
+// removed, so a wrapper that crashed or hung before ever reaching
+// StatusRunning doesn't leave a permanent phantom tab. A session that has
+// disappeared from the listing — its directory cleaned up — has its watcher
+// (or placeholder) cancelled/dropped and an acpTabRemoved emitted so the tab
+// goes away.
 func watchACPSessions(ctx context.Context, root string, interval time.Duration, dial acpDialer, probe sandboxProbe, prompt string) <-chan acpTabEvent {
 	if interval <= 0 {
 		interval = 500 * time.Millisecond
@@ -181,6 +180,9 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 		}
 
 		active := map[string]activeWatch{}
+		// starting tracks sessions currently shown as a placeholder tab (see
+		// acpTabStarting) so each one is announced only once, not on every poll.
+		starting := map[string]bool{}
 		var wg sync.WaitGroup
 		defer func() {
 			for _, w := range active {
@@ -217,9 +219,20 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 					delete(active, s.ID)
 					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: s.ID})
 				}
+				if s.Status == session.StatusStarting {
+					if !starting[s.ID] {
+						starting[s.ID] = true
+						emitACP(ctx, out, acpTabEvent{kind: acpTabStarting, id: s.ID, title: acpTabTitle(s)})
+					}
+					if startingSessionStale(ctx, probe, s) {
+						delete(starting, s.ID)
+						cleanupDeadSession(ctx, out, store, s.ID)
+					}
+					continue
+				}
+				delete(starting, s.ID)
 				if s.Status != session.StatusRunning {
-					// Not yet live (starting) or already ended: nothing to watch.
-					// A later poll picks it up once it flips to running.
+					// Already ended without ever running: nothing to watch.
 					continue
 				}
 				wctx, cancel := context.WithCancel(ctx)
@@ -230,11 +243,17 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 					watchOneACPSession(wctx, out, dial, probe, store, s, prompt, acpHandshakeTimeout, acpTurnIdleTimeout)
 				}(s)
 			}
-			// Reap watchers whose session directory is gone.
+			// Reap watchers and placeholders whose session directory is gone.
 			for id, w := range active {
 				if !seen[id] {
 					w.cancel()
 					delete(active, id)
+					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: id})
+				}
+			}
+			for id := range starting {
+				if !seen[id] {
+					delete(starting, id)
 					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: id})
 				}
 			}
@@ -477,6 +496,36 @@ func markPrompted(store session.Store, id string) {
 	rec.PromptCount = 1
 	rec.UpdatedAt = time.Now()
 	_ = store.Write(rec)
+}
+
+// startingSessionStale reports whether a session.StatusStarting session s has
+// sat past acpStartingGracePeriod with no live backing sandbox — the case a
+// wrapper that crashed or hung between writing StatusStarting and either
+// creating the sandbox or reaching StatusRunning leaves behind (see
+// acpwrapper.Run: the write at StatusStarting happens before ensureSandbox is
+// ever called). Before the grace period elapses this always returns false: a
+// cold sandbox boot legitimately has no sandbox yet, and reaping on that
+// window alone would kill a session that is starting exactly as designed.
+//
+// Once past the grace period, a session with no recorded SandboxName at all
+// can never be confirmed alive (there is nothing to probe) and is treated as
+// stale. Otherwise the sandbox is probed the same way watchOneACPSession
+// probes a running session's: confirmed gone (alive=false, err=nil) is stale;
+// confirmed alive, or an inconclusive probe (err != nil), is not — a flaky
+// `sbx ls` must never reap a session that might still be legitimately
+// starting.
+func startingSessionStale(ctx context.Context, probe sandboxProbe, s session.Session) bool {
+	if time.Since(s.CreatedAt) <= acpStartingGracePeriod {
+		return false
+	}
+	if s.SandboxName == "" {
+		return true
+	}
+	if probe == nil {
+		return false
+	}
+	alive, err := probe(ctx, s.SandboxName)
+	return err == nil && !alive
 }
 
 // cleanupDeadSession reclaims a session whose sandbox is gone: it removes the

@@ -102,7 +102,20 @@ type Config struct {
 	// success/committed run has it torn down. Empty (planning, which has no
 	// single task) means no status-based retention — only SaveSandbox and the
 	// shutdown check apply.
+	//
+	// Also recorded verbatim into session.json (see sessionRecord) so a
+	// restarting daemon can find the same task file when reconciling session
+	// tracking.
 	TaskPath string
+
+	// ProjectPath is the host path to the .project.yaml driving this session,
+	// and Kind is the agent.Kind string ("project", "planning", "task",
+	// "commit") running it. Neither affects the sandbox or the ACP client —
+	// they are recorded into session.json purely so a restarting daemon can
+	// tell which project (and how) to resume dispatching for a session it
+	// did not itself launch. See the daemon package's startup reconciliation.
+	ProjectPath string
+	Kind        string
 
 	// SaveSandbox, when true, makes the wrapper leave the sandbox in place when
 	// the agent exits instead of removing it with `sbx rm --force`. It is the
@@ -187,6 +200,9 @@ func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.T
 		Workspaces:  c.Workspaces,
 		Kit:         c.KitPath,
 		LogPath:     c.LogPath(),
+		ProjectPath: c.ProjectPath,
+		TaskPath:    c.TaskPath,
+		Kind:        c.Kind,
 	}
 }
 
@@ -347,6 +363,7 @@ func (c *Config) normalize() error {
 	if c.SbxPath == "" {
 		c.SbxPath = "sbx"
 	}
+
 	return nil
 }
 
@@ -359,54 +376,88 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
-// ensureSandbox makes the named sandbox exist with exactly c.Workspaces
-// mounted and the acp-kit kit layered on. It mirrors the daemon's idempotent
-// SandboxCreator so the wrapper is safe to relaunch:
-//
-//  1. `sbx ls --json` to find an existing sandbox by name.
-//  2. Same workspace set → no-op.
-//  3. Different set → `sbx rm --force` then recreate (self-heals drift).
-//  4. Otherwise `sbx create claude --name <name> --kit <kit> [--static-mcp <m>...] <ws...>`,
-//     then one `sbx policy <action> <kind> --sandbox <name> <resource>` per rule
-//     in c.Policies, in declaration order (so deny-all + allow-host stacks
-//     evaluate left-to-right).
-func ensureSandbox(ctx context.Context, run commandFunc, c Config) error {
-	existing, err := readSandboxWorkspaces(ctx, run, c.SbxPath, c.SandboxName)
-	if err != nil {
-		return fmt.Errorf("acpwrapper: sbx ls: %w", err)
-	}
-	if existing != nil {
-		if sameWorkspaceSet(existing, c.Workspaces) {
-			return nil
-		}
-		if out, err := run(ctx, c.SbxPath, "rm", "--force", c.SandboxName); err != nil {
-			return fmt.Errorf("acpwrapper: sbx rm %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
-		}
-	}
-	args := []string{"create", "claude", "--name", c.SandboxName, "--kit", c.KitPath}
+// createSandbox runs `sbx create claude --name <name> --kit <kit>
+// [--static-mcp <m>...] <c.Workspaces...>` and then applies c.Policies in
+// declaration order (so deny-all + allow-host stacks evaluate left-to-right).
+// It is the one place that "attaches" a sandbox's workspace mounts, used both
+// for a brand-new sandbox and to repair one whose mounts must change (the
+// caller is responsible for `sbx rm --force`-ing name first in that case).
+func createSandbox(ctx context.Context, run commandFunc, c Config, name string) (string, error) {
+	args := []string{"create", "claude", "--name", name, "--kit", c.KitPath}
 	for _, m := range c.StaticMCPs {
 		args = append(args, "--static-mcp", m)
 	}
 	args = append(args, c.Workspaces...)
-	if out, err := run(ctx, c.SbxPath, args...); err != nil {
-		return fmt.Errorf("acpwrapper: sbx create %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
+	createStart := time.Now()
+	out, err := run(ctx, c.SbxPath, args...)
+	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: sbx create %s took %s\n", c.SessionID, name, time.Since(createStart))
+	if err != nil {
+		return "", fmt.Errorf("acpwrapper: sbx create %s: %w: %s", name, err, strings.TrimSpace(string(out)))
 	}
 	for _, r := range c.Policies {
 		if err := r.Validate(); err != nil {
-			return fmt.Errorf("acpwrapper: sbx policy %s: %w", c.SandboxName, err)
+			return "", fmt.Errorf("acpwrapper: sbx policy %s: %w", name, err)
 		}
-		if out, err := run(ctx, c.SbxPath, r.CLIArgs(c.SandboxName)...); err != nil {
-			return fmt.Errorf("acpwrapper: sbx policy %s %s %s %s: %w: %s",
-				r.Action, r.Kind, c.SandboxName, r.Resource, err, strings.TrimSpace(string(out)))
+		if out, err := run(ctx, c.SbxPath, r.CLIArgs(name)...); err != nil {
+			return "", fmt.Errorf("acpwrapper: sbx policy %s %s %s %s: %w: %s",
+				r.Action, r.Kind, name, r.Resource, err, strings.TrimSpace(string(out)))
 		}
 	}
-	return nil
+	return name, nil
 }
 
-// readSandboxWorkspaces returns the workspace list for the named sandbox, or
-// nil if no sandbox by that name exists. `sbx ls --json` is the stable read
-// interface sbx exposes.
-func readSandboxWorkspaces(ctx context.Context, run commandFunc, sbxPath, name string) ([]string, error) {
+// ensureSandbox makes a sandbox exist with exactly c.Workspaces mounted and
+// the acp-kit kit layered on, and returns c.SandboxName. It mirrors the
+// daemon's idempotent SandboxCreator so the wrapper is safe to relaunch:
+//
+//  1. `sbx ls --json` to find an existing sandbox by c.SandboxName.
+//  2. Same workspace set → no-op, use c.SandboxName as-is. This is the
+//     existing task<->commit-agent reuse fast path (same derived name): a
+//     name match already proves the workspace/MCP/policy set lines up (see
+//     the Config.StaticMCPs doc).
+//  3. Different set → `sbx rm --force` then fall through (self-heals drift).
+//  4. No sandbox named c.SandboxName, or it was just removed by (3):
+//     `sbx create claude --name <name> --kit <kit> [--static-mcp <m>...] <ws...>`,
+//     then one `sbx policy <action> <kind> --sandbox <name> <resource>` per rule
+//     in c.Policies, in declaration order (so deny-all + allow-host stacks
+//     evaluate left-to-right).
+//
+// A cache miss always means "create a fresh sandbox under c.SandboxName" —
+// this never looks up or adopts any other sandbox by a different name.
+//
+// The dominant cost of a cache miss's `sbx create` is believed to be
+// acp-kit's own install step (Node 22 + the ACP client's native binary,
+// pulled over the network on every create) — see createSandbox's timing log
+// and the starting->running gap logged in Run. This could not be confirmed
+// with a live measurement from inside this repo's own tooling: the `sbx`
+// binary that createSandbox shells out to is not present in this task's own
+// sandbox (checked PATH and the filesystem; only unrelated sbx-clipboard
+// helpers exist here), so neither a real cold-start run nor `sbx create
+// --help`/`sbx --help` could be executed to check for a pre-built/cached-image
+// flag. If one exists, wiring it into createSandbox would only reduce that
+// install cost; it is out of scope for and does not change this function's
+// naming/traceability behavior above, which is this task's actual fix.
+func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, error) {
+	sandboxes, err := listSandboxes(ctx, run, c.SbxPath)
+	if err != nil {
+		return "", fmt.Errorf("acpwrapper: sbx ls: %w", err)
+	}
+	if existing, ok := sandboxes[c.SandboxName]; ok {
+		if sameWorkspaceSet(existing, c.Workspaces) {
+			return c.SandboxName, nil
+		}
+		if out, err := run(ctx, c.SbxPath, "rm", "--force", c.SandboxName); err != nil {
+			return "", fmt.Errorf("acpwrapper: sbx rm %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	return createSandbox(ctx, run, c, c.SandboxName)
+}
+
+// listSandboxes returns every sandbox's workspace list, keyed by name, from
+// `sbx ls --json` — the stable read interface sbx exposes. Used to find an
+// existing sandbox by c.SandboxName.
+func listSandboxes(ctx context.Context, run commandFunc, sbxPath string) (map[string][]string, error) {
 	out, err := run(ctx, sbxPath, "ls", "--json")
 	if err != nil {
 		return nil, err
@@ -420,12 +471,11 @@ func readSandboxWorkspaces(ctx context.Context, run commandFunc, sbxPath, name s
 	if err := json.Unmarshal(out, &data); err != nil {
 		return nil, fmt.Errorf("decode sbx ls output: %w", err)
 	}
+	m := make(map[string][]string, len(data.Sandboxes))
 	for _, s := range data.Sandboxes {
-		if s.Name == name {
-			return s.Workspaces, nil
-		}
+		m[s.Name] = s.Workspaces
 	}
-	return nil, nil
+	return m, nil
 }
 
 // sameWorkspaceSet reports whether a and b contain the same paths, ignoring
@@ -462,11 +512,11 @@ func keepForTaskStatus(s task.Status) bool {
 	}
 }
 
-// removeSandboxOnExit tears down the session's sbx sandbox after its agent has
-// exited, so per-task sandboxes don't accumulate across a project's run. It is
-// best-effort: a failure to remove is logged, never returned, because the
-// session has already ended cleanly and a lingering sandbox is a resource leak,
-// not a correctness bug.
+// removeSandboxOnExit disposes of the session's sbx sandbox after its agent
+// has exited, so per-task sandboxes don't accumulate across a project's run.
+// "Disposes of" means `sbx rm --force`-ing it — best-effort: a failure is
+// logged, never returned, because the session has already ended cleanly and
+// a lingering sandbox is a resource leak, not a correctness bug.
 //
 // The sandbox is KEPT (not removed) when any of the following hold:
 //   - shuttingDown: we're exiting on a signal rather than the agent finishing on
@@ -478,6 +528,9 @@ func keepForTaskStatus(s task.Status) bool {
 //     actually retains a failed run's sandbox: the daemon only learns the run
 //     failed after this wrapper has exited, so it can't set save_sandbox in
 //     time — reading the status here is the wrapper's own decision.
+//
+// Otherwise every sandbox is unconditionally `sbx rm --force`-d: there is no
+// pool or cross-session reuse, so every clean exit tears its sandbox down.
 //
 // A fresh ctx is required from the caller: the wrapper's run context is already
 // cancelled by the agent's exit, and reusing it would kill `sbx rm` before it ran.
@@ -558,10 +611,14 @@ func Run(ctx context.Context, c Config) error {
 		return err
 	}
 
-	if err := ensureSandbox(ctx, execCommand, c); err != nil {
+	ensureStart := time.Now()
+	sandboxName, err := ensureSandbox(ctx, execCommand, c)
+	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ensureSandbox took %s\n", c.SessionID, time.Since(ensureStart))
+	if err != nil {
 		_ = store.Remove(c.SessionID) // never started — don't leave a stale record
 		return err
 	}
+	c.SandboxName = sandboxName
 
 	// Signing preflight: when signing is configured, confirm the forwarded agent
 	// can actually reach a key and warn (without blocking) if not, so a locked
@@ -634,6 +691,7 @@ func Run(ctx context.Context, c Config) error {
 	if err := store.Write(c.sessionRecord(session.StatusRunning, createdAt, time.Now())); err != nil {
 		fmt.Fprintln(os.Stderr, "acp-wrapper:", err)
 	}
+	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: starting -> running took %s\n", c.SessionID, time.Since(createdAt))
 
 	// When the ACP client exits, the session's transport is gone: cancel the
 	// context and close the listener so the accept loop unwinds.

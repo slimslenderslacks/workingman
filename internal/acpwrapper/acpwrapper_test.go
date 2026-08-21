@@ -213,7 +213,7 @@ func TestEnsureSandboxMountsOnlyWorkspacesWhenSigning(t *testing.T) {
 		Workspaces:  []string{"/repo"},
 		SigningKey:  "ssh-ed25519 AAAAKEY",
 	}
-	if err := ensureSandbox(context.Background(), f.run, c); err != nil {
+	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
 		t.Fatalf("ensureSandbox: %v", err)
 	}
 	create := f.calls[1]
@@ -261,7 +261,7 @@ func (f *fakeSbx) run(_ context.Context, name string, args ...string) ([]byte, e
 func TestEnsureSandboxCreatesWhenMissing(t *testing.T) {
 	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
 	c := Config{SandboxName: "acp-s", KitPath: "/kits/acp", SbxPath: "sbx", Workspaces: []string{"/repo"}}
-	if err := ensureSandbox(context.Background(), f.run, c); err != nil {
+	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
 		t.Fatalf("ensureSandbox: %v", err)
 	}
 	// Expect ls then create with --kit.
@@ -275,6 +275,33 @@ func TestEnsureSandboxCreatesWhenMissing(t *testing.T) {
 	}
 }
 
+// TestEnsureSandboxIgnoresOtherSandboxesOnCacheMiss confirms that a cache
+// miss (no sandbox named c.SandboxName) always issues a plain `sbx create
+// ... --name <c.SandboxName>` and never looks up or adopts any other
+// sandbox by a different name, even when other sandboxes exist and would
+// otherwise look like plausible spares.
+func TestEnsureSandboxIgnoresOtherSandboxesOnCacheMiss(t *testing.T) {
+	f := &fakeSbx{lsOutput: `{"sandboxes":[
+		{"name":"acp-some-other-session","workspaces":["/repo"]},
+		{"name":"acp-pool-deadbeef-1234","workspaces":["/repo"]}
+	]}`}
+	c := Config{SandboxName: "acp-s", KitPath: "/kits/acp", SbxPath: "sbx", Workspaces: []string{"/repo"}}
+	name, err := ensureSandbox(context.Background(), f.run, c)
+	if err != nil {
+		t.Fatalf("ensureSandbox: %v", err)
+	}
+	if name != "acp-s" {
+		t.Errorf("name = %q, want %q (fresh create under own name, no adoption)", name, "acp-s")
+	}
+	if len(f.calls) != 2 {
+		t.Fatalf("expected 2 sbx calls (ls, create), got %d: %v", len(f.calls), f.calls)
+	}
+	want := []string{"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp", "/repo"}
+	if !reflect.DeepEqual(f.calls[1], want) {
+		t.Errorf("create call = %v, want %v", f.calls[1], want)
+	}
+}
+
 func TestEnsureSandboxForwardsStaticMCPs(t *testing.T) {
 	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
 	c := Config{
@@ -284,7 +311,7 @@ func TestEnsureSandboxForwardsStaticMCPs(t *testing.T) {
 		Workspaces:  []string{"/repo"},
 		StaticMCPs:  []string{"github", "web-search"},
 	}
-	if err := ensureSandbox(context.Background(), f.run, c); err != nil {
+	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
 		t.Fatalf("ensureSandbox: %v", err)
 	}
 	if len(f.calls) != 2 {
@@ -314,7 +341,7 @@ func TestEnsureSandboxAppliesPoliciesAfterCreate(t *testing.T) {
 			{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.github.com"},
 		},
 	}
-	if err := ensureSandbox(context.Background(), f.run, c); err != nil {
+	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
 		t.Fatalf("ensureSandbox: %v", err)
 	}
 	// Expect ls, create, then one policy call per rule, in declaration order.
@@ -337,7 +364,7 @@ func TestEnsureSandboxAppliesPoliciesAfterCreate(t *testing.T) {
 func TestEnsureSandboxNoopWhenSameWorkspaces(t *testing.T) {
 	f := &fakeSbx{lsOutput: `{"sandboxes":[{"name":"acp-s","workspaces":["/repo"]}]}`}
 	c := Config{SandboxName: "acp-s", KitPath: "k", SbxPath: "sbx", Workspaces: []string{"/repo"}}
-	if err := ensureSandbox(context.Background(), f.run, c); err != nil {
+	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
 		t.Fatalf("ensureSandbox: %v", err)
 	}
 	if len(f.calls) != 1 {
@@ -348,7 +375,7 @@ func TestEnsureSandboxNoopWhenSameWorkspaces(t *testing.T) {
 func TestEnsureSandboxRecreatesOnDrift(t *testing.T) {
 	f := &fakeSbx{lsOutput: `{"sandboxes":[{"name":"acp-s","workspaces":["/old"]}]}`}
 	c := Config{SandboxName: "acp-s", KitPath: "k", SbxPath: "sbx", Workspaces: []string{"/repo"}}
-	if err := ensureSandbox(context.Background(), f.run, c); err != nil {
+	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
 		t.Fatalf("ensureSandbox: %v", err)
 	}
 	if len(f.calls) != 3 {
@@ -362,7 +389,7 @@ func TestEnsureSandboxRecreatesOnDrift(t *testing.T) {
 func TestEnsureSandboxCreateError(t *testing.T) {
 	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`, failCmd: "create"}
 	c := Config{SandboxName: "acp-s", KitPath: "k", SbxPath: "sbx", Workspaces: []string{"/repo"}}
-	err := ensureSandbox(context.Background(), f.run, c)
+	_, err := ensureSandbox(context.Background(), f.run, c)
 	if err == nil || !strings.Contains(err.Error(), "sbx create") {
 		t.Fatalf("expected create error, got %v", err)
 	}
@@ -485,6 +512,24 @@ func TestRemoveSandboxOnExit(t *testing.T) {
 				t.Errorf("sandbox removed = %v, want %v (calls: %v)", removed, tt.wantRemove, f.calls)
 			}
 		})
+	}
+}
+
+// TestRemoveSandboxOnExitAlwaysRemovesOnCleanExit confirms that a clean exit
+// with none of SaveSandbox/keepForTaskStatus/shuttingDown set always issues a
+// plain `sbx rm --force <c.SandboxName>` — there is no donate-to-pool path,
+// and exactly one sbx call is made.
+func TestRemoveSandboxOnExitAlwaysRemovesOnCleanExit(t *testing.T) {
+	c := Config{SessionID: "s", SandboxName: "acp-s", SbxPath: "sbx"}
+	f := &fakeSbx{}
+	removeSandboxOnExit(context.Background(), f.run, c, false)
+
+	if len(f.calls) != 1 {
+		t.Fatalf("expected exactly 1 sbx call, got %d: %v", len(f.calls), f.calls)
+	}
+	want := []string{"sbx", "rm", "--force", "acp-s"}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Errorf("call = %v, want %v", f.calls[0], want)
 	}
 }
 

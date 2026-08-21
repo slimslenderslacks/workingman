@@ -31,6 +31,14 @@ func TestLoadExample(t *testing.T) {
 	if p.Cron != "*/15 * * * *" {
 		t.Errorf("Cron = %q", p.Cron)
 	}
+	// The example's schedule must carry a stop condition — a `cron:` without one
+	// is a project the daemon refuses to schedule.
+	if p.CronUnbounded() {
+		t.Errorf("example cron has no stop condition: cron_until/cron_max_runs unset")
+	}
+	if p.CronMaxRuns != 96 {
+		t.Errorf("CronMaxRuns = %d, want 96", p.CronMaxRuns)
+	}
 }
 
 func TestSaveForcesDaemonWriter(t *testing.T) {
@@ -223,6 +231,392 @@ func TestNewReposParsing(t *testing.T) {
 	if p.NewRepos[1].Org != "acme" || p.NewRepos[1].Name != "gizmo" ||
 		p.NewRepos[1].Visibility != "public" {
 		t.Errorf("new_repos[1] = %+v", p.NewRepos[1])
+	}
+}
+
+func TestArchiveFlagLoad(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "archive true",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\narchive: true\n",
+			want: true,
+		},
+		{
+			name: "archive false",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\narchive: false\n",
+			want: false,
+		},
+		{
+			// The common case: a project file written before the flag existed.
+			name: "key absent",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\n",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), ".project.yaml")
+			if err := os.WriteFile(dst, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			p, err := Load(dst)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if p.Archive != tc.want {
+				t.Errorf("Archive = %v, want %v", p.Archive, tc.want)
+			}
+			// The other fields must survive alongside it.
+			if p.Description != "x" || p.Branch != "feat/y" || p.Status != StatusWorking {
+				t.Errorf("other fields disturbed: %+v", p)
+			}
+		})
+	}
+}
+
+func TestArchiveOmitEmpty(t *testing.T) {
+	// A project without the flag must re-save without adding an `archive:`
+	// key, so files predating the flag stay byte-identical.
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	if err := SaveAs(dst, &Project{
+		Description: "x", Branch: "feat/y", Status: StatusWorking,
+	}, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(raw), "archive") {
+		t.Errorf("false Archive should not emit an archive line; got:\n%s", string(raw))
+	}
+}
+
+func TestArchiveRoundTrip(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	src := &Project{
+		Description: "x",
+		Branch:      "feat/y",
+		Status:      StatusWorking,
+		Repos:       []Repo{{Org: "slimslenderslacks", Name: "workingman"}},
+		Archive:     true,
+	}
+	if err := SaveAs(dst, src, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), "archive: true") {
+		t.Errorf("want `archive: true` on disk; got:\n%s", string(raw))
+	}
+	reloaded, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reloaded.Archive {
+		t.Errorf("Archive = false after round-trip")
+	}
+	// Nothing else may shift: the flag is independent of Status.
+	if reloaded.Status != StatusWorking {
+		t.Errorf("Status = %q, want working", reloaded.Status)
+	}
+	// SaveAs stamps the writer on the copy it writes, not on src.
+	reloaded.UpdatedBy = src.UpdatedBy
+	if !reflect.DeepEqual(src, reloaded) {
+		t.Errorf("round-trip mismatch:\n src=%+v\n got=%+v", src, reloaded)
+	}
+}
+
+func TestCleanupFlagLoad(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "cleanup requested",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\ncleanup: true\n",
+			want: true,
+		},
+		{
+			// What the daemon writes when it clears a finished request.
+			name: "cleanup false",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\ncleanup: false\n",
+			want: false,
+		},
+		{
+			// Every project file predating the flag.
+			name: "key absent",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\n",
+			want: false,
+		},
+		{
+			// The mid-run shape: the agent has reported success but the daemon
+			// hasn't cleared the request yet. The two flags are independent.
+			name: "alongside archive",
+			yaml: "description: x\nbranch: feat/y\nstatus: working\narchive: true\ncleanup: true\n",
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), ".project.yaml")
+			if err := os.WriteFile(dst, []byte(tc.yaml), 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			p, err := Load(dst)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if p.Cleanup != tc.want {
+				t.Errorf("Cleanup = %v, want %v", p.Cleanup, tc.want)
+			}
+			// Requesting a cleanup must not disturb the status routing the
+			// daemon falls back to once the request is cleared.
+			if p.Description != "x" || p.Branch != "feat/y" || p.Status != StatusWorking {
+				t.Errorf("other fields disturbed: %+v", p)
+			}
+		})
+	}
+}
+
+func TestCleanupOmitEmpty(t *testing.T) {
+	// No request → no `cleanup:` key, so files that have never had a cleanup
+	// requested stay byte-identical.
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	if err := SaveAs(dst, &Project{
+		Description: "x", Branch: "feat/y", Status: StatusWorking,
+	}, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(raw), "cleanup") {
+		t.Errorf("false Cleanup should not emit a cleanup line; got:\n%s", string(raw))
+	}
+}
+
+func TestCleanupRoundTrip(t *testing.T) {
+	// The `:cleanup` write: flag set, saved as the agent so the daemon's
+	// own-write filter doesn't swallow the fsnotify event.
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	src := &Project{
+		Description: "x",
+		Branch:      "feat/y",
+		Status:      StatusWorking,
+		Repos:       []Repo{{Org: "slimslenderslacks", Name: "workingman"}},
+		Cleanup:     true,
+	}
+	if err := SaveAs(dst, src, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), "cleanup: true") {
+		t.Errorf("want `cleanup: true` on disk; got:\n%s", string(raw))
+	}
+	reloaded, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reloaded.Cleanup {
+		t.Errorf("Cleanup = false after round-trip")
+	}
+	if reloaded.UpdatedBy != WriterAgent {
+		t.Errorf("UpdatedBy = %q, want agent (the daemon ignores its own writes)", reloaded.UpdatedBy)
+	}
+	if reloaded.Status != StatusWorking {
+		t.Errorf("Status = %q, want working — cleanup is a flag, not a status", reloaded.Status)
+	}
+	reloaded.UpdatedBy = src.UpdatedBy
+	if !reflect.DeepEqual(src, reloaded) {
+		t.Errorf("round-trip mismatch:\n src=%+v\n got=%+v", src, reloaded)
+	}
+
+	// The daemon's clear: same file, flag off, written as the daemon.
+	cleared := *reloaded
+	cleared.Cleanup = false
+	if err := Save(dst, &cleared); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	after, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load after clear: %v", err)
+	}
+	if after.Cleanup {
+		t.Errorf("Cleanup still true after the daemon cleared it")
+	}
+	if after.UpdatedBy != WriterDaemon {
+		t.Errorf("UpdatedBy = %q, want daemon", after.UpdatedBy)
+	}
+	if after.Status != StatusWorking {
+		t.Errorf("Status = %q after clear, want working", after.Status)
+	}
+}
+
+func TestCronStopCondition(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+
+	cases := []struct {
+		name          string
+		p             Project
+		wantExpired   bool
+		wantUnbounded bool
+		// wantReason is a substring the stop reason must name, so the audit
+		// entry says which condition tripped. Empty when nothing tripped.
+		wantReason string
+	}{
+		{
+			name:          "no cron at all",
+			p:             Project{},
+			wantExpired:   false,
+			wantUnbounded: false,
+		},
+		{
+			// The case the daemon refuses to register.
+			name:          "cron with no stop condition",
+			p:             Project{Cron: "@every 1s"},
+			wantExpired:   false,
+			wantUnbounded: true,
+		},
+		{
+			name:        "deadline passed",
+			p:           Project{Cron: "@every 1s", CronUntil: &past},
+			wantExpired: true,
+			wantReason:  "cron_until",
+		},
+		{
+			name:        "deadline not passed",
+			p:           Project{Cron: "@every 1s", CronUntil: &future},
+			wantExpired: false,
+		},
+		{
+			name:        "run limit reached",
+			p:           Project{Cron: "@every 1s", CronMaxRuns: 3, CronRuns: 3},
+			wantExpired: true,
+			wantReason:  "cron_max_runs",
+		},
+		{
+			// >= not ==, so an overshoot (a counter bumped past the limit by an
+			// edited file) still stops.
+			name:        "run limit exceeded",
+			p:           Project{Cron: "@every 1s", CronMaxRuns: 3, CronRuns: 9},
+			wantExpired: true,
+			wantReason:  "cron_max_runs",
+		},
+		{
+			name:        "run limit not reached",
+			p:           Project{Cron: "@every 1s", CronMaxRuns: 3, CronRuns: 2},
+			wantExpired: false,
+		},
+		{
+			// A counter with no limit set is not a stop condition on its own.
+			name:          "runs without a limit",
+			p:             Project{Cron: "@every 1s", CronRuns: 100},
+			wantExpired:   false,
+			wantUnbounded: true,
+		},
+		{
+			name:        "both set, deadline trips first",
+			p:           Project{Cron: "@every 1s", CronUntil: &past, CronMaxRuns: 10, CronRuns: 1},
+			wantExpired: true,
+			wantReason:  "cron_until",
+		},
+		{
+			name:        "both set, run limit trips first",
+			p:           Project{Cron: "@every 1s", CronUntil: &future, CronMaxRuns: 10, CronRuns: 10},
+			wantExpired: true,
+			wantReason:  "cron_max_runs",
+		},
+		{
+			name:        "both set, neither trips",
+			p:           Project{Cron: "@every 1s", CronUntil: &future, CronMaxRuns: 10, CronRuns: 4},
+			wantExpired: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := tc.p.CronStopReason()
+			if got := tc.p.CronExpired(); got != tc.wantExpired {
+				t.Errorf("CronExpired() = %v, want %v (reason %q)", got, tc.wantExpired, reason)
+			}
+			if tc.wantReason == "" {
+				if reason != "" {
+					t.Errorf("CronStopReason() = %q, want empty", reason)
+				}
+			} else if !strings.Contains(reason, tc.wantReason) {
+				t.Errorf("CronStopReason() = %q, want it to name %q", reason, tc.wantReason)
+			}
+			if got := tc.p.CronUnbounded(); got != tc.wantUnbounded {
+				t.Errorf("CronUnbounded() = %v, want %v", got, tc.wantUnbounded)
+			}
+		})
+	}
+}
+
+func TestCronFieldsRoundTripAndOmitEmpty(t *testing.T) {
+	// A project without the new fields must not grow the keys, so files
+	// predating them stay byte-identical.
+	bare := filepath.Join(t.TempDir(), ".project.yaml")
+	if err := SaveAs(bare, &Project{
+		Description: "x", Branch: "feat/y", Status: StatusWorking, Cron: "@every 1h",
+	}, WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	raw, err := os.ReadFile(bare)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, key := range []string{"cron_until", "cron_max_runs", "cron_runs"} {
+		if strings.Contains(string(raw), key) {
+			t.Errorf("unset %s should not be emitted; got:\n%s", key, string(raw))
+		}
+	}
+
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	until := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	src := &Project{
+		Description: "x",
+		Branch:      "feat/y",
+		Status:      StatusWorking,
+		Repos:       []Repo{{Org: "slimslenderslacks", Name: "workingman"}},
+		Cron:        "@every 1h",
+		CronUntil:   &until,
+		CronMaxRuns: 24,
+		CronRuns:    3,
+	}
+	if err := SaveAs(dst, src, WriterDaemon); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	reloaded, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if reloaded.CronUntil == nil || !reloaded.CronUntil.Equal(until) {
+		t.Errorf("CronUntil = %v, want %v", reloaded.CronUntil, until)
+	}
+	if reloaded.CronMaxRuns != 24 || reloaded.CronRuns != 3 {
+		t.Errorf("CronMaxRuns/CronRuns = %d/%d, want 24/3", reloaded.CronMaxRuns, reloaded.CronRuns)
+	}
+	// Compare the rest structurally. CronUntil is checked with Equal above and
+	// then aliased, because a round-tripped time.Time is only Equal, never
+	// DeepEqual, to the original (the internal wall/monotonic representation
+	// differs). Same normalization as UpdatedBy, which SaveAs stamps.
+	reloaded.CronUntil = src.CronUntil
+	reloaded.UpdatedBy = src.UpdatedBy
+	if !reflect.DeepEqual(src, reloaded) {
+		t.Errorf("round-trip mismatch:\n src=%+v\n got=%+v", src, reloaded)
 	}
 }
 

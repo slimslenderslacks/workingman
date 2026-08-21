@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/slimslenderslacks/work/internal/acpclient"
 )
@@ -269,9 +271,67 @@ func TestRenderACPTabBarMarksSelected(t *testing.T) {
 		{id: "a", title: "task-a", status: acpclient.StateStreaming},
 		{id: "b", title: "plan-b", status: acpclient.StateConnected},
 	}
-	bar := renderACPTabBar(tabs, 1)
+	bar := renderACPTabBar(tabs, 1, 0)
 	if !strings.Contains(bar, "task-a") || !strings.Contains(bar, "plan-b") {
 		t.Errorf("bar missing a tab title; got:\n%s", bar)
+	}
+}
+
+func TestRenderACPTabBarScrollsToKeepSelectedVisible(t *testing.T) {
+	const n = 18
+	tabs := make([]acpTab, n)
+	for i := range tabs {
+		tabs[i] = acpTab{id: fmt.Sprintf("s%d", i), title: fmt.Sprintf("task-%02d", i), status: acpclient.StateConnected}
+	}
+	const width = 40
+
+	// With no scrolling at all, a narrow bar can't show every one of n tabs, so
+	// an overflow indicator must appear.
+	barAtStart := renderACPTabBar(tabs, 0, width)
+	if lipgloss.Width(barAtStart) > width {
+		t.Errorf("bar wider than terminal: width=%d, rendered width=%d\n%s", width, lipgloss.Width(barAtStart), barAtStart)
+	}
+	if !strings.Contains(barAtStart, "task-00") {
+		t.Errorf("bar should contain the selected (first) tab; got:\n%s", barAtStart)
+	}
+	if !strings.Contains(barAtStart, "»") {
+		t.Errorf("bar should show a right overflow indicator when tabs are hidden; got:\n%s", barAtStart)
+	}
+
+	// Selecting a tab deep in the middle must scroll the window so it's visible,
+	// with hidden tabs on both sides now.
+	mid := n / 2
+	barAtMid := renderACPTabBar(tabs, mid, width)
+	if lipgloss.Width(barAtMid) > width {
+		t.Errorf("bar wider than terminal: width=%d, rendered width=%d\n%s", width, lipgloss.Width(barAtMid), barAtMid)
+	}
+	wantTitle := fmt.Sprintf("task-%02d", mid)
+	if !strings.Contains(barAtMid, wantTitle) {
+		t.Errorf("bar should contain the selected tab %q; got:\n%s", wantTitle, barAtMid)
+	}
+	if !strings.Contains(barAtMid, "«") {
+		t.Errorf("bar should show a left overflow indicator once scrolled past the start; got:\n%s", barAtMid)
+	}
+	if !strings.Contains(barAtMid, "»") {
+		t.Errorf("bar should show a right overflow indicator when tabs remain beyond the window; got:\n%s", barAtMid)
+	}
+
+	// Selecting the last tab must scroll all the way to the right edge, leaving
+	// only a left indicator.
+	last := n - 1
+	barAtEnd := renderACPTabBar(tabs, last, width)
+	if lipgloss.Width(barAtEnd) > width {
+		t.Errorf("bar wider than terminal: width=%d, rendered width=%d\n%s", width, lipgloss.Width(barAtEnd), barAtEnd)
+	}
+	wantLastTitle := fmt.Sprintf("task-%02d", last)
+	if !strings.Contains(barAtEnd, wantLastTitle) {
+		t.Errorf("bar should contain the selected (last) tab; got:\n%s", barAtEnd)
+	}
+	if strings.Contains(barAtEnd, "»") {
+		t.Errorf("bar should have no right overflow indicator once scrolled to the end; got:\n%s", barAtEnd)
+	}
+	if !strings.Contains(barAtEnd, "«") {
+		t.Errorf("bar should show a left overflow indicator once scrolled to the end; got:\n%s", barAtEnd)
 	}
 }
 
@@ -411,6 +471,64 @@ func TestRenderACPViewNestedBoxesIntact(t *testing.T) {
 	}
 	if complete < 2 {
 		t.Fatalf("expected >=2 intact top borders (outer + prompt card), got %d; view:\n%s", complete, out)
+	}
+}
+
+// TestRenderACPViewNeverExceedsHeight guards against the ghosted-tab-bar
+// glitch (acp-session-screen-rendering-glitch): renderACPView composed its
+// header+bar+statusLine+box+hint to exactly m.height rows with zero vertical
+// slack, so any transient overshoot in the body renderer overflowed the real
+// altscreen and scrolled it, stranding the previous frame's tab bar on
+// screen. It must now never emit more than m.height rows, across a range of
+// small and large heights, with several tabs and a long streamed message in
+// the transcript. At heights large enough that the transcript box's own
+// minimum-size floor doesn't dominate, it must also actually reserve the
+// one-row slack (strictly fewer than m.height rows) rather than merely being
+// clamped down to height after the fact.
+func TestRenderACPViewNeverExceedsHeight(t *testing.T) {
+	m := newModel(nil, nil, nil, nil)
+	m.showACP = true
+	for _, id := range []string{"t-1", "t-2", "t-3"} {
+		m.acp.appendTab(acpTab{id: id, title: "task-" + id, status: acpclient.StateStreaming, curMsg: -1})
+	}
+	m.acp.tabs[1].entries = []transcriptEntry{{kind: entryMessage, text: strings.Repeat("word ", 200)}}
+
+	for _, height := range []int{6, 8, 10, 20, 34} {
+		m.width, m.height = 90, height
+		out := m.renderACPView()
+		lines := strings.Split(out, "\n")
+		if len(lines) > height {
+			t.Errorf("height=%d: renderACPView returned %d lines, want <= %d\n%s", height, len(lines), height, out)
+		}
+		if height >= 8 && len(lines) >= height {
+			t.Errorf("height=%d: renderACPView returned %d lines, want < %d (no reserved slack row)\n%s", height, len(lines), height, out)
+		}
+	}
+}
+
+// TestModelACPViewShrinksWithoutOverflow drives a height-shrinking
+// WindowSizeMsg through the model while the ACP view is open with multiple
+// tabs — the exact scenario from the reported screenshot (resize/entry race
+// leaves the cached m.height briefly out of step with the real terminal) —
+// and checks the top-level View() output never overflows the new height.
+func TestModelACPViewShrinksWithoutOverflow(t *testing.T) {
+	m := newModel(nil, nil, nil, nil)
+	m.acpCh = make(chan acpTabEvent)
+	m.width, m.height = 100, 30
+	for _, id := range []string{"t-1", "t-2", "t-3"} {
+		step, _ := m.Update(acpTabEvent{kind: acpTabAdded, id: id, title: id})
+		m = step.(model)
+	}
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = step.(model)
+
+	step, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 10})
+	m = step.(model)
+
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) >= m.height {
+		t.Errorf("after shrink to height=%d, View() returned %d lines (want < %d):\n%s", m.height, len(lines), m.height, out)
 	}
 }
 

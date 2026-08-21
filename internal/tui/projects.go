@@ -46,6 +46,17 @@ type ProjectView struct {
 	// the daemon the first time it observed the populated project. Zero
 	// for projects created before the field existed; those sort last.
 	CreatedAt time.Time
+	// Archive mirrors the project file's `archive` flag: the cleanup agent
+	// has pushed a final commit, so the project is ready for `:archive`.
+	// The gallery renders those cards with a blue border.
+	Archive bool
+	// CronActive means the project has a `cron:` schedule that is still live —
+	// set, and with its stop condition (`cron_until` / `cron_max_runs`) not yet
+	// tripped. The gallery renders those cards with a green border so a scan of
+	// the pane shows which streams still wake themselves up. Derived from
+	// project.CronStopReason, the same predicate the daemon unschedules on, so
+	// the border and the schedule can't disagree.
+	CronActive bool
 	// LoadErr is the parse error when the project's .project.yaml exists but
 	// couldn't be decoded (e.g. an agent wrote a malformed field). Empty for a
 	// healthy project. When set, the other structured fields are zero and the
@@ -74,10 +85,12 @@ type TaskView struct {
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
-// of every project it can load, sorted by path for determinism. Individual
-// project- or task-file load failures are skipped rather than aborting the
-// whole scan: a half-written file on disk shouldn't blank the gallery.
-// A walk error on a root (e.g. root does not exist) is surfaced.
+// of every project it can load, sorted by CronActive (live cron schedules
+// last, so the gallery keeps quiescent projects up front), then by CreatedAt
+// descending (zero last), then by Path ascending as the final tie-break.
+// Individual project- or task-file load failures are skipped rather than
+// aborting the whole scan: a half-written file on disk shouldn't blank the
+// gallery. A walk error on a root (e.g. root does not exist) is surfaced.
 func ScanProjects(roots []string) ([]ProjectView, error) {
 	var views []ProjectView
 	seen := map[string]struct{}{}
@@ -112,6 +125,9 @@ func ScanProjects(roots []string) ([]ProjectView, error) {
 	}
 
 	sort.Slice(views, func(i, j int) bool {
+		if views[i].CronActive != views[j].CronActive {
+			return !views[i].CronActive // cron-active projects sink to the end
+		}
 		ai, aj := views[i].CreatedAt, views[j].CreatedAt
 		if !ai.IsZero() && !aj.IsZero() {
 			if !ai.Equal(aj) {
@@ -162,6 +178,8 @@ func loadProjectView(path string) (ProjectView, bool) {
 		Tasks:       tasks,
 		LastUpdate:  mtime,
 		CreatedAt:   createdAt,
+		Archive:     pr.Archive,
+		CronActive:  pr.Cron != "" && !pr.CronExpired(),
 	}, true
 }
 
@@ -407,6 +425,7 @@ func projectViewEqual(a, b ProjectView) bool {
 	if a.Name != b.Name || a.Path != b.Path ||
 		a.Description != b.Description || a.Branch != b.Branch ||
 		a.Status != b.Status || a.LoadErr != b.LoadErr ||
+		a.Archive != b.Archive || a.CronActive != b.CronActive ||
 		!a.LastUpdate.Equal(b.LastUpdate) {
 		return false
 	}

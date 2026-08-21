@@ -28,6 +28,7 @@ var projectCommands = []projectCommand{
 	{"session", "session", "open/resume an interactive claude session"},
 	{"wolf", "wolf", "summon the wolf to investigate"},
 	{"new", "new", "create a new work stream"},
+	{"cleanup", "cleanup", "prepare this work stream for archiving"},
 	{"archive", "archive", "archive this work stream"},
 }
 
@@ -65,9 +66,9 @@ func (m model) handleCommandPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // dispatchProjectCommand runs one work-stream command, chosen from the picker.
 // It leaves the picker (mode back to normal) and then performs the command:
-// new/task/archive open their own modal, wolf acts immediately, and dir/session
-// launch an interactive window off the UI goroutine. Commands that operate on a
-// specific work stream require one to be selected.
+// new/task/archive open their own modal, wolf/cleanup act immediately, and
+// dir/session launch an interactive window off the UI goroutine. Commands that
+// operate on a specific work stream require one to be selected.
 func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 	m.mode = modeNormal
 	switch cmd {
@@ -88,11 +89,34 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 		m.mode = modeNewTask
 		m.newTaskDesc = ""
 		m.newTaskErr = ""
-	case "archive":
-		// `archive` moves the selected work stream's tree into the sibling
-		// backup dir. It's destructive, so it goes through a yes/no confirm.
+	case "cleanup":
+		// `cleanup` sets the work stream's cleanup request flag; the daemon
+		// launches the archive agent in response, which commits and pushes
+		// whatever still needs it and then marks the work stream
+		// `archive: true`. Immediate — no modal.
 		if m.projSel == "" {
 			m.statusMsg = "no work stream selected"
+			return m, nil
+		}
+		name, err := requestCleanup(m.projSel)
+		if err != nil {
+			m.statusMsg = "cleanup: " + err.Error()
+			return m, nil
+		}
+		m.statusMsg = "requested cleanup of " + name
+	case "archive":
+		// `archive` moves the selected work stream's tree into the sibling
+		// backup dir and removes its wsp workspace. It's destructive, so it
+		// goes through a yes/no confirm.
+		if m.projSel == "" {
+			m.statusMsg = "no work stream selected"
+			return m, nil
+		}
+		// Only a cleaned-up work stream can be archived. Check before opening
+		// the confirm modal: a dialog whose only possible answer is "no" is a
+		// poor affordance, so the refusal lands directly on the status line.
+		if _, err := loadArchivable(m.projSel); err != nil {
+			m.statusMsg = "archive: " + err.Error()
 			return m, nil
 		}
 		m.archiveTarget = m.projSel

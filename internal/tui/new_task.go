@@ -15,10 +15,13 @@ import (
 )
 
 // handleNewTaskKey processes a keystroke while the new-task modal is open.
-// Enter seeds the task into the selected project and re-runs planning;
-// backspace edits the description; esc cancels. Unlike the project-name
-// field, the description accepts any printable character (including spaces
-// and punctuation) since it becomes free-form prose the planning agent reads.
+// Enter on a non-empty (trimmed) description stashes it and moves to the
+// modeConfirmNewTask review step rather than seeding the task immediately;
+// enter on an empty/whitespace-only buffer keeps the modal open with an
+// inline error, same as before. backspace edits the description; esc
+// cancels. Unlike the project-name field, the description accepts any
+// printable character (including spaces and punctuation) since it becomes
+// free-form prose the planning agent reads.
 func (m model) handleNewTaskKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -34,15 +37,13 @@ func (m model) handleNewTaskKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		desc := strings.TrimSpace(m.newTaskDesc)
-		name, err := queueTaskForPlanning(m.projSel, desc)
-		if err != nil {
-			m.newTaskErr = err.Error()
+		if desc == "" {
+			m.newTaskErr = "description required"
 			return m, nil
 		}
-		m.mode = modeNormal
-		m.newTaskDesc = ""
+		m.newTaskPending = desc
 		m.newTaskErr = ""
-		m.statusMsg = "queued task " + name + " for planning"
+		m.mode = modeConfirmNewTask
 		return m, nil
 	}
 	// A single keystroke and a paste both arrive as a KeyMsg carrying Runes;
@@ -194,7 +195,62 @@ func (m model) renderNewTaskModal() string {
 		b.WriteString(statusErrStyle.Render(m.newTaskErr))
 	}
 	b.WriteString("\n\n")
-	b.WriteString(hintStyle.Render("enter: create & plan  •  esc: cancel"))
+	b.WriteString(hintStyle.Render("enter: review  •  esc: cancel"))
+
+	width := 60
+	if m.width > 0 && m.width-4 < width {
+		width = m.width - 4
+	}
+	if width < 20 {
+		width = 20
+	}
+
+	modal := modalBorder.Width(width).Render(b.String())
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+// handleConfirmNewTaskKey processes a keystroke while the new-task confirm
+// modal (modeConfirmNewTask) is open, modeled on handleConfirmArchiveKey.
+// `y` seeds the stashed description as a task via queueTaskForPlanning,
+// exactly as enter used to do directly; `n`/esc returns to modeNewTask with
+// the description still in the buffer so it can be edited further rather than
+// discarded. Any other key is ignored.
+func (m model) handleConfirmNewTaskKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y":
+		name, err := queueTaskForPlanning(m.projSel, m.newTaskPending)
+		if err != nil {
+			m.statusMsg = "queue task: " + err.Error()
+		} else {
+			m.statusMsg = "queued task " + name + " for planning"
+		}
+		m.mode = modeNormal
+		m.newTaskDesc = ""
+		m.newTaskErr = ""
+		m.newTaskPending = ""
+		return m, nil
+	case "n", "N", "esc":
+		m.mode = modeNewTask
+		m.newTaskPending = ""
+		return m, nil
+	}
+	return m, nil
+}
+
+// renderConfirmNewTaskModal draws the centered yes/no dialog that reviews a
+// new task's description before it's seeded, modeled on
+// renderConfirmArchiveModal. Like the other modals it returns a full-screen
+// string so View can substitute it for the body while modeConfirmNewTask is
+// active.
+func (m model) renderConfirmNewTaskModal() string {
+	var b strings.Builder
+	b.WriteString(paneTitleStyle.Render("Confirm new task in " + projectDisplayName(m.projSel)))
+	b.WriteString("\n\n")
+	b.WriteString("Queue this task for planning?")
+	b.WriteString("\n\n")
+	b.WriteString(dimStyle.Render(m.newTaskPending))
+	b.WriteString("\n\n")
+	b.WriteString(hintStyle.Render("y: create & plan  •  n/esc: back to edit"))
 
 	width := 60
 	if m.width > 0 && m.width-4 < width {

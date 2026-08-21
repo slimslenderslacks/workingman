@@ -41,11 +41,11 @@ func (d *Daemon) handle(ev fsnotify.Event) {
 //
 // Wired:
 //   - empty file       → project agent
+//   - cleanup: true    → archive agent (checked ahead of the status routing)
 //   - status: ready    → planning agent
 //   - status: working  → dispatch first ready task
+//   - status: blocked  → wolf agent
 //   - status: done     → no-op
-//
-// Still TODO: status: blocked → wolf agent (slice c.2).
 func (d *Daemon) handleProject(path string) {
 	p, err := project.Load(path)
 	if err != nil {
@@ -114,7 +114,23 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 		"status", string(p.Status),
 		"writer", string(p.UpdatedBy),
 	)
-	d.registerCronIfAny(path, p)
+	// A cron schedule with no stop condition blocks the project (and launches
+	// the wolf) from in here; there is nothing left for the status routing below
+	// to do in that case.
+	if !d.registerCronIfAny(path, p) {
+		return
+	}
+	// A cleanup request outranks status routing, so `:cleanup` works on a
+	// project sitting in any status (see project.Project.Cleanup). We return
+	// instead of also running the status's normal agent: that agent would be
+	// working — and committing — in the very workspace the archive agent is
+	// trying to leave clean and pushed. Normal routing resumes from
+	// afterArchiveSession, which revisits the project once the request flag has
+	// been cleared.
+	if p.Cleanup {
+		d.launchArchiveAgent(path, p)
+		return
+	}
 	switch p.Status {
 	case project.StatusReady:
 		d.launchProjectRootAgent(path, agent.PlanningAgent, p)
@@ -162,6 +178,10 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 		TasksDir:    filepath.Join(root, "tasks"),
 		Branch:      p.Branch,
 		Repos:       workspaceReposFor(p),
+		// Only the planning template reads this; the project and wolf agents
+		// ignore it. Forwarded from disk so a re-plan survives a daemon restart
+		// between the cron firing that requested it and the launch.
+		Replan: p.Replan,
 	}
 	err := d.startSession(projectPath, plan, func(waitErr error) {
 		// The planning and project agents each get a circuit breaker: now that
@@ -224,8 +244,12 @@ func (d *Daemon) afterPlanningSession(projectPath string, waitErr error) {
 	if p.Status != project.StatusReady {
 		// Planning advanced the project. Clear the counter and dispatch the
 		// new state (revisitProject would just reload what we already have).
+		// Any re-plan request is satisfied at this point: the run that consumed
+		// it produced the new task graph we're about to dispatch. Leaving it set
+		// would make the *next* planning run — an incremental one, triggered by a
+		// human adding a task — re-plan the whole project instead.
 		d.resetPlanningFailures(projectPath)
-		d.dispatchProject(projectPath, p)
+		d.dispatchProject(projectPath, d.clearReplan(projectPath, p))
 		return
 	}
 	if waitErr != nil {
@@ -411,22 +435,234 @@ func (d *Daemon) handleTask(path string) {
 }
 
 // registerCronIfAny registers the project's cron schedule with the
-// scheduler. On each firing the callback re-invokes handleProject as if a
+// scheduler. On each firing onCronFired re-evaluates the project as if a
 // fresh fsnotify event had arrived — that path already encodes every
 // dispatch decision the daemon makes, so cron firings get correct behaviour
 // for free (planning relaunch if status=ready, next-task dispatch if
 // status=working, wolf if blocked, no-op if done).
-func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) {
+//
+// Every schedule must carry a stop condition (`cron_until` or
+// `cron_max_runs`), and this is where both halves of that rule are enforced:
+//
+//   - Stop condition already met → do not register, and Unregister anything
+//     left over, so a daemon restart cannot revive an expired schedule.
+//   - No stop condition at all → refuse to register and block the project so
+//     the wolf agent can get a human to fix the file. We deliberately do not
+//     invent a default deadline.
+//
+// Returns false when the caller must abandon the rest of dispatch: the block
+// above already wrote status:blocked and launched the wolf, so running the
+// project's normal status routing on top of it would dispatch work the file no
+// longer asks for.
+func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) bool {
 	if d.scheduler == nil || p.Cron == "" {
-		return
+		return true
 	}
-	err := d.scheduler.Register(projectPath, p.Cron, func() {
-		d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
-		d.revisitProject(projectPath)
-	})
+	if p.CronUnbounded() {
+		// Nothing should be registered, but a schedule may predate the
+		// requirement — clear it before blocking.
+		d.scheduler.Unregister(projectPath)
+		d.audit.Log("cron_missing_stop_condition",
+			"path", projectPath,
+			"spec", p.Cron,
+			"missing", "cron_until|cron_max_runs",
+		)
+		if p.Status == project.StatusBlocked {
+			// Already blocked (typically by this very check on an earlier
+			// observation). Re-blocking would rewrite the file and re-launch
+			// the wolf on every event; the status routing below sends it to the
+			// wolf anyway.
+			return true
+		}
+		d.transitionProjectBlocked(projectPath, p, fmt.Sprintf(
+			"cron %q has no stop condition: add `cron_until: <RFC3339 timestamp>` "+
+				"or `cron_max_runs: <int>` to .project.yaml so the schedule can "+
+				"unschedule itself", p.Cron))
+		return false
+	}
+	if reason := p.CronStopReason(); reason != "" {
+		d.scheduler.Unregister(projectPath)
+		d.audit.Log("cron_unscheduled", "path", projectPath, "spec", p.Cron, "reason", reason)
+		return true
+	}
+	err := d.scheduler.Register(projectPath, p.Cron, func() { d.onCronFired(projectPath) })
 	if err != nil {
 		d.audit.Log("cron_register_error", "path", projectPath, "spec", p.Cron, "err", err.Error())
 	}
+	return true
+}
+
+// onCronFired is the scheduler callback for a project's cron schedule. It
+// re-reads the project file rather than closing over the *project.Project the
+// registration was made from: the file changes under a long-lived schedule
+// (agents write it, the daemon stamps it), and the run counter below is a
+// read-modify-write that must not be based on stale fields.
+//
+// `cron_max_runs: N` means N cycles that actually started, not N wake-ups, so
+// the order here is entry-check → work → count → exit-check:
+//
+//  1. The stop condition is checked on ENTRY, against the count already on
+//     disk. Already met → unregister and return without doing work, which is
+//     what keeps a daemon restart from reviving an expired schedule.
+//  2. requestCronReplan gets its chance to start a cycle and reports back
+//     whether it did.
+//  3. Only a firing that started a cycle is charged: countCronRun increments
+//     and persists cron_runs (as the daemon, which self-filters in
+//     handleProject so this bookkeeping write cannot itself retrigger
+//     dispatch), and the stop condition is re-evaluated against the new count.
+//     Unscheduling happens *after* the Nth working run, not instead of it.
+//  4. A skipped firing is not counted; it logs cron_run_not_counted so a
+//     schedule that is burning wake-ups without doing work is visible in the
+//     audit log rather than showing up later as a mysterious shortfall.
+//
+// The deliberate tradeoff: because skipped firings no longer decrement the
+// budget, a project wedged in a non-idle status (`working` that never
+// finishes, `blocked` awaiting a human) can keep waking up past N. That is the
+// intended reading — `cron_max_runs` counts work — and `cron_until` remains the
+// absolute wall-clock bound for a project that never goes idle. There is
+// deliberately no second, hidden cap on firings.
+func (d *Daemon) onCronFired(projectPath string) {
+	p, err := project.Load(projectPath)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			d.audit.Log("project_load_error", "path", projectPath, "err", err.Error())
+		}
+		return
+	}
+	d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
+
+	// Entry check: the budget on disk may already be spent (a restart that
+	// re-registered from a stale read, or a schedule left over from before the
+	// counter reached the limit). Nothing left to do for this project.
+	if reason := p.CronStopReason(); reason != "" {
+		d.scheduler.Unregister(projectPath)
+		d.audit.Log("cron_unscheduled", "path", projectPath, "spec", p.Cron, "reason", reason)
+		return
+	}
+	// A firing on an idle project starts a fresh cycle: back to ready with a
+	// re-plan requested. This is what makes a cron project recurring rather than
+	// a one-shot that merely gets poked. The write lands before revisitProject so
+	// the re-read below picks it up and routes to the planning agent.
+	if skip := d.requestCronReplan(projectPath, p); skip != "" {
+		// No cycle started, so no run is spent. The wake-up still pokes the
+		// project — that recovery poll is the whole point of a firing landing on
+		// a project with work in flight.
+		d.audit.Log("cron_run_not_counted", "path", projectPath, "reason", skip)
+		d.revisitProject(projectPath)
+		return
+	}
+	if reason := d.countCronRun(projectPath).CronStopReason(); reason != "" {
+		d.scheduler.Unregister(projectPath)
+		d.audit.Log("cron_unscheduled", "path", projectPath, "spec", p.Cron, "reason", reason)
+	}
+	d.revisitProject(projectPath)
+}
+
+// countCronRun charges one run against the schedule's budget and returns the
+// project the caller should evaluate the stop condition against.
+//
+// It re-reads the file immediately before the write rather than reusing the
+// copy onCronFired loaded: requestCronReplan has just saved status+replan, and
+// writing a pre-replan copy back would undo it. That re-read also narrows —
+// but does not close — the read-modify-write race described on
+// project.Project.CronRuns; an agent write landing between this Load and the
+// Save is still lost, and an agent's own whole-file write can still roll the
+// counter backwards.
+//
+// A failed save (or a file that vanished mid-firing) leaves the count where it
+// was: the run isn't charged, the schedule stays registered, and the deadline
+// or the next successful save stops it. Dropping the wake-up entirely would be
+// the worse failure.
+func (d *Daemon) countCronRun(projectPath string) *project.Project {
+	p, err := project.Load(projectPath)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			d.audit.Log("project_load_error", "path", projectPath, "err", err.Error())
+		}
+		return &project.Project{}
+	}
+	counted := *p
+	counted.CronRuns++
+	if err := project.Save(projectPath, &counted); err != nil {
+		d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
+		return p
+	}
+	d.audit.Log("cron_run_counted", "path", projectPath, "runs", fmt.Sprintf("%d", counted.CronRuns))
+	return &counted
+}
+
+// requestCronReplan flips an idle cron project back to `status: ready` with
+// Replan set, so the firing produces a new planning cycle instead of a poke
+// that a finished project has nothing to do with.
+//
+// "Idle" is the whole subtlety. A firing must not disturb a project that is
+// mid-flight, so only `done` (the recurring case: last cycle finished, this one
+// begins) and `ready` (planning hasn't run or is being retried — mark it as a
+// re-plan and let it run) are rewritten. The others are deliberately left to
+// their existing routing:
+//
+//   - working — tasks are running or waiting to run. Rewriting the status would
+//     re-plan the graph out from under live task agents, and the tasks the
+//     planner deleted would still be mid-commit. The firing falls through to
+//     dispatchNextTask's recovery poll, which is the pre-existing behaviour, and
+//     the cycle re-plans on the firing after the project reaches done.
+//   - blocked — something needs a human or the wolf. Re-planning would paper
+//     over the failure and lose the blocked_reason that explains it.
+//
+// A project being wound down is skipped for the same reason `:cleanup` outranks
+// status routing in dispatchProject: the archive agent is trying to leave the
+// workspace clean and pushed, and a planning run mid-cleanup would dirty it
+// again. Archive means that already happened, so there is nothing to re-plan.
+//
+// Returns "" when a cycle actually started, and otherwise the reason it did
+// not. onCronFired charges a run against `cron_max_runs` only on the "" case,
+// so this outcome cannot be swallowed here: a firing that produced no cycle
+// must not spend part of the budget the user asked for in cycles.
+func (d *Daemon) requestCronReplan(projectPath string, p *project.Project) string {
+	skip := ""
+	switch {
+	case p.Cleanup:
+		skip = "cleanup requested"
+	case p.Archive:
+		skip = "project is archived"
+	case p.Status != project.StatusDone && p.Status != project.StatusReady:
+		skip = "status " + string(p.Status) + " is not idle"
+	}
+	if skip != "" {
+		d.audit.Log("cron_replan_skipped", "path", projectPath, "reason", skip)
+		return skip
+	}
+	updated := *p
+	updated.Status = project.StatusReady
+	updated.Replan = true
+	if err := project.Save(projectPath, &updated); err != nil {
+		// The request didn't persist, so this firing degrades to the plain
+		// re-evaluation it used to be rather than being lost outright — and,
+		// having started no cycle, it isn't charged either.
+		d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
+		return "re-plan request could not be saved"
+	}
+	d.audit.Log("cron_replan_requested", "path", projectPath, "from", string(p.Status))
+	return ""
+}
+
+// clearReplan drops a satisfied re-plan request. Written as the daemon so the
+// clear cannot retrigger dispatch, and returns the project the caller should go
+// on to use — the updated copy on success, the original if the write failed (the
+// flag stays set on disk, so the next planning run re-plans again; a duplicate
+// re-plan is a far cheaper failure than a lost project state).
+func (d *Daemon) clearReplan(projectPath string, p *project.Project) *project.Project {
+	if !p.Replan {
+		return p
+	}
+	updated := *p
+	updated.Replan = false
+	if err := project.Save(projectPath, &updated); err != nil {
+		d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
+		return p
+	}
+	d.audit.Log("replan_cleared", "path", projectPath)
+	return &updated
 }
 
 // toWorkspaceRepos converts the project's repo schema into workspace.Repo

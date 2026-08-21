@@ -16,6 +16,13 @@ const (
 	TaskAgent
 	WolfAgent
 	CommitAgent
+	// ArchiveAgent cleans a project up before it can be archived: it checks
+	// the workspace for uncommitted work, proposes a `.gitignore` edit when
+	// the leftovers are build artifacts (waiting for human approval), makes a
+	// final commit and pushes — but only where there is actually something to
+	// commit or push — and sets `archive: true` on the project file. New
+	// kinds are appended so the iota values of the existing ones don't shift.
+	ArchiveAgent
 )
 
 func (k Kind) String() string {
@@ -30,22 +37,48 @@ func (k Kind) String() string {
 		return "wolf"
 	case CommitAgent:
 		return "commit"
+	case ArchiveAgent:
+		return "archive"
 	}
 	return "unknown"
 }
 
-// Interactive reports whether this Kind expects a human in the loop. Only the
-// wolf agent does: it asks for guidance when a project is blocked. The project,
-// planning, task, and commit agents are all autonomous — they run under
-// `claude --print`, finish one turn, and exit without prompting. The project
-// agent generates `.project.yaml` from the user's seed description and, when
-// the description is insufficient, escalates by blocking the project (which
-// summons the wolf) rather than interviewing the user itself.
+// ParseKind is the inverse of Kind.String(). It is used by the daemon to
+// recover a session's Kind from the on-disk record it wrote (session.Session
+// carries the string, not the iota) when reconciling session tracking after a
+// restart. Returns false for an empty or unrecognized string.
+func ParseKind(s string) (Kind, bool) {
+	switch s {
+	case "project":
+		return ProjectAgent, true
+	case "planning":
+		return PlanningAgent, true
+	case "task":
+		return TaskAgent, true
+	case "wolf":
+		return WolfAgent, true
+	case "commit":
+		return CommitAgent, true
+	case "archive":
+		return ArchiveAgent, true
+	}
+	return 0, false
+}
+
+// Interactive reports whether this Kind expects a human in the loop. Two kinds
+// do: the wolf agent asks for guidance when a project is blocked, and the
+// archive agent may have to get a proposed `.gitignore` change approved before
+// it commits. The project, planning, task, and commit agents are all
+// autonomous — they run under `claude --print`, finish one turn, and exit
+// without prompting. The project agent generates `.project.yaml` from the
+// user's seed description and, when the description is insufficient, escalates
+// by blocking the project (which summons the wolf) rather than interviewing the
+// user itself.
 //
 // The runner uses this to pick the right claude flags; the TUI uses it to
 // highlight sessions that won't make progress until someone attaches.
 func (k Kind) Interactive() bool {
-	return k == WolfAgent
+	return k == WolfAgent || k == ArchiveAgent
 }
 
 // Spec is the minimum a Launcher needs to start a session. Command is

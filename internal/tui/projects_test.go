@@ -363,6 +363,176 @@ func TestScanProjectsKeepsTasksWithUnnamedSeed(t *testing.T) {
 	}
 }
 
+func TestScanProjectsCarriesArchiveFlag(t *testing.T) {
+	root := t.TempDir()
+
+	mk := func(name string, archive bool) {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
+			Description: name,
+			Branch:      "feat/" + name,
+			Status:      project.StatusDone,
+			Archive:     archive,
+		}, project.WriterAgent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("cleaned", true)
+	mk("dirty", false)
+
+	views, err := ScanProjects([]string{root})
+	if err != nil {
+		t.Fatalf("ScanProjects: %v", err)
+	}
+	got := map[string]bool{}
+	for _, v := range views {
+		got[v.Name] = v.Archive
+	}
+	if !got["cleaned"] {
+		t.Errorf("project with archive: true should set ProjectView.Archive")
+	}
+	if got["dirty"] {
+		t.Errorf("project without archive should leave ProjectView.Archive false")
+	}
+}
+
+// CronActive is time-dependent, so the fixtures use an already-past and a
+// comfortably-future cron_until rather than waiting for a deadline to pass.
+func TestScanProjectsCarriesCronActiveFlag(t *testing.T) {
+	root := t.TempDir()
+
+	past := time.Now().Add(-1 * time.Hour).UTC()
+	future := time.Now().Add(24 * time.Hour).UTC()
+
+	mk := func(name string, p project.Project) {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p.Description = name
+		p.Branch = "feat/" + name
+		p.Status = project.StatusWorking
+		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &p, project.WriterAgent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("live", project.Project{Cron: "@every 15m", CronUntil: &future})
+	mk("live-runs", project.Project{Cron: "@every 15m", CronMaxRuns: 10, CronRuns: 4})
+	mk("expired", project.Project{Cron: "@every 15m", CronUntil: &past})
+	mk("runs-reached", project.Project{Cron: "@every 15m", CronMaxRuns: 3, CronRuns: 3})
+	mk("no-cron", project.Project{})
+
+	views, err := ScanProjects([]string{root})
+	if err != nil {
+		t.Fatalf("ScanProjects: %v", err)
+	}
+	got := map[string]bool{}
+	for _, v := range views {
+		got[v.Name] = v.CronActive
+	}
+	want := map[string]bool{
+		"live":         true,
+		"live-runs":    true,
+		"expired":      false,
+		"runs-reached": false,
+		"no-cron":      false,
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("project %q: CronActive = %v, want %v", name, got[name], w)
+		}
+	}
+}
+
+// Cron-active projects must sink to the end of the gallery regardless of how
+// recently they were created, while the existing CreatedAt-descending /
+// Path-ascending order is preserved within each of the two groups.
+func TestScanProjectsSortsCronActiveLast(t *testing.T) {
+	root := t.TempDir()
+
+	future := time.Now().Add(24 * time.Hour).UTC()
+	now := time.Now().UTC()
+	older := now.Add(-1 * time.Hour)
+	newer := now
+
+	mk := func(name string, created *time.Time, cron string) {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := project.Project{
+			Description: name,
+			Branch:      "feat/" + name,
+			Status:      project.StatusReady,
+			CreatedAt:   created,
+		}
+		if cron != "" {
+			p.Cron = cron
+			p.CronUntil = &future
+		}
+		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &p, project.WriterAgent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Non-cron-active group.
+	mk("bravo", &newer, "")
+	mk("alpha", &older, "")
+	mk("charlie", nil, "") // un-stamped — sorts last within its group
+	// Cron-active group: newer CreatedAt than any non-cron-active project,
+	// yet must still sort after all of them.
+	veryNew := now.Add(1 * time.Hour)
+	mk("delta", &veryNew, "@every 15m")
+	mk("echo", &now, "@every 15m")
+
+	views, err := ScanProjects([]string{root})
+	if err != nil {
+		t.Fatalf("ScanProjects: %v", err)
+	}
+	var got []string
+	for _, v := range views {
+		got = append(got, v.Name)
+	}
+	want := []string{"bravo", "alpha", "charlie", "delta", "echo"}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Errorf("order = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+// A schedule expiring must make the poller emit a new snapshot, otherwise the
+// green border lingers until some unrelated field changes.
+func TestProjectViewEqualDetectsCronActiveFlip(t *testing.T) {
+	base := ProjectView{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusWorking}
+	live := base
+	live.CronActive = true
+	if projectViewEqual(base, live) {
+		t.Errorf("projectViewEqual must report a difference when CronActive flips")
+	}
+	if !projectViewEqual(live, live) {
+		t.Errorf("projectViewEqual must still report identical views as equal")
+	}
+}
+
+// A project flipping to archive: true must make the poller emit a new
+// snapshot, otherwise the blue border waits for some unrelated field to
+// change before it appears.
+func TestProjectViewEqualDetectsArchiveFlip(t *testing.T) {
+	base := ProjectView{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusDone}
+	archived := base
+	archived.Archive = true
+	if projectViewEqual(base, archived) {
+		t.Errorf("projectViewEqual must report a difference when Archive flips")
+	}
+	if !projectViewEqual(archived, archived) {
+		t.Errorf("projectViewEqual must still report identical views as equal")
+	}
+}
+
 func taskCountsEqual(a, b map[task.Status]int) bool {
 	if len(a) != len(b) {
 		return false

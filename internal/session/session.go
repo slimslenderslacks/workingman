@@ -104,6 +104,27 @@ type Session struct {
 	// cheap pointer into the prompt history for the TUI to show without parsing
 	// the whole log.
 	PromptCount int `json:"prompt_count,omitempty"`
+
+	// ProjectPath is the absolute path to the .project.yaml driving this
+	// session. Every ACP-routed kind (project, planning, task, commit) belongs
+	// to exactly one project and is tracked by the daemon under this same
+	// path, so a restarting daemon uses it to reconcile its in-memory session
+	// map with whatever is still running on disk — see the daemon package's
+	// startup reconciliation. Empty for records written before this field
+	// existed.
+	ProjectPath string `json:"project_path,omitempty"`
+
+	// TaskPath is the absolute path to the task's YAML file, set only for task
+	// and commit agents (empty for planning/project). Recorded verbatim rather
+	// than derived from the task's name because task filenames may carry sort
+	// prefixes ("00-register-repo.yaml") that don't match it; a reconciling
+	// daemon reads the task's name from this file when it needs one to display.
+	TaskPath string `json:"task_path,omitempty"`
+
+	// Kind is the agent.Kind string ("project", "planning", "task", "commit")
+	// this session is running. Lets a restarting daemon dispatch the right
+	// session-end handling once it reconnects to a session it did not launch.
+	Kind string `json:"kind,omitempty"`
 }
 
 // validID reports whether id is usable as a single-segment directory name.

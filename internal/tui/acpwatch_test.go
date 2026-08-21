@@ -594,6 +594,239 @@ func TestWatchRecycledSessionIDStartsFreshWatcher(t *testing.T) {
 	}, "recycled session id was skipped — no fresh watcher dialed/prompted it")
 }
 
+// TestWatchStartingSessionGetsPlaceholderThenTransitionsToRunning models a
+// session discovered mid-boot (session.StatusStarting, no socket to dial yet —
+// e.g. a cold sandbox still bringing up dockerd + the agent). It must surface
+// as a placeholder tab immediately, without ever being dialed, and once the
+// wrapper flips it to StatusRunning the watcher must dial and prompt it like
+// any other freshly-running session — the SAME tab carrying through rather
+// than a remove+re-add.
+func TestWatchStartingSessionGetsPlaceholderThenTransitionsToRunning(t *testing.T) {
+	root := t.TempDir()
+	store := session.Store{Root: root}
+	createdAt := time.Now()
+	rec := session.Session{
+		ID:          "task-cold-boot",
+		SandboxName: "task-cold-boot",
+		Status:      session.StatusStarting,
+		CreatedAt:   createdAt,
+		SocketPath:  store.SocketPath("task-cold-boot"),
+		Workspaces:  []string{"/work/task-cold-boot"},
+	}
+	if err := store.Write(rec); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	var dialed, sawPlaceholder atomic.Bool
+	var placeholderID atomic.Value
+	conn := newFakeACPConn()
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		dialed.Store(true)
+		return conn, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, aliveProbe, "go read it")
+	defer stopWatch(cancel, ch)
+	// Drain continuously: watchOneACPSession's first act is emitACP(acpTabAdded)
+	// on the unbuffered channel, so the dial that follows can never happen
+	// unless every event (this one included) keeps being read off ch.
+	go func() {
+		for ev := range ch {
+			if ev.kind == acpTabStarting {
+				sawPlaceholder.Store(true)
+				placeholderID.Store(ev.id)
+			}
+		}
+	}()
+
+	// The placeholder tab must appear right away, while the session is still
+	// starting, and nothing should dial it.
+	waitForCond(t, 2*time.Second, sawPlaceholder.Load, "placeholder tab for the starting session never appeared")
+	if id, _ := placeholderID.Load().(string); id != "task-cold-boot" {
+		t.Errorf("placeholder id = %q, want task-cold-boot", id)
+	}
+	time.Sleep(30 * time.Millisecond) // several poll intervals
+	if dialed.Load() {
+		t.Fatal("a still-starting session must not be dialed")
+	}
+
+	// Flip the session to running, as the wrapper does once the ACP client is
+	// confirmed up.
+	rec.Status = session.StatusRunning
+	if err := store.Write(rec); err != nil {
+		t.Fatalf("rewrite session as running: %v", err)
+	}
+
+	// The same id must now be dialed and prompted — the transition promotes the
+	// existing tab rather than requiring a fresh acpTabAdded.
+	waitForCond(t, 2*time.Second, func() bool {
+		return dialed.Load() && conn.numPrompts() == 1
+	}, "session never transitioned from starting placeholder to a dialed, prompted watch")
+}
+
+// writeStartingSession persists a StatusStarting session.json under root,
+// with the given CreatedAt, so the watcher discovers it as a placeholder.
+func writeStartingSession(t *testing.T, root, id string, createdAt time.Time) session.Store {
+	t.Helper()
+	store := session.Store{Root: root}
+	rec := session.Session{
+		ID:          id,
+		SandboxName: id,
+		Status:      session.StatusStarting,
+		CreatedAt:   createdAt,
+		SocketPath:  store.SocketPath(id),
+		Workspaces:  []string{"/work/" + id},
+	}
+	if err := store.Write(rec); err != nil {
+		t.Fatalf("write session %s: %v", id, err)
+	}
+	return store
+}
+
+// TestWatchStartingSessionReapedWhenSandboxGoneAfterGrace asserts that a
+// StatusStarting session whose CreatedAt is already past acpStartingGracePeriod
+// and whose sandbox probe reports gone gets reaped: the placeholder is dropped
+// (acpTabRemoved) and its on-disk directory is removed. This is the "wrapper
+// crashed before ever creating the sandbox" case the task exists to fix.
+func TestWatchStartingSessionReapedWhenSandboxGoneAfterGrace(t *testing.T) {
+	root := t.TempDir()
+	store := writeStartingSession(t, root, "task-orphan-starting", time.Now().Add(-acpStartingGracePeriod-time.Second))
+
+	goneProbe := func(_ context.Context, _ string) (bool, error) { return false, nil }
+	var dialed atomic.Bool
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		dialed.Store(true)
+		return newFakeACPConn(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, goneProbe, "go read it")
+	defer stopWatch(cancel, ch)
+
+	ev := waitForKind(t, ch, acpTabRemoved, 2*time.Second)
+	if ev.id != "task-orphan-starting" {
+		t.Errorf("removed id = %q, want task-orphan-starting", ev.id)
+	}
+	waitForDirGone(t, store.Dir("task-orphan-starting"), 2*time.Second)
+	if dialed.Load() {
+		t.Error("a starting session must never be dialed")
+	}
+}
+
+// TestWatchStartingSessionNotReapedWithinGrace asserts a freshly-starting
+// session (CreatedAt just now) is NOT reaped even though its sandbox probe
+// reports gone — the brief window between store.Write(StatusStarting, ...)
+// and the wrapper's sbx create is a legitimate race, not staleness.
+func TestWatchStartingSessionNotReapedWithinGrace(t *testing.T) {
+	root := t.TempDir()
+	writeStartingSession(t, root, "task-fresh-starting", time.Now())
+
+	goneProbe := func(_ context.Context, _ string) (bool, error) { return false, nil }
+	var dialed atomic.Bool
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		dialed.Store(true)
+		return newFakeACPConn(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, goneProbe, "go read it")
+	defer stopWatch(cancel, ch)
+
+	waitForKind(t, ch, acpTabStarting, 2*time.Second)
+
+	// Give the watcher several poll intervals to (wrongly) reap it.
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.kind == acpTabRemoved {
+				t.Fatalf("starting session reaped within its grace period: %+v", ev)
+			}
+		case <-deadline:
+			if dialed.Load() {
+				t.Error("a starting session must never be dialed")
+			}
+			return
+		}
+	}
+}
+
+// TestWatchStartingSessionNotReapedWhenProbeErrors asserts that a starting
+// session past its grace period is NOT reaped when the sandbox probe is
+// inconclusive (errors) — the same conservative rule applied to running
+// sessions applies here too.
+func TestWatchStartingSessionNotReapedWhenProbeErrors(t *testing.T) {
+	root := t.TempDir()
+	writeStartingSession(t, root, "task-starting-probeerr", time.Now().Add(-acpStartingGracePeriod-time.Second))
+
+	errProbe := func(_ context.Context, _ string) (bool, error) {
+		return false, context.DeadlineExceeded
+	}
+	var dialed atomic.Bool
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		dialed.Store(true)
+		return newFakeACPConn(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, errProbe, "go read it")
+	defer stopWatch(cancel, ch)
+
+	waitForKind(t, ch, acpTabStarting, 2*time.Second)
+
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.kind == acpTabRemoved {
+				t.Fatalf("inconclusive probe wrongly reaped a starting session: %+v", ev)
+			}
+		case <-deadline:
+			if dialed.Load() {
+				t.Error("a starting session must never be dialed")
+			}
+			return
+		}
+	}
+}
+
+// TestWatchStartingSessionNotReapedWhenSandboxAlive asserts that a starting
+// session past its grace period whose sandbox the probe confirms alive is NOT
+// reaped — a slow-but-legitimate boot must survive as long as the sandbox
+// genuinely exists.
+func TestWatchStartingSessionNotReapedWhenSandboxAlive(t *testing.T) {
+	root := t.TempDir()
+	writeStartingSession(t, root, "task-starting-alive", time.Now().Add(-acpStartingGracePeriod-time.Second))
+
+	var dialed atomic.Bool
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		dialed.Store(true)
+		return newFakeACPConn(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, aliveProbe, "go read it")
+	defer stopWatch(cancel, ch)
+
+	waitForKind(t, ch, acpTabStarting, 2*time.Second)
+
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.kind == acpTabRemoved {
+				t.Fatalf("a starting session with a confirmed-alive sandbox was reaped: %+v", ev)
+			}
+		case <-deadline:
+			if dialed.Load() {
+				t.Error("a starting session must never be dialed")
+			}
+			return
+		}
+	}
+}
+
 // waitForCond polls cond until it returns true or the deadline elapses, failing
 // the test with msg on timeout.
 func waitForCond(t *testing.T, dur time.Duration, cond func() bool, msg string) {

@@ -1,8 +1,8 @@
 # orch — autonomous claude-code project daemon
 
 `orch` watches one or more directories for `.project.yaml` files and runs
-claude-code agents (project, planning, task, commit, wolf) through a state
-machine until the project is done — or blocked, in which case you get a
+claude-code agents (project, planning, task, commit, wolf, archive) through a
+state machine until the project is done — or blocked, in which case you get a
 macOS notification and a wolf-agent session to drop into.
 
 ```
@@ -10,10 +10,21 @@ status: ready    → planning agent (writes tasks/*.yaml, sets status: working)
 status: working  → task agent → commit agent → next task → ... → status: done
 status: blocked  → wolf agent + osascript notification
 status: done     → terminal
+
+cleanup: true    → archive agent (checked ahead of the status routing;
+                   commits + pushes whatever needs it, then sets archive: true)
 ```
 
-The daemon also reads each project's `cron:` field; firings re-evaluate the
-project as if its `.project.yaml` had been edited.
+The daemon also reads each project's `cron:` field. A firing on an **idle**
+project (`done`, or `ready`) starts a new cycle: the daemon sets `status: ready`
+and `replan: true`, and the planning agent runs again — reading the previous
+cycle's tasks for context, then deleting, reusing, or replacing them and leaving
+what survives in `ready` for the task agents. A firing on a project with work in
+flight (`working`) or one that needs attention (`blocked`) just re-evaluates it,
+as before. Every schedule needs an explicit stop condition (`cron_until:` or
+`cron_max_runs:`) — see [Example `.project.yaml`](#example-projectyaml).
+`cron_max_runs` counts cycles, not wake-ups: a firing that starts no cycle isn't
+charged against it.
 
 ## Prerequisites
 
@@ -151,17 +162,179 @@ repos:
 
 branch: feat/healthz-probe
 status: ready
-cron: "*/15 * * * *"   # optional; daemon re-evaluates every 15 minutes
+cron: "*/15 * * * *"   # optional; wake the project every 15 minutes
+cron_max_runs: 96      # required with cron (or cron_until): stop after 96 cycles
+cron_runs: 12          # daemon-owned cycle counter
+replan: true           # optional; daemon-owned "re-plan the existing tasks" request
+cleanup: true          # optional; "please run the archive agent" (set by :cleanup)
+archive: true          # optional; "the cleanup finished" (set by the archive agent)
 updated_by: agent
 ```
+
+A `cron:` schedule must come with a stop condition — either
+`cron_until: <RFC3339 timestamp>` (an absolute deadline) or
+`cron_max_runs: <int>` (a cycle limit). They are two expressions of the same
+idea, either one is enough, and if both are set whichever trips first wins. That
+stop condition is the *only* thing that ends a schedule: `status: done` does
+**not**, because done is the resting state between cycles rather than the end of
+a recurring work stream. A project with `cron:` and *no* stop condition is not
+scheduled at all: the daemon blocks it and summons the wolf agent, since a
+schedule that can never end would wake the project up forever.
+
+`cron_max_runs` counts **work, not wake-ups**. `cron_max_runs: 30` means 30
+firings that actually started a cycle, and the 30th does its work before the
+schedule is retired — the daemon increments `cron_runs` after the cycle starts
+and unregisters (logging `cron_unscheduled`) once the count meets the limit. A
+firing that starts no cycle — one landing on a project still `working` through
+the previous cycle, or `blocked`, or being archived — is *not* charged; it logs
+`cron_run_not_counted` alongside `cron_replan_skipped` and still pokes the
+project as a recovery poll.
+
+The tradeoff is deliberate: since skipped firings don't spend the budget, a
+project wedged in a non-idle status can keep waking up past `cron_max_runs`.
+`cron_until` is the absolute wall-clock bound for that case, and there is no
+second, hidden cap on firings — a schedule that has produced no cycles has, by
+this definition, not used any of its runs.
+
+### Recurring projects
+
+`cron:` plus a project description written as a standing instruction ("triage new
+issues", "refresh the dependency report") gives a work stream that re-plans
+itself on every firing:
+
+```
+done ──(cron fires)──> ready + replan: true ──> planning agent ──> working ──> done
+```
+
+The planning agent gets a different prompt when `replan` is set. Instead of the
+default "preserve everything already here" rule — which exists for the
+incremental case, where a human adds one task through the UI and expects the rest
+untouched — it is told to read the previous cycle's tasks for context and then
+decide per task: delete it, reset it to `ready` to run again (dropping the last
+run's `summary:`, `commits:`, and `completed_at:`), or leave it `committed` so it
+stays settled and still satisfies anything that depends on it.
+
+`replan` is daemon-owned: the daemon sets it on the firing, forwards it to the
+agent through `.orch/context.yaml`, and clears it once a planning session has
+moved the project off `ready`. Agents should not write it.
 
 See `examples/.project.yaml` and `examples/tasks/*.yaml` for the full
 schemas.
 
-## Cleanup
+## Cleanup and archiving
+
+A finished project is retired in two steps — a **cleanup** that leaves every
+repo clean, committing and pushing only what needs it, then an **archive**
+that moves the project out of
+the watched root. Both are driven from the TUI's `:` command menu on the work
+streams pane, and both are recorded on `.project.yaml` by two independent
+boolean flags (neither one is a `status:`, so a project keeps whatever status
+it already had):
+
+| Field      | Meaning                                             | Written by |
+|------------|-----------------------------------------------------|------------|
+| `cleanup:` | *request*: "run the archive agent on this project"  | the TUI's `:cleanup` (as `updated_by: agent`, so the daemon sees the event); cleared by the daemon when the agent's session ends |
+| `archive:` | *result*: the cleanup succeeded, safe to archive     | the archive agent, on success only |
+
+### `:cleanup` — the archive agent
+
+`:cleanup` sets `cleanup: true` and returns immediately; the daemon notices the
+flag ahead of its normal status routing and launches the **archive agent** in
+the project's wsp workspace. It's an interactive agent, so it may need you to
+attach. In every repo of the workspace it:
+
+1. Checks for uncommitted work (`git status --porcelain`).
+2. Classifies what's there. Anything that plainly doesn't belong in the repo
+   (build artifacts, editor scratch, local caches) is **not** committed and
+   **not** deleted — the agent *proposes* a `.gitignore` edit, notifies you, and
+   waits for approval before applying it. If approval never comes, it stops and
+   reports instead of committing.
+3. Makes one final commit — only if there is something to commit.
+4. Pushes to the branch **actually checked out in that workspace**
+   (`git rev-parse --abbrev-ref HEAD`) — not a hardcoded branch name, and never
+   a force-push — and only if there is something to push. It first asks whether
+   an upstream exists at all (`git rev-parse --abbrev-ref
+   --symbolic-full-name @{upstream}`), then counts the distance
+   (`git rev-list --count @{upstream}..HEAD`). It pushes when that count is
+   above zero, or when there genuinely is no upstream configured. A repo
+   already level with its upstream is reported as *"already clean, nothing to
+   push"* — no no-op push, and no empty commit or force/`--set-upstream`
+   workaround to invent one.
+
+There are no other pre-commit steps: no tests, no lint, no formatting, no
+scratch-file cleanup. A repo that needed neither a commit nor a push is a
+success. On success the agent sets `archive: true` on
+`.project.yaml` and leaves `status:` untouched. If it can't finish, it leaves
+`archive` unset and says what's outstanding.
+
+The daemon clears `cleanup:` when the session ends either way (an unfinished run
+is logged as `archive_incomplete`), so a cleanup is never retried behind your
+back — re-run `:cleanup` yourself. Exactly one archive agent runs per request,
+and a second `:cleanup` while one is in flight is a no-op. A project that is
+already cleaned up (`archive: true`) is refused outright — its next step is
+`:archive`, not another cleanup.
+
+### `:archive`
+
+`:archive` only archives a project whose `.project.yaml` carries
+`archive: true`. Anything else is refused on the status line with "has not been
+cleaned up — run :cleanup first", and nothing moves. When the guard passes and
+you confirm, the archive:
+
+1. removes the project's **wsp workspace** (`wsp rm <branch>`), then
+2. moves the project directory to the sibling backup root, keeping its name
+   (`~/orch/my-feature` → `~/orch.backup/my-feature`).
+
+The workspace goes first on purpose: if `wsp rm` fails, the archive aborts with
+the project still in place and the failure on the status line. The daemon drops
+the project on its next scan — the move is the only cleanup needed.
+
+In the TUI's work-stream gallery, a project with `archive: true` is drawn with a
+**blue border** — it's cleaned up and waiting for `:archive`. Selection still
+wins over the blue, so the cursor never disappears onto a blue card. See
+[Gallery border colours](#gallery-border-colours) for the full precedence.
+
+Doing it by hand instead:
 
 ```sh
 rm ~/orch/my-feature/.project.yaml
 rm -rf ~/orch/my-feature/{tasks,.orch}
 wsp rm feat/healthz-probe
 ```
+
+## Gallery border colours
+
+Each card in the TUI's work-streams gallery carries a border colour, so a scan
+of the pane tells you what state its project is in:
+
+| Border | Meaning |
+|--------|---------|
+| **blue** | `archive: true` — cleaned up, waiting for `:archive` |
+| **green** | a live `cron:` schedule — the stop condition hasn't tripped, so the project still wakes itself up |
+| grey | nothing special |
+
+A project's own border shows one of those at a time, and they win in that order:
+**blue archive > green cron > grey**. Blue beats green because the blue border is
+what tells you `:archive` will be accepted, and a cleaned-up project is
+effectively finished even if a schedule is still registered against it — so a
+project that is both loses its green border until it's archived.
+
+The **selected** card — where the cursor is — gets a second pink border drawn
+*around* its own, rather than recolouring it:
+
+```
+╭────────────────────────────╮   ← pink: this is the selected card
+│╭──────────────────────────╮│   ← blue/green/grey: what the project is
+││ weather-tui              ││
+│╰──────────────────────────╯│
+╰────────────────────────────╯
+```
+
+That way the durable state colour stays readable while the cursor sits on the
+card. Every card reserves the ring's two rows and columns whether or not it is
+selected, so moving the cursor never reflows the gallery.
+
+The green border tracks the same stop condition the daemon unschedules on
+(`cron_until` / `cron_max_runs` vs. `cron_runs`, see
+[Example `.project.yaml`](#example-projectyaml)), so it clears itself on the
+gallery's next refresh once a schedule expires — no file edit needed.

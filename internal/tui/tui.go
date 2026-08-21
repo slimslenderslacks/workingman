@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/slimslenderslacks/work/internal/task"
+	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
 type pane int
@@ -38,23 +39,29 @@ type uiMode int
 const (
 	modeNormal uiMode = iota
 	// modeCommandPicker is the menu shown after `:` on the work-streams pane.
-	// It lists the project commands (task/dir/session/wolf/new/archive); the
-	// user moves with j/k, runs one with enter (or its first letter), and
+	// It lists the project commands (task/dir/session/wolf/new/cleanup/archive);
+	// the user moves with j/k, runs one with enter (or its first letter), and
 	// cancels with esc. It replaces the old free-form `:command` line so the
 	// commands are discoverable rather than memorised.
 	modeCommandPicker
 	modeNewProject
 	// modeNewTask is the modal that prompts for a free-form task description
-	// after `:task`. On enter it seeds a task file in the selected project's
-	// tasks/ dir and flips the project to status:ready so the daemon re-runs
-	// the planning agent, which fleshes out the seed and returns the project
-	// to status:working.
+	// after `:task`. On enter with a non-empty description it moves to
+	// modeConfirmNewTask to review the text; confirming there seeds a task
+	// file in the selected project's tasks/ dir and flips the project to
+	// status:ready so the daemon re-runs the planning agent, which fleshes
+	// out the seed and returns the project to status:working.
 	modeNewTask
 	// modeConfirmArchive is the yes/no confirmation shown after `:archive`.
 	// On confirm it moves the selected project's tree out of the workspace
 	// root into the sibling ~/<root>.backup dir; the project then disappears
 	// from the gallery on the next scan.
 	modeConfirmArchive
+	// modeConfirmNewTask is the yes/no confirmation shown after `enter` on a
+	// non-empty new-task description. It echoes the trimmed description back
+	// so the human can review it before it's seeded as a task file; `n`/esc
+	// returns to modeNewTask with the text still editable.
+	modeConfirmNewTask
 )
 
 // yamlSource picks what the YAML viewer pane renders: the selected
@@ -146,11 +153,20 @@ type model struct {
 	// the confirm modal, so the move acts on the project that was selected at
 	// the time even if a background scan reconciles projSel meanwhile.
 	archiveTarget string
+	// wspRemover tears down a work stream's wsp workspace as part of
+	// `:archive`. Defaulted to the real wsp manager by newModel; tests swap in
+	// a fake. A nil remover means "no workspace manager wired in" and archive
+	// skips the removal.
+	wspRemover workspaceRemover
 	// newTaskDesc / newTaskErr drive the new-task modal's free-form
 	// description field and its inline error line. Populated only while
 	// mode == modeNewTask.
 	newTaskDesc string
 	newTaskErr  string
+	// newTaskPending is the trimmed description stashed when `enter` moves
+	// from modeNewTask to modeConfirmNewTask, mirroring archiveTarget. It's
+	// what the confirm modal echoes back and what gets seeded on `y`.
+	newTaskPending string
 
 	auditLines []string
 	auditCh    <-chan []string
@@ -195,6 +211,7 @@ func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh 
 		auditCh:    auditCh,
 		sessLoaded: sessCh == nil,
 		attacher:   attacher,
+		wspRemover: workspace.NewWsp(),
 	}
 }
 
@@ -300,6 +317,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.kind {
 		case acpTabAdded:
 			m.acp.upsert(msg.id, msg.title)
+		case acpTabStarting:
+			m.acp.upsertPlaceholder(msg.id, msg.title)
 		case acpTabPrompt:
 			m.acp.addPrompt(msg.id, msg.text)
 		case acpTabStream:
@@ -344,6 +363,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleNewTaskKey(msg)
 		case modeConfirmArchive:
 			return m.handleConfirmArchiveKey(msg)
+		case modeConfirmNewTask:
+			return m.handleConfirmNewTaskKey(msg)
 		}
 		return m.handleNormalKey(msg)
 	}
@@ -749,8 +770,9 @@ func selectedTmuxTarget(views []SessionView, id string) (string, bool) {
 
 // projectCardAtPoint maps a click inside the projects pane to a card index.
 // The arithmetic mirrors renderProjectGrid: cards are cardWidth wide with a
-// cardGap-column gap between them and three rows tall (top border, content,
-// bottom border) — same shape regardless of how full each card's content is.
+// cardGap-column gap between them and cardDisplayRows tall — same shape
+// regardless of how full each card's content is, and the same whether or not
+// the card is selected.
 //
 // xRel and yRel are coordinates relative to the inner edge of the projects
 // pane (i.e. after subtracting m.sessionsWidth from msg.X). innerWidth is
@@ -765,7 +787,6 @@ func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 	const (
 		paneTopBorder  = 1
 		paneLeftBorder = 1
-		cardRows       = 3 // top border + body + bottom border (project card body always renders 1 row tall in our layout)
 	)
 	cardWidth := cardTargetWidth
 	if cardWidth > innerWidth {
@@ -780,12 +801,12 @@ func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 	}
 
 	// Vertical: skip the projects pane's top border; each card occupies
-	// cardRows.
+	// cardDisplayRows.
 	yIn := yRel - paneTopBorder
 	if yIn < 0 {
 		return -1
 	}
-	row := yIn / cardRows
+	row := yIn / cardDisplayRows
 	totalRows := (count + perRow - 1) / perRow
 	if row >= totalRows {
 		return -1
@@ -897,12 +918,40 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1)
-	// cardSelectedBorder highlights the active project card. Uses the same
+	// cardSelectedRing highlights the active project card. Uses the same
 	// accent colour as focusedBorder so the eye learns one signal for
 	// "active thing".
-	cardSelectedBorder = lipgloss.NewStyle().
+	//
+	// It is drawn as a second border *outside* the card's own border rather
+	// than recolouring it, so the durable state colour underneath — archive
+	// blue, cron green, or the default grey — stays readable while the cursor
+	// sits on the card. No padding: the ring hugs the card it wraps.
+	cardSelectedRing = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("212")).
+				BorderForeground(lipgloss.Color("212"))
+	// cardRingSpacer reserves the ring's two columns and two rows on every
+	// unselected card so the grid geometry never depends on where the cursor
+	// is: moving the selection would otherwise reflow the whole gallery.
+	// HiddenBorder draws spaces, so the reservation costs the space without
+	// showing anything.
+	cardRingSpacer = lipgloss.NewStyle().Border(lipgloss.HiddenBorder())
+	// cardArchivedBorder marks a project whose cleanup agent has finished
+	// (`archive: true` in the project file), i.e. one that `:archive` will
+	// accept. Blue "39" — the same colour as statusReady — reads as calm and
+	// finished, and is clearly distinct from both the "212" selection accent
+	// and the "240" default border.
+	cardArchivedBorder = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("39")).
+				Padding(0, 1)
+	// cardCronActiveBorder marks a project with a live `cron:` schedule — one
+	// whose stop condition hasn't tripped yet, so it still wakes itself up.
+	// Green "82" — the same colour as statusRunning, which is what a live
+	// schedule amounts to — and distinct from the "39" archive blue, the "212"
+	// selection accent and the "240" default border.
+	cardCronActiveBorder = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("82")).
 				Padding(0, 1)
 	sessionRowSelectedStyle = lipgloss.NewStyle().
 				Bold(true).
@@ -933,14 +982,16 @@ const (
 
 // Card sizing. Width is a target; the layout falls back to a single-column
 // stack when the projects pane is too narrow to fit a card at this size.
-// cardDisplayRows is the rendered height of a card: top border + name +
-// status + breakdown + bottom border = 5 rows. The grid uses it to decide
-// how many full card rows fit in the projects pane.
+// cardDisplayRows is the rendered height of a card: selection ring + top
+// border + name + status + breakdown + bottom border + ring = 7 rows. Every
+// card carries the ring's two rows, drawn or reserved (see cardRingSpacer), so
+// this height is the same for selected and unselected cards. The grid uses it
+// to decide how many full card rows fit in the projects pane.
 const (
 	cardTargetWidth = 30
 	cardMinWidth    = 20
 	cardGap         = 1
-	cardDisplayRows = 5
+	cardDisplayRows = 7
 )
 
 func (m model) borderStyle(p pane) lipgloss.Style {
@@ -1463,11 +1514,55 @@ func renderProjectGrid(views []ProjectView, selPath string, innerWidth, rowBudge
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }
 
-func renderProjectCard(v ProjectView, width int, selected bool) string {
-	border := cardBorder
-	if selected {
-		border = cardSelectedBorder
+// projectCardBorder picks the card's own border style, which encodes durable
+// project state only: archive > cron-active > default. Selection is not in the
+// running — it is drawn as a separate ring outside this border (see
+// projectCardRing), so the cursor no longer hides the state colour underneath.
+//
+// Archive sits above cron-active because the blue border is what tells a human
+// `:archive` will now be accepted, and a cleaned-up project is effectively
+// finished even if a schedule is still registered against it.
+//
+// Split out from renderProjectCard so tests can assert the choice: lipgloss
+// strips colour without a TTY, so rendered output can't be compared.
+func projectCardBorder(v ProjectView) lipgloss.Style {
+	switch {
+	case v.Archive:
+		return cardArchivedBorder
+	case v.CronActive:
+		return cardCronActiveBorder
+	default:
+		return cardBorder
 	}
+}
+
+// projectCardRing picks the outer ring: the accent border on the selected card,
+// and an invisible same-size spacer on every other one so all cards occupy an
+// identical box.
+func projectCardRing(selected bool) lipgloss.Style {
+	if selected {
+		return cardSelectedRing
+	}
+	return cardRingSpacer
+}
+
+// renderProjectCard draws one card wrapped in its selection ring. width is the
+// total display width of the result, ring included, so the ring's two columns
+// come out of the card's own budget — every card is the same size on screen
+// whether or not it holds the cursor.
+func renderProjectCard(v ProjectView, width int, selected bool) string {
+	ring := projectCardRing(selected)
+	bodyWidth := width - ring.GetHorizontalBorderSize()
+	if bodyWidth < 1 {
+		bodyWidth = 1
+	}
+	return ring.Render(renderProjectCardBody(v, bodyWidth))
+}
+
+// renderProjectCardBody draws the card itself — state border and contents — at
+// exactly width columns.
+func renderProjectCardBody(v ProjectView, width int) string {
+	border := projectCardBorder(v)
 	// width is the desired display width on screen; lipgloss .Width(N) sets
 	// the content+padding size and adds borders outside, so subtract the
 	// border size before handing it over. Skipping this fragments the
@@ -1545,8 +1640,9 @@ const auditPaneHeight = 10
 
 // projectsMinHeight is the floor for the projects pane when the body height
 // is large enough to split. Sized so exactly one row of cards fits cleanly:
-// 2 border + 5 card = 7 rows.
-const projectsMinHeight = 7
+// the pane's two border rows plus one card. Derived rather than written out so
+// it can't drift when a card changes height.
+const projectsMinHeight = paneChromeRows + cardDisplayRows
 
 // tasksMinHeight is the floor for the tasks pane below the projects pane.
 // 4 rows = top border + column header + 1 task row + bottom border. Below
@@ -1777,6 +1873,9 @@ func (m model) View() string {
 	}
 	if m.mode == modeConfirmArchive {
 		return m.renderConfirmArchiveModal()
+	}
+	if m.mode == modeConfirmNewTask {
+		return m.renderConfirmNewTaskModal()
 	}
 
 	// The ACP tab view takes over the whole window when open.

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -43,6 +44,21 @@ type Daemon struct {
 	planningMu       sync.Mutex
 	planningFailures map[string]int // keyed by project file path
 	projectFailures  map[string]int // keyed by project file path
+
+	// cleanupMu guards cleanupInFlight, the set of projects whose archive
+	// (cleanup) agent has been dispatched and whose `cleanup: true` request
+	// flag has not been cleared yet. See beginCleanup for why the session map
+	// can't serve as this guard on its own.
+	cleanupMu       sync.Mutex
+	cleanupInFlight map[string]bool // keyed by project file path
+
+	// dispatchMu guards dispatchChains, which chains fsnotify events keyed by
+	// their containing directory (see dispatchEvent) so that events for the
+	// same project still run in the order they arrived even though each is
+	// now handled on its own goroutine. Events in different directories carry
+	// no dependency and so run fully concurrently.
+	dispatchMu     sync.Mutex
+	dispatchChains map[string]chan struct{}
 
 	// sessionIdleTimeout bounds how long a tracked session may go without any
 	// ACP stream activity before the stranded-session reaper terminates it.
@@ -132,6 +148,8 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		sessions:           map[string]sessionEntry{},
 		planningFailures:   map[string]int{},
 		projectFailures:    map[string]int{},
+		cleanupInFlight:    map[string]bool{},
+		dispatchChains:     map[string]chan struct{}{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 	}
 	for _, opt := range opts {
@@ -154,6 +172,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		d.audit.Log("watch_root", "path", r)
 	}
+	// Reconcile against on-disk sessions before startupScan: adopting any
+	// still-running ACP session into d.sessions first means startupScan's
+	// revisitProject calls see hasSession(key) == true and skip re-dispatching
+	// a duplicate agent for a project a prior orch process already has a
+	// live session for.
+	d.reconcileSessions()
 	d.startupScan()
 	go d.reapLoop(ctx)
 	for {
@@ -164,7 +188,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			d.handle(ev)
+			// Ordering guarantee: events are dispatched concurrently across
+			// directories, but two events for the same directory (e.g. two
+			// rapid-fire writes to one project's .project.yaml) still run in
+			// the order they were received here. See dispatchEvent.
+			d.dispatchEvent(ev)
 		case err, ok := <-d.watcher.Errors:
 			if !ok {
 				return nil
@@ -174,6 +202,48 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
+// dispatchEvent runs d.handle(ev) on its own goroutine so that a slow
+// dispatch for one project (typically workspace provisioning blocking inside
+// runner.Runner.Start) cannot delay the Run() loop from picking up the next
+// fsnotify event for an unrelated project.
+//
+// Ordering within a single project is preserved by chaining: events are
+// keyed by their containing directory, and each event waits for the
+// previously-chained event for that same key to finish before it runs. Events
+// under different directories share no chain and so proceed in parallel.
+func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
+	key := filepath.Dir(ev.Name)
+
+	d.dispatchMu.Lock()
+	prev := d.dispatchChains[key]
+	done := make(chan struct{})
+	d.dispatchChains[key] = done
+	d.dispatchMu.Unlock()
+
+	go func() {
+		defer close(done)
+		if prev != nil {
+			<-prev
+		}
+		d.handle(ev)
+		// Drop the chain entry if nothing newer has queued behind us, so a
+		// project that goes quiet doesn't leave its key pinned in the map
+		// forever.
+		d.dispatchMu.Lock()
+		if d.dispatchChains[key] == done {
+			delete(d.dispatchChains, key)
+		}
+		d.dispatchMu.Unlock()
+	}()
+}
+
+// shutdown runs when ctx is cancelled — a normal orch exit/restart as well as
+// a crash-adjacent path. It must NOT tear down ACP-backed sessions: an
+// acp-wrapper process is meant to keep running (and its sandbox with it) so a
+// future orch process can reconnect over the session's socket. Only sessions
+// that aren't ACP-backed (the legacy tmux + `sbx exec` path, and interactive
+// project/wolf agents) are actually closed here — detachable ones are simply
+// dropped from local tracking, exactly like a deliberate detach.
 func (d *Daemon) shutdown() {
 	d.watcher.Close()
 	if d.scheduler != nil {
@@ -184,11 +254,27 @@ func (d *Daemon) shutdown() {
 	d.sessionsMu.Lock()
 	defer d.sessionsMu.Unlock()
 	for key, entry := range d.sessions {
+		if d.detachable(entry.kind) {
+			d.audit.Log("session_detached", "key", key, "kind", entry.kind.String())
+			delete(d.sessions, key)
+			continue
+		}
 		if err := entry.sess.Close(); err != nil {
 			d.audit.Log("session_close_error", "key", key, "err", err.Error())
 		}
 		delete(d.sessions, key)
 	}
+}
+
+// detachable reports whether a session of this kind should survive an orch
+// shutdown/restart rather than being closed: exactly the ACP-backed,
+// non-interactive kinds (project, planning, task, commit), which run as a
+// standalone acp-wrapper host process the daemon does not need to keep alive
+// to keep running. Interactive kinds (wolf, archive) and the legacy tmux path
+// (no AcpLauncher configured) are unaffected — those sessions are still
+// closed on shutdown as before.
+func (d *Daemon) detachable(kind agent.Kind) bool {
+	return d.runner != nil && d.runner.UsesACP(kind)
 }
 
 // trackSession registers sess under key and spawns a goroutine that waits for
@@ -221,8 +307,21 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, t
 	}
 	d.sessionsMu.Unlock()
 
+	// Detachable (ACP-backed) sessions must not be waited on under d.ctx:
+	// processSession.Wait itself closes the session (SIGTERM) the moment its
+	// ctx is cancelled, so feeding it the daemon's shutdown ctx would tear
+	// down the very acp-wrapper a restart is supposed to leave running —
+	// regardless of what shutdown()'s own loop does. Waiting under
+	// context.Background() instead means this goroutine only ends when the
+	// process actually exits; it is abandoned harmlessly when the daemon's
+	// own process later exits.
+	waitCtx := d.ctx
+	if d.detachable(kind) {
+		waitCtx = context.Background()
+	}
+
 	go func() {
-		waitErr := sess.Wait(d.ctx)
+		waitErr := sess.Wait(waitCtx)
 		d.sessionsMu.Lock()
 		delete(d.sessions, key)
 		d.sessionsMu.Unlock()

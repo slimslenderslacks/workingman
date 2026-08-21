@@ -24,7 +24,58 @@ status: ready
 
 # Cron schedule for daemon-driven wake-ups. Standard 5-field cron.
 # Empty / omitted means "no scheduled wake-ups, event-driven only".
+#
+# A firing on an idle project (status `done` or `ready`) starts a new cycle: the
+# daemon sets `status: ready` plus `replan: true` below, so the planning agent
+# re-plans the existing tasks. A firing on a `working` or `blocked` project only
+# re-evaluates it — a re-plan would rewrite the graph under running task agents.
+# Reaching `done` does NOT unschedule the cron; only the stop condition does.
 cron: "*/15 * * * *"
+
+# Stop condition for the schedule above — REQUIRED whenever `cron` is set, so a
+# schedule can end instead of waking the project up forever. `cron_until` is an
+# absolute RFC3339 deadline, `cron_max_runs` a cycle limit; they are two ways
+# of saying the same thing, either one is enough, and if both are set whichever
+# trips first wins. A `cron` with neither is not scheduled at all: the daemon
+# blocks the project (→ wolf agent) rather than invent a default deadline.
+#
+# `cron_max_runs` counts work, not wake-ups: 96 means 96 firings that actually
+# started a cycle, and the 96th does its work before the schedule retires. A
+# firing that starts no cycle (the project is still `working` through the last
+# one, or blocked, or being archived) is not charged — it logs
+# `cron_run_not_counted` and just re-evaluates the project. The tradeoff: a
+# project wedged in a non-idle status keeps waking up past this limit, and
+# `cron_until` is the wall-clock bound for that case.
+#
+#   cron_until: 2026-07-01T00:00:00Z
+cron_max_runs: 96
+
+# Cycle counter, maintained by the daemon: on a firing that starts a cycle it
+# increments and persists this, then re-checks the stop condition. Daemon-owned
+# bookkeeping — never written by an agent or the TUI.
+cron_runs: 0
+
+# Re-plan request. Daemon-owned like cron_runs: set on a cron firing that starts
+# a new cycle, forwarded to the planning agent through .orch/context.yaml, and
+# cleared once a planning session moves the project off `ready`. It tells the
+# planning agent it may delete / reset / reuse the tasks already on disk —
+# without it, a re-invoked planner preserves them (the incremental case, where a
+# human added one task through the UI). Omitted until a cycle requests one.
+#
+#   replan: true
+
+# Cleanup request flag. Set by the TUI's `:cleanup` (as updated_by: agent, so
+# the daemon sees the event); the daemon dispatches the archive agent for it
+# ahead of the normal status routing and clears the flag when that agent's
+# session ends. Omitted until a cleanup is actually requested. Not a status:
+# the project keeps whatever status it had while the cleanup runs.
+cleanup: false
+
+# Set to true by the archive agent once every repo in the workspace is
+# committed and pushed. `:archive` refuses to archive a project without it, and
+# the TUI draws such a project with a blue border. Omitted until then; nothing
+# else writes it.
+archive: false
 
 # Who last wrote this file. Daemon ignores fsnotify events where this is "daemon".
 # Values: agent | daemon

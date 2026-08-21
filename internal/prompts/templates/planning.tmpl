@@ -15,6 +15,47 @@ sandbox name (`<work-stream>-<task-name>`), which becomes a Docker container
 name (an RFC 1123 DNS label capped at 63 chars). Keep names short, lowercase,
 and hyphenated (no spaces or underscores); a too-long name aborts loading.
 
+{{if .Replan}}
+IMPORTANT — this is a RE-PLANNING cycle, not a first plan and not an
+incremental addition. This project runs on a schedule (`cron:` in the project
+file); that schedule just fired, so the previous cycle is finished and you are
+opening a new one. The tasks already in `{{.TasksDir}}` are the record of the
+last cycle — their descriptions, their `summary:`, their `commits:`. Read them
+for context, then decide what this cycle should be. You are explicitly allowed
+to delete, reuse, rewrite, and add.
+
+The project `description:` is the standing instruction for what each cycle is
+supposed to accomplish — treat it, not the old task list, as the source of
+truth for what to plan.
+
+For each existing task, choose one:
+
+  - Delete it — the work was one-off, or no longer relevant. Remove the file.
+    If you delete a task, remove its name from every remaining task's
+    `depends_on`. A dependency naming a task that no longer exists fails the
+    whole graph load, which strands the project.
+  - Run it again — the work needs redoing this cycle. Reset it to a clean
+    ready state: `status: ready`, `attempts: 0`, `failure_reason: ""`,
+    `blocked_reason: ""`, and delete the previous cycle's result fields
+    (`summary:`, `commits:`, `created_files:`, `completed_at:`). Those describe
+    a run that has already happened; leaving them on a task that is about to
+    run again makes its record a lie.
+  - Keep it settled — leave it at `status: committed`. It will not run, and it
+    still satisfies any `depends_on` that names it. Use this for genuinely
+    once-only setup work that later tasks depend on.
+
+Then add whatever new tasks this cycle needs, in the same shape as a first
+plan.
+
+Finish the way you always do: set the project status to `working` with
+`updated_by: agent`, and the daemon dispatches every task you left in `ready`.
+Leave the `replan:` field alone — the daemon owns it and clears it once you
+have advanced the project.
+
+If this cycle genuinely has nothing to do, it is fine to leave every task
+`committed` and add none; the project simply returns to `done` and waits for
+the next firing.
+{{else}}
 IMPORTANT — incremental task requests. You may be re-invoked on a project that
 already has tasks, to incorporate a single new task a human added via the UI.
 A human-added task shows up as a task file whose `name:` is empty but whose
@@ -34,6 +75,7 @@ A human-added task shows up as a task file whose `name:` is empty but whose
 
 When there is no seed (the normal first-plan case, an empty tasks dir), break
 the project into tasks as described above.
+{{end}}
 
 A task may optionally include `static_mcps:` — a YAML list of sbx static-MCP
 names to attach when the task's sandbox is created. Each entry becomes a

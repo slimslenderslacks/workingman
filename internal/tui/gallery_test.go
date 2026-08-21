@@ -275,13 +275,171 @@ func TestSelectedCardBorderUsesAccentColor(t *testing.T) {
 	// compare rendered output. Verify the style values directly via the
 	// per-side getter (BorderForeground sets all four sides identically).
 	plain := cardBorder.GetBorderTopForeground()
-	sel := cardSelectedBorder.GetBorderTopForeground()
+	sel := cardSelectedRing.GetBorderTopForeground()
 	focused := focusedBorder.GetBorderTopForeground()
 	if plain == sel {
-		t.Errorf("cardSelectedBorder must use a different colour than cardBorder; both = %v", plain)
+		t.Errorf("cardSelectedRing must use a different colour than cardBorder; both = %v", plain)
 	}
 	if sel != focused {
-		t.Errorf("cardSelectedBorder should share the focus accent colour; got %v, want %v", sel, focused)
+		t.Errorf("cardSelectedRing should share the focus accent colour; got %v, want %v", sel, focused)
+	}
+}
+
+// TestSelectionRingIsSizedLikeItsSpacer pins the invariant that makes the ring
+// safe to add: a selected card and an unselected one occupy the same box, so
+// moving the cursor can't reflow the gallery. Both are one border thick on
+// every side, and cardDisplayRows accounts for the ring's two rows on top of
+// the card's own five.
+func TestSelectionRingIsSizedLikeItsSpacer(t *testing.T) {
+	ring, spacer := projectCardRing(true), projectCardRing(false)
+	if got, want := ring.GetHorizontalBorderSize(), spacer.GetHorizontalBorderSize(); got != want {
+		t.Errorf("ring horizontal size = %d, spacer = %d; they must match or the grid reflows on selection", got, want)
+	}
+	if got, want := ring.GetVerticalBorderSize(), spacer.GetVerticalBorderSize(); got != want {
+		t.Errorf("ring vertical size = %d, spacer = %d; they must match or the grid reflows on selection", got, want)
+	}
+	cardRows := cardBorder.GetVerticalBorderSize() + 3 // name + status + breakdown
+	if want := cardRows + ring.GetVerticalBorderSize(); cardDisplayRows != want {
+		t.Errorf("cardDisplayRows = %d, want %d (card + ring)", cardDisplayRows, want)
+	}
+}
+
+// TestSelectedCardRendersBothBorders is the point of the ring: the state colour
+// has to survive selection. Colours are stripped without a TTY, so assert on
+// geometry instead — the selected card gains a border ring while staying the
+// same width, which is what leaves the inner border visible.
+func TestSelectedCardRendersBothBorders(t *testing.T) {
+	v := ProjectView{Name: "alpha", Status: project.StatusDone, Archive: true}
+	const width = cardTargetWidth
+
+	sel := strings.Split(renderProjectCard(v, width, true), "\n")
+	unsel := strings.Split(renderProjectCard(v, width, false), "\n")
+
+	if len(sel) != cardDisplayRows || len(unsel) != cardDisplayRows {
+		t.Fatalf("card heights = %d selected / %d unselected, want %d for both",
+			len(sel), len(unsel), cardDisplayRows)
+	}
+	for i, line := range sel {
+		if got := lipgloss.Width(line); got != width {
+			t.Errorf("selected line %d width = %d, want %d", i, got, width)
+		}
+	}
+
+	// Two nested rounded borders: the ring's top-left corner opens row 0, and
+	// the card's own corner sits on row 1 just inside the ring's left edge.
+	rounded := lipgloss.RoundedBorder()
+	if !strings.HasPrefix(sel[0], rounded.TopLeft) {
+		t.Errorf("selected row 0 = %q, want the ring's %q corner", sel[0], rounded.TopLeft)
+	}
+	if want := rounded.Left + rounded.TopLeft; !strings.HasPrefix(sel[1], want) {
+		t.Errorf("selected row 1 = %q, want %q — the card's corner inside the ring", sel[1], want)
+	}
+	// Unselected: the ring's rows and columns are reserved but blank, so the
+	// card's corner lands in the same place with nothing drawn around it.
+	if strings.TrimSpace(unsel[0]) != "" {
+		t.Errorf("unselected row 0 = %q, want blank reserved space", unsel[0])
+	}
+	if want := " " + rounded.TopLeft; !strings.HasPrefix(unsel[1], want) {
+		t.Errorf("unselected row 1 = %q, want %q", unsel[1], want)
+	}
+}
+
+func TestArchivedCardBorderIsBlueAndDistinct(t *testing.T) {
+	// Same constraint as TestSelectedCardBorderUsesAccentColor: colours are
+	// stripped in a non-TTY test run, so inspect the style values directly.
+	archived := cardArchivedBorder.GetBorderTopForeground()
+	plain := cardBorder.GetBorderTopForeground()
+	sel := cardSelectedRing.GetBorderTopForeground()
+	if archived == plain {
+		t.Errorf("cardArchivedBorder must differ from cardBorder; both = %v", plain)
+	}
+	// The ring sits directly against this border on a selected card, so the two
+	// colours have to be told apart side by side.
+	if archived == sel {
+		t.Errorf("cardArchivedBorder must differ from cardSelectedRing; both = %v", sel)
+	}
+	// Blue comes from the same 256-colour family as statusReady.
+	if want := statusReady.GetForeground(); archived != want {
+		t.Errorf("cardArchivedBorder colour = %v, want the blue %v", archived, want)
+	}
+	// The archived card must keep the same border geometry as the others, or
+	// the width arithmetic in renderProjectCard fragments the card.
+	if got, want := cardArchivedBorder.GetHorizontalBorderSize(), cardBorder.GetHorizontalBorderSize(); got != want {
+		t.Errorf("cardArchivedBorder horizontal border size = %d, want %d", got, want)
+	}
+}
+
+func TestCronActiveCardBorderIsGreenAndDistinct(t *testing.T) {
+	// Mirrors TestArchivedCardBorderIsBlueAndDistinct: colours are stripped in
+	// a non-TTY test run, so inspect the style values directly.
+	cronActive := cardCronActiveBorder.GetBorderTopForeground()
+	plain := cardBorder.GetBorderTopForeground()
+	sel := cardSelectedRing.GetBorderTopForeground()
+	archived := cardArchivedBorder.GetBorderTopForeground()
+	if cronActive == plain {
+		t.Errorf("cardCronActiveBorder must differ from cardBorder; both = %v", plain)
+	}
+	// As with the archive blue: the ring is drawn immediately outside this
+	// border when the card is selected.
+	if cronActive == sel {
+		t.Errorf("cardCronActiveBorder must differ from cardSelectedRing; both = %v", sel)
+	}
+	if cronActive == archived {
+		t.Errorf("cardCronActiveBorder must differ from cardArchivedBorder; both = %v", archived)
+	}
+	// Green comes from the same 256-colour family as statusRunning.
+	if want := statusRunning.GetForeground(); cronActive != want {
+		t.Errorf("cardCronActiveBorder colour = %v, want the green %v", cronActive, want)
+	}
+	// Same border geometry as the others, or the width arithmetic in
+	// renderProjectCard fragments the card.
+	if got, want := cardCronActiveBorder.GetHorizontalBorderSize(), cardBorder.GetHorizontalBorderSize(); got != want {
+		t.Errorf("cardCronActiveBorder horizontal border size = %d, want %d", got, want)
+	}
+}
+
+// TestProjectCardBorderPrefersArchiveOverCron covers the card's own border,
+// which now encodes durable state only: archive beats cron-active, and
+// selection doesn't enter into it — the ring carries that instead, so a
+// selected card keeps showing what it is.
+func TestProjectCardBorderPrefersArchiveOverCron(t *testing.T) {
+	archived := ProjectView{Name: "alpha", Status: project.StatusDone, Archive: true}
+	normal := ProjectView{Name: "bravo", Status: project.StatusWorking}
+	cronActive := ProjectView{Name: "charlie", Status: project.StatusWorking, CronActive: true}
+	both := ProjectView{Name: "delta", Status: project.StatusDone, Archive: true, CronActive: true}
+
+	cases := []struct {
+		name string
+		view ProjectView
+		want lipgloss.Style
+	}{
+		{"archived", archived, cardArchivedBorder},
+		{"normal", normal, cardBorder},
+		{"cron-active", cronActive, cardCronActiveBorder},
+		{"archived and cron-active", both, cardArchivedBorder},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := projectCardBorder(tc.view).GetBorderTopForeground()
+			if want := tc.want.GetBorderTopForeground(); got != want {
+				t.Errorf("border colour = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestRenderArchivedProjectCardStaysIntact(t *testing.T) {
+	// The archived style must not change the card's shape: same line count and
+	// same width as a normal card, so a blue card doesn't fragment the grid.
+	archived := renderProjectCard(ProjectView{Name: "alpha", Status: project.StatusDone, Archive: true}, 32, false)
+	plain := renderProjectCard(ProjectView{Name: "alpha", Status: project.StatusDone}, 32, false)
+	for _, line := range strings.Split(archived, "\n") {
+		if got := lipgloss.Width(line); got != 32 {
+			t.Errorf("archived card line width = %d, want 32; line=%q", got, line)
+		}
+	}
+	if got, want := strings.Count(archived, "\n"), strings.Count(plain, "\n"); got != want {
+		t.Errorf("archived card has %d line breaks, want %d", got, want)
 	}
 }
 
