@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/slimslenderslacks/work/internal/audit"
 )
 
 func TestShouldDefaultSSHAgent(t *testing.T) {
@@ -47,5 +51,32 @@ func TestOnePasswordAgentSockDetectsSocket(t *testing.T) {
 	}
 	if got := onePasswordAgentSock(); got != "" {
 		t.Errorf("a plain file must not count as the agent socket, got %q", got)
+	}
+}
+
+// TestLogOnePasswordAgentMissingDistinguishesCauses asserts the diagnostic
+// added for item 3 (onePasswordAgentSock hardcodes one container id) tells
+// apart "1Password looks installed here but has no live agent socket"
+// (likely SSH agent integration disabled, or locked) from "no 1Password app
+// data found under this id at all" (not installed, or a build using a
+// different container id we don't check) — so a missing/wrong path doesn't
+// fail silently with nothing to go on.
+func TestLogOnePasswordAgentMissingDistinguishesCauses(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	var buf bytes.Buffer
+	logOnePasswordAgentMissing(audit.New(&buf))
+	if got := buf.String(); !strings.Contains(got, "no 1Password app data found") {
+		t.Errorf("with no container dir, got %q, want mention of missing app data", got)
+	}
+
+	if err := os.MkdirAll(onePasswordContainerDir(home), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	buf.Reset()
+	logOnePasswordAgentMissing(audit.New(&buf))
+	if got := buf.String(); !strings.Contains(got, "no live SSH agent socket") {
+		t.Errorf("with container dir present but no socket, got %q, want mention of missing live socket", got)
 	}
 }

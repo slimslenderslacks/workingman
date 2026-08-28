@@ -125,6 +125,14 @@ type Session struct {
 	// this session is running. Lets a restarting daemon dispatch the right
 	// session-end handling once it reconnects to a session it did not launch.
 	Kind string `json:"kind,omitempty"`
+
+	// SigningBroken is true when this session's commit signing was disabled at
+	// runtime because the SSH agent sbx forwards into the sandbox proved to
+	// hold no key (acpwrapper's signingPreflight failed). Commits still
+	// succeed — just unsigned — so this is the durable, greppable record of the
+	// degradation for a human or the daemon to surface, rather than relying on
+	// whoever happened to be tailing acp-wrapper's stderr at the time.
+	SigningBroken bool `json:"signing_broken,omitempty"`
 }
 
 // validID reports whether id is usable as a single-segment directory name.

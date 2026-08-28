@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/policy"
+	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
 )
 
@@ -786,5 +787,73 @@ func TestSigningPreflight(t *testing.T) {
 	want := []string{"sbx", "exec", "acp-s", "--", "ssh-add", "-l"}
 	if !reflect.DeepEqual(gotArgs, want) {
 		t.Errorf("preflight argv = %v, want %v", gotArgs, want)
+	}
+}
+
+// TestWithSigningPreflightResultDisablesOnFailure is the crux of the fix:
+// a failed preflight (checked && !ok) must clear SigningKey so execArgs stops
+// forcing commit.gpgsign=true — otherwise every git commit in the sandbox
+// hard-fails signing against an agent with no key, rather than landing
+// unsigned. It must also flag signingPreflightFailed so the degradation is
+// recorded into session.json (see TestSessionRecordReflectsSigningBroken)
+// instead of only appearing in a stderr log line.
+func TestWithSigningPreflightResultDisablesOnFailure(t *testing.T) {
+	base := Config{SandboxName: "acp-s", Workspaces: []string{"/repo"}, SigningKey: "ssh-ed25519 AAAA"}
+
+	got := withSigningPreflightResult(base, true, false)
+	if got.SigningKey != "" {
+		t.Errorf("SigningKey = %q, want cleared after failed preflight", got.SigningKey)
+	}
+	if !got.signingPreflightFailed {
+		t.Errorf("signingPreflightFailed = false, want true after failed preflight")
+	}
+
+	// The clearing must actually change execArgs' output, not just the field —
+	// this is the "provably changes execArgs' behavior" requirement.
+	for _, a := range got.execArgs() {
+		if strings.HasPrefix(a, "GIT_CONFIG_") {
+			t.Fatalf("execArgs still injected signing config after failed preflight: %v", got.execArgs())
+		}
+	}
+}
+
+// TestWithSigningPreflightResultLeavesOtherCasesUnchanged asserts the two
+// non-failure outcomes (signing unconfigured, or preflight passed) leave
+// Config untouched, so a passing preflight keeps forcing commit.gpgsign=true
+// exactly as before.
+func TestWithSigningPreflightResultLeavesOtherCasesUnchanged(t *testing.T) {
+	base := Config{SandboxName: "acp-s", Workspaces: []string{"/repo"}, SigningKey: "ssh-ed25519 AAAA"}
+
+	tests := []struct {
+		name        string
+		checked, ok bool
+	}{
+		{"not configured", false, false},
+		{"preflight passed", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withSigningPreflightResult(base, tt.checked, tt.ok)
+			if got.SigningKey != base.SigningKey {
+				t.Errorf("SigningKey = %q, want unchanged %q", got.SigningKey, base.SigningKey)
+			}
+			if got.signingPreflightFailed {
+				t.Errorf("signingPreflightFailed = true, want false")
+			}
+		})
+	}
+}
+
+// TestSessionRecordReflectsSigningBroken asserts the signingPreflightFailed
+// flag withSigningPreflightResult sets is surfaced into session.json's
+// SigningBroken field, so the degradation is visible to a reconnecting
+// TUI/daemon reading session state, not only to a stderr tail.
+func TestSessionRecordReflectsSigningBroken(t *testing.T) {
+	c := Config{SessionID: "s", SandboxName: "acp-s", SigningKey: "ssh-ed25519 AAAA"}
+	c = withSigningPreflightResult(c, true, false)
+
+	rec := c.sessionRecord(session.StatusRunning, time.Time{}, time.Time{})
+	if !rec.SigningBroken {
+		t.Errorf("sessionRecord().SigningBroken = false, want true after failed preflight")
 	}
 }
