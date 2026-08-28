@@ -21,26 +21,49 @@ import (
 	"github.com/slimslenderslacks/work/internal/task"
 )
 
-// MaxNameLen is the maximum length of a task name. A task name flows into the
-// task's sbx sandbox name ("<work-stream>-<task-name>"), which sbx passes to
-// Docker as a container name — an RFC 1123 DNS label capped at 63 characters.
-// Names longer than this are rejected at Load so the failure surfaces here
-// with a clear message instead of downstream as an opaque sbx/Docker error.
-const MaxNameLen = 63
+// MaxNameLen is the maximum length of a task name. Re-exported from the task
+// package (the canonical source) so existing callers of taskgraph.MaxNameLen
+// keep working.
+const MaxNameLen = task.MaxNameLen
 
 // Graph is an immutable snapshot of a project's task DAG.
 type Graph struct {
-	dir   string
-	tasks map[string]*task.Task // keyed by task name
-	deps  map[string][]string   // adjacency: name → names it depends on
+	dir      string
+	tasks    map[string]*task.Task // keyed by task name
+	deps     map[string][]string   // adjacency: name → names it depends on
+	warnings []string              // loud, non-fatal repairs made during Load
 }
 
 // Dir returns the directory the Graph was loaded from.
 func (g *Graph) Dir() string { return g.dir }
 
+// Warnings returns a loud, human-readable record of every non-fatal repair
+// Load made — e.g. a blank or malformed task name that was rewritten to a
+// derived slug. Callers should surface these (audit log, TUI banner, etc.)
+// even though they didn't prevent the graph from loading: a repaired name
+// means an upstream writer (usually the planning agent) produced something
+// invalid, and that's worth someone's attention. Empty when Load made no
+// repairs.
+func (g *Graph) Warnings() []string { return g.warnings }
+
 // Load reads every *.yaml file in dir into a Graph and validates the result.
 // If dir does not exist, Load returns an empty Graph and no error — the
 // daemon treats a missing tasks/ as "planning hasn't produced anything yet."
+//
+// A task file's name is repaired rather than rejected when it's blank or
+// malformed (not a lowercase kebab-case slug, or over MaxNameLen): Load
+// derives a slug from the name itself (or, if it was blank, from the
+// filename) and records the repair in Warnings(). This is deliberate — a
+// single planning-agent mistake in one task file must not abort loading
+// every other task in the project and strand it. Structural problems that
+// span the whole graph (an unknown dependency, a cycle, or two files
+// genuinely claiming the same valid name) remain fatal: there's no safe
+// single-file repair for those.
+//
+// A blank name paired with a non-blank description is treated as a pending
+// seed (see the tui package's queueTaskForPlanning) rather than a malformed
+// task — it's skipped from the graph entirely so it neither errors nor
+// occupies a slot until the planning agent gives it a real name.
 func Load(dir string) (*Graph, error) {
 	g := &Graph{
 		dir:   dir,
@@ -65,23 +88,61 @@ func Load(dir string) (*Graph, error) {
 		if err != nil {
 			return nil, fmt.Errorf("taskgraph: load %s: %w", path, err)
 		}
-		if t.Name == "" {
-			return nil, fmt.Errorf("taskgraph: %s has no name", path)
+
+		if t.Name == "" && strings.TrimSpace(t.Description) != "" {
+			// A pending seed awaiting the planning agent, not yet a task.
+			continue
 		}
-		if len(t.Name) > MaxNameLen {
-			return nil, fmt.Errorf("taskgraph: %s name %q is %d chars; must not exceed %d", path, t.Name, len(t.Name), MaxNameLen)
+
+		name := t.Name
+		if !task.ValidName(name) {
+			var repaired string
+			if name == "" {
+				repaired = task.Slugify(strings.TrimSuffix(e.Name(), ".yaml"))
+			} else {
+				repaired = task.Slugify(name)
+			}
+			repaired = dedupeName(repaired, g.tasks)
+			g.warnings = append(g.warnings, fmt.Sprintf(
+				"taskgraph: %s had invalid name %q; repaired to %q", path, name, repaired))
+			name = repaired
+			t.Name = repaired
 		}
-		if _, dup := g.tasks[t.Name]; dup {
-			return nil, fmt.Errorf("taskgraph: duplicate task name %q in %s", t.Name, dir)
+
+		if _, dup := g.tasks[name]; dup {
+			return nil, fmt.Errorf("taskgraph: duplicate task name %q in %s", name, dir)
 		}
-		g.tasks[t.Name] = t
-		g.deps[t.Name] = append([]string(nil), t.DependsOn...)
+		g.tasks[name] = t
+		g.deps[name] = append([]string(nil), t.DependsOn...)
 	}
 
 	if err := g.validate(); err != nil {
 		return nil, err
 	}
 	return g, nil
+}
+
+// dedupeName returns name, or name-2 / name-3 / ... — the first candidate
+// not already present in tasks. Only invoked for a name Load just repaired,
+// so a repair that happens to collide with an existing task gets a stable,
+// distinct identity instead of silently colliding; two files that both
+// carry the same already-valid name are a separate, fatal condition (see
+// the duplicate check in Load).
+func dedupeName(name string, tasks map[string]*task.Task) string {
+	if _, exists := tasks[name]; !exists {
+		return name
+	}
+	for i := 2; ; i++ {
+		suffix := fmt.Sprintf("-%d", i)
+		base := name
+		if over := len(base) + len(suffix) - task.MaxNameLen; over > 0 {
+			base = base[:len(base)-over]
+		}
+		candidate := base + suffix
+		if _, exists := tasks[candidate]; !exists {
+			return candidate
+		}
+	}
 }
 
 // Tasks returns every task in the graph, sorted by name. Stable order makes

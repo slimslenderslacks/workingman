@@ -40,6 +40,12 @@ if [ -S "$OP_AGENT" ]; then
   fi
 fi
 
+# The orch binary moved into this workspace, so the old $HERE/../acp-kit default
+# now resolves to a path with no kit checked out, which fails sandbox creation
+# for every project ("resolve kits: path does not exist"). Point ACP_KIT at the
+# real kit checkout; still overridable from the environment.
+export ACP_KIT="${ACP_KIT:-/Users/slim/dev/repos_docker/slimslenderslacks/acp-kit}"
+
 "$HERE/orch" \
   --root ~/orch \
   --audit-log ~/orch/audit.log \

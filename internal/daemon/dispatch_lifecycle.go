@@ -175,6 +175,9 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		d.transitionProjectBlocked(projectPath, p, "taskgraph error: "+err.Error())
 		return
 	}
+	for _, w := range g.Warnings() {
+		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
+	}
 	if g.AllCommitted() {
 		d.transitionProjectDone(projectPath, p)
 		return
