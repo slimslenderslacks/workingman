@@ -229,10 +229,10 @@ type model struct {
 	leftVisible  bool
 	rightVisible bool
 
-	// lastCenterFocus remembers which center-column pane (Projects or Tasks)
-	// last held focus, so alt-h/alt-l can return focus there when the user
-	// leaves a side column back to the center column. Set in newModel and
-	// kept up to date wherever focus moves onto Projects or Tasks (see
+	// lastCenterFocus remembers which center-column pane (Projects, Tasks, or
+	// Audit) last held focus, so alt-h/alt-l can return focus there when the
+	// user leaves a side column back to the center column. Set in newModel
+	// and kept up to date wherever focus moves onto one of the three (see
 	// focusLeftColumn / focusRightColumn / cycleCenterFocus /
 	// handleCenterClick).
 	lastCenterFocus pane
@@ -461,15 +461,15 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return m, tea.Quit
 	case ":":
-		// `:` opens the command-picker menu, but only when the work-streams
-		// pane is focused — every command is a work-stream action. The menu
-		// replaces the old free-form `:command` line so the commands are
-		// discoverable instead of memorised.
-		if m.focus == paneProjects {
-			m.mode = modeCommandPicker
-			m.cmdPickerIdx = 0
-			m.statusMsg = ""
-		}
+		// `:` opens the command-picker menu regardless of which pane is
+		// focused — the menu itself is scoped to the selected project, not to
+		// pane focus, so there's no reason to require the work-streams pane
+		// to be focused first. The menu replaces the old free-form
+		// `:command` line so the commands are discoverable instead of
+		// memorised.
+		m.mode = modeCommandPicker
+		m.cmdPickerIdx = 0
+		m.statusMsg = ""
 	case "a":
 		// Open the full-window ACP session tab view. Only meaningful when an
 		// ACP source is wired in (daemon mode); a no-op in standalone tui mode.
@@ -519,38 +519,44 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m = m.pageYAML(-page)
 		}
 		m.statusMsg = ""
-	case "alt+j", "∆", "alt+k", "˚":
-		// ⌥j/⌥k shift focus between the two selectable panes stacked in the
-		// center column — Projects and Tasks — and nowhere else: Sessions and
-		// the YAML viewer live in their own side columns (alt-h/alt-l,
-		// below), and Audit — though it also stacks in the center column,
-		// below Tasks — stays reachable only by click (see handleMouse):
-		// it's a read-only log tail, not a list of things to select, so it
-		// doesn't belong in the same cycle as Projects/Tasks (see
-		// cycleCenterFocus for the full reasoning). A no-op while focus is
-		// already on a side column or Audit, since there's no "up/down"
-		// relationship between those and the center stack.
+	case "alt+j", "∆":
+		// ⌥j steps focus forward through the three panes stacked in the
+		// center column — Projects -> Tasks -> Audit — wrapping back to
+		// Projects. See cycleCenterFocus for the full reasoning. A no-op
+		// while focus is already on a side column, since there's no
+		// "up/down" relationship between those and the center stack.
 		//
-		// "∆"/"˚" are the glyphs a default macOS terminal emits for Option-j /
-		// Option-k when Option isn't configured as a Meta key — accepting them
-		// too means the binding works out of the box there, while "alt+j"/
-		// "alt+k" covers terminals that do send Meta (or tmux with xterm-keys).
-		m = m.cycleCenterFocus()
+		// "∆" is the glyph a default macOS terminal emits for Option-j when
+		// Option isn't configured as a Meta key — accepting it too means the
+		// binding works out of the box there, while "alt+j" covers terminals
+		// that do send Meta (or tmux with xterm-keys).
+		m = m.cycleCenterFocus(1)
+		m.statusMsg = ""
+	case "alt+k", "˚":
+		// ⌥k is the mirror of ⌥j: Audit -> Tasks -> Projects, wrapping back
+		// to Audit. See the "∆" note above for why "˚" (Option-k's glyph) is
+		// accepted alongside "alt+k".
+		m = m.cycleCenterFocus(-1)
 		m.statusMsg = ""
 	case "alt+h", "˙":
-		// ⌥h shifts focus onto the sessions column (left) when it's visible,
-		// or back to the center column if focus is already on it. See
+		// ⌥h always steps focus one column to the left — right (YAML viewer)
+		// -> center -> left (sessions) — never skipping the center column and
+		// never wrapping: it stops as soon as focus is on the left column, or
+		// on the center column with the left column not visible. See
 		// focusLeftColumn/focusCenterColumn.
-		if m.focus == paneSessions {
+		switch m.focus {
+		case paneProjectYAML:
 			m = m.focusCenterColumn()
-		} else {
+		case paneProjects, paneTasks, paneAudit:
 			m = m.focusLeftColumn()
 		}
 	case "alt+l", "¬":
-		// ⌥l is the mirror image of ⌥h for the YAML-viewer column (right).
-		if m.focus == paneProjectYAML {
+		// ⌥l is the mirror image of ⌥h: left -> center -> right, stopping
+		// rather than wrapping at the right end.
+		switch m.focus {
+		case paneSessions:
 			m = m.focusCenterColumn()
-		} else {
+		case paneProjects, paneTasks, paneAudit:
 			m = m.focusRightColumn()
 		}
 	case "z":
@@ -745,9 +751,9 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 //   - Projects pane (center, top): focus + select the card under the cursor.
 //   - Tasks pane (center, middle): focus + select the task row under the
 //     cursor.
-//   - Audit pane (center, bottom, optional): focus only — a click is the
-//     only way onto it now that alt-j/alt-k is scoped to Projects/Tasks
-//     (see cycleCenterFocus).
+//   - Audit pane (center, bottom, optional): focus only; alt-j/alt-k also
+//     reach it as part of the center column's focus cycle (see
+//     cycleCenterFocus).
 //   - Project/task YAML column (right, optional): focus only; the body is
 //     read-only and scrolled via keyboard.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -856,6 +862,7 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 	}
 	if l.auditH > 0 && y < auditEnd {
 		m.focus = paneAudit
+		m.lastCenterFocus = paneAudit
 		m.statusMsg = ""
 		return m, nil
 	}
@@ -1000,32 +1007,35 @@ func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 	return idx
 }
 
-// cycleCenterFocus toggles focus between the two *selectable* panes stacked
-// in the center column — Projects and Tasks — bound to alt-j/alt-k.
+// cycleCenterFocus steps focus through the three panes stacked in the center
+// column — Projects, Tasks, Audit (see computeLayout/splitCenterColumn) — in
+// the direction given by delta (+1 for alt-j, -1 for alt-k), wrapping at
+// either end. Bound to alt-j/alt-k.
 //
-// Audit also stacks in the center column now (below Tasks — see
-// computeLayout/splitCenterColumn), but is deliberately left out of this
-// cycle: Projects and Tasks are lists you pick an item from, while Audit is
-// a read-only log tail with nothing to "select" — folding it into the same
-// keybinding would mix two different interactions onto one cycle for no
-// real benefit. Audit keeps the click-to-focus affordance every other pane
-// gets by default (see handleMouse/handleCenterClick) instead of gaining a
-// second, redundant path onto it.
+// Audit used to be excluded from this cycle on the theory that a read-only
+// log tail didn't belong in a cycle meant for picking an item from a list,
+// leaving click (see handleMouse/handleCenterClick) as the only way to focus
+// it. That left no keyboard path onto Audit at all, which is worse than the
+// inconsistency it was meant to avoid, so Audit rejoined the cycle; click
+// remains available as a second way onto any of the three.
 //
-// A no-op when focus is on a side column or Audit; alt-h/alt-l
+// A no-op when focus is on a side column; alt-h/alt-l
 // (focusLeftColumn/focusRightColumn/focusCenterColumn) own moving focus onto
-// and off of the center column. With just two panes in the cycle there's no
-// distinct forward/backward direction, so alt-j and alt-k both call this the
-// same way.
-func (m model) cycleCenterFocus() model {
-	switch m.focus {
-	case paneProjects:
-		m.focus = paneTasks
-	case paneTasks:
-		m.focus = paneProjects
-	default:
+// and off of the center column.
+func (m model) cycleCenterFocus(delta int) model {
+	order := [...]pane{paneProjects, paneTasks, paneAudit}
+	idx := -1
+	for i, p := range order {
+		if p == m.focus {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
 		return m
 	}
+	idx = (idx + delta + len(order)) % len(order)
+	m.focus = order[idx]
 	m.lastCenterFocus = m.focus
 	return m
 }
@@ -1038,7 +1048,7 @@ func (m model) focusLeftColumn() model {
 	if !m.leftVisible {
 		return m
 	}
-	if m.focus == paneProjects || m.focus == paneTasks {
+	if m.focus == paneProjects || m.focus == paneTasks || m.focus == paneAudit {
 		m.lastCenterFocus = m.focus
 	}
 	m.focus = paneSessions
@@ -1053,7 +1063,7 @@ func (m model) focusRightColumn() model {
 	if !m.rightVisible {
 		return m
 	}
-	if m.focus == paneProjects || m.focus == paneTasks {
+	if m.focus == paneProjects || m.focus == paneTasks || m.focus == paneAudit {
 		m.lastCenterFocus = m.focus
 	}
 	m.focus = paneProjectYAML

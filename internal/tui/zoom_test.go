@@ -92,16 +92,18 @@ func TestZoomFollowsFocus(t *testing.T) {
 	if !m.zoomed || m.focus != paneSessions {
 		t.Fatalf("precondition: want zoomed sessions, got zoomed=%v focus=%v", m.zoomed, m.focus)
 	}
-	// alt-h moves focus off the sessions column back to center; zoom stays on
-	// and now maximizes the newly focused pane. (alt-j/alt-k don't apply here
-	// — they only toggle within the center column's Projects/Tasks stack.)
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}, Alt: true})
+	// alt-l moves focus off the sessions column onto center; zoom stays on
+	// and now maximizes the newly focused pane. (alt-h is a no-op here since
+	// sessions is already the leftmost column — alt-h/alt-l step one column
+	// at a time and never wrap. alt-j/alt-k don't apply either — they only
+	// cycle within the center column's Projects/Tasks/Audit stack.)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}, Alt: true})
 	m = next.(model)
 	if !m.zoomed {
 		t.Error("moving focus should not exit zoom")
 	}
 	if m.focus == paneSessions {
-		t.Error("alt-h should have moved focus off the sessions pane")
+		t.Error("alt-l should have moved focus off the sessions pane")
 	}
 }
 

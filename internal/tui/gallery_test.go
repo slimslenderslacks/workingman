@@ -487,6 +487,13 @@ func TestOptionGlyphSwitchesColumn(t *testing.T) {
 	if m.focus != paneSessions {
 		t.Fatalf("˙ glyph did not switch to sessions column: focus = %v", m.focus)
 	}
+	// ¬ (⌥l) steps back through the center column first, not straight to the
+	// yaml column — the fixed alt-h/alt-l never skip center.
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'¬'}})
+	m = step.(model)
+	if m.focus != paneProjects {
+		t.Fatalf("¬ glyph from the left column: focus = %v, want paneProjects (center)", m.focus)
+	}
 	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'¬'}})
 	m = step.(model)
 	if m.focus != paneProjectYAML {

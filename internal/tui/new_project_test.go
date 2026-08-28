@@ -32,8 +32,11 @@ func focusProjectsPane(t *testing.T, m model) model {
 	return m
 }
 
-// openCommandPicker presses `:` (the projects pane must already be focused)
-// and asserts the command menu opened.
+// openCommandPicker presses `:` and asserts the command menu opened. `:`
+// opens the picker regardless of which pane is focused (see
+// TestColonOpensCommandPickerFromAnyPane), so callers don't need to focus
+// projects first — most still do simply because that's the pane most
+// project-command tests care about afterward.
 func openCommandPicker(t *testing.T, m model) model {
 	t.Helper()
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
@@ -69,13 +72,19 @@ func TestColonOpensCommandPickerFromProjectsPane(t *testing.T) {
 	}
 }
 
-func TestColonIgnoredOutsideProjectsPane(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	// Sessions is the default focus.
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
-	m = step.(model)
-	if m.mode != modeNormal {
-		t.Errorf("`:` outside projects pane should be a no-op; mode = %v", m.mode)
+// TestColonOpensCommandPickerFromAnyPane covers the fix for the reported bug:
+// `:` used to open the command menu only when the projects pane was focused,
+// silently doing nothing from every other pane. It must now open the picker
+// no matter which pane has focus.
+func TestColonOpensCommandPickerFromAnyPane(t *testing.T) {
+	for _, p := range []pane{paneSessions, paneProjectYAML, paneProjects, paneTasks, paneAudit} {
+		m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+		m.focus = p
+		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
+		m = step.(model)
+		if m.mode != modeCommandPicker {
+			t.Errorf("`:` with focus=%v: mode = %v, want modeCommandPicker", p, m.mode)
+		}
 	}
 }
 

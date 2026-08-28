@@ -176,29 +176,35 @@ func TestCtrlFCtrlBPageYAMLRegardlessOfFocus(t *testing.T) {
 	m = step.(model)
 	m.projSel = path
 
-	// Force focus to projects so we prove the binding is independent of
-	// pane focus.
-	m.focus = paneProjects
 	page := yamlPageSize(m)
 	if page <= 0 {
 		t.Fatalf("yamlPageSize = %d; need a positive page size for the test (height too small?)", page)
 	}
 
-	fwd, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
-	m = fwd.(model)
-	if m.yamlScroll != page {
-		t.Errorf("ctrl+f from focus=projects: scroll = %d, want %d", m.yamlScroll, page)
-	}
-	back, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
-	m = back.(model)
-	if m.yamlScroll != 0 {
-		t.Errorf("ctrl+b back to top: scroll = %d, want 0", m.yamlScroll)
-	}
-	// Ctrl+b at zero must not underflow.
-	back2, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
-	m = back2.(model)
-	if m.yamlScroll != 0 {
-		t.Errorf("ctrl+b at zero: scroll = %d, want 0", m.yamlScroll)
+	// Try every pane focus, including Audit — the newest addition to the
+	// center-column stack — to prove the binding really is independent of
+	// pane focus rather than happening to work only for whichever pane the
+	// original test picked.
+	for _, focus := range []pane{paneProjects, paneTasks, paneAudit, paneSessions} {
+		m.focus = focus
+		m.yamlScroll = 0
+
+		fwd, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+		m = fwd.(model)
+		if m.yamlScroll != page {
+			t.Errorf("ctrl+f from focus=%v: scroll = %d, want %d", focus, m.yamlScroll, page)
+		}
+		back, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+		m = back.(model)
+		if m.yamlScroll != 0 {
+			t.Errorf("ctrl+b back to top from focus=%v: scroll = %d, want 0", focus, m.yamlScroll)
+		}
+		// Ctrl+b at zero must not underflow.
+		back2, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+		m = back2.(model)
+		if m.yamlScroll != 0 {
+			t.Errorf("ctrl+b at zero from focus=%v: scroll = %d, want 0", focus, m.yamlScroll)
+		}
 	}
 }
 

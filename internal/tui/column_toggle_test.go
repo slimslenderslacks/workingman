@@ -233,11 +233,11 @@ func TestComputeLayoutHidesColumnWhenTerminalTooNarrow(t *testing.T) {
 	}
 }
 
-// TestMouseClickOnAuditStripFocusesIt covers Audit's replacement for its old
-// keyboard path: alt-j/alt-k is now scoped to the center column's Projects/
-// Tasks stack (see cycleCenterFocus) and no longer reaches Audit, so a click
-// on the strip is the only way left to focus it — the same click-to-focus
-// affordance every other pane already has (see handleMouse).
+// TestMouseClickOnAuditStripFocusesIt covers the click-to-focus affordance
+// every center-column pane has (see handleMouse) applied to Audit — alt-j/
+// alt-k also reaches Audit as part of the center column's focus cycle (see
+// cycleCenterFocus and TestAltJKCyclesCenterColumnPanesIncludingAudit in
+// tasks_focus_test.go).
 func TestMouseClickOnAuditStripFocusesIt(t *testing.T) {
 	m := newModel(nil, nil, make(<-chan []string), &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
