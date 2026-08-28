@@ -34,8 +34,16 @@ type Context struct {
 	TaskName      string   `yaml:"task_name,omitempty"`
 	FailedTasks   []string `yaml:"failed_tasks,omitempty"`
 	BlockedReason string   `yaml:"blocked_reason,omitempty"`
-	Replan        bool     `yaml:"replan,omitempty"`
-	Worktree      string   `yaml:"worktree,omitempty"`
+
+	// BlockedSessionPath/Summary/Attempted mirror project.BlockedSession, the
+	// durable record the wolf agent reads/writes for a blocked project. See
+	// prompts.Data for the field-by-field meaning.
+	BlockedSessionPath      string   `yaml:"blocked_session_path,omitempty"`
+	BlockedSessionSummary   string   `yaml:"blocked_session_summary,omitempty"`
+	BlockedSessionAttempted []string `yaml:"blocked_session_attempted,omitempty"`
+
+	Replan   bool   `yaml:"replan,omitempty"`
+	Worktree string `yaml:"worktree,omitempty"`
 }
 
 // Skill is a directory of files copied verbatim into the workspace's

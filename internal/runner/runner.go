@@ -85,6 +85,20 @@ type Plan struct {
 	// re-parsing the YAML.
 	BlockedReason string
 
+	// BlockedSessionPath is the absolute path to the project's durable
+	// blocked-session record (see project.BlockedSessionPath), surfaced so
+	// the wolf's prompt names the exact file it should write/update. Ignored
+	// for any Kind but wolf.
+	BlockedSessionPath string
+	// BlockedSessionSummary, when non-empty, is the step-by-step summary the
+	// wolf left behind in that record on a prior investigation of this
+	// project — read back so the wolf starts from what it already learned
+	// instead of re-deriving it from scratch. Ignored for any Kind but wolf.
+	BlockedSessionSummary string
+	// BlockedSessionAttempted mirrors the prior record's list of what the
+	// wolf already tried or ruled out. Ignored for any Kind but wolf.
+	BlockedSessionAttempted []string
+
 	Skills []setup.Skill
 
 	// SessionName is the tmux session name. If empty, Runner derives one
@@ -340,18 +354,21 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	}
 
 	data := prompts.Data{
-		Kind:          p.Kind,
-		Workspace:     workingDir,
-		Branch:        p.Branch,
-		ProjectPath:   p.ProjectPath,
-		ProjectName:   projectNameFromPath(p.ProjectPath),
-		TasksDir:      p.TasksDir,
-		TaskPath:      p.TaskPath,
-		TaskName:      p.TaskName,
-		FailedTasks:   p.FailedTasks,
-		BlockedReason: p.BlockedReason,
-		Replan:        p.Replan,
-		Worktree:      planningWorktree,
+		Kind:                    p.Kind,
+		Workspace:               workingDir,
+		Branch:                  p.Branch,
+		ProjectPath:             p.ProjectPath,
+		ProjectName:             projectNameFromPath(p.ProjectPath),
+		TasksDir:                p.TasksDir,
+		TaskPath:                p.TaskPath,
+		TaskName:                p.TaskName,
+		FailedTasks:             p.FailedTasks,
+		BlockedReason:           p.BlockedReason,
+		BlockedSessionPath:      p.BlockedSessionPath,
+		BlockedSessionSummary:   p.BlockedSessionSummary,
+		BlockedSessionAttempted: p.BlockedSessionAttempted,
+		Replan:                  p.Replan,
+		Worktree:                planningWorktree,
 	}
 	instructions, err := prompts.Render(p.Kind, data)
 	if err != nil {
@@ -359,17 +376,20 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	}
 
 	ctxFile := setup.Context{
-		Kind:          p.Kind.String(),
-		Workspace:     workingDir,
-		Branch:        p.Branch,
-		ProjectPath:   p.ProjectPath,
-		TasksDir:      p.TasksDir,
-		TaskPath:      p.TaskPath,
-		TaskName:      p.TaskName,
-		FailedTasks:   p.FailedTasks,
-		BlockedReason: p.BlockedReason,
-		Replan:        p.Replan,
-		Worktree:      planningWorktree,
+		Kind:                    p.Kind.String(),
+		Workspace:               workingDir,
+		Branch:                  p.Branch,
+		ProjectPath:             p.ProjectPath,
+		TasksDir:                p.TasksDir,
+		TaskPath:                p.TaskPath,
+		TaskName:                p.TaskName,
+		FailedTasks:             p.FailedTasks,
+		BlockedReason:           p.BlockedReason,
+		BlockedSessionPath:      p.BlockedSessionPath,
+		BlockedSessionSummary:   p.BlockedSessionSummary,
+		BlockedSessionAttempted: p.BlockedSessionAttempted,
+		Replan:                  p.Replan,
+		Worktree:                planningWorktree,
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {
 		return nil, err

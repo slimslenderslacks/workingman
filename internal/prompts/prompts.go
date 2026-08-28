@@ -37,8 +37,20 @@ type Data struct {
 	TaskName      string   // for TaskAgent: name field of the task
 	FailedTasks   []string // for WolfAgent: paths to failed/blocked task yamls
 	BlockedReason string   // for WolfAgent: why the project was blocked
-	Replan        bool     // for PlanningAgent: re-plan the existing tasks (a cron cycle) instead of preserving them
-	Worktree      string   // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
+
+	// BlockedSessionPath is the absolute path to the project's durable
+	// blocked-session record (project.BlockedSessionPath) — for WolfAgent,
+	// the file it should write/update with its diagnosis.
+	BlockedSessionPath string
+	// BlockedSessionSummary is the step-by-step summary a prior wolf
+	// invocation left in that record, if any — for WolfAgent.
+	BlockedSessionSummary string
+	// BlockedSessionAttempted is what a prior wolf invocation already tried
+	// or ruled out, if any — for WolfAgent.
+	BlockedSessionAttempted []string
+
+	Replan   bool   // for PlanningAgent: re-plan the existing tasks (a cron cycle) instead of preserving them
+	Worktree string // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
 }
 
 var tmpls = template.Must(template.ParseFS(templatesFS, "templates/*.tmpl"))
