@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestTLTogglesLeftColumn(t *testing.T) {
@@ -243,18 +244,85 @@ func TestMouseClickOnAuditStripFocusesIt(t *testing.T) {
 	m = sized.(model)
 	l := m.computeLayout()
 	if l.auditH <= 0 {
-		t.Fatalf("precondition: audit strip should have room; auditH=%d", l.auditH)
+		t.Fatalf("precondition: audit pane should have room; auditH=%d", l.auditH)
 	}
 
+	// Audit now stacks at the bottom of the center column rather than
+	// spanning a full-width row below it, so the click must land within the
+	// center column's X range and the audit band's Y range (the last
+	// l.auditH rows of the column's stack).
 	final, _ := m.Update(tea.MouseMsg{
-		X:      5,
-		Y:      l.bodyH + 1,
+		X:      l.leftW + 5,
+		Y:      l.bodyH - 1,
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 	})
 	m = final.(model)
 	if m.focus != paneAudit {
-		t.Errorf("click on audit strip should focus paneAudit, got %v", m.focus)
+		t.Errorf("click on audit pane should focus paneAudit, got %v", m.focus)
+	}
+}
+
+// TestAuditStacksInCenterColumnBelowTasks covers the center-column-audit
+// requirement directly at the layout level: Audit fills out the bottom of
+// the center column's own vertical stack (projectsH + tasksH + auditH ==
+// bodyH) rather than being a fourth full-width row below the three columns,
+// and renderAudit draws it at the column's width, not the terminal's.
+func TestAuditStacksInCenterColumnBelowTasks(t *testing.T) {
+	m := newModel(nil, nil, make(<-chan []string), &fakeAttacher{})
+	m.width, m.height = 200, 40
+	l := m.computeLayout()
+	if l.auditH <= 0 {
+		t.Fatalf("precondition: audit should have room; auditH=%d", l.auditH)
+	}
+	if l.tasksH <= 0 {
+		t.Fatalf("precondition: tasks should have room; tasksH=%d", l.tasksH)
+	}
+	if got, want := l.projectsH+l.tasksH+l.auditH, l.bodyH; got != want {
+		t.Errorf("projectsH+tasksH+auditH = %d, want bodyH (%d): audit should fill out the center column's stack instead of sitting below it", got, want)
+	}
+
+	rendered := m.renderAudit(l.centerW, l.auditH)
+	for _, line := range strings.Split(rendered, "\n") {
+		if w := lipgloss.Width(line); w > l.centerW {
+			t.Errorf("audit line width %d exceeds centerW %d (terminal width is %d): audit should render at the column's width", w, l.centerW, m.width)
+		}
+	}
+}
+
+// TestSideColumnsFullHeightRegardlessOfAudit is the regression test for the
+// original bug: because audit's height used to be carved out of the window
+// height before the columns were sized, showing Audit shrank the left
+// (sessions) and right (YAML) columns even though it never visually
+// occupied any of their space. Now that audit sizing is scoped to the
+// center column, the side columns must get the full body height (window
+// height minus only the footer) whether or not Audit is showing.
+func TestSideColumnsFullHeightRegardlessOfAudit(t *testing.T) {
+	withAudit := newModel(nil, nil, make(<-chan []string), &fakeAttacher{})
+	withAudit.width, withAudit.height = 200, 40
+	lWith := withAudit.computeLayout()
+	if lWith.auditH <= 0 {
+		t.Fatalf("precondition: audit should have room; auditH=%d", lWith.auditH)
+	}
+
+	withoutAudit := newModel(nil, nil, nil, &fakeAttacher{})
+	withoutAudit.width, withoutAudit.height = 200, 40
+	lWithout := withoutAudit.computeLayout()
+	if lWithout.auditH != 0 {
+		t.Fatalf("precondition: no audit source wired up, want auditH=0, got %d", lWithout.auditH)
+	}
+
+	if lWith.sessionsH != lWith.bodyH {
+		t.Errorf("sessionsH = %d, want it to equal bodyH (%d) — full height minus only the footer", lWith.sessionsH, lWith.bodyH)
+	}
+	if lWith.yamlH != lWith.bodyH {
+		t.Errorf("yamlH = %d, want it to equal bodyH (%d) — full height minus only the footer", lWith.yamlH, lWith.bodyH)
+	}
+	if lWith.sessionsH != lWithout.sessionsH {
+		t.Errorf("sessionsH = %d with audit showing, %d without; want equal — audit must not shrink the left column", lWith.sessionsH, lWithout.sessionsH)
+	}
+	if lWith.yamlH != lWithout.yamlH {
+		t.Errorf("yamlH = %d with audit showing, %d without; want equal — audit must not shrink the right column", lWith.yamlH, lWithout.yamlH)
 	}
 }
 

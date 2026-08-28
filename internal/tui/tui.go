@@ -520,11 +520,14 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.statusMsg = ""
 	case "alt+j", "∆", "alt+k", "˚":
-		// ⌥j/⌥k shift focus between the two panes stacked in the center
-		// column — Projects and Tasks — and nowhere else: they no longer
-		// reach Sessions, the YAML viewer, or Audit now that those live in
-		// their own side columns (alt-h/alt-l, below) or, for Audit, are
-		// reached by clicking it (see handleMouse). A no-op while focus is
+		// ⌥j/⌥k shift focus between the two selectable panes stacked in the
+		// center column — Projects and Tasks — and nowhere else: Sessions and
+		// the YAML viewer live in their own side columns (alt-h/alt-l,
+		// below), and Audit — though it also stacks in the center column,
+		// below Tasks — stays reachable only by click (see handleMouse):
+		// it's a read-only log tail, not a list of things to select, so it
+		// doesn't belong in the same cycle as Projects/Tasks (see
+		// cycleCenterFocus for the full reasoning). A no-op while focus is
 		// already on a side column or Audit, since there's no "up/down"
 		// relationship between those and the center stack.
 		//
@@ -732,23 +735,21 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleMouse routes a mouse event to its pane. The body is three columns
-// side by side — sessions (left, optional), projects+tasks (center), the
-// project/task YAML viewer (right, optional) — so X picks the column first;
-// Y then picks the pane/row within it, with the center column additionally
-// stacking projects above tasks. The audit strip spans the full width below
-// all three columns and has no keyboard path onto it now that alt-j/alt-k is
-// scoped to the center column's Projects/Tasks stack (see
-// cycleCenterFocus), so a click is the only way to focus it — the same
-// affordance every other pane already has.
+// side by side — sessions (left, optional), the center column stacking
+// projects/tasks/audit, the project/task YAML viewer (right, optional) — so
+// X picks the column first; Y then picks the pane/row within it, via
+// handleCenterClick for the center column's own vertical stack.
 //
 //   - Sessions column (left, optional): focus + select the box under the
 //     cursor and immediately attach to it (click-to-attach UX).
 //   - Projects pane (center, top): focus + select the card under the cursor.
-//   - Tasks pane (center, below projects): focus + select the task row under
-//     the cursor.
+//   - Tasks pane (center, middle): focus + select the task row under the
+//     cursor.
+//   - Audit pane (center, bottom, optional): focus only — a click is the
+//     only way onto it now that alt-j/alt-k is scoped to Projects/Tasks
+//     (see cycleCenterFocus).
 //   - Project/task YAML column (right, optional): focus only; the body is
 //     read-only and scrolled via keyboard.
-//   - Audit strip (bottom, full width, optional): focus only.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
@@ -764,15 +765,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	l := m.computeLayout()
 
-	if l.auditH > 0 && msg.Y >= l.bodyH && msg.Y < l.bodyH+l.auditH {
-		m.focus = paneAudit
-		m.statusMsg = ""
-		return m, nil
-	}
-
-	// Horizontal layout (left → right): sessions, center (projects/tasks),
-	// the YAML viewer. The bands here mirror View()'s JoinHorizontal exactly
-	// so click routing and rendering can't drift.
+	// Horizontal layout (left → right): sessions, center (projects/tasks/
+	// audit), the YAML viewer. The bands here mirror View()'s
+	// JoinHorizontal exactly so click routing and rendering can't drift.
 	centerStart := l.leftW
 	rightStart := centerStart + l.centerW
 
@@ -812,11 +807,12 @@ func (m model) handleYAMLClick() (tea.Model, tea.Cmd) {
 }
 
 // handleCenterClick maps a click at (xRel, y) — coordinates relative to the
-// center column's own top-left corner — to the projects pane (top) or the
-// tasks pane stacked below it.
+// center column's own top-left corner — to whichever of Projects, Tasks, or
+// Audit occupies that row of the column's vertical stack.
 func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 	projectsEnd := l.projectsH
 	tasksEnd := projectsEnd + l.tasksH
+	auditEnd := tasksEnd + l.auditH
 
 	if y < projectsEnd {
 		innerW := l.centerW - unfocusedBorder.GetHorizontalFrameSize()
@@ -858,9 +854,15 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if l.auditH > 0 && y < auditEnd {
+		m.focus = paneAudit
+		m.statusMsg = ""
+		return m, nil
+	}
 	// Click below every pane in the center column (only reachable when the
-	// tasks pane doesn't fill the column). Focus projects as a safe default
-	// so j/k still does something sensible.
+	// stack doesn't fill the column, or on a stray row the outer Y bounds
+	// check let through). Focus projects as a safe default so j/k still does
+	// something sensible.
 	m.focus = paneProjects
 	m.lastCenterFocus = paneProjects
 	return m, nil
@@ -998,14 +1000,23 @@ func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 	return idx
 }
 
-// cycleCenterFocus toggles focus between the two panes stacked in the center
-// column — Projects and Tasks — bound to alt-j/alt-k now that Tasks has
-// moved out of the standalone right column into the center stack alongside
-// Projects. A no-op when focus is on a side column or Audit; alt-h/alt-l
+// cycleCenterFocus toggles focus between the two *selectable* panes stacked
+// in the center column — Projects and Tasks — bound to alt-j/alt-k.
+//
+// Audit also stacks in the center column now (below Tasks — see
+// computeLayout/splitCenterColumn), but is deliberately left out of this
+// cycle: Projects and Tasks are lists you pick an item from, while Audit is
+// a read-only log tail with nothing to "select" — folding it into the same
+// keybinding would mix two different interactions onto one cycle for no
+// real benefit. Audit keeps the click-to-focus affordance every other pane
+// gets by default (see handleMouse/handleCenterClick) instead of gaining a
+// second, redundant path onto it.
+//
+// A no-op when focus is on a side column or Audit; alt-h/alt-l
 // (focusLeftColumn/focusRightColumn/focusCenterColumn) own moving focus onto
-// and off of the center column. With just two panes there's no distinct
-// forward/backward direction, so alt-j and alt-k both call this the same
-// way.
+// and off of the center column. With just two panes in the cycle there's no
+// distinct forward/backward direction, so alt-j and alt-k both call this the
+// same way.
 func (m model) cycleCenterFocus() model {
 	switch m.focus {
 	case paneProjects:
@@ -1706,8 +1717,13 @@ func truncate(s string, width int) string {
 
 // auditPaneHeight is how many rows the audit log pane occupies (including
 // borders + title). Sized so ~6 lines of log fit comfortably without
-// crowding the body panes above.
+// crowding Projects/Tasks stacked above it in the center column.
 const auditPaneHeight = 10
+
+// minAuditH is the floor below which the audit pane inside the center
+// column is dropped entirely rather than rendered too short to be useful:
+// enough for its border rows plus a couple of tail lines.
+const minAuditH = 5
 
 // projectsMinHeight is the floor for the projects pane when the body height
 // is large enough to split. Sized so exactly one row of cards fits cleanly:
@@ -1757,13 +1773,16 @@ const (
 // click-routing math stay in lockstep.
 //
 // The body is three columns side by side: an optional left column (sessions,
-// "tl"), a center column stacking projects (top) and tasks (bottom), and an
-// optional right column holding the project/task YAML viewer ("tr"), sized
-// to half the terminal's current width. leftW/rightW are 0 when the
-// corresponding column is toggled off or the terminal is too narrow to give
-// it room without starving the center column; tasksH is 0 when the terminal
-// is too short to fit both center panes. The audit strip and footer span the
-// full width (bodyW) below all three columns.
+// "tl"), a center column stacking projects, tasks, and the audit log in that
+// order, and an optional right column holding the project/task YAML viewer
+// ("tr"), sized to half the terminal's current width. leftW/rightW are 0
+// when the corresponding column is toggled off or the terminal is too
+// narrow to give it room without starving the center column; tasksH/auditH
+// are 0 when the terminal is too short to fit them. bodyH is the full body
+// height (window height minus the footer) shared by all three columns —
+// left/right are sized to it directly, while the center column further
+// divides it into projectsH/tasksH/auditH via splitCenterColumn. The footer
+// spans the full width (bodyW) below the body.
 type uiLayout struct {
 	bodyW, bodyH                                int
 	leftW, centerW, rightW                      int
@@ -1772,26 +1791,9 @@ type uiLayout struct {
 
 func (m model) computeLayout() uiLayout {
 	bodyW := m.width
+	const footerH = 1
 
-	// Reserve audit space only when there's room for it without squashing
-	// the body below a usable minimum. Otherwise the audit pane forces the
-	// body to overflow the terminal and the footer disappears off-screen.
-	const (
-		footerH   = 1
-		minBodyH  = 4
-		minAuditH = 5
-	)
-	audit := 0
-	if m.auditCh != nil {
-		candidate := auditPaneHeight
-		if candidate > m.height/3 {
-			candidate = m.height / 3
-		}
-		if candidate >= minAuditH && m.height-footerH-candidate >= minBodyH {
-			audit = candidate
-		}
-	}
-	bodyH := m.height - footerH - audit
+	bodyH := m.height - footerH
 	if bodyH < 1 {
 		bodyH = 1
 	}
@@ -1816,7 +1818,7 @@ func (m model) computeLayout() uiLayout {
 		centerW = 0
 	}
 
-	projH, tasksH := splitCenterColumn(bodyH, centerW, len(m.projects))
+	projH, tasksH, auditH := splitCenterColumn(bodyH, centerW, len(m.projects), m.auditCh != nil)
 
 	leftH, yamlH := 0, 0
 	if leftW > 0 {
@@ -1836,32 +1838,48 @@ func (m model) computeLayout() uiLayout {
 		tasksH:    tasksH,
 		sessionsH: leftH,
 		yamlH:     yamlH,
-		auditH:    audit,
+		auditH:    auditH,
 	}
 }
 
 // splitCenterColumn divides the center column's bodyH rows between projects
-// (top) and tasks (bottom).
+// (top), tasks (middle), and audit (bottom, when auditWanted).
 //
-// Sizing strategy: projects grows to whatever height it would need to render
-// every card without truncation (see desiredProjectsHeight), capped so tasks
-// still gets at least its minimum. When there isn't room for both at their
-// minimums, the tasks pane is dropped and projects takes the rest — the same
-// fallback the YAML viewer used to get before tasks took its place in the
-// center column.
+// Sizing strategy, most to least important: projects always gets at least
+// projectsMinHeight, growing to whatever height it needs to render every
+// card without truncation (see desiredProjectsHeight); tasks gets whatever
+// is left down to its own minimum; audit — the newest and least essential
+// addition to the stack — is only given room when projects and tasks can
+// both still fit at their minimums after its cut, and is capped to a third
+// of the column so it can't dominate a tall terminal. When there isn't room
+// for both projects and tasks at their minimums, tasks (and, before it,
+// audit) is dropped and projects takes the rest — the same fallback the
+// YAML viewer used to get before tasks took its place in the center column.
 //
 // All clamps prefer fitting within bodyH over hitting the per-pane minimums
-// so the center column never overflows the audit footer below it.
-func splitCenterColumn(bodyH, centerW, projCount int) (proj, tasks int) {
+// so the center column's stack never overflows past bodyH.
+func splitCenterColumn(bodyH, centerW, projCount int, auditWanted bool) (proj, tasks, audit int) {
 	if bodyH <= 0 {
-		return 0, 0
+		return 0, 0, 0
 	}
 	desired := desiredProjectsHeight(centerW, projCount)
 	if desired < projectsMinHeight {
 		desired = projectsMinHeight
 	}
-	if bodyH >= projectsMinHeight+tasksMinHeight {
-		maxProj := bodyH - tasksMinHeight
+
+	if auditWanted {
+		candidate := auditPaneHeight
+		if candidate > bodyH/3 {
+			candidate = bodyH / 3
+		}
+		if candidate >= minAuditH && bodyH-candidate >= projectsMinHeight+tasksMinHeight {
+			audit = candidate
+		}
+	}
+
+	remaining := bodyH - audit
+	if remaining >= projectsMinHeight+tasksMinHeight {
+		maxProj := remaining - tasksMinHeight
 		proj = desired
 		if proj > maxProj {
 			proj = maxProj
@@ -1869,15 +1887,15 @@ func splitCenterColumn(bodyH, centerW, projCount int) (proj, tasks int) {
 		if proj < projectsMinHeight {
 			proj = projectsMinHeight
 		}
-		tasks = bodyH - proj
-		return proj, tasks
+		tasks = remaining - proj
+		return proj, tasks, audit
 	}
-	// Not enough room for the tasks pane; projects takes everything.
-	proj = bodyH
+	// Not enough room for the tasks pane; projects takes everything left.
+	proj = remaining
 	if proj < 1 {
 		proj = 1
 	}
-	return proj, 0
+	return proj, 0, audit
 }
 
 // desiredProjectsHeight returns the row count the projects pane would need
@@ -1980,6 +1998,9 @@ func (m model) View() string {
 	if l.tasksH > 0 {
 		centerPanes = append(centerPanes, m.renderTasks(l.centerW, l.tasksH))
 	}
+	if l.auditH > 0 {
+		centerPanes = append(centerPanes, m.renderAudit(l.centerW, l.auditH))
+	}
 	center := lipgloss.JoinVertical(lipgloss.Left, centerPanes...)
 
 	var columns []string
@@ -1992,10 +2013,6 @@ func (m model) View() string {
 	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top, columns...)
 
-	if l.auditH > 0 {
-		audit := m.renderAudit(m.width, l.auditH)
-		return lipgloss.JoinVertical(lipgloss.Left, body, audit, footer)
-	}
 	return lipgloss.JoinVertical(lipgloss.Left, body, footer)
 }
 
@@ -2285,9 +2302,10 @@ func taskStatusStyle(s task.Status) lipgloss.Style {
 	return dimStyle
 }
 
-// renderAudit draws the audit log tail pane that lives below the body panes.
-// Lines are shown newest-last (matching `tail -f` semantics) so the eye
-// naturally lands on the most recent event at the bottom of the pane.
+// renderAudit draws the audit log tail pane that lives at the bottom of the
+// center column, below Projects and Tasks. Lines are shown newest-last
+// (matching `tail -f` semantics) so the eye naturally lands on the most
+// recent event at the bottom of the pane.
 //
 // `height` is the total rows the pane should occupy. lipgloss.Height sets
 // content height (borders add 2), so we subtract the frame size before
