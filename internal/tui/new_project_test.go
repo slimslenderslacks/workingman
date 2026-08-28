@@ -21,21 +21,14 @@ func typeChars(t *testing.T, m model, s string) model {
 	return m
 }
 
+// focusProjectsPane focuses the projects pane directly. Pane focus is a pure
+// model field with no side effects of its own (⌥j/⌥k/⌥h/⌥l just reassign
+// it), so tests that only need "projects is focused" as setup can skip
+// simulating the navigation keys entirely.
 func focusProjectsPane(t *testing.T, m model) model {
 	t.Helper()
-	// Cycle pane focus forward (⌥j) until the projects pane is active. The
-	// default focus is sessions and the cycle now includes the audit pane, so
-	// the number of steps varies — loop rather than assume a fixed count.
-	for i := 0; i < 5; i++ {
-		if m.focus == paneProjects {
-			return m
-		}
-		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
-		m = step.(model)
-	}
-	if m.focus != paneProjects {
-		t.Fatalf("expected projects focus after cycling, got %v", m.focus)
-	}
+	m.focus = paneProjects
+	m.lastCenterFocus = paneProjects
 	return m
 }
 

@@ -63,17 +63,16 @@ func withTaskFixtures(t *testing.T) (m model, taskAPath, taskBPath string) {
 	return m, taskAPath, taskBPath
 }
 
+// focusPane focuses the given pane directly. Pane focus is a pure model
+// field with no side effects of its own, so tests that only need a
+// particular pane focused as setup can skip simulating the alt-h/alt-j/
+// alt-k/alt-l navigation keys entirely.
 func focusPane(t *testing.T, m model, target pane) model {
 	t.Helper()
-	for i := 0; i < 5; i++ {
-		if m.focus == target {
-			return m
-		}
-		// Down cycles pane focus forward (replaced the former Tab key).
-		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
-		m = step.(model)
+	m.focus = target
+	if target == paneProjects || target == paneTasks {
+		m.lastCenterFocus = target
 	}
-	t.Fatalf("could not focus %v in 5 presses (current=%v)", target, m.focus)
 	return m
 }
 
@@ -91,18 +90,84 @@ func TestTaskViewCarriesPathFromDisk(t *testing.T) {
 	}
 }
 
-func TestDownCyclesPanes(t *testing.T) {
+// TestAltJKOnlyCyclesCenterColumnPanes covers the reworked alt-j/alt-k scope:
+// now that Tasks lives in the center column alongside Projects, alt-j/alt-k
+// only toggles focus between those two — it no longer reaches Sessions, the
+// YAML viewer, or Audit (alt-h/alt-l own the side columns; Audit is
+// click-only — see handleMouse).
+func TestAltJKOnlyCyclesCenterColumnPanes(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
-	// Visual order top-to-bottom is projects → tasks → yaml → sessions →
-	// audit, so down from the default (sessions) cycles: audit → projects →
-	// tasks → yaml → sessions.
-	want := []pane{paneAudit, paneProjects, paneTasks, paneProjectYAML, paneSessions}
-	for i, expected := range want {
+	m = focusPane(t, m, paneProjects)
+
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
+	m = step.(model)
+	if m.focus != paneTasks {
+		t.Fatalf("alt-j from projects: focus = %v, want paneTasks", m.focus)
+	}
+
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}, Alt: true})
+	m = step.(model)
+	if m.focus != paneProjects {
+		t.Fatalf("alt-k from tasks: focus = %v, want paneProjects", m.focus)
+	}
+
+	// A no-op everywhere else.
+	for _, p := range []pane{paneSessions, paneProjectYAML, paneAudit} {
+		m = focusPane(t, m, p)
 		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
 		m = step.(model)
-		if m.focus != expected {
-			t.Errorf("down #%d focus = %v, want %v", i+1, m.focus, expected)
+		if m.focus != p {
+			t.Errorf("alt-j from %v: focus = %v, want it to stay put", p, m.focus)
 		}
+	}
+}
+
+// TestAltHAltLSwitchColumns covers the new column-switch keys: alt-h toggles
+// focus between the center column and the sessions column (left), alt-l
+// between the center column and the YAML viewer column (right). Both are a
+// no-op when the target column is toggled off, and returning to center
+// restores whichever of Projects/Tasks was last focused there.
+func TestAltHAltLSwitchColumns(t *testing.T) {
+	m, _, _ := withTaskFixtures(t)
+	m = focusPane(t, m, paneTasks)
+
+	altH := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}, Alt: true}
+	altL := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}, Alt: true}
+
+	step, _ := m.Update(altH)
+	m = step.(model)
+	if m.focus != paneSessions {
+		t.Fatalf("alt-h from tasks: focus = %v, want paneSessions", m.focus)
+	}
+	step, _ = m.Update(altH)
+	m = step.(model)
+	if m.focus != paneTasks {
+		t.Fatalf("alt-h back from sessions: focus = %v, want paneTasks (lastCenterFocus)", m.focus)
+	}
+
+	step, _ = m.Update(altL)
+	m = step.(model)
+	if m.focus != paneProjectYAML {
+		t.Fatalf("alt-l from tasks: focus = %v, want paneProjectYAML", m.focus)
+	}
+	step, _ = m.Update(altL)
+	m = step.(model)
+	if m.focus != paneTasks {
+		t.Fatalf("alt-l back from yaml: focus = %v, want paneTasks (lastCenterFocus)", m.focus)
+	}
+
+	// Toggled-off side columns make alt-h/alt-l a no-op.
+	m.leftVisible = false
+	m.rightVisible = false
+	step, _ = m.Update(altH)
+	m = step.(model)
+	if m.focus != paneTasks {
+		t.Errorf("alt-h with left column hidden: focus = %v, want it to stay paneTasks", m.focus)
+	}
+	step, _ = m.Update(altL)
+	m = step.(model)
+	if m.focus != paneTasks {
+		t.Errorf("alt-l with right column hidden: focus = %v, want it to stay paneTasks", m.focus)
 	}
 }
 
@@ -267,11 +332,11 @@ func TestFooterAdvertisesPTToggle(t *testing.T) {
 func TestMouseClickOnTaskRowSelectsIt(t *testing.T) {
 	m, taskAPath, taskBPath := withTaskFixtures(t)
 	l := m.computeLayout()
-	// Tasks is now the right column, starting at x = leftW+centerW. Inside
-	// it: row 0 top border, row 1 column header, row 2 the first task, row 3
-	// the second task.
-	clickX := l.leftW + l.centerW + 5
-	clickY := 3
+	// Tasks is now stacked in the center column below Projects, starting at
+	// y = l.projectsH. Inside its own band: row 0 top border, row 1 column
+	// header, row 2 the first task, row 3 the second task.
+	clickX := l.leftW + 5
+	clickY := l.projectsH + 3
 	step, _ := m.Update(tea.MouseMsg{
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,

@@ -1,10 +1,11 @@
 // Package tui hosts the orch terminal UI. The body is three columns: an
 // optional left column listing agent sessions (toggled by "tl"), a center
-// column with the projects gallery and an optional YAML viewer, and an
-// optional right column listing the selected project's tasks (toggled by
-// "tr"). All three reflect live state — projects from the .project.yaml
-// files scanned by WatchProjects, sessions from a channel the daemon feeds
-// in via its WatchSessions adapter.
+// column stacking the projects gallery and the selected project's tasks,
+// and an optional right column showing the project/task YAML viewer
+// (toggled by "tr"), sized to half the terminal's width. All three reflect
+// live state — projects from the .project.yaml files scanned by
+// WatchProjects, sessions from a channel the daemon feeds in via its
+// WatchSessions adapter.
 package tui
 
 import (
@@ -221,11 +222,20 @@ type model struct {
 	interactive InteractiveLauncher
 
 	// leftVisible / rightVisible show or hide the sessions-as-left-column and
-	// tasks-as-right-column panes. Both default true (the full three-column
-	// layout) and are flipped by the "tl" / "tr" chords so the user can
-	// reclaim horizontal space for the center column (projects + YAML).
+	// YAML-viewer-as-right-column panes. Both default true (the full
+	// three-column layout) and are flipped by the "tl" / "tr" chords so the
+	// user can reclaim horizontal space for the center column (projects +
+	// tasks).
 	leftVisible  bool
 	rightVisible bool
+
+	// lastCenterFocus remembers which center-column pane (Projects or Tasks)
+	// last held focus, so alt-h/alt-l can return focus there when the user
+	// leaves a side column back to the center column. Set in newModel and
+	// kept up to date wherever focus moves onto Projects or Tasks (see
+	// focusLeftColumn / focusRightColumn / cycleCenterFocus /
+	// handleCenterClick).
+	lastCenterFocus pane
 
 	// pendingKey holds a chord's first keystroke while handleNormalKey waits
 	// to see whether the next key completes it. Currently only "t" starts a
@@ -245,15 +255,16 @@ func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh 
 	// to the empty state so the pane shows "(none)" instead of an endless
 	// "(loading…)".
 	return model{
-		focus:        paneSessions,
-		projCh:       projCh,
-		sessCh:       sessCh,
-		auditCh:      auditCh,
-		sessLoaded:   sessCh == nil,
-		attacher:     attacher,
-		wspRemover:   workspace.NewWsp(),
-		leftVisible:  true,
-		rightVisible: true,
+		focus:           paneSessions,
+		projCh:          projCh,
+		sessCh:          sessCh,
+		auditCh:         auditCh,
+		sessLoaded:      sessCh == nil,
+		attacher:        attacher,
+		wspRemover:      workspace.NewWsp(),
+		leftVisible:     true,
+		rightVisible:    true,
+		lastCenterFocus: paneProjects,
 	}
 }
 
@@ -508,21 +519,37 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m = m.pageYAML(-page)
 		}
 		m.statusMsg = ""
-	case "alt+j", "∆":
-		// ⌥j/⌥k shift focus between the stacked panes ("tabs"), matching the
-		// in-pane j/k direction: ⌥j moves to the next pane DOWN the stack, ⌥k
-		// to the previous one UP. Selection within a pane is j/k (see above);
-		// cursor keys are unbound.
+	case "alt+j", "∆", "alt+k", "˚":
+		// ⌥j/⌥k shift focus between the two panes stacked in the center
+		// column — Projects and Tasks — and nowhere else: they no longer
+		// reach Sessions, the YAML viewer, or Audit now that those live in
+		// their own side columns (alt-h/alt-l, below) or, for Audit, are
+		// reached by clicking it (see handleMouse). A no-op while focus is
+		// already on a side column or Audit, since there's no "up/down"
+		// relationship between those and the center stack.
 		//
 		// "∆"/"˚" are the glyphs a default macOS terminal emits for Option-j /
 		// Option-k when Option isn't configured as a Meta key — accepting them
 		// too means the binding works out of the box there, while "alt+j"/
 		// "alt+k" covers terminals that do send Meta (or tmux with xterm-keys).
-		m.focus = togglePane(m.focus)
+		m = m.cycleCenterFocus()
 		m.statusMsg = ""
-	case "alt+k", "˚":
-		m.focus = shiftTogglePane(m.focus)
-		m.statusMsg = ""
+	case "alt+h", "˙":
+		// ⌥h shifts focus onto the sessions column (left) when it's visible,
+		// or back to the center column if focus is already on it. See
+		// focusLeftColumn/focusCenterColumn.
+		if m.focus == paneSessions {
+			m = m.focusCenterColumn()
+		} else {
+			m = m.focusLeftColumn()
+		}
+	case "alt+l", "¬":
+		// ⌥l is the mirror image of ⌥h for the YAML-viewer column (right).
+		if m.focus == paneProjectYAML {
+			m = m.focusCenterColumn()
+		} else {
+			m = m.focusRightColumn()
+		}
 	case "z":
 		// Toggle maximize of the focused pane: fill the body with it, or
 		// restore the normal stacked layout if it's already maximized.
@@ -608,7 +635,7 @@ func (m model) yamlViewport() (innerWidth, contentRows int, ok bool) {
 		return 0, 0, false
 	}
 	bs := m.borderStyle(paneProjectYAML)
-	innerWidth = l.centerW - bs.GetHorizontalFrameSize()
+	innerWidth = l.rightW - bs.GetHorizontalFrameSize()
 	contentRows = l.yamlH - bs.GetVerticalFrameSize()
 	if innerWidth < 0 {
 		innerWidth = 0
@@ -705,18 +732,23 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleMouse routes a mouse event to its pane. The body is three columns
-// side by side — sessions (left, optional), projects+YAML (center), tasks
-// (right, optional) — so X picks the column first; Y then picks the pane/row
-// within it, with the center column additionally stacking projects above the
-// optional YAML viewer.
+// side by side — sessions (left, optional), projects+tasks (center), the
+// project/task YAML viewer (right, optional) — so X picks the column first;
+// Y then picks the pane/row within it, with the center column additionally
+// stacking projects above tasks. The audit strip spans the full width below
+// all three columns and has no keyboard path onto it now that alt-j/alt-k is
+// scoped to the center column's Projects/Tasks stack (see
+// cycleCenterFocus), so a click is the only way to focus it — the same
+// affordance every other pane already has.
 //
 //   - Sessions column (left, optional): focus + select the box under the
 //     cursor and immediately attach to it (click-to-attach UX).
 //   - Projects pane (center, top): focus + select the card under the cursor.
-//   - Project-YAML pane (center, optional, below projects): focus only; the
-//     body is read-only and scrolled via keyboard.
-//   - Tasks column (right, optional): focus + select the task row under the
-//     cursor.
+//   - Tasks pane (center, below projects): focus + select the task row under
+//     the cursor.
+//   - Project/task YAML column (right, optional): focus only; the body is
+//     read-only and scrolled via keyboard.
+//   - Audit strip (bottom, full width, optional): focus only.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
@@ -726,15 +758,21 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	// While a pane is maximized the column math below doesn't apply (only
 	// one pane is on screen), so click-routing is a no-op — keyboard drives
-	// the zoomed pane. `z` or alt-j/alt-k returns to the grid.
+	// the zoomed pane. `z` or alt-h/alt-j/alt-k/alt-l returns to the grid.
 	if m.zoomed {
 		return m, nil
 	}
 	l := m.computeLayout()
 
-	// Horizontal layout (left → right): sessions, center (projects/yaml),
-	// tasks. The bands here mirror View()'s JoinHorizontal exactly so click
-	// routing and rendering can't drift.
+	if l.auditH > 0 && msg.Y >= l.bodyH && msg.Y < l.bodyH+l.auditH {
+		m.focus = paneAudit
+		m.statusMsg = ""
+		return m, nil
+	}
+
+	// Horizontal layout (left → right): sessions, center (projects/tasks),
+	// the YAML viewer. The bands here mirror View()'s JoinHorizontal exactly
+	// so click routing and rendering can't drift.
 	centerStart := l.leftW
 	rightStart := centerStart + l.centerW
 
@@ -742,7 +780,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.handleSessionsClick(msg.Y, l)
 	}
 	if l.rightW > 0 && msg.X >= rightStart {
-		return m.handleTasksClick(msg.Y, l)
+		return m.handleYAMLClick()
 	}
 	return m.handleCenterClick(msg.X-centerStart, msg.Y, l)
 }
@@ -764,32 +802,21 @@ func (m model) handleSessionsClick(y int, l uiLayout) (tea.Model, tea.Cmd) {
 	return m.attachSelected()
 }
 
-// handleTasksClick maps a click at row y (relative to the top of the body)
-// to a task row in the right column and, on a hit, focuses the pane and
-// selects that task.
-func (m model) handleTasksClick(y int, l uiLayout) (tea.Model, tea.Cmd) {
-	m.focus = paneTasks
+// handleYAMLClick focuses the project/task YAML column. The pane is
+// read-only and scrolled via keyboard, so — unlike Projects/Tasks/Sessions —
+// a click only changes focus; there's nothing in it to select.
+func (m model) handleYAMLClick() (tea.Model, tea.Cmd) {
+	m.focus = paneProjectYAML
 	m.statusMsg = ""
-	tasks := m.selectedProjectTasks()
-	// The column may be scrolled (centered on the selection), so map the
-	// clicked visible row through the same window the renderer used.
-	start, end := centerWindow(len(tasks), taskIndex(tasks, m.taskSel), listMaxRows(l.tasksH))
-	if rel := taskRowAtY(y, 0, end-start); rel >= 0 {
-		prev := m.taskSel
-		m.taskSel = tasks[start+rel].Path
-		if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
-			m.yamlScroll = 0
-		}
-	}
 	return m, nil
 }
 
 // handleCenterClick maps a click at (xRel, y) — coordinates relative to the
 // center column's own top-left corner — to the projects pane (top) or the
-// optional YAML viewer stacked below it.
+// tasks pane stacked below it.
 func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 	projectsEnd := l.projectsH
-	yamlEnd := projectsEnd + l.yamlH
+	tasksEnd := projectsEnd + l.tasksH
 
 	if y < projectsEnd {
 		innerW := l.centerW - unfocusedBorder.GetHorizontalFrameSize()
@@ -798,6 +825,7 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 		}
 		idx := projectCardAtPoint(xRel, y, innerW, len(m.projects))
 		m.focus = paneProjects
+		m.lastCenterFocus = paneProjects
 		m.statusMsg = ""
 		if idx < 0 || idx >= len(m.projects) {
 			return m, nil
@@ -811,15 +839,30 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, nil
 	}
-	if l.yamlH > 0 && y < yamlEnd {
-		m.focus = paneProjectYAML
+	if l.tasksH > 0 && y < tasksEnd {
+		m.focus = paneTasks
+		m.lastCenterFocus = paneTasks
 		m.statusMsg = ""
+		tasks := m.selectedProjectTasks()
+		// The pane may be scrolled (centered on the selection), so map the
+		// clicked visible row through the same window the renderer used. y is
+		// relative to the center column's top, so shift it down by
+		// projectsEnd to make it relative to the tasks pane's own top.
+		start, end := centerWindow(len(tasks), taskIndex(tasks, m.taskSel), listMaxRows(l.tasksH))
+		if rel := taskRowAtY(y-projectsEnd, 0, end-start); rel >= 0 {
+			prev := m.taskSel
+			m.taskSel = tasks[start+rel].Path
+			if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
+				m.yamlScroll = 0
+			}
+		}
 		return m, nil
 	}
 	// Click below every pane in the center column (only reachable when the
-	// YAML pane is absent and projects doesn't fill the column). Focus
-	// projects as a safe default so j/k still does something sensible.
+	// tasks pane doesn't fill the column). Focus projects as a safe default
+	// so j/k still does something sensible.
 	m.focus = paneProjects
+	m.lastCenterFocus = paneProjects
 	return m, nil
 }
 
@@ -955,39 +998,65 @@ func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 	return idx
 }
 
-// togglePane cycles forward through the focusable panes in a fixed logical
-// order — projects → tasks → project-YAML → sessions → audit → projects —
-// independent of the on-screen layout, which now splits sessions and tasks
-// out into their own left/right columns. shiftTogglePane is the inverse
-// cycle.
-func togglePane(p pane) pane {
-	switch p {
+// cycleCenterFocus toggles focus between the two panes stacked in the center
+// column — Projects and Tasks — bound to alt-j/alt-k now that Tasks has
+// moved out of the standalone right column into the center stack alongside
+// Projects. A no-op when focus is on a side column or Audit; alt-h/alt-l
+// (focusLeftColumn/focusRightColumn/focusCenterColumn) own moving focus onto
+// and off of the center column. With just two panes there's no distinct
+// forward/backward direction, so alt-j and alt-k both call this the same
+// way.
+func (m model) cycleCenterFocus() model {
+	switch m.focus {
 	case paneProjects:
-		return paneTasks
+		m.focus = paneTasks
 	case paneTasks:
-		return paneProjectYAML
-	case paneProjectYAML:
-		return paneSessions
-	case paneSessions:
-		return paneAudit
-	default: // paneAudit
-		return paneProjects
+		m.focus = paneProjects
+	default:
+		return m
 	}
+	m.lastCenterFocus = m.focus
+	return m
 }
 
-func shiftTogglePane(p pane) pane {
-	switch p {
-	case paneProjects:
-		return paneAudit
-	case paneAudit:
-		return paneSessions
-	case paneSessions:
-		return paneProjectYAML
-	case paneProjectYAML:
-		return paneTasks
-	default: // paneTasks
-		return paneProjects
+// focusLeftColumn shifts focus onto the sessions column (alt-h), remembering
+// the center-column pane to return to (see lastCenterFocus). A no-op when
+// the left column is toggled off — alt-h then does nothing rather than
+// focusing a pane that isn't on screen.
+func (m model) focusLeftColumn() model {
+	if !m.leftVisible {
+		return m
 	}
+	if m.focus == paneProjects || m.focus == paneTasks {
+		m.lastCenterFocus = m.focus
+	}
+	m.focus = paneSessions
+	m.statusMsg = ""
+	return m
+}
+
+// focusRightColumn shifts focus onto the project/task YAML column (alt-l),
+// remembering the center-column pane to return to. A no-op when the right
+// column is toggled off.
+func (m model) focusRightColumn() model {
+	if !m.rightVisible {
+		return m
+	}
+	if m.focus == paneProjects || m.focus == paneTasks {
+		m.lastCenterFocus = m.focus
+	}
+	m.focus = paneProjectYAML
+	m.statusMsg = ""
+	return m
+}
+
+// focusCenterColumn returns focus to whichever center-column pane was last
+// focused there (see lastCenterFocus). Used when alt-h/alt-l moves away from
+// the side column that key just put focus on.
+func (m model) focusCenterColumn() model {
+	m.focus = m.lastCenterFocus
+	m.statusMsg = ""
+	return m
 }
 
 var (
@@ -1646,37 +1715,41 @@ const auditPaneHeight = 10
 // it can't drift when a card changes height.
 const projectsMinHeight = paneChromeRows + cardDisplayRows
 
-// tasksMinHeight is the floor for the tasks column. 4 rows = top border +
-// column header + 1 task row + bottom border. Below this the table can't
-// show even one task underneath the column headers; it's also used as the
-// right column's overall height floor (rightColumnMinHeight).
+// tasksMinHeight is the floor for the tasks pane stacked below projects in
+// the center column. 4 rows = top border + column header + 1 task row +
+// bottom border. Below this the table can't show even one task underneath
+// the column headers, and splitCenterColumn drops the pane entirely,
+// falling back to projects alone.
 const tasksMinHeight = 4
 
-// yamlMinHeight is the floor for the project-YAML pane stacked below
-// projects in the center column. 3 rows = top border + 1 content line +
-// bottom border. Below this we drop the pane entirely and fall back to
-// projects alone, the way it was before the YAML viewer existed.
+// yamlMinHeight is the floor for the project/task YAML pane — now the right
+// column's own single pane ("tr") rather than a pane stacked in the center
+// column. 3 rows = top border + 1 content line + bottom border. Below this
+// the column is dropped entirely rather than rendered unusably short; it
+// also doubles as rightColumnMinHeight below.
 const yamlMinHeight = 3
 
-// leftColumnWidth / rightColumnWidth are the target widths for the sessions
-// (left, "tl") and tasks (right, "tr") columns when their toggle is on.
-// minCenterWidth is the floor the center column (projects + YAML) must keep;
-// a column is dropped for this render — independent of its own toggle state
-// — when giving it its target width would starve the center column below
-// that floor, so it reappears automatically once the terminal widens again.
+// leftColumnWidth is the target width for the sessions column (left, "tl")
+// when its toggle is on. The YAML-viewer column (right, "tr") has no fixed
+// target width of its own — it's sized to half the current terminal width,
+// computed live in computeLayout, so it stays proportional as the terminal
+// resizes. minCenterWidth is the floor the center column (projects + tasks)
+// must keep; a column is dropped for this render — independent of its own
+// toggle state — when giving it its width would starve the center column
+// below that floor, so it reappears automatically once the terminal widens
+// again.
 const (
-	leftColumnWidth  = 34
-	rightColumnWidth = 70
-	minCenterWidth   = 24
+	leftColumnWidth = 34
+	minCenterWidth  = 24
 )
 
 // leftColumnMinHeight / rightColumnMinHeight are the height floors below
 // which a column is dropped entirely rather than rendered unusably short:
 // enough for the sessions column to show one full session box, or for the
-// tasks table to show its header plus one row.
+// YAML pane to show its border plus one content line.
 const (
 	leftColumnMinHeight  = paneChromeRows + sessionBoxHeight
-	rightColumnMinHeight = tasksMinHeight
+	rightColumnMinHeight = yamlMinHeight
 )
 
 // uiLayout caches the computed dimensions of every pane for a given window
@@ -1684,17 +1757,17 @@ const (
 // click-routing math stay in lockstep.
 //
 // The body is three columns side by side: an optional left column (sessions,
-// "tl"), a center column stacking projects (top) and the optional
-// project/task YAML viewer (bottom), and an optional right column (tasks,
-// "tr"). leftW/rightW are 0 when the corresponding column is toggled off or
-// the terminal is too narrow to give it room without starving the center
-// column; yamlH is 0 when the terminal is too short to fit both center panes.
-// The audit strip and footer span the full width (bodyW) below all three
-// columns.
+// "tl"), a center column stacking projects (top) and tasks (bottom), and an
+// optional right column holding the project/task YAML viewer ("tr"), sized
+// to half the terminal's current width. leftW/rightW are 0 when the
+// corresponding column is toggled off or the terminal is too narrow to give
+// it room without starving the center column; tasksH is 0 when the terminal
+// is too short to fit both center panes. The audit strip and footer span the
+// full width (bodyW) below all three columns.
 type uiLayout struct {
 	bodyW, bodyH                                int
 	leftW, centerW, rightW                      int
-	projectsH, yamlH, sessionsH, tasksH, auditH int
+	projectsH, tasksH, sessionsH, yamlH, auditH int
 }
 
 func (m model) computeLayout() uiLayout {
@@ -1728,22 +1801,29 @@ func (m model) computeLayout() uiLayout {
 		leftW = leftColumnWidth
 	}
 	rightW := 0
-	if m.rightVisible && bodyH >= rightColumnMinHeight && bodyW-leftW-rightColumnWidth >= minCenterWidth {
-		rightW = rightColumnWidth
+	if m.rightVisible && bodyH >= rightColumnMinHeight {
+		// The YAML column is half the terminal's current width rather than a
+		// fixed constant (see leftColumnWidth's doc comment above), so it's
+		// recomputed here every render instead of being a package-level
+		// const like leftColumnWidth.
+		candidate := bodyW / 2
+		if bodyW-leftW-candidate >= minCenterWidth {
+			rightW = candidate
+		}
 	}
 	centerW := bodyW - leftW - rightW
 	if centerW < 0 {
 		centerW = 0
 	}
 
-	projH, yamlH := splitCenterColumn(bodyH, centerW, len(m.projects))
+	projH, tasksH := splitCenterColumn(bodyH, centerW, len(m.projects))
 
-	leftH, tasksH := 0, 0
+	leftH, yamlH := 0, 0
 	if leftW > 0 {
 		leftH = bodyH
 	}
 	if rightW > 0 {
-		tasksH = bodyH
+		yamlH = bodyH
 	}
 
 	return uiLayout{
@@ -1753,25 +1833,26 @@ func (m model) computeLayout() uiLayout {
 		centerW:   centerW,
 		rightW:    rightW,
 		projectsH: projH,
-		yamlH:     yamlH,
-		sessionsH: leftH,
 		tasksH:    tasksH,
+		sessionsH: leftH,
+		yamlH:     yamlH,
 		auditH:    audit,
 	}
 }
 
 // splitCenterColumn divides the center column's bodyH rows between projects
-// (top) and the YAML viewer (bottom).
+// (top) and tasks (bottom).
 //
 // Sizing strategy: projects grows to whatever height it would need to render
-// every card without truncation (see desiredProjectsHeight), capped so yaml
+// every card without truncation (see desiredProjectsHeight), capped so tasks
 // still gets at least its minimum. When there isn't room for both at their
-// minimums, the YAML pane is dropped and projects takes the rest — the same
-// fallback used before the YAML viewer existed.
+// minimums, the tasks pane is dropped and projects takes the rest — the same
+// fallback the YAML viewer used to get before tasks took its place in the
+// center column.
 //
 // All clamps prefer fitting within bodyH over hitting the per-pane minimums
 // so the center column never overflows the audit footer below it.
-func splitCenterColumn(bodyH, centerW, projCount int) (proj, yaml int) {
+func splitCenterColumn(bodyH, centerW, projCount int) (proj, tasks int) {
 	if bodyH <= 0 {
 		return 0, 0
 	}
@@ -1779,8 +1860,8 @@ func splitCenterColumn(bodyH, centerW, projCount int) (proj, yaml int) {
 	if desired < projectsMinHeight {
 		desired = projectsMinHeight
 	}
-	if bodyH >= projectsMinHeight+yamlMinHeight {
-		maxProj := bodyH - yamlMinHeight
+	if bodyH >= projectsMinHeight+tasksMinHeight {
+		maxProj := bodyH - tasksMinHeight
 		proj = desired
 		if proj > maxProj {
 			proj = maxProj
@@ -1788,10 +1869,10 @@ func splitCenterColumn(bodyH, centerW, projCount int) (proj, yaml int) {
 		if proj < projectsMinHeight {
 			proj = projectsMinHeight
 		}
-		yaml = bodyH - proj
-		return proj, yaml
+		tasks = bodyH - proj
+		return proj, tasks
 	}
-	// Not enough room for the YAML pane; projects takes everything.
+	// Not enough room for the tasks pane; projects takes everything.
 	proj = bodyH
 	if proj < 1 {
 		proj = 1
@@ -1896,8 +1977,8 @@ func (m model) View() string {
 	l := m.computeLayout()
 
 	centerPanes := []string{m.renderProjects(l.centerW, l.projectsH)}
-	if l.yamlH > 0 {
-		centerPanes = append(centerPanes, m.renderProjectYAML(l.centerW, l.yamlH))
+	if l.tasksH > 0 {
+		centerPanes = append(centerPanes, m.renderTasks(l.centerW, l.tasksH))
 	}
 	center := lipgloss.JoinVertical(lipgloss.Left, centerPanes...)
 
@@ -1907,7 +1988,7 @@ func (m model) View() string {
 	}
 	columns = append(columns, center)
 	if l.rightW > 0 {
-		columns = append(columns, m.renderTasks(l.rightW, l.tasksH))
+		columns = append(columns, m.renderProjectYAML(l.rightW, l.yamlH))
 	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top, columns...)
 
@@ -2292,7 +2373,7 @@ func (m model) renderFooter() string {
 		if m.zoomed {
 			zoomHint = "z: restore panes"
 		}
-		base := "⌥j/⌥k: switch pane  •  j/k: select in pane  •  " + zoomHint + "  •  p/t: project/task yaml  •  tl/tr: toggle sessions/tasks column  •  enter/click: attach  •  q: quit"
+		base := "⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  p/t: project/task yaml  •  tl/tr: toggle sessions/yaml column  •  enter/click: attach  •  q: quit"
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}
@@ -2316,7 +2397,9 @@ func paneName(p pane) string {
 		return "yaml"
 	case paneTasks:
 		return "tasks"
-	default:
+	case paneAudit:
+		return "audit"
+	default: // paneProjects
 		return "work streams"
 	}
 }

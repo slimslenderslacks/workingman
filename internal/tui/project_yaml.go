@@ -7,7 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// renderProjectYAML draws the bottom pane of the right column: a scrollable
+// renderProjectYAML draws the optional right column ("tr"): a scrollable
 // viewer that shows either the currently-selected project's .project.yaml
 // or the selected task's YAML file. The choice is driven by m.yamlSrc,
 // toggled with the p / t keys, so the viewer's content is decoupled from

@@ -453,9 +453,12 @@ func TestRenderArchivedProjectCardStaysIntact(t *testing.T) {
 
 // TestOptionGlyphSwitchesPane covers the macOS Option-key fallback: a default
 // macOS terminal emits "∆"/"˚" for ⌥j/⌥k (no Meta), so those glyphs must
-// switch panes just like "alt+j"/"alt+k".
+// switch panes just like "alt+j"/"alt+k". alt-j/alt-k only toggles within the
+// center column (see cycleCenterFocus), so the model must already be
+// focused there for the glyphs to have any effect.
 func TestOptionGlyphSwitchesPane(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m.focus = paneProjects
 	start := m.focus
 	// "˚" (⌥k) advances focus like alt+k.
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'˚'}})
@@ -468,5 +471,25 @@ func TestOptionGlyphSwitchesPane(t *testing.T) {
 	m = step.(model)
 	if m.focus != start {
 		t.Errorf("⌥j glyph should invert ⌥k: focus = %v, want %v", m.focus, start)
+	}
+}
+
+// TestOptionGlyphSwitchesColumn covers the same macOS Option-key fallback
+// for the column-switch keys: a default macOS terminal emits "˙"/"¬" for
+// ⌥h/⌥l (no Meta), so those glyphs must switch columns just like
+// "alt+h"/"alt+l".
+func TestOptionGlyphSwitchesColumn(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m.focus = paneProjects // default focus (paneSessions) is already the alt-h target
+
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'˙'}})
+	m = step.(model)
+	if m.focus != paneSessions {
+		t.Fatalf("˙ glyph did not switch to sessions column: focus = %v", m.focus)
+	}
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'¬'}})
+	m = step.(model)
+	if m.focus != paneProjectYAML {
+		t.Fatalf("¬ glyph did not switch to yaml column: focus = %v", m.focus)
 	}
 }

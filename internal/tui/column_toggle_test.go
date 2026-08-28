@@ -126,8 +126,66 @@ func TestFooterAdvertisesColumnToggle(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
-	if !strings.Contains(m.View(), "tl/tr") {
-		t.Errorf("footer should advertise the tl/tr column toggle; got:\n%s", m.View())
+	view := m.View()
+	if !strings.Contains(view, "tl/tr") {
+		t.Errorf("footer should advertise the tl/tr column toggle; got:\n%s", view)
+	}
+	// "tr" now toggles the YAML viewer as the right column, not the task
+	// list (which moved into the center column — see TestTaskPaneMovedToCenterColumn).
+	if !strings.Contains(view, "sessions/yaml") {
+		t.Errorf("footer should describe tl/tr as toggling sessions/yaml columns; got:\n%s", view)
+	}
+	if !strings.Contains(view, "⌥h/⌥l") {
+		t.Errorf("footer should advertise the ⌥h/⌥l column-switch keys; got:\n%s", view)
+	}
+}
+
+// TestRightColumnWidthIsHalfTerminalWidth covers the requirement that the
+// YAML-viewer right column, unlike the fixed-width sessions column, is sized
+// to half of whatever the terminal's current width is — and stays that way
+// live across a resize.
+func TestRightColumnWidthIsHalfTerminalWidth(t *testing.T) {
+	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m.width, m.height = 200, 40
+
+	l := m.computeLayout()
+	if want := m.width / 2; l.rightW != want {
+		t.Errorf("rightW = %d, want %d (half of terminal width %d)", l.rightW, want, m.width)
+	}
+
+	m.width = 300
+	l = m.computeLayout()
+	if want := m.width / 2; l.rightW != want {
+		t.Errorf("after resize: rightW = %d, want %d (half of terminal width %d)", l.rightW, want, m.width)
+	}
+}
+
+// TestTaskPaneMovedToCenterColumn is the layout-level companion to the
+// pane-assignment change: Tasks now stacks in the center column below
+// Projects, sized by splitCenterColumn, while the right column ("tr") holds
+// the YAML viewer instead.
+func TestTaskPaneMovedToCenterColumn(t *testing.T) {
+	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m.width, m.height = 200, 40
+	m.projects = []ProjectView{{
+		Name:   "p",
+		Path:   "/p",
+		Status: "working",
+		Tasks:  []TaskView{{Name: "zzztask", Path: "/p/tasks/t.yaml", Status: "ready"}},
+	}}
+	m.projSel = "/p"
+
+	l := m.computeLayout()
+	if l.tasksH <= 0 {
+		t.Fatalf("precondition: tasks should have room in the center column; tasksH=%d", l.tasksH)
+	}
+	if want := m.width / 2; l.rightW != want {
+		t.Fatalf("precondition: right column should be half the terminal width; rightW=%d, want %d", l.rightW, want)
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "zzztask") {
+		t.Errorf("view should render the selected project's tasks in the center column; got:\n%s", view)
 	}
 }
 
@@ -171,6 +229,32 @@ func TestComputeLayoutHidesColumnWhenTerminalTooNarrow(t *testing.T) {
 	l = m.computeLayout()
 	if l.leftW == 0 {
 		t.Error("leftW = 0, want it to reappear once the terminal is wide enough again")
+	}
+}
+
+// TestMouseClickOnAuditStripFocusesIt covers Audit's replacement for its old
+// keyboard path: alt-j/alt-k is now scoped to the center column's Projects/
+// Tasks stack (see cycleCenterFocus) and no longer reaches Audit, so a click
+// on the strip is the only way left to focus it — the same click-to-focus
+// affordance every other pane already has (see handleMouse).
+func TestMouseClickOnAuditStripFocusesIt(t *testing.T) {
+	m := newModel(nil, nil, make(<-chan []string), &fakeAttacher{})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
+	m = sized.(model)
+	l := m.computeLayout()
+	if l.auditH <= 0 {
+		t.Fatalf("precondition: audit strip should have room; auditH=%d", l.auditH)
+	}
+
+	final, _ := m.Update(tea.MouseMsg{
+		X:      5,
+		Y:      l.bodyH + 1,
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	})
+	m = final.(model)
+	if m.focus != paneAudit {
+		t.Errorf("click on audit strip should focus paneAudit, got %v", m.focus)
 	}
 }
 
