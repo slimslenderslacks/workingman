@@ -146,9 +146,13 @@ func TestArrowsLeaveProjectSelectionAloneWhenTasksFocused(t *testing.T) {
 
 func TestYAMLViewerShowsTaskFileAfterPressingT(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
-	// Default is project YAML; pressing t flips the source to the task.
+	// Default is project YAML; pressing t starts a possible "tl"/"tr" chord,
+	// which resolves to the plain YAML-source flip once chordTimeoutDelay
+	// elapses without a completing "l"/"r" (simulated here via resolveChord
+	// instead of a real sleep).
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	m = step.(model)
+	m = resolveChord(m)
 
 	view := m.View()
 	// Default selection is the first task alphabetically — "alpha". The task
@@ -176,9 +180,11 @@ func TestYAMLViewerSwapsTaskFilesOnSelectionChange(t *testing.T) {
 func TestYAMLViewerStaysOnTaskWhenFocusMovesAway(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
 	// Flip to task source; the viewer now shows task YAML (task content, not a
-	// pane title, is the tell now that titles are gone).
+	// pane title, is the tell now that titles are gone). "t" alone resolves
+	// to the flip once the chord timeout elapses (see resolveChord).
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	m = step.(model)
+	m = resolveChord(m)
 	if !strings.Contains(m.View(), "name: alpha") {
 		t.Fatalf("expected task YAML content after pressing t")
 	}
@@ -219,10 +225,12 @@ func TestYamlScrollResetsOnTaskSelectionChange(t *testing.T) {
 
 func TestYamlScrollResetsOnPTToggle(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
-	// Scroll into the project file, then flip to task source.
+	// Scroll into the project file, then flip to task source. "t" alone
+	// resolves to the flip once the chord timeout elapses (see resolveChord).
 	m.yamlScroll = 5
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	m = step.(model)
+	m = resolveChord(m)
 	if m.yamlScroll != 0 {
 		t.Errorf("yamlScroll = %d after t toggle, want 0 (different file)", m.yamlScroll)
 	}
@@ -259,17 +267,15 @@ func TestFooterAdvertisesPTToggle(t *testing.T) {
 func TestMouseClickOnTaskRowSelectsIt(t *testing.T) {
 	m, taskAPath, taskBPath := withTaskFixtures(t)
 	l := m.computeLayout()
-	// Tasks pane sits directly below projects in the new bottom-yaml
-	// layout: projectsH rows, then the tasks pane (no header row anymore).
-	tasksStart := l.projectsH
-	// Inside the tasks pane: row 0 top border, row 1 column header, row 2 the
-	// first task, row 3 the second task. So the second-task row is at
-	// tasksStart + 3.
-	clickY := tasksStart + 3
+	// Tasks is now the right column, starting at x = leftW+centerW. Inside
+	// it: row 0 top border, row 1 column header, row 2 the first task, row 3
+	// the second task.
+	clickX := l.leftW + l.centerW + 5
+	clickY := 3
 	step, _ := m.Update(tea.MouseMsg{
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
-		X:      5,
+		X:      clickX,
 		Y:      clickY,
 	})
 	m = step.(model)

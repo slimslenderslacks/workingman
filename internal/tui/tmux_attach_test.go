@@ -193,7 +193,7 @@ func TestAttachResultSuccessClearsStatusMsg(t *testing.T) {
 	}
 }
 
-func TestMouseClickAttachesSessionRow(t *testing.T) {
+func TestMouseClickAttachesSessionBox(t *testing.T) {
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -203,14 +203,9 @@ func TestMouseClickAttachesSessionRow(t *testing.T) {
 		{ID: "b", TmuxTarget: "orch:task-bravo"},
 	}})
 	m = step2.(model)
-	// Sessions is now the bottom pane; compute its absolute start-y from the
-	// layout so the click lands inside the pane regardless of how the stack
-	// above (projects/tasks/yaml) is sized.
-	l := m.computeLayout()
-	sessionsStartY := l.projectsH + l.tasksH + l.yamlH
-	// Row 1 (second session): paneTopBorder(1) + column header(1) + row 0(1)
-	// = offset 3 from the pane's top.
-	clickY := sessionsStartY + 3
+	// Sessions is the left column, starting at x=0/y=0. Box 0 (first session)
+	// occupies rows [1, 1+sessionBoxHeight); box 1 starts right after it.
+	clickY := 1 + sessionBoxHeight
 	final, cmd := m.Update(tea.MouseMsg{
 		X:      5,
 		Y:      clickY,
@@ -227,10 +222,9 @@ func TestMouseClickAttachesSessionRow(t *testing.T) {
 	}
 }
 
-func TestMouseClickAboveSessionsPaneDoesNotAttach(t *testing.T) {
-	// With the single-column layout, clicks above the sessions pane land in
-	// projects/tasks/yaml — never in sessions — so click-to-attach is gated
-	// to the bottom band.
+func TestMouseClickOutsideSessionsColumnDoesNotAttach(t *testing.T) {
+	// Sessions is the left column; a click further right lands in the center
+	// (projects/YAML) column and must not attach anything.
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -239,54 +233,52 @@ func TestMouseClickAboveSessionsPaneDoesNotAttach(t *testing.T) {
 		{ID: "a", TmuxTarget: "orch:task-alpha"},
 	}})
 	m = step2.(model)
-	// Click on the projects band (y=4 is well above the sessions pane).
+	l := m.computeLayout()
 	_, cmd := m.Update(tea.MouseMsg{
-		X:      5,
+		X:      l.leftW + 5,
 		Y:      4,
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 	})
 	_ = runCmd(t, cmd)
 	if len(att.targets) != 0 {
-		t.Errorf("targets = %v, want none (click outside sessions pane)", att.targets)
+		t.Errorf("targets = %v, want none (click outside sessions column)", att.targets)
 	}
 }
 
-func TestSessionRowAtYHandlesChromeAndOOB(t *testing.T) {
-	// Inside the sessions pane: top border(1) + column header(1) = 2 chrome
-	// rows. Each session is one data row, so row i lives at y = 2 + i (with
-	// paneStartY=0).
+func TestSessionBoxAtYHandlesChromeAndOOB(t *testing.T) {
+	// Inside the left column: top border(1), then one sessionBoxHeight-row
+	// band per session box (each box draws its own border, so there's no
+	// separate header chrome to skip, unlike the old table).
 	tests := []struct {
 		name  string
 		y     int
 		count int
 		want  int
 	}{
-		{"row 0", 2, 3, 0},
-		{"row 1", 3, 3, 1},
-		{"row 2", 4, 3, 2},
+		{"box 0 start", 1, 3, 0},
+		{"box 0 end", sessionBoxHeight, 3, 0},
+		{"box 1 start", sessionBoxHeight + 1, 3, 1},
 		{"top border", 0, 3, -1},
-		{"column header", 1, 3, -1},
 		{"above pane", -1, 3, -1},
-		{"past end", 5, 3, -1},
-		{"empty pane", 2, 0, -1},
+		{"past end", 1 + 3*sessionBoxHeight, 3, -1},
+		{"empty pane", 1, 0, -1},
 	}
 	for _, tc := range tests {
-		if got := sessionRowAtY(tc.y, 0, tc.count); got != tc.want {
-			t.Errorf("sessionRowAtY(%d, 0, %d) = %d, want %d (%s)",
+		if got := sessionBoxAtY(tc.y, 0, tc.count); got != tc.want {
+			t.Errorf("sessionBoxAtY(%d, 0, %d) = %d, want %d (%s)",
 				tc.y, tc.count, got, tc.want, tc.name)
 		}
 	}
 }
 
-func TestSessionRowAtYRespectsPaneStartY(t *testing.T) {
+func TestSessionBoxAtYRespectsPaneStartY(t *testing.T) {
 	// Shifting paneStartY by 20 should shift every band by 20 — i.e. the
-	// pane's vertical position is fully encoded in the argument. With 2
-	// chrome rows, row 0 is at y=22 and row 1 at y=23 when paneStartY=20.
-	if got := sessionRowAtY(22, 20, 2); got != 0 {
-		t.Errorf("sessionRowAtY(22, 20, 2) = %d, want 0", got)
+	// column's vertical position is fully encoded in the argument.
+	if got := sessionBoxAtY(21, 20, 2); got != 0 {
+		t.Errorf("sessionBoxAtY(21, 20, 2) = %d, want 0", got)
 	}
-	if got := sessionRowAtY(23, 20, 2); got != 1 {
-		t.Errorf("sessionRowAtY(23, 20, 2) = %d, want 1", got)
+	if got := sessionBoxAtY(21+sessionBoxHeight, 20, 2); got != 1 {
+		t.Errorf("sessionBoxAtY(%d, 20, 2) = %d, want 1", 21+sessionBoxHeight, got)
 	}
 }

@@ -90,7 +90,9 @@ func TestRenderProjectGridReflowsByWidth(t *testing.T) {
 
 func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Wide enough that the tasks right column has room for full task names
+	// alongside the sessions left column and the projects/YAML center column.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{
@@ -116,7 +118,9 @@ func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
 
 func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	// Wide enough that the tasks right column has room for full task names
+	// alongside the sessions left column and the projects/YAML center column.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 220, Height: 40})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{
@@ -168,7 +172,9 @@ func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
 
 func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Wide enough that the tasks right column has room for full task names
+	// alongside the sessions left column and the projects/YAML center column.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{
@@ -202,7 +208,9 @@ func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
 
 func TestRenderTasksEmptyState(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Wide enough that the tasks right column has room alongside the
+	// sessions left column and the projects/YAML center column.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{Name: "empty", Path: "/x/empty/.project.yaml", Status: project.StatusReady},

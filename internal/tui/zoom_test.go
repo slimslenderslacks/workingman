@@ -11,7 +11,9 @@ import (
 // pane. Default focus is paneSessions (see newModel).
 func zoomTestModel() model {
 	m := newModel(nil, nil, nil, &fakeAttacher{})
-	m.width, m.height = 120, 40
+	// Wide enough that the sessions left column and tasks right column both
+	// have room alongside the projects/YAML center column.
+	m.width, m.height = 200, 40
 	m.loaded = true
 	m.sessLoaded = true
 	m.projects = []ProjectView{{Name: "alpha", Path: "/a", Status: "working"}}
@@ -23,6 +25,16 @@ func zoomTestModel() model {
 
 func pressKey(m model, s string) model {
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)})
+	return next.(model)
+}
+
+// resolveChord simulates chordTimeoutDelay elapsing on the model's current
+// pending chord (if any), same as pressKey but for the timer path instead of
+// a keystroke. A lone "t" (not the start of "tl"/"tr") only takes effect once
+// it's clear no completing key is coming — in real usage that's the timeout
+// firing; tests trigger it directly instead of sleeping.
+func resolveChord(m model) model {
+	next, _ := m.Update(chordTimeoutMsg{seq: m.pendingSeq})
 	return next.(model)
 }
 
