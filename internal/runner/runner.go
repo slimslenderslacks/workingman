@@ -25,6 +25,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
+	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/prompts"
 	"github.com/slimslenderslacks/work/internal/session"
@@ -313,6 +314,20 @@ type Runner struct {
 	// SbxPath, when set, is forwarded to `acp-wrapper --sbx` so the wrapper
 	// uses a specific sbx binary. Empty lets the wrapper resolve sbx on PATH.
 	SbxPath string
+
+	// preflightRun runs the interactive-session signing preflight command
+	// (`sbx exec ... ssh-add -l`). Nil means use the real exec (gitsign.ExecRun);
+	// tests set it to avoid shelling out to sbx.
+	preflightRun gitsign.RunFunc
+}
+
+// signingPreflightRun returns the command runner used for the interactive
+// signing preflight, defaulting to a real exec when none was injected.
+func (r *Runner) signingPreflightRun() gitsign.RunFunc {
+	if r.preflightRun != nil {
+		return r.preflightRun
+	}
+	return gitsign.ExecRun
 }
 
 // UsesACP reports whether a Start for kind would take the ACP path (i.e. the
@@ -484,6 +499,20 @@ type InteractiveSpec struct {
 	Inner []string
 	// WindowName is the tmux window name inside the umbrella session.
 	WindowName string
+	// GitName/GitEmail are the host user's git identity. When both are set and
+	// SandboxName is set, LaunchInteractive injects them as GIT_AUTHOR_*/
+	// GIT_COMMITTER_* into `sbx exec` so commits made in the window are
+	// attributed to the user rather than the sandbox image's baked identity.
+	// Ignored for a host command (empty SandboxName).
+	GitName  string
+	GitEmail string
+	// SigningKey is the host user's SSH signing public key (user.signingkey),
+	// set only when the host is fully configured for SSH commit signing. When
+	// set (and SandboxName is set), LaunchInteractive preflights the sandbox's
+	// forwarded SSH agent and, if it holds the key, injects the git config that
+	// makes commits SSH-sign — mirroring the ACP commit agent so a `:session`
+	// user's commits are signed too. Ignored for a host command.
+	SigningKey string
 }
 
 // LaunchInteractive opens an interactive window in the umbrella tmux session
@@ -528,11 +557,35 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 		if sbxBin == "" {
 			sbxBin = "sbx"
 		}
+		// Teach the window to commit as the host user and, when the host signs,
+		// to SSH-sign — the same env the ACP commit agent injects. Signing is
+		// preflighted first: with commit.gpgsign forced on, a forwarded agent
+		// that holds no key (1Password locked, sandboxd restarted without it)
+		// would make every `git commit` in this interactive window hard-fail, so
+		// a failed preflight degrades to unsigned (signingKey cleared) exactly
+		// like acpwrapper.Run does for the commit agent.
+		signingKey := spec.SigningKey
+		if signingKey != "" {
+			if checked, ok := gitsign.Preflight(ctx, r.signingPreflightRun(), sbxBin, spec.SandboxName, signingKey); checked && !ok {
+				signingKey = ""
+				if r.Audit != nil {
+					r.Audit.Log("interactive_signing_disabled",
+						"sandbox", spec.SandboxName,
+						"reason", "forwarded SSH agent holds no key",
+					)
+				}
+			}
+		}
 		// `sbx exec` auto-starts the sandbox if it's stopped, so a persisted
 		// `:session` sandbox is reused (started + exec'd into) rather than
 		// recreated — DefaultSandboxCreator above already no-ops when a sandbox
 		// with the same name and mounts exists.
-		command = append([]string{sbxBin, "exec", "-it", "-w", spec.Cwd, spec.SandboxName}, spec.Inner...)
+		execArgs := []string{"exec", "-it", "-w", spec.Cwd}
+		execArgs = append(execArgs, gitsign.IdentityEnvArgs(spec.GitName, spec.GitEmail)...)
+		execArgs = append(execArgs, gitsign.SigningEnvArgs(signingKey)...)
+		execArgs = append(execArgs, spec.SandboxName)
+		execArgs = append(execArgs, spec.Inner...)
+		command = append([]string{sbxBin}, execArgs...)
 	}
 
 	sess, err := r.Launcher.Launch(ctx, agent.Spec{

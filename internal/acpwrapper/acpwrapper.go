@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
@@ -275,17 +276,10 @@ func (c Config) execArgs() []string {
 	// Commit as the host user without a local .git/config: passing the identity
 	// as environment overrides any git config (including the base image's baked
 	// `agent@orch.local`) for every git command in the session — author AND
-	// committer. We set all four so a commit is fully attributed; git falls back
-	// to its own config only when these are absent. Both fields must be present:
-	// a half-set identity is worse than the sandbox default.
-	if c.GitName != "" && c.GitEmail != "" {
-		args = append(args,
-			"-e", "GIT_AUTHOR_NAME="+c.GitName,
-			"-e", "GIT_AUTHOR_EMAIL="+c.GitEmail,
-			"-e", "GIT_COMMITTER_NAME="+c.GitName,
-			"-e", "GIT_COMMITTER_EMAIL="+c.GitEmail,
-		)
-	}
+	// committer. gitsign.IdentityEnvArgs sets all four so a commit is fully
+	// attributed (git falls back to its own config only when these are absent)
+	// and returns nothing unless both name and email are present.
+	args = append(args, gitsign.IdentityEnvArgs(c.GitName, c.GitEmail)...)
 	// Point `go` at a host-staged offline module cache when one exists, so the
 	// network-less sandbox can build/test code that depends on private
 	// github.com/docker/* modules. The cache is pre-populated on the host (which
@@ -304,26 +298,13 @@ func (c Config) execArgs() []string {
 			"-e", "GOPROXY=off",
 		)
 	}
-	// Inject SSH commit-signing config when the host is set up for it. Delivered
-	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n so it applies to every git invocation
-	// without writing a .git/config. gpg.ssh.program is forced to ssh-keygen: the
-	// host's configured signer may be a macOS/1Password binary (op-ssh-sign)
-	// absent in the Linux sandbox, so signing must run through ssh-keygen against
-	// the SSH agent sbx exposes inside the sandbox (SSH_AUTH_SOCK=/run/ssh-agent.sock,
-	// which we deliberately leave untouched — see the SigningKey field doc).
-	if c.SigningKey != "" {
-		args = append(args,
-			"-e", "GIT_CONFIG_COUNT=4",
-			"-e", "GIT_CONFIG_KEY_0=user.signingkey",
-			"-e", "GIT_CONFIG_VALUE_0="+c.SigningKey,
-			"-e", "GIT_CONFIG_KEY_1=gpg.format",
-			"-e", "GIT_CONFIG_VALUE_1=ssh",
-			"-e", "GIT_CONFIG_KEY_2=gpg.ssh.program",
-			"-e", "GIT_CONFIG_VALUE_2=ssh-keygen",
-			"-e", "GIT_CONFIG_KEY_3=commit.gpgsign",
-			"-e", "GIT_CONFIG_VALUE_3=true",
-		)
-	}
+	// Inject SSH commit-signing config when the host is set up for it (and the
+	// preflight has proven the key reachable — see the SigningKey field doc,
+	// which is cleared to "" otherwise). gitsign.SigningEnvArgs delivers it via
+	// GIT_CONFIG_COUNT/KEY_n/VALUE_n and forces gpg.ssh.program=ssh-keygen so
+	// signing runs against the SSH agent sbx exposes inside the sandbox
+	// (SSH_AUTH_SOCK=/run/ssh-agent.sock, which we deliberately leave untouched).
+	args = append(args, gitsign.SigningEnvArgs(c.SigningKey)...)
 	if cwd := c.primaryWorkspace(); cwd != "" {
 		args = append(args, "-w", cwd)
 	}
@@ -597,11 +578,7 @@ func removeSandboxOnExit(ctx context.Context, run commandFunc, c Config, shuttin
 // identities or is unreachable, so a good result is a nil error whose output
 // carries a key fingerprint.
 func signingPreflight(ctx context.Context, run commandFunc, c Config) (checked, ok bool) {
-	if c.SigningKey == "" {
-		return false, false
-	}
-	out, err := run(ctx, c.SbxPath, "exec", c.SandboxName, "--", "ssh-add", "-l")
-	return true, err == nil && strings.Contains(string(out), "SHA256:")
+	return gitsign.Preflight(ctx, gitsign.RunFunc(run), c.SbxPath, c.SandboxName, c.SigningKey)
 }
 
 // withSigningPreflightResult is the actual fix for the root cause this task

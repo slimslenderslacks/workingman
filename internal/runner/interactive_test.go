@@ -2,9 +2,13 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+var errFakeNoKey = errors.New("exit status 1")
 
 func TestLaunchInteractiveEnsuresSandboxAndWrapsCommand(t *testing.T) {
 	launcher := &fakeLauncher{}
@@ -86,6 +90,109 @@ func TestLaunchInteractiveHostShell(t *testing.T) {
 	if target != "shell-widget" {
 		t.Errorf("target = %q, want shell-widget", target)
 	}
+}
+
+// TestLaunchInteractiveInjectsSigning covers the `:session` fix: with a git
+// identity and a signing key set — and a preflight that finds a key in the
+// forwarded agent — the wrapped `sbx exec` carries the GIT_AUTHOR_*/COMMITTER_*
+// identity env AND the GIT_CONFIG_* signing env, so commits in the window are
+// attributed and SSH-signed just like the ACP commit agent.
+func TestLaunchInteractiveInjectsSigning(t *testing.T) {
+	launcher := &fakeLauncher{}
+	r := &Runner{
+		Launcher: launcher,
+		SbxPath:  "/bin/sbx",
+		Sandbox:  func(context.Context, SandboxSpec) error { return nil },
+		// Preflight finds a key → signing stays on.
+		preflightRun: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("256 SHA256:abc key (ED25519)\n"), nil
+		},
+	}
+
+	_, err := r.LaunchInteractive(context.Background(), InteractiveSpec{
+		SandboxName: "session-widget",
+		Workspaces:  []string{"/ws/widget", "/orch/widget"},
+		Cwd:         "/ws/widget",
+		Inner:       []string{"claude", "--session-id", "abc"},
+		WindowName:  "session-widget",
+		GitName:     "Jim Clark",
+		GitEmail:    "jim@example.com",
+		SigningKey:  "ssh-ed25519 AAAAKEY",
+	})
+	if err != nil {
+		t.Fatalf("LaunchInteractive: %v", err)
+	}
+
+	want := []string{
+		"/bin/sbx", "exec", "-it", "-w", "/ws/widget",
+		"-e", "GIT_AUTHOR_NAME=Jim Clark",
+		"-e", "GIT_AUTHOR_EMAIL=jim@example.com",
+		"-e", "GIT_COMMITTER_NAME=Jim Clark",
+		"-e", "GIT_COMMITTER_EMAIL=jim@example.com",
+		"-e", "GIT_CONFIG_COUNT=4",
+		"-e", "GIT_CONFIG_KEY_0=user.signingkey",
+		"-e", "GIT_CONFIG_VALUE_0=ssh-ed25519 AAAAKEY",
+		"-e", "GIT_CONFIG_KEY_1=gpg.format",
+		"-e", "GIT_CONFIG_VALUE_1=ssh",
+		"-e", "GIT_CONFIG_KEY_2=gpg.ssh.program",
+		"-e", "GIT_CONFIG_VALUE_2=ssh-keygen",
+		"-e", "GIT_CONFIG_KEY_3=commit.gpgsign",
+		"-e", "GIT_CONFIG_VALUE_3=true",
+		"session-widget", "claude", "--session-id", "abc",
+	}
+	if !reflect.DeepEqual(launcher.last.Command, want) {
+		t.Errorf("command = %v\nwant %v", launcher.last.Command, want)
+	}
+}
+
+// TestLaunchInteractiveSigningDegradesWhenAgentEmpty covers the safety valve:
+// when the forwarded agent holds no key, forcing commit.gpgsign on would make
+// every `git commit` hard-fail, so signing is dropped (no GIT_CONFIG_* env)
+// while the git identity is still injected.
+func TestLaunchInteractiveSigningDegradesWhenAgentEmpty(t *testing.T) {
+	launcher := &fakeLauncher{}
+	r := &Runner{
+		Launcher: launcher,
+		SbxPath:  "/bin/sbx",
+		Sandbox:  func(context.Context, SandboxSpec) error { return nil },
+		// `ssh-add -l` exits non-zero when the agent has no identities.
+		preflightRun: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte("The agent has no identities."), errFakeNoKey
+		},
+	}
+
+	_, err := r.LaunchInteractive(context.Background(), InteractiveSpec{
+		SandboxName: "session-widget",
+		Workspaces:  []string{"/ws/widget"},
+		Cwd:         "/ws/widget",
+		Inner:       []string{"claude"},
+		WindowName:  "session-widget",
+		GitName:     "Jim Clark",
+		GitEmail:    "jim@example.com",
+		SigningKey:  "ssh-ed25519 AAAAKEY",
+	})
+	if err != nil {
+		t.Fatalf("LaunchInteractive: %v", err)
+	}
+
+	for _, arg := range launcher.last.Command {
+		if strings.HasPrefix(arg, "GIT_CONFIG_") {
+			t.Fatalf("signing env %q injected despite an empty agent; command: %v", arg, launcher.last.Command)
+		}
+	}
+	// Identity must still be present — only signing degrades.
+	if !containsArg(launcher.last.Command, "GIT_AUTHOR_NAME=Jim Clark") {
+		t.Errorf("identity env dropped along with signing; command: %v", launcher.last.Command)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestLaunchInteractiveValidates(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 )
@@ -63,6 +64,12 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 	var spec runner.InteractiveSpec
 	if claudeSession {
 		name := sanitizeSandboxName("session-" + workStream)
+		// Resolve the host git identity and SSH-signing config so a `:session`
+		// window commits as the user and SSH-signs, just like the ACP commit
+		// agent. Both read from the host git config; Key() is empty unless the
+		// host is fully set up for SSH signing, and the runner preflights the
+		// forwarded agent before actually forcing commit.gpgsign on.
+		gitName, gitEmail := gitsign.Identity()
 		spec = runner.InteractiveSpec{
 			SandboxName: name,
 			// Mount both the worktree and the orch control dir, like the task
@@ -74,6 +81,9 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 			// prompt is injected — claude opens at its prompt awaiting the user.
 			Inner:      sessionCommand(sessionUUID(workStream)),
 			WindowName: "session-" + workStream,
+			GitName:    gitName,
+			GitEmail:   gitEmail,
+			SigningKey: gitsign.Resolve().Key(),
 		}
 	} else {
 		// `:dir` is a plain host shell (no sandbox) cd'd to the workspace dir —
