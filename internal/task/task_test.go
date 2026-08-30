@@ -166,6 +166,53 @@ func TestLoadPreservesExplicitModel(t *testing.T) {
 	}
 }
 
+func TestValidName(t *testing.T) {
+	valid := []string{"a", "add-healthz-handler", "task2", "00-mystery-task", strings.Repeat("a", MaxNameLen)}
+	for _, name := range valid {
+		if !ValidName(name) {
+			t.Errorf("ValidName(%q) = false, want true", name)
+		}
+	}
+	invalid := []string{
+		"",                                // blank
+		"Add Healthz Handler",             // spaces, uppercase
+		"add_healthz_handler",             // underscores
+		"-leading-hyphen",                 // leading hyphen
+		"trailing-hyphen-",                // trailing hyphen
+		"double--hyphen",                  // doubled hyphen
+		strings.Repeat("a", MaxNameLen+1), // over length
+	}
+	for _, name := range invalid {
+		if ValidName(name) {
+			t.Errorf("ValidName(%q) = true, want false", name)
+		}
+	}
+}
+
+func TestSlugify(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"Add Healthz Handler!", "add-healthz-handler"},
+		{"add_healthz_handler", "add-healthz-handler"},
+		{"  leading and trailing  ", "leading-and-trailing"},
+		{"", "task"},
+		{"!!!", "task"},
+		{strings.Repeat("a", MaxNameLen+10), strings.Repeat("a", MaxNameLen)},
+	}
+	for _, c := range cases {
+		if got := Slugify(c.in); got != c.want {
+			t.Errorf("Slugify(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// Every non-empty input must slugify to something ValidName accepts.
+	for _, c := range cases {
+		if got := Slugify(c.in); !ValidName(got) {
+			t.Errorf("Slugify(%q) = %q, which ValidName rejects", c.in, got)
+		}
+	}
+}
+
 func TestInvalidStatusRejected(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "bad.yaml")
 	if err := writeRaw(dst, "name: x\nstatus: notathing\n"); err != nil {

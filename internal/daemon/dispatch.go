@@ -719,8 +719,17 @@ func (d *Daemon) dispatchNextTask(projectPath string, p *project.Project) {
 
 	g, err := taskgraph.Load(tasksDir)
 	if err != nil {
+		// A structural graph error (unknown dependency, cycle, genuine
+		// duplicate) can't be repaired per-file. Block rather than returning
+		// silently: an unblocked project with no ready tasks and no active
+		// session never gets revisited, which would strand it forever
+		// instead of handing it to the wolf agent for recovery.
 		d.audit.Log("taskgraph_error", "path", projectPath, "err", err.Error())
+		d.transitionProjectBlocked(projectPath, p, "taskgraph error: "+err.Error())
 		return
+	}
+	for _, w := range g.Warnings() {
+		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
 	}
 	if g.AllCommitted() {
 		d.transitionProjectDone(projectPath, p)

@@ -175,6 +175,9 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		d.transitionProjectBlocked(projectPath, p, "taskgraph error: "+err.Error())
 		return
 	}
+	for _, w := range g.Warnings() {
+		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
+	}
 	if g.AllCommitted() {
 		d.transitionProjectDone(projectPath, p)
 		return
@@ -290,7 +293,11 @@ func (d *Daemon) transitionProjectBlocked(projectPath string, p *project.Project
 
 // launchWolfAgent starts the wolf agent in the project's control directory.
 // It populates the FailedTasks slice in the Plan so the rendered prompt and
-// .orch/context.yaml both surface which tasks need attention.
+// .orch/context.yaml both surface which tasks need attention. It also reads
+// back the project's durable blocked-session record (see
+// project.BlockedSessionPath), if a prior wolf invocation left one, and folds
+// its summary/attempted fields into the Plan alongside BlockedReason so the
+// wolf starts up with that context instead of re-deriving it from scratch.
 //
 // As with the other project-root agents, the session-end callback re-runs
 // handleProject so that if wolf flipped the project back to ready/working,
@@ -312,15 +319,31 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	}
 	root := filepath.Dir(projectPath)
 	tasksDir := filepath.Join(root, "tasks")
+
+	blockedSessionPath := project.BlockedSessionPath(projectPath)
+	var priorSummary string
+	var priorAttempted []string
+	if bs, err := project.LoadBlockedSession(blockedSessionPath); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			d.audit.Log("blocked_session_load_error", "path", blockedSessionPath, "err", err.Error())
+		}
+	} else {
+		priorSummary = bs.Summary
+		priorAttempted = bs.Attempted
+	}
+
 	plan := runner.Plan{
-		Kind:          agent.WolfAgent,
-		WorkingDir:    root,
-		ProjectPath:   projectPath,
-		TasksDir:      tasksDir,
-		Branch:        p.Branch,
-		Repos:         workspaceReposFor(p),
-		FailedTasks:   failedOrBlockedTaskPaths(tasksDir),
-		BlockedReason: reason,
+		Kind:                    agent.WolfAgent,
+		WorkingDir:              root,
+		ProjectPath:             projectPath,
+		TasksDir:                tasksDir,
+		Branch:                  p.Branch,
+		Repos:                   workspaceReposFor(p),
+		FailedTasks:             failedOrBlockedTaskPaths(tasksDir),
+		BlockedReason:           reason,
+		BlockedSessionPath:      blockedSessionPath,
+		BlockedSessionSummary:   priorSummary,
+		BlockedSessionAttempted: priorAttempted,
 	}
 	d.audit.Log("wolf_dispatch", "path", projectPath, "reason", reason)
 	// Ignore start error here: the project is already blocked, recursing

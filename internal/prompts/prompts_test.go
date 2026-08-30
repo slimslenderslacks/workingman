@@ -123,6 +123,53 @@ func TestRenderWolfWithFailedTasks(t *testing.T) {
 	}
 }
 
+// TestRenderWolfWithBlockedSessionSummary checks that a prior wolf
+// invocation's persisted diagnosis (blocked-session.yaml) is surfaced in the
+// rendered prompt, alongside the file path the wolf should keep writing to.
+func TestRenderWolfWithBlockedSessionSummary(t *testing.T) {
+	out, err := Render(agent.WolfAgent, Data{
+		ProjectPath:             "/ws/.project.yaml",
+		Workspace:               "/ws",
+		BlockedSessionPath:      "/ws/blocked-session.yaml",
+		BlockedSessionSummary:   "1. Fix the missing import in handler.go\n2. Re-run the task",
+		BlockedSessionAttempted: []string{"reverted the last commit", "checked the sandbox logs"},
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"/ws/blocked-session.yaml",
+		"Fix the missing import in handler.go",
+		"reverted the last commit",
+		"checked the sandbox logs",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderWolfWithoutBlockedSessionSummary checks the persisted-summary
+// block stays silent (no prior record) while the durable-record write
+// instructions still name the target path — the wolf needs to know where to
+// write even on its first investigation of a project.
+func TestRenderWolfWithoutBlockedSessionSummary(t *testing.T) {
+	out, err := Render(agent.WolfAgent, Data{
+		ProjectPath:        "/ws/.project.yaml",
+		Workspace:          "/ws",
+		BlockedSessionPath: "/ws/blocked-session.yaml",
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(out, "previous wolf investigation") {
+		t.Errorf("should not claim a previous investigation with no summary:\n%s", out)
+	}
+	if !strings.Contains(out, "/ws/blocked-session.yaml") {
+		t.Errorf("missing the durable record path in:\n%s", out)
+	}
+}
+
 func TestRenderArchive(t *testing.T) {
 	out, err := Render(agent.ArchiveAgent, Data{
 		ProjectPath: "/orch/myproj/.project.yaml",

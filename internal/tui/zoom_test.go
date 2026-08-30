@@ -11,7 +11,9 @@ import (
 // pane. Default focus is paneSessions (see newModel).
 func zoomTestModel() model {
 	m := newModel(nil, nil, nil, &fakeAttacher{})
-	m.width, m.height = 120, 40
+	// Wide enough that the sessions left column and tasks right column both
+	// have room alongside the projects/YAML center column.
+	m.width, m.height = 200, 40
 	m.loaded = true
 	m.sessLoaded = true
 	m.projects = []ProjectView{{Name: "alpha", Path: "/a", Status: "working"}}
@@ -23,6 +25,16 @@ func zoomTestModel() model {
 
 func pressKey(m model, s string) model {
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)})
+	return next.(model)
+}
+
+// resolveChord simulates chordTimeoutDelay elapsing on the model's current
+// pending chord (if any), same as pressKey but for the timer path instead of
+// a keystroke. A lone "t" (not the start of "tl"/"tr") only takes effect once
+// it's clear no completing key is coming — in real usage that's the timeout
+// firing; tests trigger it directly instead of sleeping.
+func resolveChord(m model) model {
+	next, _ := m.Update(chordTimeoutMsg{seq: m.pendingSeq})
 	return next.(model)
 }
 
@@ -80,14 +92,18 @@ func TestZoomFollowsFocus(t *testing.T) {
 	if !m.zoomed || m.focus != paneSessions {
 		t.Fatalf("precondition: want zoomed sessions, got zoomed=%v focus=%v", m.zoomed, m.focus)
 	}
-	// down cycles focus; zoom stays on and now maximizes the newly focused pane.
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
+	// alt-l moves focus off the sessions column onto center; zoom stays on
+	// and now maximizes the newly focused pane. (alt-h is a no-op here since
+	// sessions is already the leftmost column — alt-h/alt-l step one column
+	// at a time and never wrap. alt-j/alt-k don't apply either — they only
+	// cycle within the center column's Projects/Tasks/Audit stack.)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}, Alt: true})
 	m = next.(model)
 	if !m.zoomed {
 		t.Error("moving focus should not exit zoom")
 	}
 	if m.focus == paneSessions {
-		t.Error("down should have moved focus off the sessions pane")
+		t.Error("alt-l should have moved focus off the sessions pane")
 	}
 }
 

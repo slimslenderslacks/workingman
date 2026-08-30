@@ -139,19 +139,118 @@ func TestDuplicateTaskNamesRejected(t *testing.T) {
 	}
 }
 
-func TestOverlongNameRejected(t *testing.T) {
+func TestOverlongNameRepaired(t *testing.T) {
 	dir := t.TempDir()
-	// Exactly at the limit loads; one over aborts.
+	// Exactly at the limit loads untouched, with no warning.
 	writeTask(t, dir, strings.Repeat("a", MaxNameLen), task.StatusReady)
-	if _, err := Load(dir); err != nil {
+	g, err := Load(dir)
+	if err != nil {
 		t.Fatalf("name of exactly %d chars should load, got %v", MaxNameLen, err)
 	}
+	if len(g.Warnings()) != 0 {
+		t.Errorf("expected no warnings for a name at the limit, got %v", g.Warnings())
+	}
 
+	// One char over the limit no longer aborts the whole graph: the name is
+	// truncated to fit and the repair is recorded as a loud warning.
 	dir2 := t.TempDir()
-	writeTask(t, dir2, strings.Repeat("a", MaxNameLen+1), task.StatusReady)
-	_, err := Load(dir2)
-	if err == nil || !strings.Contains(err.Error(), "exceed") {
-		t.Errorf("expected overlong-name error, got %v", err)
+	overlong := strings.Repeat("a", MaxNameLen+1)
+	writeTask(t, dir2, overlong, task.StatusReady)
+	g2, err := Load(dir2)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(g2.Tasks()) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(g2.Tasks()))
+	}
+	got := g2.Tasks()[0]
+	if len(got.Name) > MaxNameLen {
+		t.Errorf("repaired name %q is %d chars, want <= %d", got.Name, len(got.Name), MaxNameLen)
+	}
+	if len(g2.Warnings()) != 1 {
+		t.Errorf("expected exactly 1 warning for the repaired overlong name, got %v", g2.Warnings())
+	}
+}
+
+func TestBlankNameWithoutDescriptionRepairedFromFilename(t *testing.T) {
+	dir := t.TempDir()
+	tk := &task.Task{Status: task.StatusReady} // no Name, no Description
+	path := filepath.Join(dir, "00-mystery-task.yaml")
+	if err := task.Save(path, tk); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	g, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(g.Tasks()) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(g.Tasks()))
+	}
+	if got := g.Tasks()[0].Name; got != "00-mystery-task" {
+		t.Errorf("Name = %q, want %q (derived from filename)", got, "00-mystery-task")
+	}
+	if len(g.Warnings()) != 1 {
+		t.Errorf("expected exactly 1 warning, got %v", g.Warnings())
+	}
+}
+
+func TestBlankNameWithDescriptionSkippedAsSeed(t *testing.T) {
+	dir := t.TempDir()
+	seed := &task.Task{Description: "do the thing a human asked for", Status: task.StatusReady}
+	if err := task.Save(filepath.Join(dir, "seed.yaml"), seed); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	writeTask(t, dir, "existing", task.StatusReady)
+
+	g, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(g.Tasks()) != 1 || g.Task("existing") == nil {
+		t.Errorf("expected only the named task, got %v", names(g.Tasks()))
+	}
+	if len(g.Warnings()) != 0 {
+		t.Errorf("a pending seed is not a repair and should not warn, got %v", g.Warnings())
+	}
+}
+
+func TestNonSlugNameRepaired(t *testing.T) {
+	dir := t.TempDir()
+	tk := &task.Task{Name: "Add Healthz Handler!", Status: task.StatusReady}
+	if err := task.Save(filepath.Join(dir, "task.yaml"), tk); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	g, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(g.Tasks()) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(g.Tasks()))
+	}
+	if got := g.Tasks()[0].Name; got != "add-healthz-handler" {
+		t.Errorf("Name = %q, want %q", got, "add-healthz-handler")
+	}
+	if len(g.Warnings()) != 1 {
+		t.Errorf("expected exactly 1 warning, got %v", g.Warnings())
+	}
+}
+
+func TestRepairedNameDedupedAgainstExisting(t *testing.T) {
+	dir := t.TempDir()
+	writeTask(t, dir, "add-healthz-handler", task.StatusReady)
+	tk := &task.Task{Name: "Add Healthz Handler!!", Status: task.StatusReady}
+	if err := task.Save(filepath.Join(dir, "dup-seed.yaml"), tk); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	g, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(g.Tasks()) != 2 {
+		t.Fatalf("got %d tasks, want 2", len(g.Tasks()))
+	}
+	if g.Task("add-healthz-handler") == nil || g.Task("add-healthz-handler-2") == nil {
+		t.Errorf("expected deduped names, got %v", names(g.Tasks()))
 	}
 }
 

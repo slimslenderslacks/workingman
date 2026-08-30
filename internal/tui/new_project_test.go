@@ -21,26 +21,22 @@ func typeChars(t *testing.T, m model, s string) model {
 	return m
 }
 
+// focusProjectsPane focuses the projects pane directly. Pane focus is a pure
+// model field with no side effects of its own (⌥j/⌥k/⌥h/⌥l just reassign
+// it), so tests that only need "projects is focused" as setup can skip
+// simulating the navigation keys entirely.
 func focusProjectsPane(t *testing.T, m model) model {
 	t.Helper()
-	// Cycle pane focus forward (⌥j) until the projects pane is active. The
-	// default focus is sessions and the cycle now includes the audit pane, so
-	// the number of steps varies — loop rather than assume a fixed count.
-	for i := 0; i < 5; i++ {
-		if m.focus == paneProjects {
-			return m
-		}
-		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
-		m = step.(model)
-	}
-	if m.focus != paneProjects {
-		t.Fatalf("expected projects focus after cycling, got %v", m.focus)
-	}
+	m.focus = paneProjects
+	m.lastCenterFocus = paneProjects
 	return m
 }
 
-// openCommandPicker presses `:` (the projects pane must already be focused)
-// and asserts the command menu opened.
+// openCommandPicker presses `:` and asserts the command menu opened. `:`
+// opens the picker regardless of which pane is focused (see
+// TestColonOpensCommandPickerFromAnyPane), so callers don't need to focus
+// projects first — most still do simply because that's the pane most
+// project-command tests care about afterward.
 func openCommandPicker(t *testing.T, m model) model {
 	t.Helper()
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
@@ -76,13 +72,19 @@ func TestColonOpensCommandPickerFromProjectsPane(t *testing.T) {
 	}
 }
 
-func TestColonIgnoredOutsideProjectsPane(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	// Sessions is the default focus.
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
-	m = step.(model)
-	if m.mode != modeNormal {
-		t.Errorf("`:` outside projects pane should be a no-op; mode = %v", m.mode)
+// TestColonOpensCommandPickerFromAnyPane covers the fix for the reported bug:
+// `:` used to open the command menu only when the projects pane was focused,
+// silently doing nothing from every other pane. It must now open the picker
+// no matter which pane has focus.
+func TestColonOpensCommandPickerFromAnyPane(t *testing.T) {
+	for _, p := range []pane{paneSessions, paneProjectYAML, paneProjects, paneTasks, paneAudit} {
+		m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+		m.focus = p
+		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}})
+		m = step.(model)
+		if m.mode != modeCommandPicker {
+			t.Errorf("`:` with focus=%v: mode = %v, want modeCommandPicker", p, m.mode)
+		}
 	}
 }
 
@@ -275,7 +277,9 @@ func TestNewProjectModalEscapeCancels(t *testing.T) {
 
 func TestProjectsFooterShowsColonMenuWithoutSelection(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	// Wide enough that the longer footer (now advertising tl/tr too) isn't
+	// truncated before the `:` menu hint at the end.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 240, Height: 40})
 	m = sized.(model)
 	m = focusProjectsPane(t, m)
 	// The footer advertises the `:` menu, not the individual commands.

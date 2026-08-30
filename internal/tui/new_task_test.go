@@ -330,7 +330,10 @@ func TestTaskSlug(t *testing.T) {
 func TestProjectsFooterAdvertisesCommandMenu(t *testing.T) {
 	root := t.TempDir()
 	m, _ := selectProject(t, root, "widget")
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
+	// Wide enough that the longer footer (now advertising ⌥h/⌥l too) isn't
+	// truncated before the `:` menu hint at the end — see the sibling check
+	// in new_project_test.go's TestProjectsFooterShowsColonMenuWithoutSelection.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 240, Height: 40})
 	m = sized.(model)
 	// The footer advertises the `:` menu rather than listing each command.
 	if !strings.Contains(m.View(), "  •  :  •  ") {

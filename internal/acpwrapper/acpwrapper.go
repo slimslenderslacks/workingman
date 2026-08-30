@@ -166,7 +166,23 @@ type Config struct {
 	// to that path would only clobber sbx's working socket. So signing relies on
 	// sandboxd being started with the signing agent in its environment (see
 	// start-orch.sh), and the wrapper leaves SSH_AUTH_SOCK alone.
+	//
+	// IMPORTANT: SigningKey being non-empty means signing is *configured*, not
+	// that it will *work* — signingPreflight verifies the forwarded agent
+	// actually holds a key once the sandbox exists, and Run() clears this field
+	// (via withSigningPreflightResult) when it doesn't, so execArgs never sees a
+	// SigningKey it can't honor. Read SigningKey after that point (e.g. in
+	// execArgs) as "signing is configured AND was proven reachable this run".
 	SigningKey string
+
+	// signingPreflightFailed is set internally by Run() when signingPreflight
+	// determines the forwarded SSH agent has no key (see
+	// withSigningPreflightResult). It is not part of the wrapper's external
+	// configuration surface — main.go never sets it — but is surfaced into
+	// session.json via sessionRecord so the degradation is visible in session
+	// state, not just a stderr line that's easy to miss when the daemon runs
+	// headless.
+	signingPreflightFailed bool
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -191,18 +207,19 @@ func (c Config) LogPath() string {
 // absolute paths are populated.
 func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.Time) session.Session {
 	return session.Session{
-		ID:          c.SessionID,
-		SandboxName: c.SandboxName,
-		Status:      status,
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
-		SocketPath:  c.SocketPath(),
-		Workspaces:  c.Workspaces,
-		Kit:         c.KitPath,
-		LogPath:     c.LogPath(),
-		ProjectPath: c.ProjectPath,
-		TaskPath:    c.TaskPath,
-		Kind:        c.Kind,
+		ID:            c.SessionID,
+		SandboxName:   c.SandboxName,
+		Status:        status,
+		CreatedAt:     createdAt,
+		UpdatedAt:     updatedAt,
+		SocketPath:    c.SocketPath(),
+		Workspaces:    c.Workspaces,
+		Kit:           c.KitPath,
+		LogPath:       c.LogPath(),
+		ProjectPath:   c.ProjectPath,
+		TaskPath:      c.TaskPath,
+		Kind:          c.Kind,
+		SigningBroken: c.signingPreflightFailed,
 	}
 }
 
@@ -587,6 +604,33 @@ func signingPreflight(ctx context.Context, run commandFunc, c Config) (checked, 
 	return true, err == nil && strings.Contains(string(out), "SHA256:")
 }
 
+// withSigningPreflightResult is the actual fix for the root cause this task
+// tracks down: execArgs previously forced commit.gpgsign=true whenever
+// c.SigningKey was set, with no guard on signingPreflight's result. When the
+// forwarded agent turned out to have no key (1Password locked, or sandboxd
+// restarted since orch launched and lost the 1Password agent — see
+// signingPreflight), every `git commit` inside the sandbox hard-failed trying
+// to sign against an empty agent. That is the actual mechanism behind "the
+// commit agent is not working": not merely "commits land unsigned" but "the
+// commit agent cannot commit at all", since Run() previously only logged a
+// WARNING and launched the ACP client anyway with signing still forced on.
+//
+// Clearing SigningKey here — the single field execArgs gates the whole signing
+// block on — makes a failed preflight degrade to unsigned commits (still
+// useful; the commit lands) instead of a hard failure, while leaving the
+// checked=true, ok=false case loud: Run() logs it prominently and records it
+// in session.json (see sessionRecord's SigningBroken) before this call clears
+// the field, so both the stderr log and the durable session state say signing
+// was disabled and why. checked=false (signing not configured) or ok=true
+// (preflight passed) leave c unchanged.
+func withSigningPreflightResult(c Config, checked, ok bool) Config {
+	if checked && !ok {
+		c.SigningKey = ""
+		c.signingPreflightFailed = true
+	}
+	return c
+}
+
 // Run is the wrapper's blocking main loop. It normalizes the config, ensures
 // the sandbox, starts the sandboxed ACP client over `sbx exec`, listens on the
 // session's agent.sock, and bridges each TUI connection to the ACP client's
@@ -621,17 +665,36 @@ func Run(ctx context.Context, c Config) error {
 	c.SandboxName = sandboxName
 
 	// Signing preflight: when signing is configured, confirm the forwarded agent
-	// can actually reach a key and warn (without blocking) if not, so a locked
-	// 1Password or a restarted sandboxd surfaces here in the log rather than as a
-	// silent commit-time signing failure later.
-	if checked, ok := signingPreflight(ctx, execCommand, c); checked && !ok {
+	// can actually reach a key. This runs fresh on every Run() invocation — every
+	// retry of a task spawns a new acp-wrapper process, hence a new Run() call —
+	// regardless of whether ensureSandbox just created the sandbox or reused an
+	// existing one: the forwarded agent at /run/ssh-agent.sock is a host-level
+	// property proxied live by sandboxd, not something baked into a sandbox at
+	// creation time. So a task retried against a reused sandbox (see
+	// keepForTaskStatus) still gets a live, current read of agent health, and if
+	// the underlying sandboxd/1Password issue was fixed between attempts, this
+	// preflight (and therefore signing) recovers on the very next retry without
+	// ensureSandbox needing to know or care about signing health itself.
+	//
+	// A failed preflight no longer just warns: withSigningPreflightResult clears
+	// c.SigningKey so execArgs stops forcing commit.gpgsign=true, and every
+	// `git commit` in this session succeeds unsigned instead of hard-failing
+	// against an agent with no key (see withSigningPreflightResult's doc for why
+	// that was the actual "commit agent is not working" mechanism). The failure
+	// is still loud: logged prominently here, and recorded durably in
+	// session.json via sessionRecord's SigningBroken so it's visible to a
+	// reconnecting TUI/daemon, not only to whoever happens to be tailing stderr.
+	checked, ok := signingPreflight(ctx, execCommand, c)
+	if checked && !ok {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING signing preflight FAILED — the SSH "+
-			"agent forwarded into sandbox %q has no key, so commits will NOT sign. Likely 1Password is "+
+			"agent forwarded into sandbox %q has no key. Commit signing is DISABLED for this session "+
+			"so `git commit` still succeeds (UNSIGNED) instead of hard-failing. Likely 1Password is "+
 			"locked or sandboxd was restarted without it; run ./check-signing.sh to fix.\n",
 			c.SessionID, c.SandboxName)
 	} else if checked {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: signing preflight OK — forwarded agent holds a key\n", c.SessionID)
 	}
+	c = withSigningPreflightResult(c, checked, ok)
 
 	// Cancelling this child context tears down the ACP client process when the
 	// listener stops (and vice versa), so neither outlives the other. Keep a

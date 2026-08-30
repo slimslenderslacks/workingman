@@ -90,7 +90,9 @@ func TestRenderProjectGridReflowsByWidth(t *testing.T) {
 
 func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Wide enough that the tasks right column has room for full task names
+	// alongside the sessions left column and the projects/YAML center column.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{
@@ -116,7 +118,9 @@ func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
 
 func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	// Wide enough that the tasks right column has room for full task names
+	// alongside the sessions left column and the projects/YAML center column.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 220, Height: 40})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{
@@ -168,7 +172,9 @@ func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
 
 func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Wide enough that the tasks right column has room for full task names
+	// alongside the sessions left column and the projects/YAML center column.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{
@@ -202,7 +208,9 @@ func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
 
 func TestRenderTasksEmptyState(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Wide enough that the tasks right column has room alongside the
+	// sessions left column and the projects/YAML center column.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{Name: "empty", Path: "/x/empty/.project.yaml", Status: project.StatusReady},
@@ -445,9 +453,12 @@ func TestRenderArchivedProjectCardStaysIntact(t *testing.T) {
 
 // TestOptionGlyphSwitchesPane covers the macOS Option-key fallback: a default
 // macOS terminal emits "∆"/"˚" for ⌥j/⌥k (no Meta), so those glyphs must
-// switch panes just like "alt+j"/"alt+k".
+// switch panes just like "alt+j"/"alt+k". alt-j/alt-k only toggles within the
+// center column (see cycleCenterFocus), so the model must already be
+// focused there for the glyphs to have any effect.
 func TestOptionGlyphSwitchesPane(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m.focus = paneProjects
 	start := m.focus
 	// "˚" (⌥k) advances focus like alt+k.
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'˚'}})
@@ -460,5 +471,32 @@ func TestOptionGlyphSwitchesPane(t *testing.T) {
 	m = step.(model)
 	if m.focus != start {
 		t.Errorf("⌥j glyph should invert ⌥k: focus = %v, want %v", m.focus, start)
+	}
+}
+
+// TestOptionGlyphSwitchesColumn covers the same macOS Option-key fallback
+// for the column-switch keys: a default macOS terminal emits "˙"/"¬" for
+// ⌥h/⌥l (no Meta), so those glyphs must switch columns just like
+// "alt+h"/"alt+l".
+func TestOptionGlyphSwitchesColumn(t *testing.T) {
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m.focus = paneProjects // default focus (paneSessions) is already the alt-h target
+
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'˙'}})
+	m = step.(model)
+	if m.focus != paneSessions {
+		t.Fatalf("˙ glyph did not switch to sessions column: focus = %v", m.focus)
+	}
+	// ¬ (⌥l) steps back through the center column first, not straight to the
+	// yaml column — the fixed alt-h/alt-l never skip center.
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'¬'}})
+	m = step.(model)
+	if m.focus != paneProjects {
+		t.Fatalf("¬ glyph from the left column: focus = %v, want paneProjects (center)", m.focus)
+	}
+	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'¬'}})
+	m = step.(model)
+	if m.focus != paneProjectYAML {
+		t.Fatalf("¬ glyph did not switch to yaml column: focus = %v", m.focus)
 	}
 }

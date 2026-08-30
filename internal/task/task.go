@@ -3,6 +3,8 @@ package task
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/policy"
@@ -24,6 +26,54 @@ const (
 // planning agent writes this verbatim; Load() backfills it for tasks on
 // disk that pre-date the field.
 const ModelDefault = "default"
+
+// MaxNameLen is the maximum length of a task name. A task name flows into the
+// task's sbx sandbox name ("<work-stream>-<task-name>"), which sbx passes to
+// Docker as a container name — an RFC 1123 DNS label capped at 63 characters.
+// taskgraph.Load repairs (rather than rejects) a name that violates this, so
+// this constant is the single source of truth both packages consult.
+const MaxNameLen = 63
+
+var nameRE = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// ValidName reports whether name is a well-formed task name: non-empty,
+// lowercase kebab-case (letters, digits, and single hyphens between them,
+// no leading/trailing/doubled hyphen), and no longer than MaxNameLen. Task
+// names become Docker container-name components and taskgraph/depends_on
+// keys, so anything else must be repaired before it reaches the graph.
+func ValidName(name string) bool {
+	return name != "" && len(name) <= MaxNameLen && nameRE.MatchString(name)
+}
+
+// Slugify derives a valid task name from free-form text such as a
+// description or a filename stem: lowercased, with runs of characters
+// outside [a-z0-9] collapsed to single hyphens, leading/trailing hyphens
+// trimmed, and the result capped to MaxNameLen. Returns "task" if nothing
+// usable remains (e.g. the input was empty or all punctuation).
+func Slugify(s string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if len(slug) > MaxNameLen {
+		slug = strings.Trim(slug[:MaxNameLen], "-")
+	}
+	if slug == "" {
+		return "task"
+	}
+	return slug
+}
 
 func (s Status) Valid() bool {
 	switch s {
