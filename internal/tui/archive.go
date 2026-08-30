@@ -23,7 +23,7 @@ import (
 // substitute a fake that records the branch it was asked to remove.
 type workspaceRemover interface {
 	Path(branch string) (string, error)
-	Remove(ctx context.Context, branch string) error
+	Remove(ctx context.Context, branch string, force bool) error
 }
 
 // archiveWorkspaceTimeout bounds the `wsp rm` shell-out. The archive runs
@@ -138,7 +138,10 @@ func archiveProject(root, projectPath string, wsp workspaceRemover) error {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), archiveWorkspaceTimeout)
 		defer cancel()
-		if err := wsp.Remove(ctx, p.Branch); err != nil {
+		// force=true: the cleanup task (archive: true) has already validated the
+		// workspace is ready to be removed, so bypass wsp's unmerged/pending-changes
+		// guard rather than have it block the archive.
+		if err := wsp.Remove(ctx, p.Branch, true); err != nil {
 			return fmt.Errorf("workspace %s not removed (%v); %s left in place", p.Branch, err, name)
 		}
 	}

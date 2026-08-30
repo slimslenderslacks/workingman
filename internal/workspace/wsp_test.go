@@ -184,7 +184,7 @@ func TestWspManagerCreateAndPath_Integration(t *testing.T) {
 	m := NewWsp()
 	name := fmt.Sprintf("orch-test-create-%d", time.Now().UnixNano())
 	ctx := context.Background()
-	t.Cleanup(func() { _ = m.Remove(ctx, name) })
+	t.Cleanup(func() { _ = m.Remove(ctx, name, true) })
 
 	path, err := m.Create(ctx, name, nil)
 	if err != nil {
@@ -214,7 +214,7 @@ func TestWspManagerCreateIsIdempotent_Integration(t *testing.T) {
 	m := NewWsp()
 	name := fmt.Sprintf("orch-test-idem-%d", time.Now().UnixNano())
 	ctx := context.Background()
-	t.Cleanup(func() { _ = m.Remove(ctx, name) })
+	t.Cleanup(func() { _ = m.Remove(ctx, name, true) })
 
 	first, err := m.Create(ctx, name, nil)
 	if err != nil {
@@ -240,10 +240,10 @@ func TestWspManagerRemoveIsIdempotent_Integration(t *testing.T) {
 	if _, err := m.Create(ctx, name, nil); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := m.Remove(ctx, name); err != nil {
+	if err := m.Remove(ctx, name, false); err != nil {
 		t.Fatalf("first Remove: %v", err)
 	}
-	if err := m.Remove(ctx, name); err != nil {
+	if err := m.Remove(ctx, name, false); err != nil {
 		t.Errorf("second Remove (idempotent): %v", err)
 	}
 }

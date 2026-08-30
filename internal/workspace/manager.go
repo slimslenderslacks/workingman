@@ -65,5 +65,8 @@ type Manager interface {
 	Path(branch string) (string, error)
 
 	// Remove tears the workspace down. Safe to call on a non-existent workspace.
-	Remove(ctx context.Context, branch string) error
+	// force skips wsp's safety checks (unmerged branches, pending changes, user
+	// content in the workspace root); pass it only when the caller has already
+	// verified the workspace is safe to remove.
+	Remove(ctx context.Context, branch string, force bool) error
 }

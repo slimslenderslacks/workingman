@@ -79,14 +79,14 @@ func TestStubRemoveIsIdempotent(t *testing.T) {
 	if _, err := m.Create(ctx, "feat/y", nil); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := m.Remove(ctx, "feat/y"); err != nil {
+	if err := m.Remove(ctx, "feat/y", false); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "feat/y")); !os.IsNotExist(err) {
 		t.Errorf("workspace dir should be gone, got err=%v", err)
 	}
 	// Idempotent.
-	if err := m.Remove(ctx, "feat/y"); err != nil {
+	if err := m.Remove(ctx, "feat/y", false); err != nil {
 		t.Errorf("second Remove: %v", err)
 	}
 }

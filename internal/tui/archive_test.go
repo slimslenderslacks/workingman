@@ -24,6 +24,7 @@ import (
 type fakeWspRemover struct {
 	root     string
 	branches []string
+	forced   []bool
 	err      error
 	// removeHook runs inside Remove, before the recorded result, so a test can
 	// observe the state of the workspace at the moment wsp is asked to tear it
@@ -38,11 +39,12 @@ func (f *fakeWspRemover) Path(branch string) (string, error) {
 	return filepath.Join(f.root, branch), nil
 }
 
-func (f *fakeWspRemover) Remove(ctx context.Context, branch string) error {
+func (f *fakeWspRemover) Remove(ctx context.Context, branch string, force bool) error {
 	if f.removeHook != nil {
 		f.removeHook(branch)
 	}
 	f.branches = append(f.branches, branch)
+	f.forced = append(f.forced, force)
 	return f.err
 }
 
@@ -153,6 +155,11 @@ func TestArchiveProjectRemovesOrchBeforeWorkspaceRemoval(t *testing.T) {
 	}
 	if len(wsp.branches) != 1 || wsp.branches[0] != "feat/weather" {
 		t.Errorf("wsp removals = %v, want [feat/weather]", wsp.branches)
+	}
+	// The cleanup task has already validated the workspace; archive must force
+	// the removal so wsp's unmerged/pending-changes guard can't block it.
+	if len(wsp.forced) != 1 || !wsp.forced[0] {
+		t.Errorf("wsp force flags = %v, want [true]", wsp.forced)
 	}
 	if _, err := os.Stat(filepath.Join(root+".backup", "weather-tui", ".project.yaml")); err != nil {
 		t.Errorf("archived project missing: %v", err)

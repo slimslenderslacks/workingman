@@ -50,7 +50,7 @@ func (m *StubManager) Path(branch string) (string, error) {
 	return filepath.Join(m.Root, branch), nil
 }
 
-func (m *StubManager) Remove(_ context.Context, branch string) error {
+func (m *StubManager) Remove(_ context.Context, branch string, _ bool) error {
 	dir := filepath.Join(m.Root, branch)
 	err := os.RemoveAll(dir)
 	if os.IsNotExist(err) {

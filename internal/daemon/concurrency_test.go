@@ -72,7 +72,7 @@ func (m *gatedManager) Create(ctx context.Context, branch string, _ []workspace.
 
 func (m *gatedManager) Path(branch string) (string, error) { return "/tmp/ws/" + branch, nil }
 
-func (m *gatedManager) Remove(context.Context, string) error { return nil }
+func (m *gatedManager) Remove(context.Context, string, bool) error { return nil }
 
 // seedWorkingProject writes a project at status:working with a single ready
 // task, so the daemon's very next observation routes straight to

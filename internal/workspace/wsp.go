@@ -150,11 +150,19 @@ func (m *WspManager) Path(branch string) (string, error) {
 	return "", fmt.Errorf("wsp ls: workspace %q not found", branch)
 }
 
-func (m *WspManager) Remove(ctx context.Context, branch string) error {
+func (m *WspManager) Remove(ctx context.Context, branch string, force bool) error {
 	if branch == "" {
 		return fmt.Errorf("workspace: branch is required")
 	}
-	cmd := exec.CommandContext(ctx, m.binary(), "rm", "--json", branch)
+	args := []string{"rm", "--json"}
+	if force {
+		// wsp rm refuses a workspace with unmerged branches or user content
+		// unless --force is given. The archive path passes force=true because
+		// the cleanup task has already validated the workspace is ready to go.
+		args = append(args, "--force")
+	}
+	args = append(args, branch)
+	cmd := exec.CommandContext(ctx, m.binary(), args...)
 	out, runErr := cmd.Output()
 	// wsp rm of a missing workspace exits 1 but still writes JSON. Parse first.
 	ok, errMsg, parseErr := parseRmResult(out)
