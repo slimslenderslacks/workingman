@@ -213,6 +213,43 @@ func TestSlugify(t *testing.T) {
 	}
 }
 
+// Save is the single choke point for writing a task file, so an over-length
+// name must never reach disk. Save asserts the invariant (refuses with an error
+// and writes nothing) rather than silently truncating, since truncating in
+// isolation would break other tasks' depends_on. Repair-with-context is
+// taskgraph.Load's job. An empty Name (the seed signal) and a valid name are
+// both accepted.
+func TestSaveRefusesOverlongName(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "long.yaml")
+	src := &Task{Name: strings.Repeat("a", MaxNameLen+20), Status: StatusReady}
+	if err := Save(dst, src); err == nil {
+		t.Fatalf("Save accepted an over-length name")
+	}
+	// Nothing must have been written.
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("Save wrote a file for a refused name: stat err = %v", err)
+	}
+
+	// An empty seed name is allowed (planning fills it in later).
+	seed := filepath.Join(t.TempDir(), "seed.yaml")
+	if err := Save(seed, &Task{Status: StatusReady}); err != nil {
+		t.Fatalf("Save rejected an empty seed name: %v", err)
+	}
+
+	// An already-valid name is written verbatim.
+	dst2 := filepath.Join(t.TempDir(), "ok.yaml")
+	if err := Save(dst2, &Task{Name: "add-healthz-handler", Status: StatusReady}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	ok, err := Load(dst2)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if ok.Name != "add-healthz-handler" {
+		t.Errorf("Save mangled valid name: got %q", ok.Name)
+	}
+}
+
 func TestInvalidStatusRejected(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "bad.yaml")
 	if err := writeRaw(dst, "name: x\nstatus: notathing\n"); err != nil {

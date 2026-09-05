@@ -20,10 +20,17 @@ MUST be:
   - a lowercase kebab-case slug: only `a-z`, `0-9`, and single hyphens between
     words (no spaces, underscores, uppercase, leading/trailing/doubled
     hyphens),
-  - roughly 3-64 characters — long enough to be a real identifier, short
-    enough to leave room for the `<work-stream>-` prefix under the 63-char
-    Docker limit; never a single character and never the whole description
-    copy-pasted in,
+  - at most {{sub 62 (len .ProjectName)}} characters long. This is a HARD
+    cap, not a guideline. The sandbox name is `{{.ProjectName}}-<task-name>`
+    (the work-stream `{{.ProjectName}}` is {{len .ProjectName}} chars, plus a
+    hyphen), and that whole string is a Docker/RFC-1123 DNS label capped at 63
+    chars. So a `name` longer than {{sub 62 (len .ProjectName)}} chars will
+    fail `sbx create` and the task will NEVER run. BEFORE you write each task
+    file, count the characters in its `name` and confirm it is
+    <= {{sub 62 (len .ProjectName)}}; if it is longer, shorten it (3 short
+    words is plenty) until it fits. Also keep it at least 3 characters — long
+    enough to be a real identifier, never a single character and never the
+    whole description copy-pasted in,
   - unique among every task in this project and stable — once another task's
     `depends_on` references it, do not rename it.
 

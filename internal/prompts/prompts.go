@@ -53,7 +53,16 @@ type Data struct {
 	Worktree string // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
 }
 
-var tmpls = template.Must(template.ParseFS(templatesFS, "templates/*.tmpl"))
+// tmplFuncs are the helpers available to every template. `sub` lets the
+// planning template compute the exact per-task-name character budget from the
+// work-stream name length (max task name = 62 - len(ProjectName), since the
+// sandbox name is "<ProjectName>-<task-name>" and must fit the 63-char DNS
+// label limit).
+var tmplFuncs = template.FuncMap{
+	"sub": func(a, b int) int { return a - b },
+}
+
+var tmpls = template.Must(template.New("").Funcs(tmplFuncs).ParseFS(templatesFS, "templates/*.tmpl"))
 
 // Render returns the instruction text for the given Kind.
 func Render(kind agent.Kind, data Data) (string, error) {

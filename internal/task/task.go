@@ -200,7 +200,22 @@ func Load(path string) (*Task, error) {
 	return &t, nil
 }
 
+// Save writes t to path as YAML. It is the single choke point every Go writer
+// of a task file passes through, so it asserts the MaxNameLen invariant here
+// rather than silently repairing it: a name longer than MaxNameLen is refused
+// with an error, and nothing is written. Save deliberately does NOT truncate,
+// because it sees one task in isolation — silently shortening a name would
+// break every other task's depends_on that referenced the full name, with no
+// way to fix those references. Repairing an over-length name (with graph
+// context and dedupe) is taskgraph.Load's job, which does it loudly via
+// Warnings(). An over-length name reaching Save therefore signals a Go-side
+// bug, and this error surfaces it (daemon: audit task_save_error; TUI: returned
+// to the caller) instead of corrupting the file. An empty Name is allowed — it
+// is the "human-added seed" signal the planning agent fills in later.
 func Save(path string, t *Task) error {
+	if len(t.Name) > MaxNameLen {
+		return fmt.Errorf("task name %q is %d chars, exceeds MaxNameLen %d", t.Name, len(t.Name), MaxNameLen)
+	}
 	data, err := yaml.Marshal(t)
 	if err != nil {
 		return err

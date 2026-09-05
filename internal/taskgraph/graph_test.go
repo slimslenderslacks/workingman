@@ -155,7 +155,13 @@ func TestOverlongNameRepaired(t *testing.T) {
 	// truncated to fit and the repair is recorded as a loud warning.
 	dir2 := t.TempDir()
 	overlong := strings.Repeat("a", MaxNameLen+1)
-	writeTask(t, dir2, overlong, task.StatusReady)
+	// task.Save refuses an over-length name by design, so write the YAML raw to
+	// simulate a file the planning agent authored directly (which is the only
+	// way an over-length name reaches disk) and confirm Load repairs it.
+	if err := os.WriteFile(filepath.Join(dir2, overlong+".yaml"),
+		[]byte("name: "+overlong+"\nstatus: ready\n"), 0o644); err != nil {
+		t.Fatalf("write raw task: %v", err)
+	}
 	g2, err := Load(dir2)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
