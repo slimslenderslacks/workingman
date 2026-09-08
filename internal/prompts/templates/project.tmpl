@@ -58,6 +58,16 @@ interactively. Fill in these fields:
   when what they asked for is really a window in time ("every hour until
   Friday"), since it is also the only bound on a project that stops going
   idle.
+- review: optional boolean. Set `review: true` when the work's completion is
+  gated on a GitHub pull request — the description asks to open a PR and address
+  review feedback, iterate until reviewers approve, get CI green, and so on.
+  With it set, once every task has committed the project enters the
+  PR-resolution loop: the daemon polls the PR and turns review comments and
+  failed Actions runs into follow-up tasks until the PR is merged or closed.
+  Omit it (default false) for ordinary work; a project with repos still gets a
+  one-time PR probe on completion either way, but the flag is what makes the
+  loop keep watching for a PR that has not been opened yet. Never set it on a
+  repo-less project.
 
 Sensible defaults exist for everything except which repositories the work
 touches. If the description gives you enough to identify at least one

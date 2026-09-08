@@ -895,6 +895,11 @@ func SandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 		name = base + "-" + taskName
 	case agent.ArchiveAgent:
 		name = base + "-archive"
+	case agent.ReviewAgent:
+		// The review agent runs in the control dir (like planning) and reaches
+		// GitHub through the github MCP; it gets its own sandbox so its MCP set
+		// (github) and network policy don't collide with any other agent's.
+		name = base + "-review"
 	default:
 		return ""
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/notify"
+	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
 )
@@ -52,6 +53,25 @@ type Daemon struct {
 	cleanupMu       sync.Mutex
 	cleanupInFlight map[string]bool // keyed by project file path
 
+	// reviewMu guards reviewFixCycles, the count of *consecutive* PR-review
+	// cycles in which the review agent produced fix work (flipped the project
+	// reviewing→working) without the PR ever coming back clean. It is the
+	// runaway guard for the PR-resolution loop: incremented each time a review
+	// cycle creates fix tasks, reset the moment a poll finds the PR clean (or the
+	// loop ends), and once it exceeds maxReviewFixCycles the project is blocked
+	// for the wolf. In-memory on purpose — a daemon restart charitably resets it,
+	// and it must not penalise a long-lived PR that is merely being polled while
+	// idle (idle polls never touch this counter).
+	reviewMu        sync.Mutex
+	reviewFixCycles map[string]int    // keyed by project file path
+	reviewErrors    map[string]int    // consecutive review-agent crashes, keyed by project file path
+	reviewFinger    map[string]string // last PR fingerprint reconciled, keyed by project file path
+	reviewBackoff   map[string]int    // adaptive poll-interval index (into reviewPollSpecs), keyed by project file path
+	// reviewFingerprintFn, when set, overrides the host `gh` PR fingerprint used
+	// by the change-detection gate. Nil in production (uses the real gh probe);
+	// tests set it to exercise the gate without a network/gh dependency.
+	reviewFingerprintFn func(projectPath string, p *project.Project) (string, bool)
+
 	// dispatchMu guards dispatchChains, which chains fsnotify events keyed by
 	// their containing directory (see dispatchEvent) so that events for the
 	// same project still run in the order they arrived even though each is
@@ -82,6 +102,17 @@ const (
 	// even within the retry budget the daemon cannot spin.
 	planningBackoffStep = 2 * time.Second
 	planningBackoffMax  = 30 * time.Second
+
+	// maxReviewFixCycles bounds consecutive PR-review fix cycles that never
+	// converge (each flips reviewing→working without the PR coming back clean),
+	// after which the project is blocked for the wolf. It counts fix churn, not
+	// wall-clock or idle polls, so a long-lived PR being watched while quiet is
+	// never penalised — see Daemon.reviewFixCycles.
+	maxReviewFixCycles = 10
+	// maxReviewErrors bounds consecutive review-agent crashes (its process
+	// failed, usually a sandbox that couldn't be created) before the project is
+	// blocked so the user is told the loop is stuck rather than retrying forever.
+	maxReviewErrors = 5
 )
 
 // sessionEntry bundles a live agent.Session with the metadata the TUI's
@@ -149,6 +180,10 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		planningFailures:   map[string]int{},
 		projectFailures:    map[string]int{},
 		cleanupInFlight:    map[string]bool{},
+		reviewFixCycles:    map[string]int{},
+		reviewErrors:       map[string]int{},
+		reviewFinger:       map[string]string{},
+		reviewBackoff:      map[string]int{},
 		dispatchChains:     map[string]chan struct{}{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 	}

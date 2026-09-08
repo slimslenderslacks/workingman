@@ -147,6 +147,13 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 			reason = "project marked blocked by " + string(p.UpdatedBy)
 		}
 		d.launchWolfAgent(path, p, reason)
+	case project.StatusReviewing:
+		// The PR-resolution loop is driven by the project's #review poll, not by
+		// this fsnotify path. Just (re)register the poll — idempotent, so it is
+		// safe on every observation and is how a daemon restart or an agent's own
+		// status:reviewing write re-arms polling. The poll dispatches the review
+		// agent (see onReviewPoll).
+		d.ensureReviewPoll(path)
 	case project.StatusDone:
 		// terminal
 	}
@@ -732,7 +739,7 @@ func (d *Daemon) dispatchNextTask(projectPath string, p *project.Project) {
 		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
 	}
 	if g.AllCommitted() {
-		d.transitionProjectDone(projectPath, p)
+		d.transitionProjectComplete(projectPath, p)
 		return
 	}
 	if t := firstUncommittedSuccess(g); t != nil {

@@ -28,6 +28,42 @@ func TestLoadExampleNoDeps(t *testing.T) {
 	}
 }
 
+// TestSourceRoundTrip pins the review agent's correlation field: a task tagged
+// with the PR signal it addresses must save and load intact (so a later poll can
+// dedup against it), and Source must stay out of the YAML for ordinary tasks.
+func TestSourceRoundTrip(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "fix-comment.yaml")
+	if err := Save(dst, &Task{
+		Name:   "fix-comment",
+		Status: StatusReady,
+		Source: &Source{Kind: "pr-comment", Ref: "PRRT_kwDOabc", PR: 42},
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Source == nil {
+		t.Fatalf("Source = nil, want the pr-comment correlation")
+	}
+	if got.Source.Kind != "pr-comment" || got.Source.Ref != "PRRT_kwDOabc" || got.Source.PR != 42 {
+		t.Errorf("Source = %+v, want {pr-comment, PRRT_kwDOabc, 42}", got.Source)
+	}
+
+	bare := filepath.Join(t.TempDir(), "plain.yaml")
+	if err := Save(bare, &Task{Name: "plain", Status: StatusReady}); err != nil {
+		t.Fatalf("Save bare: %v", err)
+	}
+	data, err := os.ReadFile(bare)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(data), "source:") {
+		t.Errorf("source leaked into a plain task's YAML:\n%s", data)
+	}
+}
+
 func TestLoadExampleWithDeps(t *testing.T) {
 	tk, err := Load("../../examples/tasks/02-add-readiness-probe.yaml")
 	if err != nil {

@@ -191,7 +191,46 @@ type Project struct {
 	// most-recent-first. Pointer + omitempty so the field stays out of
 	// the YAML on disk until the daemon writes it.
 	CreatedAt *time.Time `yaml:"created_at,omitempty"`
-	UpdatedBy Writer     `yaml:"updated_by"`
+	// Review is the intent flag for the PR-resolution loop: completion of this
+	// project is gated on resolving a GitHub pull request's review comments and
+	// Actions runs, not merely on committing every task. When set, a `reviewing`
+	// poll that finds no open PR *keeps watching* (a PR is expected to appear);
+	// without it, the daemon still runs a one-time probe for any project that has
+	// repos, but a probe that finds no PR goes straight to `done`. Set by the
+	// project/planning agent when the seed goal is PR-shaped, or by a human.
+	// `omitempty` keeps the key out of files that don't use it.
+	Review bool `yaml:"review,omitempty"`
+	// PullRequest is the PR the review agent discovered for this project's branch,
+	// stamped so the TUI can surface it and so a new push (changed HeadSHA) is
+	// detectable across polls. Nil until the review agent finds an open PR.
+	//
+	// The PR-resolution loop's runaway guard is deliberately NOT a field here: a
+	// legitimately long-lived PR can sit open for days, so a persisted lifetime
+	// cycle cap would wrongly kill it. The daemon instead bounds only
+	// *consecutive fix cycles that never converge* with an in-memory counter that
+	// resets whenever a poll finds the PR clean (see reviewFixCycles).
+	PullRequest *PullRequest `yaml:"pull_request,omitempty"`
+	UpdatedBy   Writer       `yaml:"updated_by"`
+}
+
+// PullRequest is the review agent's record of the GitHub pull request that
+// backs a project's branch. It is agent-written (the review agent stamps it on
+// each poll) and read by the TUI; State is one of "open", "merged", "closed".
+type PullRequest struct {
+	Repo    string `yaml:"repo"`
+	Number  int    `yaml:"number"`
+	URL     string `yaml:"url,omitempty"`
+	HeadSHA string `yaml:"head_sha,omitempty"`
+	State   string `yaml:"state,omitempty"`
+}
+
+// HasRepos reports whether the project references any remote repository — the
+// precondition for a pull request to exist. The daemon uses it as the "probe"
+// half of the review trigger: a project with repos gets a one-time PR probe on
+// completion even without Review set, while a repo-less project skips straight
+// to done.
+func (p *Project) HasRepos() bool {
+	return len(p.Repos) > 0 || len(p.NewRepos) > 0
 }
 
 // Empty reports whether the file is the unpopulated placeholder the project

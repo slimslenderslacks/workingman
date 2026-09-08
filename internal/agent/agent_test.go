@@ -16,6 +16,7 @@ func TestKindString(t *testing.T) {
 		{WolfAgent, "wolf"},
 		{CommitAgent, "commit"},
 		{ArchiveAgent, "archive"},
+		{ReviewAgent, "review"},
 		{Kind(99), "unknown"},
 	}
 	for _, tc := range cases {
@@ -39,11 +40,27 @@ func TestKindOrdinals(t *testing.T) {
 		{WolfAgent, 3},
 		{CommitAgent, 4},
 		{ArchiveAgent, 5},
+		{ReviewAgent, 6},
 	}
 	for _, tc := range cases {
 		if int(tc.kind) != tc.want {
 			t.Errorf("%s = %d, want %d", tc.kind, int(tc.kind), tc.want)
 		}
+	}
+}
+
+// ParseKind is the inverse of String() and must round-trip for every kind —
+// the daemon recovers a session's Kind from the on-disk string it wrote, so a
+// missing case would silently drop that agent kind on restart reconciliation.
+func TestParseKindRoundTrip(t *testing.T) {
+	for _, k := range []Kind{ProjectAgent, PlanningAgent, TaskAgent, WolfAgent, CommitAgent, ArchiveAgent, ReviewAgent} {
+		got, ok := ParseKind(k.String())
+		if !ok || got != k {
+			t.Errorf("ParseKind(%q) = (%v, %v), want (%v, true)", k.String(), got, ok, k)
+		}
+	}
+	if _, ok := ParseKind("nonsense"); ok {
+		t.Errorf("ParseKind(nonsense) should report ok=false")
 	}
 }
 
@@ -62,6 +79,9 @@ func TestKindInteractive(t *testing.T) {
 		{CommitAgent, false},
 		{WolfAgent, true},
 		{ArchiveAgent, true},
+		// The review agent is autonomous: it runs under ACP with `--print` so it
+		// can carry --static-mcp github, like planning.
+		{ReviewAgent, false},
 	}
 	for _, tc := range cases {
 		if got := tc.kind.Interactive(); got != tc.want {

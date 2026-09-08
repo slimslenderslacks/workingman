@@ -252,7 +252,8 @@ func TestNumericPrefixTaskFilenames(t *testing.T) {
 
 	// afterCommitSession must reload from the prefixed path — not from
 	// tasks/register-repo.yaml — or it would log task_load_error and block.
-	// Project should reach done (no other tasks).
+	// Project should reach done (no other tasks; this daemon has no scheduler, so
+	// the PR-resolution loop is inert and completion is terminal as before).
 	if ok, snap := waitForWithin(t, buf, "project_done", 6*time.Second); !ok {
 		t.Fatalf("project never reached done — likely task_load_error from wrong path.\naudit:\n%s", snap)
 	}
