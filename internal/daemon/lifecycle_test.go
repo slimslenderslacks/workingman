@@ -107,7 +107,10 @@ func TestHappyPathFullProject(t *testing.T) {
 	expectKindSession(t, buf, "commit", 2)
 	mustSaveTask(t, task2Path, &task.Task{Name: "second", Status: task.StatusCommitted, DependsOn: []string{"first"}})
 
-	// 5) all tasks committed → daemon transitions project to done.
+	// 5) all tasks committed → daemon transitions project to done. This daemon
+	// has no scheduler, so the PR-resolution loop is inert and completion keeps
+	// its original terminal behaviour (a scheduler-backed daemon would instead
+	// enter status:reviewing here — see the review tests).
 	if ok, snap := waitForWithin(t, buf, "project_done", 6*time.Second); !ok {
 		t.Fatalf("project never reached done.\naudit:\n%s", snap)
 	}
@@ -136,14 +139,32 @@ func TestHappyPathFullProject(t *testing.T) {
 		}
 	}
 
-	// Sanity: each Kind launched exactly the expected number of times.
+	// Sanity: each Kind launched exactly the expected number of times. Count
+	// session_started lines specifically rather than any occurrence of
+	// kind=<kind> — a session_reconciled entry for an unrelated real session
+	// left in the default sessions root would otherwise inflate the count.
 	snap := buf.String()
-	if got := strings.Count(snap, "kind=task"); got != 2 {
+	if got := countStartedKind(snap, "task"); got != 2 {
 		t.Errorf("task launches = %d, want 2.\naudit:\n%s", got, snap)
 	}
-	if got := strings.Count(snap, "kind=commit"); got != 2 {
+	if got := countStartedKind(snap, "commit"); got != 2 {
 		t.Errorf("commit launches = %d, want 2.\naudit:\n%s", got, snap)
 	}
+}
+
+// countStartedKind counts session_started audit lines for a given kind. It is
+// precise where a blunt strings.Count(kind=<k>) is not: other audit events
+// (session_reconciled, session_skip_duplicate, sandbox_ensured) also carry a
+// kind field and would be miscounted as launches.
+func countStartedKind(snap, kind string) int {
+	want := "kind=" + kind
+	n := 0
+	for _, line := range strings.Split(snap, "\n") {
+		if strings.Contains(line, "session_started") && strings.Contains(line, want) {
+			n++
+		}
+	}
+	return n
 }
 
 // expectKindSession waits until N session_started entries with kind=<kind>

@@ -23,6 +23,15 @@ const (
 	// commit or push — and sets `archive: true` on the project file. New
 	// kinds are appended so the iota values of the existing ones don't shift.
 	ArchiveAgent
+	// ReviewAgent drives the PR-resolution loop for a project in
+	// status:reviewing: it polls the project's pull request via the github MCP,
+	// turns each unresolved review thread and failed check into a ready task,
+	// resolves threads whose fix has landed, escalates contested comments by
+	// blocking the project (→ wolf), and flips the project to done once the PR is
+	// merged or closed. It is autonomous (runs under `claude --print` via ACP,
+	// like planning) so it can carry `--static-mcp github`. Appended so the iota
+	// values of the existing kinds don't shift.
+	ReviewAgent
 )
 
 func (k Kind) String() string {
@@ -39,6 +48,8 @@ func (k Kind) String() string {
 		return "commit"
 	case ArchiveAgent:
 		return "archive"
+	case ReviewAgent:
+		return "review"
 	}
 	return "unknown"
 }
@@ -61,6 +72,8 @@ func ParseKind(s string) (Kind, bool) {
 		return CommitAgent, true
 	case "archive":
 		return ArchiveAgent, true
+	case "review":
+		return ReviewAgent, true
 	}
 	return 0, false
 }

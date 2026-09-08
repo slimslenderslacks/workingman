@@ -166,6 +166,15 @@ type Task struct {
 	// continue to work without a planner rewrite.
 	Model string `yaml:"model"`
 
+	// Source records the external signal this task exists to address, set by the
+	// review agent when it turns a PR review comment or a failed check into a
+	// task. It lets a later review poll correlate a live PR signal with a task it
+	// already created — so an unresolved thread that already has an in-flight task
+	// isn't duplicated, and a committed task's thread can be resolved once its fix
+	// has landed. Nil for ordinary planning-created tasks, which carry no external
+	// source. See Source for the field meanings.
+	Source *Source `yaml:"source,omitempty"`
+
 	// Path is the absolute file path the task was loaded from. It is set by
 	// Load and excluded from YAML so it round-trips cleanly. Callers use it
 	// when they need to read or write the task file again (e.g. the daemon
@@ -182,6 +191,17 @@ type Task struct {
 type Commit struct {
 	Repo string `yaml:"repo"`
 	Hash string `yaml:"hash"`
+}
+
+// Source identifies the external PR signal a review-agent-created task exists to
+// address. Kind is "pr-comment" (Ref is the GitHub review-thread node id, e.g.
+// "PRRT_kwDO...") or "pr-check" (Ref is the failing check/workflow name); PR is
+// the pull request number the signal came from. Used by the review agent to
+// dedup signals against tasks and to resolve the right thread once a fix lands.
+type Source struct {
+	Kind string `yaml:"kind"`
+	Ref  string `yaml:"ref"`
+	PR   int    `yaml:"pr"`
 }
 
 func Load(path string) (*Task, error) {

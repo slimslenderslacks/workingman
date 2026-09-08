@@ -9,11 +9,19 @@ const (
 	StatusWorking Status = "working"
 	StatusBlocked Status = "blocked"
 	StatusDone    Status = "done"
+	// StatusReviewing is "done-but-watching": every task has committed, but the
+	// project produced (or is expected to produce) a GitHub pull request whose
+	// review comments and Actions runs are still live signals. The daemon polls
+	// the PR while in this state (see the review agent and the #review schedule),
+	// turning unresolved review threads and failed checks into new tasks
+	// (→ working), escalating contested comments to the wolf (→ blocked), and
+	// reaching done only once the PR is merged or closed.
+	StatusReviewing Status = "reviewing"
 )
 
 func (s Status) Valid() bool {
 	switch s {
-	case StatusReady, StatusWorking, StatusBlocked, StatusDone:
+	case StatusReady, StatusWorking, StatusBlocked, StatusDone, StatusReviewing:
 		return true
 	}
 	return false

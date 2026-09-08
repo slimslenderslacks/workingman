@@ -256,6 +256,45 @@ func TestRenderArchive(t *testing.T) {
 	}
 }
 
+// TestRenderReview checks the review agent's prompt substitutes the project
+// paths and spells out the PR-resolution contract: it must use the github MCP
+// (not gh), correlate signals via each task's source, resolve threads whose fix
+// landed, and know the full project status enum including reviewing.
+func TestRenderReview(t *testing.T) {
+	out, err := Render(agent.ReviewAgent, Data{
+		Workspace:   "/orch/myproj",
+		ProjectPath: "/orch/myproj/.project.yaml",
+		ProjectName: "myproj",
+		TasksDir:    "/orch/myproj/tasks",
+		Branch:      "feat/x",
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"/orch/myproj/.project.yaml", // where status/pull_request are written
+		"/orch/myproj/tasks",         // where new tasks go
+		"feat/x",                     // the head branch to find the PR for
+		"github` MCP",                // uses the MCP, not gh
+		"resolve_thread",             // resolves a thread once its fix lands
+		"source:",                    // correlation block on created tasks
+		"reviewing",                  // the status it may leave unchanged
+		"merged or closed",           // the terminal condition
+		"updated_by: agent",          // write convention
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in review prompt:\n%s", want, out)
+		}
+	}
+	// It must explicitly forbid the gh CLI and pushing — the review agent works
+	// through the github MCP and only writes task files / status.
+	for _, want := range []string{"`gh`", "git push"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review prompt should forbid %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderAllKinds(t *testing.T) {
 	// Smoke test — every Kind must have a template; ensures we don't ship
 	// a Kind without text.
@@ -266,6 +305,7 @@ func TestRenderAllKinds(t *testing.T) {
 		agent.WolfAgent,
 		agent.CommitAgent,
 		agent.ArchiveAgent,
+		agent.ReviewAgent,
 	} {
 		if _, err := Render(k, Data{Workspace: "/ws"}); err != nil {
 			t.Errorf("Render(%s): %v", k, err)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
+	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
@@ -100,6 +101,10 @@ func TestSandboxNameFor(t *testing.T) {
 		// name is task-independent.
 		{"archive", agent.ArchiveAgent, "", "myproj-archive"},
 		{"archive-ignores-task-name", agent.ArchiveAgent, "scaffold", "myproj-archive"},
+		// The review agent runs once per project (in its control dir), not per
+		// task, so its name is task-independent like the archive agent.
+		{"review", agent.ReviewAgent, "", "myproj-review"},
+		{"review-ignores-task-name", agent.ReviewAgent, "scaffold", "myproj-review"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -110,6 +115,66 @@ func TestSandboxNameFor(t *testing.T) {
 	}
 	if got := SandboxNameFor(agent.PlanningAgent, "", ""); got != "" {
 		t.Errorf("empty projectPath should produce empty name, got %q", got)
+	}
+}
+
+// TestReviewAgentSandbox pins the review agent's launch shape: it runs in the
+// project's control dir (a single mount — that dir holds .project.yaml and
+// tasks/), and its plan's github MCP and network policy reach the sandbox
+// creator so the agent can talk to GitHub.
+func TestReviewAgentSandbox(t *testing.T) {
+	workingDir := t.TempDir()
+	projectPath := filepath.Join(workingDir, ".project.yaml")
+	_ = os.WriteFile(projectPath, nil, 0o644)
+
+	type call struct {
+		name       string
+		workspaces []string
+		mcps       []string
+		policies   int
+	}
+	var sbCalls []call
+	launcher := &fakeLauncher{}
+	r := &Runner{
+		Launcher: launcher,
+		Command:  func(_ agent.Kind, _ string) []string { return []string{"claude", "--print", "hi"} },
+		Sandbox: func(_ context.Context, spec SandboxSpec) error {
+			sbCalls = append(sbCalls, call{
+				name:       spec.Name,
+				workspaces: append([]string(nil), spec.Workspaces...),
+				mcps:       append([]string(nil), spec.StaticMCPs...),
+				policies:   len(spec.Policies),
+			})
+			return nil
+		},
+	}
+	_, err := r.Start(context.Background(), Plan{
+		Kind:        agent.ReviewAgent,
+		WorkingDir:  workingDir,
+		ProjectPath: projectPath,
+		Branch:      "feat/x",
+		StaticMCPs:  []string{"github"},
+		Policies:    []policy.Rule{{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.github.com"}},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	wantName := filepath.Base(workingDir) + "-review"
+	if len(sbCalls) != 1 {
+		t.Fatalf("expected one sandbox create, got %d: %+v", len(sbCalls), sbCalls)
+	}
+	c := sbCalls[0]
+	if c.name != wantName {
+		t.Errorf("sandbox name = %q, want %q", c.name, wantName)
+	}
+	if len(c.workspaces) != 1 || c.workspaces[0] != workingDir {
+		t.Errorf("workspaces = %v, want single control-dir mount [%q]", c.workspaces, workingDir)
+	}
+	if !contains(c.mcps, "github") {
+		t.Errorf("static MCPs = %v, want github attached", c.mcps)
+	}
+	if c.policies != 1 {
+		t.Errorf("policies forwarded = %d, want 1", c.policies)
 	}
 }
 

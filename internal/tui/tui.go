@@ -1097,14 +1097,15 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1)
-	statusReady   = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	statusWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	statusBlocked = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	statusDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
-	statusRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	cardNameStyle = lipgloss.NewStyle().Bold(true)
-	cardBorder    = lipgloss.NewStyle().
+	statusReady     = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	statusWorking   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	statusBlocked   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	statusDone      = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+	statusReviewing = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
+	statusRunning   = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	dimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	cardNameStyle   = lipgloss.NewStyle().Bold(true)
+	cardBorder      = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1)
@@ -1201,6 +1202,8 @@ func renderStatus(s string) string {
 		return statusBlocked.Render(s)
 	case "done":
 		return statusDone.Render(s)
+	case "reviewing":
+		return statusReviewing.Render(s)
 	default:
 		return s
 	}

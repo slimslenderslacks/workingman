@@ -179,7 +179,7 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
 	}
 	if g.AllCommitted() {
-		d.transitionProjectDone(projectPath, p)
+		d.transitionProjectComplete(projectPath, p)
 		return
 	}
 	if next := firstUncommittedSuccess(g); next != nil {
@@ -267,7 +267,10 @@ func (d *Daemon) transitionProjectDone(projectPath string, p *project.Project) {
 		} else {
 			d.scheduler.Unregister(projectPath)
 		}
+		// The PR-resolution poll (if any) is done once the project is done.
+		d.scheduler.Unregister(reviewPollKey(projectPath))
 	}
+	d.clearReviewState(projectPath)
 	d.audit.Log("project_done", "path", projectPath)
 }
 
@@ -285,6 +288,13 @@ func (d *Daemon) transitionProjectBlocked(projectPath string, p *project.Project
 		// the in-memory state is enough to drive the agent.
 	}
 	d.audit.Log("project_blocked", "path", projectPath, "reason", reason)
+	// A blocked project needs a human via the wolf, not a background PR poll —
+	// stop polling until the block is resolved (the resolving agent's status
+	// write re-arms it if the project returns to reviewing).
+	if d.scheduler != nil {
+		d.scheduler.Unregister(reviewPollKey(projectPath))
+	}
+	d.clearReviewState(projectPath)
 	if err := d.notifier.Send("Project blocked", reason); err != nil {
 		d.audit.Log("notify_error", "err", err.Error())
 	}
