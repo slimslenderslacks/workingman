@@ -25,94 +25,151 @@ existing task files in the tasks dir — in particular each task's `status:` and
 its `source:` block (present on tasks you created on earlier polls). You will
 correlate live PR signals against these.
 
-## Step 2 — locate the pull request
+## Step 2 — locate the pull requests
 
-Using the github MCP, find the open pull request whose head branch is
-`{{.Branch}}` (check the project's repos; take the first open PR — this loop
-assumes one PR per project). Record its number, URL, head commit SHA, and state.
+A project can span several repos, each with its own PR on the same branch, and
+you watch them all at once. Using the github MCP, look in EVERY repo the project
+lists for an open pull request whose head branch is `{{.Branch}}`. For each one,
+record its repo, number, URL, head commit SHA, and state.
 
-Write that back into `.project.yaml` as (keeping `status: reviewing` for now):
+Write the full set back into `.project.yaml` as (keeping `status: reviewing` for
+now) — one list entry per PR you found (open, merged, or closed since last poll):
 
-  pull_request:
-    repo: <org/name>
-    number: <n>
-    url: <html url>
-    head_sha: <head commit sha>
-    state: open        # or merged / closed
+  pull_requests:
+    - repo: <org/name>
+      number: <n>
+      url: <html url>
+      head_sha: <head commit sha>
+      state: open        # or merged / closed
+    - repo: <org/name>   # another repo's PR, if any
+      number: <n>
+      ...
   updated_by: agent
 
-Then branch on state:
+Then branch on the set:
 
-  - PR is **merged or closed** → the loop is over. Set `status: done`
+  - **Every** PR is merged or closed → the whole loop is over. Set `status: done`
     (`updated_by: agent`) and exit.
-  - **No open PR found**:
+  - **No open PR in any repo**:
       - if the project's `review:` flag is true → a PR is still expected to
         appear (a task may open it, or a human will). Leave `status: reviewing`
         unchanged and exit; the daemon will poll again.
       - otherwise → this was a one-time probe and there is nothing to review.
         Set `status: done` (`updated_by: agent`) and exit.
+  - Otherwise at least one PR is still open → proceed. Steps 3–4b apply
+    per-PR: gather and disposition each open PR's signals independently, tagging
+    every task with the repo/PR it belongs to.
 
-## Step 3 — gather signals (PR is open)
+## Step 3 — gather signals (per open PR)
 
-At the PR's **current head SHA** only (ignore signals on superseded commits):
+For EACH still-open PR, at its **current head SHA** only (ignore signals on
+superseded commits):
 
   - Unresolved review threads: `pull_request_read` with the review-comments
     method; keep only threads where `isResolved` is false. Record each thread's
-    node id and its comment text.
-  - Failed checks: the `actions` tools — the check runs / workflow runs for the
-    head SHA whose conclusion is failure/cancelled/timed_out.
+    repo, node id, and comment text.
+  - Failed checks: the `actions` tools — the check runs / workflow runs for that
+    PR's head SHA whose conclusion is failure/cancelled/timed_out.
 
 ## Step 4 — disposition each signal
 
-For every **unresolved thread**, correlate by node id against existing tasks'
-`source:` (kind `pr-comment`, matching `ref`):
+Fix tasks you create are **commit-only**: they land their change as a local
+commit but do NOT push. A commit is invisible to the external reviewer and to CI
+until it is PUBLISHED (pushed) by a separate push task (Step 4b). So treat a fix
+as "on the PR" only once it is BOTH committed AND published — a committed fix
+that hasn't been published yet is not addressed as far as the reviewer is
+concerned. "Published" here means a `pr-push` task that depends on the fix has
+itself reached `committed`.
 
-  - A matching task exists and is `committed` → its fix has already landed but
-    the thread is still open. Reply to the thread (e.g. "Addressed in
-    <head_sha>.") and resolve it via the review-write `resolve_thread` method.
-    Do not create another task.
-  - A matching task exists but is NOT committed (ready/running/success/failed/
-    blocked) → work is already in flight. Skip it (no duplicate).
+Every task you create must be tagged with the repo and PR it belongs to (its
+`source.repo` and `source.pr`), because with several PRs in flight a bare thread
+id or check name isn't enough to tell one PR's work from another's — and pushes
+are per-repo (Step 4b).
+
+For every **unresolved thread**, correlate by node id (and repo) against existing
+tasks' `source:` (kind `pr-comment`, matching `ref`):
+
+  - A matching fix task is `committed` AND published → its fix is on the PR now.
+    Reply to the thread (e.g. "Addressed in <the fix task's commit sha>.") and
+    resolve it via the review-write `resolve_thread` method. Do not create
+    another task.
+  - A matching fix task is `committed` but NOT yet published → the change is
+    written but not on the PR. Do NOT resolve the thread (that would claim a fix
+    the reviewer can't see). Do NOT create a duplicate — instead make sure it
+    gets published (Step 4b).
+  - A matching fix task is not committed (ready/running/success/failed/blocked)
+    → work is in flight. Skip it (no duplicate).
   - No matching task → judge the comment against the project goal:
-      - Actionable and within the goal → create a task (schema below) that
-        addresses it, tagged with the thread as its `source`.
-      - Clearly out of scope for this project → reply to the thread explaining
-        why it is out of scope, then `resolve_thread`. Do not create a task.
+      - Actionable and within the goal → create a commit-only fix task (schema
+        below) that addresses it, tagged with the thread as its `source`.
+      - Clearly out of scope → reply to the thread explaining why, then
+        `resolve_thread`. Do not create a task.
       - Contested, pushback on the approach, or something you cannot honor
         within the project goal → this needs a human. Set the project
         `status: blocked` with a `blocked_reason` quoting the comment and the PR
         number (`updated_by: agent`), and exit. The daemon summons the wolf.
 
-For every **failed check**, correlate by name against existing tasks' `source:`
-(kind `pr-check`, matching `ref`):
+For every **failed check**, correlate by name AND repo against existing tasks'
+`source:` (kind `pr-check`, matching `ref` + `repo` — check names repeat across
+repos). Remember a check only re-runs after the fix is PUSHED, so never judge
+convergence on an unpublished fix:
 
-  - A matching task is `committed` and the check STILL fails at head → the fix
-    is not converging. Set `status: blocked` with a `blocked_reason` naming the
-    check (`updated_by: agent`) and exit.
-  - A matching task exists but is not committed → skip (in flight).
-  - No matching task → create a fix task (schema below) tagged with the check as
-    its `source`; tell it to pull the failing job logs via the actions
-    `get_job_logs` (failed-only) method to diagnose.
+  - A matching pr-check task is `committed` AND published AND the check STILL
+    fails at head → the fix is not converging. Set `status: blocked` with a
+    `blocked_reason` naming the check (`updated_by: agent`) and exit.
+  - A matching pr-check task is `committed` but not yet published → publish it
+    (Step 4b); the check will re-run once the push lands.
+  - A matching pr-check task is not committed → skip (in flight).
+  - No matching task → create a commit-only fix task (schema below) tagged with
+    the check as its `source`; tell it to pull the failing job logs via the
+    actions `get_job_logs` (failed-only) method to diagnose.
+
+## Step 4b — publish accumulated fixes in bulk (push task)
+
+Look at fix tasks that are `committed` but not yet published (no committed
+`pr-push` task depends on them). Those commits are sitting local; the reviewer
+and CI can't see them. When a coherent batch is ready — which is the norm once
+one or more related fixes have committed — insert a push task to publish it:
+
+  - **One push task PER REPO.** A push task publishes a single repo's PR (its
+    `source.repo`), so create a separate push task for each repo whose fixes are
+    ready. This keeps repos independent — you can publish repo A's batch while
+    repo B's work is still in flight, and never push one repo's in-progress
+    commits onto another's PR.
+  - **Batch, don't drip.** Within a repo, prefer a single push task covering all
+    that repo's fixes you want reviewed as a unit over one push per fix — that
+    keeps the PR history and CI runs coherent (the whole point of holding fixes
+    commit-only until a batch is ready).
+  - A push task has NO code work; the commit agent pushes the accumulated commits
+    for it. Give it `depends_on:` naming every fix task (in that repo) it should
+    publish, so the daemon runs it only after those commits exist.
+  - Only the push task needs git-push network; the fix tasks don't.
+  - If nothing is committed-but-unpublished, no push task is needed.
 
 ## Step 5 — set the final project status
 
   - If you set `status: blocked` above, you already exited.
-  - If you created one or more new `ready` tasks → set `status: working`
-    (`updated_by: agent`). The daemon dispatches them; when they commit, the
-    project returns here for another poll.
-  - Otherwise (PR open, nothing left to address this cycle) → leave
-    `status: reviewing` unchanged. The daemon keeps polling; a merge/close or a
-    new comment/check is what advances it next.
+  - If you created any new `ready` task (a fix task or a push task) → set
+    `status: working` (`updated_by: agent`). The daemon dispatches them; when
+    they commit, the project returns here for another poll — at which point a
+    just-published fix's thread becomes resolvable.
+  - Otherwise (PR open, nothing to address and nothing unpublished) → leave
+    `status: reviewing` unchanged. The daemon keeps polling.
 
-## Task file schema
+## Task file schemas
 
-Write each new task as `{{.TasksDir}}/<name>.yaml`:
+A **fix task** (commit-only) — one per `pr-comment` / `pr-check` signal:
 
   name: <kebab-case slug, lowercase a-z/0-9/single-hyphens, 3..{{sub 62 (len .ProjectName)}} chars, unique>
   description: |
     <what to do, phrased strictly within the project goal. For a comment,
     summarize the requested change. For a check, name the failing check and say
-    to fix the underlying cause. Include the PR number.>
+    to fix the underlying cause. Include the PR number. Describe only the WORK:
+    never tell the task which `status` to end on or to commit / self-mark
+    `committed` — the task agent exits `success` and the commit agent finalizes
+    it. This holds when the change leaves no git commit (e.g. editing the PR
+    body or labels via the github MCP): the task still exits `success`, and the
+    commit agent no-ops the git side and moves it to `committed`.>
   depends_on: []
   status: ready
   attempts: 0
@@ -124,10 +181,35 @@ Write each new task as `{{.TasksDir}}/<name>.yaml`:
   policies:
     - action: allow
       type: network
-      resource: "api.github.com"
+      resource: "api.github.com"    # the github MCP (read PR context); no push
   source:
     kind: pr-comment        # or pr-check
     ref: <review-thread node id, or the check name>
+    repo: <org/name>        # which repo's PR this addresses
+    pr: <PR number>
+
+A **push task** (publishes one repo's batch — no code work, just `git push`):
+
+  name: <kebab-case slug, e.g. publish-sandboxes-fixes, within the same length cap>
+  description: |
+    Publish the accumulated review fixes for <org/name> PR <n> to its branch so
+    the reviewer and CI see them. No code changes — the commit agent pushes.
+  depends_on:
+    - <fix-task-name-1>       # every fix task (in this repo) whose commit to publish
+    - <fix-task-name-2>
+  status: ready
+  attempts: 0
+  failure_reason: ""
+  blocked_reason: ""
+  model: default
+  policies:
+    - action: allow
+      type: network
+      resource: "github.com"        # git push over SSH to the PR branch
+  source:
+    kind: pr-push
+    ref: ""
+    repo: <org/name>        # the ONLY repo this push task publishes
     pr: <PR number>
 
 The `name` cap is a HARD limit: the sandbox name is `{{.ProjectName}}-<name>`
@@ -141,7 +223,7 @@ write.
   task status:    `ready` | `running` | `success` | `failed` | `blocked` | `committed`
 
 For YOUR exit, the project status is exactly one of: `working` (you created fix
-tasks), `done` (PR merged/closed, or no PR and not a review project),
+or push tasks), `done` (PR merged/closed, or no PR and not a review project),
 `blocked` (a contested comment or a non-converging check needs a human), or
 `reviewing` left unchanged (nothing to do this cycle; keep watching). New tasks
 you write always start `status: ready`, `attempts: 0`. Do not invent values.

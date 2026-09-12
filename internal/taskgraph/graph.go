@@ -32,6 +32,7 @@ type Graph struct {
 	tasks    map[string]*task.Task // keyed by task name
 	deps     map[string][]string   // adjacency: name → names it depends on
 	warnings []string              // loud, non-fatal repairs made during Load
+	seeds    int                   // pending seeds (blank name + description) awaiting planning
 }
 
 // Dir returns the directory the Graph was loaded from.
@@ -79,6 +80,17 @@ func Load(dir string) (*Graph, error) {
 		return nil, fmt.Errorf("taskgraph: read %s: %w", dir, err)
 	}
 
+	// renamed records original-name → repaired-name for every task whose name we
+	// slugged. depends_on entries are written against the ORIGINAL names, so once
+	// the loop below has repaired the nodes we rewrite the edges through this map
+	// — otherwise a single invalid name (e.g. `select_pull_models`, which slugs to
+	// `select-pull-models`) leaves every dependent pointing at a name that no
+	// longer exists and validate() fails with "depends on unknown task". Repairing
+	// the node but not the edge is exactly the stranding the repair exists to
+	// prevent. Only non-blank originals are recorded: a blank name repaired from
+	// its filename was never a valid dependency target, so nothing references it.
+	renamed := map[string]string{}
+
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
 			continue
@@ -91,6 +103,7 @@ func Load(dir string) (*Graph, error) {
 
 		if t.Name == "" && strings.TrimSpace(t.Description) != "" {
 			// A pending seed awaiting the planning agent, not yet a task.
+			g.seeds++
 			continue
 		}
 
@@ -105,6 +118,9 @@ func Load(dir string) (*Graph, error) {
 			repaired = dedupeName(repaired, g.tasks)
 			g.warnings = append(g.warnings, fmt.Sprintf(
 				"taskgraph: %s had invalid name %q; repaired to %q", path, name, repaired))
+			if name != "" {
+				renamed[name] = repaired
+			}
 			name = repaired
 			t.Name = repaired
 		}
@@ -114,6 +130,24 @@ func Load(dir string) (*Graph, error) {
 		}
 		g.tasks[name] = t
 		g.deps[name] = append([]string(nil), t.DependsOn...)
+	}
+
+	// Carry the name repairs into the dependency edges. A dep naming a repaired
+	// task is rewritten to that task's repaired name; a dep already naming a valid
+	// task is left untouched. Both the graph's edge list and the task's own
+	// DependsOn are updated so downstream reads (Ready/depsCommitted and any
+	// consumer of Task.DependsOn) agree with the repaired node names.
+	if len(renamed) > 0 {
+		for name, deps := range g.deps {
+			for i, dep := range deps {
+				if to, ok := renamed[dep]; ok {
+					deps[i] = to
+				}
+			}
+			if t := g.tasks[name]; t != nil {
+				t.DependsOn = append([]string(nil), deps...)
+			}
+		}
 	}
 
 	if err := g.validate(); err != nil {
@@ -201,6 +235,16 @@ func (g *Graph) AllCommitted() bool {
 // Empty reports whether the graph contains no tasks. Useful for the daemon
 // to distinguish "planning hasn't run yet" from "tasks exist".
 func (g *Graph) Empty() bool { return len(g.tasks) == 0 }
+
+// HasPendingSeed reports whether the tasks dir holds at least one pending seed:
+// a task file with a blank name and a non-blank description, written by `:task`
+// as the signal for the planning agent to flesh it into a real task. Seeds are
+// deliberately excluded from the graph itself (they have no name and no place in
+// the DAG yet), so this is the only way to tell the daemon "there is unplanned
+// work here." The daemon uses it to re-arm planning for a project whose seed was
+// orphaned — its `:task` status flip to `ready` was skipped or clobbered while
+// another agent held the project slot.
+func (g *Graph) HasPendingSeed() bool { return g.seeds > 0 }
 
 func (g *Graph) depsCommitted(name string) bool {
 	for _, dep := range g.deps[name] {

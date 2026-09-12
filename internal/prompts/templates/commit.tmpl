@@ -20,8 +20,35 @@ user.name` / `user.email`, pass `--author`, or otherwise write a local
 `.git/config` — it is unnecessary and the environment identity overrides it
 anyway.
 
-Do not push. When all repos are committed (or had nothing to commit), update
-the task file with the following fields and save:
+{{if .PushBranch}}IMPORTANT — this is a PUSH task: its job is to PUBLISH, not to write code.
+Ignore the "changes sitting in the working tree" framing above — there is
+normally nothing new of your own to commit. Earlier commit-only review tasks
+left commits in this workspace's repos that are not yet on the remote PR branch;
+you make them visible to the external reviewer and CI. Do this:
+
+  - If a repo happens to have uncommitted changes, stage and commit them as
+    above; normally there are none.
+  - This push task's `source.repo` (in {{.TaskPath}}) names the repo whose PR it
+    publishes to — its working directory is the last path segment, e.g.
+    `sandboxes` for `docker/sandboxes`. Push ONLY that repo, so a batch for one
+    repo's PR does not prematurely publish another repo's in-flight fixes. If
+    `source.repo` is empty, push every repo whose local branch is AHEAD of its
+    upstream.
+  - Push with `git -C <repo> push` — the branch already has an upstream, it is
+    the PR's head. Do NOT force, do NOT `--set-upstream` a new branch, and do NOT
+    push a different branch or remote. A repo already level with its upstream
+    needs no push and is fine.
+  - Confirm the push landed: `git -C <repo> rev-parse @{upstream}` equals local
+    HEAD.
+
+If a push is REJECTED (non-fast-forward or auth failure), do NOT force it and do
+NOT set `committed`: set the task `status: blocked` with a `blocked_reason`
+naming the repo and the git error, so a human resolves it (the remote moved, or
+the branch needs a rebase). Leaving it `committed` would strand the fixes
+locally and the review agent would resolve threads that aren't really on the PR.
+
+When every ahead repo has been pushed, record what you published and save:{{else}}Do not push. When all repos are committed (or had nothing to commit), update
+the task file with the following fields and save:{{end}}
 
   status: committed
   summary: |
@@ -47,5 +74,6 @@ task.
 
 The task's `status:` field is a fixed enum — any other value is rejected
 by the daemon. Valid: `ready`, `running`, `success`, `failed`,
-`blocked`, `committed`. For *your* exit: always use `committed`. Do not
+`blocked`, `committed`. For *your* exit: use `committed` on success{{if .PushBranch}}, or
+`blocked` (with a `blocked_reason`) only if a required push was rejected{{end}}. Do not
 invent values like `done` or `merged`.

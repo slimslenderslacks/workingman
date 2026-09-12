@@ -102,6 +102,11 @@ type Plan struct {
 
 	Skills []setup.Skill
 
+	// PushBranch, for the commit agent, requests a `git push` of the branch
+	// after committing (set by the daemon for a review-fix task carrying a
+	// `source:`). Ignored for other kinds. See prompts.Data.PushBranch.
+	PushBranch bool
+
 	// SessionName is the tmux session name. If empty, Runner derives one
 	// from Kind and Branch (or Kind and a short hash of WorkingDir).
 	SessionName string
@@ -384,6 +389,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
 		Replan:                  p.Replan,
 		Worktree:                planningWorktree,
+		PushBranch:              p.PushBranch,
 	}
 	instructions, err := prompts.Render(p.Kind, data)
 	if err != nil {
@@ -405,6 +411,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
 		Replan:                  p.Replan,
 		Worktree:                planningWorktree,
+		PushBranch:              p.PushBranch,
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {
 		return nil, err

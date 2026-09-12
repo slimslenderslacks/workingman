@@ -32,9 +32,9 @@ func TestReviewingStatusValidAndRoundTrips(t *testing.T) {
 	}
 }
 
-// TestReviewFieldsRoundTrip checks Review and PullRequest survive a save/load
-// and that both stay out of the YAML when unset (omitempty keeps existing files
-// byte-identical).
+// TestReviewFieldsRoundTrip checks Review and PullRequests survive a save/load
+// (including several PRs, one per repo) and that both stay out of the YAML when
+// unset (omitempty keeps existing files byte-identical).
 func TestReviewFieldsRoundTrip(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), ".project.yaml")
 	if err := SaveAs(dst, &Project{
@@ -43,7 +43,10 @@ func TestReviewFieldsRoundTrip(t *testing.T) {
 		Status:      StatusReviewing,
 		Repos:       []Repo{{Org: "docker", Name: "gateway"}},
 		Review:      true,
-		PullRequest: &PullRequest{Repo: "docker/gateway", Number: 42, URL: "https://github.com/docker/gateway/pull/42", HeadSHA: "abc123", State: "open"},
+		PullRequests: []PullRequest{
+			{Repo: "docker/gateway", Number: 42, URL: "https://github.com/docker/gateway/pull/42", HeadSHA: "abc123", State: "open"},
+			{Repo: "docker/mcpruntime", Number: 7, State: "merged"},
+		},
 	}, WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
 	}
@@ -54,8 +57,14 @@ func TestReviewFieldsRoundTrip(t *testing.T) {
 	if !got.Review {
 		t.Errorf("Review = false, want true")
 	}
-	if got.PullRequest == nil || got.PullRequest.Number != 42 || got.PullRequest.State != "open" {
-		t.Errorf("PullRequest = %+v, want number 42 / state open", got.PullRequest)
+	if len(got.PullRequests) != 2 {
+		t.Fatalf("PullRequests = %+v, want 2 entries", got.PullRequests)
+	}
+	if got.PullRequests[0].Number != 42 || got.PullRequests[0].State != "open" {
+		t.Errorf("PR[0] = %+v, want number 42 / state open", got.PullRequests[0])
+	}
+	if got.PullRequests[1].Repo != "docker/mcpruntime" || got.PullRequests[1].State != "merged" {
+		t.Errorf("PR[1] = %+v, want mcpruntime / merged", got.PullRequests[1])
 	}
 
 	// Unset case: neither key appears on disk.
@@ -67,7 +76,7 @@ func TestReviewFieldsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	for _, key := range []string{"review:", "pull_request:"} {
+	for _, key := range []string{"review:", "pull_requests:"} {
 		if strings.Contains(string(data), key) {
 			t.Errorf("unset field leaked into YAML: %q\n%s", key, data)
 		}

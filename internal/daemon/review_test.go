@@ -57,6 +57,29 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 			wantStatus: project.StatusReviewing,
 			wantPoll:   true,
 		},
+		{
+			// A live recurring cron project commits directly and opens no PR, so
+			// its repos are not a PR signal — it rests at done and re-fires on cron
+			// instead of probing every cycle (the EmailPromotionSummary case).
+			name:       "recurring cron with repos skips the probe",
+			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 390},
+			wantStatus: project.StatusDone,
+			wantPoll:   false,
+		},
+		{
+			// The flag still opts a recurring project into the loop explicitly.
+			name:       "recurring cron with review flag still reviews",
+			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 390, Review: true},
+			wantStatus: project.StatusReviewing,
+			wantPoll:   true,
+		},
+		{
+			// An expired schedule is a one-shot again, so the probe returns.
+			name:       "expired cron with repos still probes",
+			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 720},
+			wantStatus: project.StatusReviewing,
+			wantPoll:   true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,8 +209,8 @@ func TestReviewPollBacksOffWhenQuietAndResetsOnChange(t *testing.T) {
 	projectPath := filepath.Join(root, ".project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b", Status: project.StatusReviewing,
-		Repos:       []project.Repo{{Org: "docker", Name: "gateway"}},
-		PullRequest: &project.PullRequest{Repo: "docker/gateway", Number: 1},
+		Repos:        []project.Repo{{Org: "docker", Name: "gateway"}},
+		PullRequests: []project.PullRequest{{Repo: "docker/gateway", Number: 1}},
 	}, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
 	}
@@ -230,6 +253,68 @@ func TestReviewPollBacksOffWhenQuietAndResetsOnChange(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "review_poll_fired") {
 		t.Errorf("expected review_poll_fired after a detected change:\n%s", buf.String())
+	}
+}
+
+// TestReviewNowKickForcesImmediateReconcile pins the `:review` kick on an
+// already-reviewing project: a ReviewNow request must clear the flag (so it's
+// one-shot and the daemon's own clearing write can't re-fire it), snap a
+// backed-off poll cadence back to the fast rung, and skip the fingerprint gate
+// so the reconcile happens now instead of at the next (slow) tick.
+func TestReviewNowKickForcesImmediateReconcile(t *testing.T) {
+	root := t.TempDir()
+	d, buf, sched := newReviewDaemon(t, root)
+	projectPath := filepath.Join(root, ".project.yaml")
+	if err := project.SaveAs(projectPath, &project.Project{
+		Description: "x", Branch: "b", Status: project.StatusReviewing,
+		Repos:     []project.Repo{{Org: "docker", Name: "gateway"}},
+		ReviewNow: true,
+	}, project.WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	// Arm the poll and back it all the way off, as a long-quiet PR would be.
+	d.ensureReviewPoll(projectPath)
+	for i := 1; i < len(reviewPollSpecs); i++ {
+		d.growReviewBackoff(projectPath)
+	}
+	d.rescheduleReviewPoll(projectPath, reviewPollSpecs[len(reviewPollSpecs)-1])
+
+	d.handleProject(projectPath)
+
+	// The one-shot flag is cleared (as the daemon, so it can't retrigger).
+	got, err := project.Load(projectPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.ReviewNow {
+		t.Errorf("ReviewNow still set; the kick must clear it")
+	}
+	if got.UpdatedBy != project.WriterDaemon {
+		t.Errorf("clear written by %q, want daemon (so it doesn't re-fire)", got.UpdatedBy)
+	}
+	// Cadence snapped back to fast, and the forced reconcile was logged.
+	if spec := sched.Spec(reviewPollKey(projectPath)); spec != reviewPollSpecs[0] {
+		t.Errorf("poll cadence = %q, want fast %q after a kick", spec, reviewPollSpecs[0])
+	}
+	if !strings.Contains(buf.String(), "review_poll_forced") {
+		t.Errorf("expected review_poll_forced in audit:\n%s", buf.String())
+	}
+}
+
+// TestReviewPRFingerprintNoPRs pins the fingerprint gate's guards: with no PRs
+// to watch (or only entries missing a repo/number) it reports ok=false without
+// shelling gh, so onReviewPoll falls through to running the agent rather than
+// treating the project as quiet.
+func TestReviewPRFingerprintNoPRs(t *testing.T) {
+	root := t.TempDir()
+	d, _, _ := newReviewDaemon(t, root)
+	path := filepath.Join(root, ".project.yaml")
+
+	if _, ok := d.reviewPRFingerprint(path, &project.Project{}); ok {
+		t.Errorf("fingerprint ok=true with no PRs, want false")
+	}
+	if _, ok := d.reviewPRFingerprint(path, &project.Project{PullRequests: []project.PullRequest{{}}}); ok {
+		t.Errorf("fingerprint ok=true with an unusable PR entry, want false")
 	}
 }
 

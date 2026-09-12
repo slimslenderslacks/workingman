@@ -86,7 +86,8 @@ func TestSummonWolfWithoutProjectErrors(t *testing.T) {
 func TestProjectsFooterAdvertisesCommandMenuForWolf(t *testing.T) {
 	root := t.TempDir()
 	m, _ := selectProject(t, root, "widget")
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 220, Height: 40})
+	// Wide enough that the full footer isn't truncated before the `:` menu hint.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 300, Height: 40})
 	m = sized.(model)
 	// Commands (including wolf) now live behind the `:` menu, not the footer.
 	if strings.Contains(m.View(), ":wolf") {

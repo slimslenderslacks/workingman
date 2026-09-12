@@ -245,19 +245,19 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 		return counts, nil
 	}
 	// ReadDir returns entries sorted by name, so tasks start in stable
-	// alphabetical order. Order the pane by run/completion order on top of that:
-	// tasks that have completed come first, earliest completion at the top;
-	// tasks that haven't completed keep the alphabetical order below, via the
-	// stable sort.
+	// alphabetical order. Order the pane most-recent-first on top of that: tasks
+	// that haven't completed yet (the current frontier of the run) sit at the
+	// top, then completed tasks below with the latest completion first; both
+	// groups keep their alphabetical order for ties, via the stable sort.
 	sort.SliceStable(tasks, func(i, j int) bool {
 		ci, cj := tasks[i].CompletedAt, tasks[j].CompletedAt
 		switch {
 		case !ci.IsZero() && !cj.IsZero():
-			return ci.Before(cj)
+			return ci.After(cj)
 		case !ci.IsZero():
-			return true
-		case !cj.IsZero():
 			return false
+		case !cj.IsZero():
+			return true
 		default:
 			return false
 		}

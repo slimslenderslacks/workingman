@@ -195,13 +195,36 @@ type Commit struct {
 
 // Source identifies the external PR signal a review-agent-created task exists to
 // address. Kind is "pr-comment" (Ref is the GitHub review-thread node id, e.g.
-// "PRRT_kwDO...") or "pr-check" (Ref is the failing check/workflow name); PR is
-// the pull request number the signal came from. Used by the review agent to
-// dedup signals against tasks and to resolve the right thread once a fix lands.
+// "PRRT_kwDO...") or "pr-check" (Ref is the failing check/workflow name); Repo is
+// the "org/name" the signal came from and PR its pull request number. Repo
+// disambiguates when a project watches a PR in several repos at once (check
+// names and even PR numbers can collide across repos). Used by the review agent
+// to dedup signals against tasks and to resolve the right thread once a fix
+// lands.
+//
+// Kind may also be "pr-push" (SourceKindPush): a task the review agent inserts,
+// depending on a batch of commit-only fix tasks, whose sole job is to publish
+// those accumulated commits to one repo's PR branch — Repo names that repo. See
+// IsPushTask.
 type Source struct {
 	Kind string `yaml:"kind"`
 	Ref  string `yaml:"ref"`
+	Repo string `yaml:"repo,omitempty"`
 	PR   int    `yaml:"pr"`
+}
+
+// SourceKindPush is the Source.Kind marking a push task: it carries no code work
+// of its own, it publishes the commit-only fixes other review tasks left in the
+// worktree. The review agent inserts one (depending on those fixes) to batch a
+// set of changes for bulk review rather than pushing every fix commit
+// individually. The daemon routes such a task straight to the commit agent in
+// push mode, skipping the (work-less) task-agent phase.
+const SourceKindPush = "pr-push"
+
+// IsPushTask reports whether this task is a review-agent push task (see
+// SourceKindPush).
+func (t *Task) IsPushTask() bool {
+	return t.Source != nil && t.Source.Kind == SourceKindPush
 }
 
 func Load(path string) (*Task, error) {

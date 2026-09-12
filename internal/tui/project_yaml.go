@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -52,6 +54,9 @@ func (m model) renderProjectYAML(width, height int) string {
 	}
 
 	body, isErr := projectYAMLBody(path)
+	if !isErr {
+		body = collapseYAMLBlocks(body, m.yamlExpanded)
+	}
 	lines := wrapDisplayWidth(body, innerWidth)
 
 	// Derive the cursor line and scroll offset together so the highlighted
@@ -99,8 +104,88 @@ func (m model) yamlLines(innerWidth int) ([]string, bool) {
 		path = m.taskSel
 	}
 	body, isErr := projectYAMLBody(path)
+	if !isErr {
+		body = collapseYAMLBlocks(body, m.yamlExpanded)
+	}
 	return wrapDisplayWidth(body, innerWidth), isErr
 }
+
+// collapsibleYAMLKeys are the long free-text fields the metadata viewer folds
+// down by default so the shorter, scannable fields around them stay on screen.
+var collapsibleYAMLKeys = map[string]bool{"description": true, "summary": true}
+
+// yamlCollapseLines is how many body lines of a collapsed block scalar stay
+// visible before the "… +N more" marker.
+const yamlCollapseLines = 3
+
+// blockScalarRE matches the opening line of a YAML block scalar —
+// `<key>: |`, `<key>: >`, and their chomping/indent variants (`|-`, `>+`, …) —
+// capturing the leading indentation and the key name.
+var blockScalarRE = regexp.MustCompile(`^(\s*)([A-Za-z0-9_]+):\s*[|>][-+0-9]*\s*$`)
+
+// collapseYAMLBlocks shortens the multi-line block scalars of the collapsible
+// keys (description, summary) to yamlCollapseLines lines, replacing the hidden
+// remainder with a "… +N more (tt to expand)" marker. With expanded=true it
+// returns body unchanged.
+//
+// Only block scalars (`key: |` / `key: >` and variants) are folded; a
+// single-line value is already short and left alone. A block's extent is the
+// run of following lines indented deeper than the key (blank lines included);
+// trailing blank lines are treated as separators, kept, and not counted toward
+// the limit. The marker is plain text on purpose: it flows through the same
+// width-wrap and cursor math as every other line, and injecting ANSI styling
+// here would corrupt that rune-based wrap.
+func collapseYAMLBlocks(body string, expanded bool) string {
+	if expanded {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		m := blockScalarRE.FindStringSubmatch(lines[i])
+		if m == nil || !collapsibleYAMLKeys[m[2]] {
+			out = append(out, lines[i])
+			continue
+		}
+		keyIndent := len(m[1])
+		out = append(out, lines[i]) // the `key: |` line itself
+
+		// Gather the block body: following lines indented deeper than the key.
+		j := i + 1
+		var block []string
+		for ; j < len(lines); j++ {
+			if strings.TrimSpace(lines[j]) != "" && lineIndent(lines[j]) <= keyIndent {
+				break
+			}
+			block = append(block, lines[j])
+		}
+		i = j - 1 // resume after the block
+
+		// Split off trailing blank separator lines so they don't count as content.
+		end := len(block)
+		for end > 0 && strings.TrimSpace(block[end-1]) == "" {
+			end--
+		}
+		content, trailing := block[:end], block[end:]
+
+		if len(content) > yamlCollapseLines {
+			out = append(out, content[:yamlCollapseLines]...)
+			indent := leadingWhitespace(content[0])
+			out = append(out, fmt.Sprintf("%s… +%d more (tt to expand)", indent, len(content)-yamlCollapseLines))
+		} else {
+			out = append(out, content...)
+		}
+		out = append(out, trailing...)
+	}
+	return strings.Join(out, "\n")
+}
+
+// lineIndent counts the leading spaces of s (YAML indents with spaces).
+func lineIndent(s string) int { return len(s) - len(strings.TrimLeft(s, " ")) }
+
+// leadingWhitespace returns the leading-space prefix of s, so a marker can line
+// up under the block body it stands in for.
+func leadingWhitespace(s string) string { return s[:len(s)-len(strings.TrimLeft(s, " "))] }
 
 // reconcileYAMLView clamps a cursor line index into [0, n-1] and derives the
 // scroll offset (index of the first visible line) so the cursor sits within a

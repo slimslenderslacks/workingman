@@ -64,6 +64,25 @@ func TestSourceRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIsPushTask(t *testing.T) {
+	cases := []struct {
+		name string
+		src  *Source
+		want bool
+	}{
+		{"no source", nil, false},
+		{"comment fix", &Source{Kind: "pr-comment", Ref: "PRRT_x", PR: 1}, false},
+		{"check fix", &Source{Kind: "pr-check", Ref: "build", PR: 1}, false},
+		{"push task", &Source{Kind: SourceKindPush, PR: 1}, true},
+	}
+	for _, tc := range cases {
+		tk := &Task{Name: "t", Source: tc.src}
+		if got := tk.IsPushTask(); got != tc.want {
+			t.Errorf("%s: IsPushTask() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestLoadExampleWithDeps(t *testing.T) {
 	tk, err := Load("../../examples/tasks/02-add-readiness-probe.yaml")
 	if err != nil {

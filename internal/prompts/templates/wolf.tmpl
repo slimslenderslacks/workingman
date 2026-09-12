@@ -65,19 +65,54 @@ starts a repository that does not exist yet, put it under `new_repos:` (same
 `org`/`name` shape) rather than `repos:` — the orchestrator will create it
 empty before provisioning the workspace.
 
+Special case — a project blocked out of the PR-review loop. Once every task
+has committed, a project that produced (or is expected to produce) a pull
+request does NOT go straight to `done`: it enters `status: reviewing`, where
+the daemon polls the PR(s) on a backoff cadence and runs a review agent that
+reconciles live signals — unresolved review threads and failed GitHub Actions
+checks become new fix tasks (project → `working`), and once the fix tasks
+commit the project returns to `reviewing` to keep watching. The loop reaches
+`done` only when every PR is merged or closed. The review agent escalates to
+you (project → `blocked`) in exactly these situations, which you can recognize
+from the `blocked_reason`:
+
+  - A contested review comment it can't safely turn into a fix task — the
+    reason quotes the comment and the PR number. Decide with the user how to
+    respond (reply on the PR, open a fix task, or overrule), then act.
+  - A check that keeps failing at head without converging — the reason names
+    the check. Investigate why the fix isn't sticking.
+  - "PR review produced N consecutive fix cycles without converging" — the PR
+    has churned through too many rounds of fixes without ever coming back
+    clean. Look at what keeps reopening and break the cycle.
+  - "PR review agent failed to run N times in a row" — the review agent's own
+    sandbox/MCP is broken (commonly the github MCP can't be created; the reason
+    suggests `sbx mcp ls` / `sbx mcp auth`). This is infrastructure, not the
+    PR's content — fix the MCP/sandbox, don't touch the PR.
+
+Crucially: when you resolve a review-loop block, the right exit is almost
+always `status: reviewing`, NOT `working` or `done`. Returning to `reviewing`
+resumes the PR watch (the daemon re-arms the poll and kicks an immediate
+reconcile); the review agent will re-derive any fix tasks itself. Only set
+`working` if you deliberately want to hand-author fix tasks and dispatch them
+now, and only set `done` if the PR work is genuinely finished (every PR merged
+or closed) and no further watching is wanted. The project may carry a
+`pull_requests:` list — leave it intact.
+
 When you have a resolution, update the relevant task and/or project files to
 move them out of the blocked/failed state (e.g. reset a task to `ready`
-after fixing its precondition, or mark the project as `done` if the work is
-no longer needed). When moving the project out of `blocked`, clear the
-`blocked_reason` field. Use `updated_by: agent`.
+after fixing its precondition, return a review-loop project to `reviewing`, or
+mark the project as `done` if the work is no longer needed). When moving the
+project out of `blocked`, clear the `blocked_reason` field. Use
+`updated_by: agent`.
 
 The project's `status:` field is a fixed enum — the daemon rejects any
 other value and re-blocks the project. Use exactly one of:
 
-  - `ready`    — planning needs to run (or re-run) before tasks dispatch
-  - `working`  — tasks should be dispatched normally
-  - `blocked`  — keeps the project here (where you are now)
-  - `done`     — terminal; no further work
+  - `ready`      — planning needs to run (or re-run) before tasks dispatch
+  - `working`    — tasks should be dispatched normally
+  - `reviewing`  — all tasks committed; the daemon is watching the PR(s) (see below)
+  - `blocked`    — keeps the project here (where you are now)
+  - `done`       — terminal; no further work
 
 Each task's `status:` field is also enum-checked. Valid values:
 

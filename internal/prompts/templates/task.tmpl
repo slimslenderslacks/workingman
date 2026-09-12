@@ -16,8 +16,16 @@ the commit agent on success and will restart the task on failure (up to a
 limit). Do not commit, push, or change `.project.yaml` — that is the
 daemon's and commit agent's job.
 
+This holds even when your work leaves nothing for git to commit — e.g. the
+task was a GitHub-API edit (updating the PR body or labels via the github
+MCP) or produced only untracked artifacts. Still exit `success`: the commit
+agent finalizes every task and no-ops cleanly when there is nothing to
+commit, moving the task to `committed` itself.
+
 The task's `status:` field is a fixed enum — any other value is rejected
 by the daemon and your save won't take effect. Valid: `ready`,
 `running`, `success`, `failed`, `blocked`, `committed`. For *your* exit:
-use `success` (work done) or `failed` (couldn't complete). Do not
-invent values like `active`, `done`, or `complete`.
+use `success` (work done) or `failed` (couldn't complete) — NEVER
+`committed`, even if nothing needed committing. A task agent that sets
+`committed` itself is treated as an invariant violation and blocks the
+project. Do not invent values like `active`, `done`, or `complete`.

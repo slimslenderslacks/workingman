@@ -295,6 +295,33 @@ func TestRenderReview(t *testing.T) {
 	}
 }
 
+// TestRenderCommitPush pins the commit template's two modes. An ordinary task's
+// commit stays local ("Do not push"); a push task (PushBranch set by the daemon
+// for a pr-push task) publishes the accumulated commit-only fixes and must block
+// rather than falsely report committed if the push is rejected.
+func TestRenderCommitPush(t *testing.T) {
+	local, err := Render(agent.CommitAgent, Data{Workspace: "/ws", Branch: "b", TaskPath: "/ws/tasks/t.yaml"})
+	if err != nil {
+		t.Fatalf("Render local: %v", err)
+	}
+	if !strings.Contains(local, "Do not push") {
+		t.Errorf("ordinary commit should not push:\n%s", local)
+	}
+
+	push, err := Render(agent.CommitAgent, Data{Workspace: "/ws", Branch: "b", TaskPath: "/ws/tasks/t.yaml", PushBranch: true})
+	if err != nil {
+		t.Fatalf("Render push: %v", err)
+	}
+	if strings.Contains(push, "Do not push") {
+		t.Errorf("a push task must not carry the do-not-push instruction:\n%s", push)
+	}
+	for _, want := range []string{"PUSH task", "source.repo", "AHEAD", "blocked", "non-fast-forward"} {
+		if !strings.Contains(push, want) {
+			t.Errorf("push-task prompt missing %q:\n%s", want, push)
+		}
+	}
+}
+
 func TestRenderAllKinds(t *testing.T) {
 	// Smoke test — every Kind must have a template; ensures we don't ship
 	// a Kind without text.

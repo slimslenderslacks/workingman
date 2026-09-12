@@ -260,6 +260,43 @@ func TestRepairedNameDedupedAgainstExisting(t *testing.T) {
 	}
 }
 
+// TestDependencyRepairedWhenNameSlugged is the regression for the opencode-dmr
+// wolf-summon: the planning agent emitted underscore task names (invalid
+// kebab-case) and referenced them, underscores and all, in depends_on. Repairing
+// the node name to hyphens without repairing the edge left the dependent
+// pointing at a name that no longer existed, so validate() failed with "depends
+// on unknown task" and the project was stranded to the wolf. Load must carry the
+// repair through the edges too.
+func TestDependencyRepairedWhenNameSlugged(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.yaml"),
+		[]byte("name: select_pull_models\nstatus: committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.yaml"),
+		[]byte("name: validate_integration\nstatus: ready\ndepends_on:\n  - select_pull_models\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Both nodes repaired to kebab-case.
+	if g.Task("validate-integration") == nil || g.Task("select-pull-models") == nil {
+		t.Fatalf("names not repaired: %v", names(g.Tasks()))
+	}
+	// The edge was carried along: the dep now names the repaired task, on both
+	// the graph's edge list (via Ready/depsCommitted) and the task's own field.
+	if got := g.Task("validate-integration").DependsOn; len(got) != 1 || got[0] != "select-pull-models" {
+		t.Errorf("DependsOn = %v, want [select-pull-models]", got)
+	}
+	// Its committed dependency resolves, so the dependent is Ready.
+	if ready := names(g.Ready()); len(ready) != 1 || ready[0] != "validate-integration" {
+		t.Errorf("Ready = %v, want [validate-integration]", ready)
+	}
+}
+
 func TestNonYamlFilesIgnored(t *testing.T) {
 	dir := t.TempDir()
 	writeTask(t, dir, "a", task.StatusReady)

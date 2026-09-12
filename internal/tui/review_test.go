@@ -60,7 +60,7 @@ func TestRequestReviewRefusesNonDone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := requestReview(path); err == nil {
+	if _, _, err := requestReview(path); err == nil {
 		t.Errorf("requestReview on a working project should error")
 	}
 	// And it must not have changed the status.
@@ -74,7 +74,47 @@ func TestRequestReviewRefusesNonDone(t *testing.T) {
 }
 
 func TestRequestReviewWithoutProjectErrors(t *testing.T) {
-	if _, err := requestReview(""); err == nil {
+	if _, _, err := requestReview(""); err == nil {
 		t.Errorf("requestReview(\"\") should error")
+	}
+}
+
+// TestRequestReviewKicksReviewingProject pins the overload: `:review` on a
+// project already in the loop must NOT re-flip status (it's already reviewing)
+// but instead set the one-shot ReviewNow request the daemon acts on, and report
+// kicked=true so the caller can say "running now" rather than "watching".
+func TestRequestReviewKicksReviewingProject(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "widget")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, ".project.yaml")
+	yaml := "description: p\nbranch: b\nstatus: reviewing\nupdated_by: daemon\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, kicked, err := requestReview(path)
+	if err != nil {
+		t.Fatalf("requestReview on a reviewing project: %v", err)
+	}
+	if !kicked {
+		t.Errorf("kicked = false, want true for an already-reviewing project")
+	}
+
+	p, err := project.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Status != project.StatusReviewing {
+		t.Errorf("status = %q, want reviewing left untouched", p.Status)
+	}
+	if !p.ReviewNow {
+		t.Errorf("ReviewNow = false, want the request flag set")
+	}
+	// Written as agent so the daemon sees it (its own daemon writes are filtered).
+	if p.UpdatedBy != project.WriterAgent {
+		t.Errorf("updated_by = %q, want agent", p.UpdatedBy)
 	}
 }

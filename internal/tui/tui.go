@@ -146,6 +146,13 @@ type model struct {
 	// the project view that existed before the task viewer was added.
 	yamlSrc yamlSource
 
+	// yamlExpanded controls whether the metadata viewer's long free-text
+	// fields (description, summary) render in full or collapsed to a few
+	// lines. Defaults to false (collapsed) so the shorter, scannable fields
+	// stay on screen; the "tt" chord toggles it (see collapseYAMLBlocks and
+	// the pending-"t" resolution in handleNormalKey).
+	yamlExpanded bool
+
 	// zoomed maximizes the focused pane: when set, View renders only the
 	// focused pane filling the whole body (reclaiming the audit strip too),
 	// and the `z` key toggles it back to the normal stacked layout. Because
@@ -437,10 +444,12 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	// Resolve a pending "t" chord first. "l"/"r" complete it as a
-	// toggle-left/toggle-right column command; any other key means the user
-	// wasn't typing "tl"/"tr" at all, so "t" resolves to its own standalone
-	// action (switch the YAML viewer to task content) and `key` falls through
-	// to be handled normally below, exactly as if no chord had been pending.
+	// toggle-left/toggle-right column command; "t" completes it as the
+	// expand/collapse toggle for the metadata viewer's description/summary
+	// fields; any other key means the user wasn't typing a "t?" chord at all,
+	// so "t" resolves to its own standalone action (switch the YAML viewer to
+	// task content) and `key` falls through to be handled normally below,
+	// exactly as if no chord had been pending.
 	if m.pendingKey == "t" {
 		m.pendingKey = ""
 		switch key {
@@ -450,6 +459,13 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "r":
 			m.rightVisible = !m.rightVisible
+			m.statusMsg = ""
+			return m, nil
+		case "t":
+			// "tt" folds/unfolds the long description and summary block scalars
+			// in the metadata viewer (see collapseYAMLBlocks). Returning here
+			// keeps the second "t" from re-arming the chord via the switch below.
+			m.yamlExpanded = !m.yamlExpanded
 			m.statusMsg = ""
 			return m, nil
 		default:
@@ -518,6 +534,11 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if page := yamlPageSize(m); page > 0 {
 			m = m.pageYAML(-page)
 		}
+		m.statusMsg = ""
+	case "G":
+		// Vim-style jump to the end of the YAML buffer. Like ctrl+f/ctrl+b it
+		// acts on whichever YAML view is visible, independent of pane focus.
+		m = m.yamlToEnd()
 		m.statusMsg = ""
 	case "alt+j", "∆":
 		// ⌥j steps focus forward through the three panes stacked in the
@@ -685,6 +706,23 @@ func (m model) pageYAML(delta int) model {
 		return m
 	}
 	m.yamlCursor, m.yamlScroll = reconcileYAMLView(m.yamlCursor+delta, m.yamlScroll+delta, len(lines), rows)
+	return m
+}
+
+// yamlToEnd jumps the YAML viewport to the bottom of the buffer (vim "G"),
+// putting the cursor on the last line; reconcileYAMLView scrolls so it's
+// visible. Like pageYAML it is a no-op when the pane isn't laid out or the body
+// isn't navigable (an error/placeholder).
+func (m model) yamlToEnd() model {
+	iw, rows, ok := m.yamlViewport()
+	if !ok {
+		return m
+	}
+	lines, isErr := m.yamlLines(iw)
+	if isErr || len(lines) == 0 {
+		return m
+	}
+	m.yamlCursor, m.yamlScroll = reconcileYAMLView(len(lines)-1, m.yamlScroll, len(lines), rows)
 	return m
 }
 
@@ -2404,7 +2442,7 @@ func (m model) renderFooter() string {
 		if m.zoomed {
 			zoomHint = "z: restore panes"
 		}
-		base := "⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  p/t: project/task yaml  •  tl/tr: toggle sessions/yaml column  •  enter/click: attach  •  q: quit"
+		base := "⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  p/t: project/task yaml  •  tl/tr: toggle sessions/yaml column  •  tt: expand/collapse desc  •  enter/click: attach  •  q: quit"
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}

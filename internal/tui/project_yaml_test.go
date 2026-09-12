@@ -175,6 +175,9 @@ func TestCtrlFCtrlBPageYAMLRegardlessOfFocus(t *testing.T) {
 	}})
 	m = step.(model)
 	m.projSel = path
+	// This fixture is one long description block; expand it so there's a full
+	// body to page through (the fold is covered by its own test).
+	m.yamlExpanded = true
 
 	page := yamlPageSize(m)
 	if page <= 0 {
@@ -205,6 +208,44 @@ func TestCtrlFCtrlBPageYAMLRegardlessOfFocus(t *testing.T) {
 		if m.yamlScroll != 0 {
 			t.Errorf("ctrl+b at zero from focus=%v: scroll = %d, want 0", focus, m.yamlScroll)
 		}
+	}
+}
+
+// TestGJumpsToEndOfYAML pins the vim "G" binding: it scrolls the YAML viewer to
+// the bottom of the buffer, lands on the last page, and works regardless of
+// which pane holds focus (same independence as ctrl+f/ctrl+b).
+func TestGJumpsToEndOfYAML(t *testing.T) {
+	path := writeManyLineProject(t, 200)
+	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
+	m = sized.(model)
+	step, _ := m.Update(projectsMsg{views: []ProjectView{
+		{Name: "alpha", Path: path, Status: project.StatusReady},
+	}})
+	m = step.(model)
+	m.projSel = path
+	// One long description block; expand it so there's a real buffer to jump
+	// through (the fold has its own test).
+	m.yamlExpanded = true
+
+	m.focus = paneProjects
+	m = pressKey(m, "G")
+	end := m.yamlScroll
+	if end <= 0 {
+		t.Fatalf("G did not scroll toward the end; yamlScroll=%d", end)
+	}
+	// Already at the bottom: a further page-down can't move past it.
+	if further := m.pageYAML(yamlPageSize(m)); further.yamlScroll != end {
+		t.Errorf("G should land on the last page; ctrl+f advanced it from %d to %d", end, further.yamlScroll)
+	}
+
+	// Independent of pane focus: from the top with a side pane focused, G still
+	// reaches the same bottom.
+	m.focus = paneSessions
+	m.yamlScroll, m.yamlCursor = 0, 0
+	m = pressKey(m, "G")
+	if m.yamlScroll != end {
+		t.Errorf("G from a non-YAML focus scroll=%d, want %d", m.yamlScroll, end)
 	}
 }
 
@@ -257,5 +298,85 @@ func TestWrapDisplayWidthSplitsLongLinesAndPreservesBlanks(t *testing.T) {
 	// original long line so no characters were dropped.
 	if joined := strings.Join(got[2:], ""); joined != "verylongline-of-text-that-must-wrap-cleanly" {
 		t.Errorf("wrapped fragments do not reassemble: %q", joined)
+	}
+}
+
+const collapseSampleYAML = `description: |
+    line one
+    line two
+    line three
+    line four
+    line five
+branch: feat/x
+status: reviewing
+summary: |
+    only one
+repos:
+    - org: docker
+`
+
+func TestCollapseYAMLBlocksFoldsLongBlocks(t *testing.T) {
+	got := collapseYAMLBlocks(collapseSampleYAML, false)
+
+	// The five-line description keeps yamlCollapseLines lines + a marker.
+	if !strings.Contains(got, "line three") {
+		t.Errorf("collapsed body dropped a kept line:\n%s", got)
+	}
+	if strings.Contains(got, "line four") || strings.Contains(got, "line five") {
+		t.Errorf("collapsed body still shows hidden lines:\n%s", got)
+	}
+	if !strings.Contains(got, "… +2 more (tt to expand)") {
+		t.Errorf("collapsed body missing the fold marker:\n%s", got)
+	}
+	// Fields after the collapsed block survive intact.
+	for _, want := range []string{"branch: feat/x", "status: reviewing", "repos:", "- org: docker"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("collapsed body dropped %q:\n%s", want, got)
+		}
+	}
+	// A short block (summary: one line) is under the limit, so no marker and its
+	// content stays.
+	if !strings.Contains(got, "only one") {
+		t.Errorf("short summary block was altered:\n%s", got)
+	}
+	if strings.Count(got, "to expand") != 1 {
+		t.Errorf("only the long block should be folded; got %d markers:\n%s", strings.Count(got, "to expand"), got)
+	}
+}
+
+func TestCollapseYAMLBlocksExpandedIsIdentity(t *testing.T) {
+	if got := collapseYAMLBlocks(collapseSampleYAML, true); got != collapseSampleYAML {
+		t.Errorf("expanded=true must return the body unchanged; got:\n%s", got)
+	}
+}
+
+// TestTTChordTogglesYAMLExpansion pins the "tt" chord: it flips yamlExpanded
+// (fold/unfold the description & summary blocks) regardless of pane focus, and
+// the second "t" must not re-arm the chord or leave a stray "t" standalone
+// action pending.
+func TestTTChordTogglesYAMLExpansion(t *testing.T) {
+	m := zoomTestModel()
+	m.focus = paneProjects // works independent of focus
+
+	m = pressKey(m, "t")
+	if m.pendingKey != "t" {
+		t.Fatalf("first t should arm the chord; pendingKey=%q", m.pendingKey)
+	}
+	m = pressKey(m, "t")
+	if m.yamlExpanded != true {
+		t.Errorf("tt should expand; yamlExpanded=false")
+	}
+	if m.pendingKey != "" {
+		t.Errorf("tt must not leave a chord pending; pendingKey=%q", m.pendingKey)
+	}
+	if m.zoomed {
+		t.Errorf("tt must not touch the maximize state")
+	}
+
+	// Toggle back.
+	m = pressKey(m, "t")
+	m = pressKey(m, "t")
+	if m.yamlExpanded {
+		t.Errorf("second tt should collapse again; yamlExpanded=true")
 	}
 }

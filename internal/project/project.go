@@ -200,22 +200,42 @@ type Project struct {
 	// project/planning agent when the seed goal is PR-shaped, or by a human.
 	// `omitempty` keeps the key out of files that don't use it.
 	Review bool `yaml:"review,omitempty"`
-	// PullRequest is the PR the review agent discovered for this project's branch,
-	// stamped so the TUI can surface it and so a new push (changed HeadSHA) is
-	// detectable across polls. Nil until the review agent finds an open PR.
+	// ReviewNow is the one-shot *request* flag behind `:review` on a project that
+	// is already `reviewing`: "run the review agent now" instead of waiting for
+	// the next scheduled poll. The PR poll backs off to as slow as 30m when a PR
+	// is quiet (see reviewPollSpecs), so a human who wants an on-demand reconcile
+	// needs a way to jump the queue.
+	//
+	// It follows the same request-flag contract as Cleanup: the TUI sets it and
+	// writes as WriterAgent (a daemon-authored write is dropped by the daemon's
+	// own fsnotify filter and would never be seen); the daemon, on observing a
+	// reviewing project with the flag set, clears it — as the daemon, so the
+	// clear can't retrigger dispatch — snaps the poll cadence back to fast, and
+	// dispatches the review agent immediately (a run already in flight makes the
+	// kick a no-op). Unlike Cleanup the flag is cleared before the run rather than
+	// after: the periodic poll stays armed, so a request lost to a mid-run crash
+	// simply falls back to the normal cadence. `omitempty` keeps the key out of
+	// files that never used it.
+	ReviewNow bool `yaml:"review_now,omitempty"`
+	// PullRequests are the pull requests the review agent is watching for this
+	// project — one per repo that has an open PR on the project's branch, so a
+	// project spanning several repos can review a PR in each at once. The review
+	// agent stamps this list on every poll; the loop reaches done only when every
+	// entry is merged or closed. The TUI reads it to surface the PRs.
 	//
 	// The PR-resolution loop's runaway guard is deliberately NOT a field here: a
 	// legitimately long-lived PR can sit open for days, so a persisted lifetime
 	// cycle cap would wrongly kill it. The daemon instead bounds only
 	// *consecutive fix cycles that never converge* with an in-memory counter that
-	// resets whenever a poll finds the PR clean (see reviewFixCycles).
-	PullRequest *PullRequest `yaml:"pull_request,omitempty"`
-	UpdatedBy   Writer       `yaml:"updated_by"`
+	// resets whenever a poll finds the PRs clean (see reviewFixCycles).
+	PullRequests []PullRequest `yaml:"pull_requests,omitempty"`
+	UpdatedBy    Writer        `yaml:"updated_by"`
 }
 
-// PullRequest is the review agent's record of the GitHub pull request that
-// backs a project's branch. It is agent-written (the review agent stamps it on
-// each poll) and read by the TUI; State is one of "open", "merged", "closed".
+// PullRequest is the review agent's record of one GitHub pull request that backs
+// a project's branch (a project may have several — one per repo — see
+// Project.PullRequests). It is agent-written (stamped on each poll) and read by
+// the TUI; State is one of "open", "merged", "closed".
 type PullRequest struct {
 	Repo    string `yaml:"repo"`
 	Number  int    `yaml:"number"`

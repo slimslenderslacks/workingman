@@ -36,12 +36,21 @@ var reviewPollSpecs = []string{"@every 2m", "@every 5m", "@every 15m", "@every 3
 // with repos still gets a one-time PR probe (the review agent checks for an open
 // PR and goes done immediately if there is none). A repo-less project can't have
 // a PR, so it keeps the original terminal behaviour.
+//
+// A live recurring cron project is the exception: it rests at `done` between
+// firings and does its work by committing directly (it opens no PR), so the
+// probe would fire on EVERY cycle — spinning up a review agent each period only
+// to find no PR and return to done (the EmailPromotionSummary oscillation). Its
+// repos are not a PR signal, so the probe is skipped; such a project enters the
+// review loop only when it explicitly asks via `review: true`. An expired
+// schedule is treated as a one-shot again and keeps the probe.
 func (d *Daemon) transitionProjectComplete(projectPath string, p *project.Project) {
 	// The PR-resolution loop is scheduler-driven — it polls the PR on a cadence —
 	// so, like cron, it can only run when the daemon has a scheduler. Production
 	// always wires one; a scheduler-less daemon (dev/tests) keeps the original
 	// terminal behaviour instead of stranding the project in reviewing.
-	if d.scheduler != nil && (p.Review || p.HasRepos()) {
+	recurring := p.Cron != "" && !p.CronExpired()
+	if d.scheduler != nil && (p.Review || (p.HasRepos() && !recurring)) {
 		d.transitionProjectReviewing(projectPath, p)
 		return
 	}
@@ -144,6 +153,32 @@ func (d *Daemon) onReviewPoll(projectPath string) {
 	d.resetReviewBackoff(projectPath)
 	d.rescheduleReviewPoll(projectPath, reviewPollSpecs[0])
 	d.audit.Log("review_poll_fired", "path", projectPath)
+	d.dispatchReviewAgent(projectPath, p)
+}
+
+// forceReviewNow honors a `:review` kick on an already-reviewing project: it
+// clears the one-shot ReviewNow request, snaps the poll cadence back to the
+// fast rung, and dispatches the review agent immediately — bypassing the poll's
+// change-detection gate so the reconcile happens now rather than at the next
+// (possibly 30m-away) tick.
+//
+// The flag is cleared as the daemon so the clearing write can't retrigger
+// dispatch, and cleared before the launch rather than after: the #review poll is
+// still armed (ensureReviewPoll ran just before this), so a request lost to a
+// mid-run crash just falls back to the normal cadence. A run already in flight
+// makes the dispatch a dedup no-op (dispatchReviewAgent checks hasSession), which
+// is the right outcome — the kick is already being served.
+func (d *Daemon) forceReviewNow(projectPath string, p *project.Project) {
+	cleared := *p
+	cleared.ReviewNow = false
+	if err := project.Save(projectPath, &cleared); err != nil {
+		d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
+	} else {
+		p = &cleared
+	}
+	d.resetReviewBackoff(projectPath)
+	d.rescheduleReviewPoll(projectPath, reviewPollSpecs[0])
+	d.audit.Log("review_poll_forced", "path", projectPath)
 	d.dispatchReviewAgent(projectPath, p)
 }
 
@@ -325,26 +360,40 @@ func (d *Daemon) reviewFingerprint(projectPath string, p *project.Project) (stri
 // agent hasn't stamped one) or gh is unavailable; the caller treats that as
 // "can't gate — run the agent" so the optimization never hides a real signal.
 func (d *Daemon) reviewPRFingerprint(projectPath string, p *project.Project) (string, bool) {
-	if p.PullRequest == nil || p.PullRequest.Repo == "" || p.PullRequest.Number == 0 {
+	if len(p.PullRequests) == 0 {
 		return "", false
 	}
 	base := d.ctx
 	if base == nil {
 		base = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(base, 20*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "gh", "pr", "view",
-		strconv.Itoa(p.PullRequest.Number),
-		"--repo", p.PullRequest.Repo,
-		"--json", "headRefOid,updatedAt,statusCheckRollup",
-	).Output()
-	if err != nil {
-		d.audit.Log("review_fingerprint_error", "path", projectPath, "err", err.Error())
+	h := sha256.New()
+	n := 0
+	for _, pr := range p.PullRequests {
+		if pr.Repo == "" || pr.Number == 0 {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(base, 20*time.Second)
+		out, err := exec.CommandContext(ctx, "gh", "pr", "view",
+			strconv.Itoa(pr.Number),
+			"--repo", pr.Repo,
+			"--json", "headRefOid,updatedAt,statusCheckRollup",
+		).Output()
+		cancel()
+		if err != nil {
+			// Can't gate reliably if any watched PR is unreadable — fail toward
+			// running the agent so we never miss a signal.
+			d.audit.Log("review_fingerprint_error", "path", projectPath, "repo", pr.Repo, "err", err.Error())
+			return "", false
+		}
+		h.Write([]byte(pr.Repo))
+		h.Write(out)
+		n++
+	}
+	if n == 0 {
 		return "", false
 	}
-	sum := sha256.Sum256(out)
-	return hex.EncodeToString(sum[:]), true
+	return hex.EncodeToString(h.Sum(nil)), true
 }
 
 func (d *Daemon) lastReviewFinger(projectPath string) (string, bool) {

@@ -284,8 +284,9 @@ func TestScanProjectsOrdersTasksByCompletion(t *testing.T) {
 	}, project.WriterAgent); err != nil {
 		t.Fatal(err)
 	}
-	// Alphabetical (taskgraph) order is a, b, c. Completion order is c (earlier)
-	// then a (later); b never completed and must fall to the bottom.
+	// Alphabetical (taskgraph) order is a, b, c. The pane is most-recent-first:
+	// b (never completed — the current frontier) rises to the top, then a (later
+	// completion) above c (earlier completion).
 	earlier := time.Now().UTC().Add(-2 * time.Hour)
 	later := time.Now().UTC().Add(-1 * time.Hour)
 	writeTask(t, filepath.Join(dir, "tasks", "01-a.yaml"),
@@ -302,7 +303,7 @@ func TestScanProjectsOrdersTasksByCompletion(t *testing.T) {
 	if len(views) != 1 {
 		t.Fatalf("want 1 view, got %d", len(views))
 	}
-	want := []string{"c", "a", "b"}
+	want := []string{"b", "a", "c"}
 	got := make([]string, 0, len(views[0].Tasks))
 	for _, tk := range views[0].Tasks {
 		got = append(got, tk.Name)
@@ -312,7 +313,7 @@ func TestScanProjectsOrdersTasksByCompletion(t *testing.T) {
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("task order = %v, want %v (completed by time, then uncompleted by name)", got, want)
+			t.Errorf("task order = %v, want %v (uncompleted first, then completed newest-first)", got, want)
 			break
 		}
 	}

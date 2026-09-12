@@ -195,7 +195,22 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 			"no ready tasks remain but project is not fully committed")
 		return
 	}
-	d.launchTaskAgent(projectPath, p, ready[0])
+	d.dispatchReadyTask(projectPath, p, ready[0])
+}
+
+// dispatchReadyTask launches the right agent for a ready task. A push task has
+// no code work of its own — it publishes the commit-only fixes a batch of review
+// tasks accumulated in the worktree — so it goes straight to the commit agent in
+// push mode, skipping the (work-less) task-agent phase. Every other task starts
+// with a task agent. Both the status:working dispatch and the post-commit
+// next-task pick route through here so push tasks are handled the same wherever
+// they surface in the graph.
+func (d *Daemon) dispatchReadyTask(projectPath string, p *project.Project, t *task.Task) {
+	if t.IsPushTask() {
+		d.launchCommitAgent(projectPath, p, t)
+		return
+	}
+	d.launchTaskAgent(projectPath, p, t)
 }
 
 // launchCommitAgent runs in the same workspace shape as a task agent — it
@@ -228,6 +243,12 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		StaticMCPs:  t.StaticMCPs,
 		Policies:    t.Policies,
 		SaveSandbox: t.SaveSandbox,
+		// Only a push task publishes: it pushes the commit-only fixes earlier
+		// review tasks accumulated in the worktree to the remote PR branch. Every
+		// other task's commit stays local (ordinary work is published by the
+		// archive agent at cleanup; individual review fixes wait for a push task
+		// so the reviewer sees a coherent batch rather than a stream of commits).
+		PushBranch: t.IsPushTask(),
 	}
 	err := d.startSession(projectPath, plan, func(error) {
 		d.afterCommitSession(projectPath, plan.TaskPath, p)

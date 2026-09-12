@@ -44,6 +44,10 @@ type Context struct {
 
 	Replan   bool   `yaml:"replan,omitempty"`
 	Worktree string `yaml:"worktree,omitempty"`
+
+	// PushBranch tells the commit agent to push after committing (review-fix
+	// tasks) rather than leaving the commit local. See prompts.Data.PushBranch.
+	PushBranch bool `yaml:"push_branch,omitempty"`
 }
 
 // Skill is a directory of files copied verbatim into the workspace's

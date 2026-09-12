@@ -27,7 +27,7 @@ var projectCommands = []projectCommand{
 	{"dir", "dir", "open a shell in the workspace sandbox"},
 	{"session", "session", "open/resume an interactive claude session"},
 	{"wolf", "wolf", "summon the wolf to investigate"},
-	{"review", "review", "watch this work stream's PR (comments & CI)"},
+	{"review", "review", "watch this work stream's PR (or poll it now)"},
 	{"new", "new", "create a new work stream"},
 	{"cleanup", "cleanup", "prepare this work stream for archiving"},
 	{"archive", "archive", "archive this work stream"},
@@ -136,19 +136,25 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 		m.statusMsg = "summoned the wolf for " + name
 	case "review":
-		// `review` starts the PR-resolution loop for a finished work stream: it
-		// flips the project to status:reviewing; the daemon arms the PR poll and
-		// dispatches the review agent. Immediate — no modal.
+		// `review` drives the PR-resolution loop for the selected work stream: on a
+		// `done` project it flips to status:reviewing (the daemon arms the PR poll
+		// and dispatches the review agent); on a project already `reviewing` it
+		// kicks an immediate reconcile instead of waiting out the poll backoff.
+		// Immediate — no modal.
 		if m.projSel == "" {
 			m.statusMsg = "no work stream selected"
 			return m, nil
 		}
-		name, err := requestReview(m.projSel)
+		name, kicked, err := requestReview(m.projSel)
 		if err != nil {
 			m.statusMsg = "review: " + err.Error()
 			return m, nil
 		}
-		m.statusMsg = "watching the PR for " + name
+		if kicked {
+			m.statusMsg = "running the review agent now for " + name
+		} else {
+			m.statusMsg = "watching the PR for " + name
+		}
 	case "dir":
 		return m.openInteractive("shell")
 	case "session":

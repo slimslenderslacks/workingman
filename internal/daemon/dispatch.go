@@ -131,6 +131,29 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 		d.launchArchiveAgent(path, p)
 		return
 	}
+	// A pending seed on a resting project (done/reviewing) is an orphaned `:task`
+	// addition: `:task` flips the project to `ready` so planning fleshes the seed
+	// into a real task, but that flip can be skipped (the project slot was busy
+	// with a review/other agent, so the planning launch dedup-skipped) or clobbered
+	// (a review agent's own status write landed after it, resetting done/reviewing).
+	// Either way the seed strands — unplanned work that never runs. Re-arm the
+	// normal path by flipping back to `ready` here; the switch below then routes to
+	// the planning agent, which carries its own crash-loop circuit breaker. Guarded
+	// to resting statuses so a seed observed mid-flight (working/ready/blocked) is
+	// left to that status's own handling.
+	if (p.Status == project.StatusDone || p.Status == project.StatusReviewing) && d.hasPendingSeed(path) {
+		d.audit.Log("seed_replan", "path", path, "from", string(p.Status))
+		updated := *p
+		updated.Status = project.StatusReady
+		if err := project.Save(path, &updated); err != nil {
+			// Couldn't persist the flip: leave the project as-is and fall through to
+			// its normal routing. The seed remains on disk, so the next observation
+			// (or a daemon restart) retries this re-arm rather than losing the work.
+			d.audit.Log("project_save_error", "path", path, "err", err.Error())
+		} else {
+			p = &updated
+		}
+	}
 	switch p.Status {
 	case project.StatusReady:
 		d.launchProjectRootAgent(path, agent.PlanningAgent, p)
@@ -148,14 +171,34 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 		}
 		d.launchWolfAgent(path, p, reason)
 	case project.StatusReviewing:
+		// `reviewing` means "the PR is open", not "there is no work left." A human
+		// (or an agent) can queue manual tasks alongside the PR watch, so dispatch
+		// any pending task work first. When work is dispatched it takes the
+		// project's agent slot and the project stays reviewing; on commit it
+		// returns here and the poll re-arms (transitionProjectComplete →
+		// transitionProjectReviewing). Only when nothing is pending do we fall
+		// through to the PR-watch behavior below.
+		if d.dispatchPendingTasks(path, p) {
+			return
+		}
 		// The PR-resolution loop is driven by the project's #review poll, not by
 		// this fsnotify path. Just (re)register the poll — idempotent, so it is
 		// safe on every observation and is how a daemon restart or an agent's own
 		// status:reviewing write re-arms polling. The poll dispatches the review
 		// agent (see onReviewPoll).
 		d.ensureReviewPoll(path)
+		// A `:review` on an already-reviewing project sets ReviewNow to demand an
+		// immediate reconcile instead of waiting out the poll's backoff.
+		if p.ReviewNow {
+			d.forceReviewNow(path, p)
+		}
 	case project.StatusDone:
-		// terminal
+		// Done is terminal for the automatic cycle, but a human can still append
+		// manual tasks to a finished project — those still need to run. Dispatch
+		// any that are pending; a fully-committed graph is a no-op and the project
+		// stays done (dispatchPendingTasks does not re-run the completion
+		// transition, so a done project is never spuriously moved).
+		d.dispatchPendingTasks(path, p)
 	}
 }
 
@@ -721,41 +764,107 @@ func workspaceReposFor(p *project.Project) []workspace.Repo {
 //  3. Any task in Ready() → launch task agent for the first.
 //  4. Nothing to do → log no_ready_tasks with the total count.
 func (d *Daemon) dispatchNextTask(projectPath string, p *project.Project) {
-	root := filepath.Dir(projectPath)
-	tasksDir := filepath.Join(root, "tasks")
-
-	g, err := taskgraph.Load(tasksDir)
-	if err != nil {
-		// A structural graph error (unknown dependency, cycle, genuine
-		// duplicate) can't be repaired per-file. Block rather than returning
-		// silently: an unblocked project with no ready tasks and no active
-		// session never gets revisited, which would strand it forever
-		// instead of handing it to the wolf agent for recovery.
-		d.audit.Log("taskgraph_error", "path", projectPath, "err", err.Error())
-		d.transitionProjectBlocked(projectPath, p, "taskgraph error: "+err.Error())
+	g, ok := d.loadTaskGraph(projectPath, p)
+	if !ok {
 		return
-	}
-	for _, w := range g.Warnings() {
-		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
 	}
 	if g.AllCommitted() {
 		d.transitionProjectComplete(projectPath, p)
 		return
 	}
-	if t := firstUncommittedSuccess(g); t != nil {
-		d.audit.Log("resume_pending_commit", "task", t.Name)
-		d.launchCommitAgent(projectPath, p, t)
-		return
-	}
-	ready := g.Ready()
-	if len(ready) == 0 {
+	if !d.dispatchReadyOrPending(projectPath, p, g) {
 		d.audit.Log("no_ready_tasks",
 			"path", projectPath,
 			"total", fmt.Sprintf("%d", len(g.Tasks())),
 		)
-		return
 	}
-	d.launchTaskAgent(projectPath, p, ready[0])
+}
+
+// dispatchPendingTasks runs whatever uncommitted task work a project holds
+// WITHOUT touching its status — the counterpart to dispatchNextTask for the
+// statuses that are not `working`. A `reviewing` project has an open PR but can
+// still carry manual tasks a human queued alongside the PR watch, and a `done`
+// project can have work appended to it after the fact; either way those tasks
+// must run. It returns true when it dispatched an agent (a commit agent for a
+// finished-but-uncommitted task, or a task/commit agent for the first ready
+// task) and false when the graph has nothing to run — fully committed, empty, or
+// only failed/blocked tasks.
+//
+// Unlike dispatchNextTask it never transitions a fully-committed graph to
+// complete: re-running the completion transition on a `reviewing` project would
+// churn it, and on a `done` project with repos would wrongly re-open the PR
+// watch. The caller's status is preserved so the PR keeps being watched and a
+// done project stays done when there is no pending work to pick up.
+func (d *Daemon) dispatchPendingTasks(projectPath string, p *project.Project) bool {
+	g, ok := d.loadTaskGraph(projectPath, p)
+	if !ok {
+		// A structural graph error blocked the project; report handled so the
+		// caller drops its normal (reviewing/done) routing for this observation.
+		return true
+	}
+	if g.AllCommitted() {
+		return false
+	}
+	return d.dispatchReadyOrPending(projectPath, p, g)
+}
+
+// hasPendingSeed reports whether projectPath's tasks dir holds a pending `:task`
+// seed (a blank-name task with a description) awaiting the planning agent. A
+// graph that can't be loaded returns false: the structural error is surfaced and
+// blocked on the normal dispatch path (loadTaskGraph), not here, so this stays a
+// pure predicate with no side effects.
+func (d *Daemon) hasPendingSeed(projectPath string) bool {
+	tasksDir := filepath.Join(filepath.Dir(projectPath), "tasks")
+	g, err := taskgraph.Load(tasksDir)
+	if err != nil {
+		return false
+	}
+	return g.HasPendingSeed()
+}
+
+// loadTaskGraph loads projectPath's task graph, logging any repair warnings. On
+// a structural error (unknown dependency, cycle, genuine duplicate) — which
+// can't be repaired per-file — it blocks the project for the wolf and returns
+// ok=false; the caller must stop. Blocking rather than returning silently
+// matters because an unblocked project with no ready tasks and no active session
+// never gets revisited, which would strand it forever. Extracted so the
+// `working` dispatch and the `reviewing`/`done` manual-task dispatch share one
+// load-and-repair path.
+func (d *Daemon) loadTaskGraph(projectPath string, p *project.Project) (*taskgraph.Graph, bool) {
+	root := filepath.Dir(projectPath)
+	tasksDir := filepath.Join(root, "tasks")
+
+	g, err := taskgraph.Load(tasksDir)
+	if err != nil {
+		d.audit.Log("taskgraph_error", "path", projectPath, "err", err.Error())
+		d.transitionProjectBlocked(projectPath, p, "taskgraph error: "+err.Error())
+		return nil, false
+	}
+	for _, w := range g.Warnings() {
+		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
+	}
+	return g, true
+}
+
+// dispatchReadyOrPending launches the next agent for a graph that is NOT fully
+// committed: a commit agent for a task whose agent finished but hasn't committed
+// (the interrupted task→commit recovery), otherwise the first ready task (a push
+// task goes straight to the commit agent, every other task to a task agent — see
+// dispatchReadyTask). It returns false when the graph has no dispatchable work —
+// nothing awaiting commit and nothing ready — which each caller interprets for
+// its own status.
+func (d *Daemon) dispatchReadyOrPending(projectPath string, p *project.Project, g *taskgraph.Graph) bool {
+	if t := firstUncommittedSuccess(g); t != nil {
+		d.audit.Log("resume_pending_commit", "task", t.Name)
+		d.launchCommitAgent(projectPath, p, t)
+		return true
+	}
+	ready := g.Ready()
+	if len(ready) == 0 {
+		return false
+	}
+	d.dispatchReadyTask(projectPath, p, ready[0])
+	return true
 }
 
 // firstUncommittedSuccess returns the first task in deterministic order

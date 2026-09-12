@@ -51,6 +51,15 @@ type Data struct {
 
 	Replan   bool   // for PlanningAgent: re-plan the existing tasks (a cron cycle) instead of preserving them
 	Worktree string // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
+
+	// PushBranch, for the CommitAgent, tells it to push the branch after
+	// committing instead of leaving the commit local. Set by the daemon for a
+	// review-fix task (one carrying a `source:` — it addresses a live PR review
+	// comment or check), because the remote PR branch must include the fix for
+	// the external reviewer and CI to see it, and so the review agent's later
+	// thread-resolve is truthful. False for ordinary tasks, whose commits stay
+	// local until the archive agent publishes them at cleanup.
+	PushBranch bool
 }
 
 // tmplFuncs are the helpers available to every template. `sub` lets the

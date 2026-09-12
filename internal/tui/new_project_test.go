@@ -277,9 +277,9 @@ func TestNewProjectModalEscapeCancels(t *testing.T) {
 
 func TestProjectsFooterShowsColonMenuWithoutSelection(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	// Wide enough that the longer footer (now advertising tl/tr too) isn't
-	// truncated before the `:` menu hint at the end.
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 240, Height: 40})
+	// Wide enough that the full footer (now also advertising the tt/tl/tr
+	// toggles) isn't truncated before the `:` menu hint at the end.
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 300, Height: 40})
 	m = sized.(model)
 	m = focusProjectsPane(t, m)
 	// The footer advertises the `:` menu, not the individual commands.
