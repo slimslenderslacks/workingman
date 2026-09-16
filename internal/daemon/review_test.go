@@ -80,6 +80,21 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 			wantStatus: project.StatusReviewing,
 			wantPoll:   true,
 		},
+		{
+			// no_review opts a repo-backed project out of the probe: workspace
+			// setup / health checks that never open a PR go straight to done.
+			name:       "no_review skips the repos probe",
+			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, NoReview: true},
+			wantStatus: project.StatusDone,
+			wantPoll:   false,
+		},
+		{
+			// An explicit review intent still wins over no_review.
+			name:       "review flag beats no_review",
+			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Review: true, NoReview: true},
+			wantStatus: project.StatusReviewing,
+			wantPoll:   true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

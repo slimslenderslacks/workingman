@@ -68,6 +68,14 @@ interactively. Fill in these fields:
   one-time PR probe on completion either way, but the flag is what makes the
   loop keep watching for a PR that has not been opened yet. Never set it on a
   repo-less project.
+- no_review: optional boolean. The mirror image of `review`: set `no_review:
+  true` when a repo-backed project is known never to open a pull request —
+  workspace setup, a read-only health check, or work that commits straight to
+  the branch. Without it, such a project still runs the one-time PR probe on
+  completion, spinning up a review agent each time only to find no PR and go to
+  done. With it set the project skips the probe and completes straight to done.
+  Never set both `review` and `no_review`; if you do, `review` wins. Omit it
+  (default false) whenever the work might legitimately open a PR.
 
 Sensible defaults exist for everything except which repositories the work
 touches. If the description gives you enough to identify at least one

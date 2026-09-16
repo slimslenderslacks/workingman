@@ -44,13 +44,21 @@ var reviewPollSpecs = []string{"@every 2m", "@every 5m", "@every 15m", "@every 3
 // repos are not a PR signal, so the probe is skipped; such a project enters the
 // review loop only when it explicitly asks via `review: true`. An expired
 // schedule is treated as a one-shot again and keeps the probe.
+//
+// NoReview is the one-shot analogue of the cron exception: a repo-backed project
+// that is known never to open a PR (workspace setup, read-only health checks,
+// direct-to-branch commits) sets it to skip the probe and go straight to done,
+// instead of spinning up a review agent on every completion only to find no PR.
+// It suppresses only the repos proxy — an explicit `Review: true` still wins,
+// since that is a deliberate "a PR is expected" signal.
 func (d *Daemon) transitionProjectComplete(projectPath string, p *project.Project) {
 	// The PR-resolution loop is scheduler-driven — it polls the PR on a cadence —
 	// so, like cron, it can only run when the daemon has a scheduler. Production
 	// always wires one; a scheduler-less daemon (dev/tests) keeps the original
 	// terminal behaviour instead of stranding the project in reviewing.
 	recurring := p.Cron != "" && !p.CronExpired()
-	if d.scheduler != nil && (p.Review || (p.HasRepos() && !recurring)) {
+	probe := p.HasRepos() && !recurring && !p.NoReview
+	if d.scheduler != nil && (p.Review || probe) {
 		d.transitionProjectReviewing(projectPath, p)
 		return
 	}

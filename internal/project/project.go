@@ -200,6 +200,18 @@ type Project struct {
 	// project/planning agent when the seed goal is PR-shaped, or by a human.
 	// `omitempty` keeps the key out of files that don't use it.
 	Review bool `yaml:"review,omitempty"`
+	// NoReview opts a repo-backed project out of the one-time PR probe on
+	// completion. The probe (see transitionProjectComplete) fires for any project
+	// with repos because HasRepos() is only a *proxy* for "might have a PR" — but
+	// some repo-backed work never opens one (workspace setup, read-only health
+	// checks, direct-to-branch commits), so every completion spins up a review
+	// agent just to find no PR and return to done. Setting this skips the probe
+	// and goes straight to `done`. It suppresses only the repos proxy, not an
+	// explicit `Review: true` — if a human/agent said the work is PR-shaped, that
+	// intent wins and the loop still runs. Set by the planning agent when the goal
+	// clearly produces no PR, or by a human. `omitempty` keeps it out of files
+	// that don't use it.
+	NoReview bool `yaml:"no_review,omitempty"`
 	// ReviewNow is the one-shot *request* flag behind `:review` on a project that
 	// is already `reviewing`: "run the review agent now" instead of waiting for
 	// the next scheduled poll. The PR poll backs off to as slow as 30m when a PR
