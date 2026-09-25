@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/slimslenderslacks/work/internal/task"
 )
@@ -132,7 +133,10 @@ func renderProjectDetailBadges(v ProjectView, width int) []string {
 		if links == "" {
 			links = "expected"
 		}
-		lines = append(lines, dimStyle.Render(truncate("watching PR: "+links, width)))
+		// links may carry an OSC 8 hyperlink escape (see prShortLinks): unlike
+		// truncate, ansi.Truncate won't cut mid-escape and leave the terminal
+		// thinking a hyperlink is still open.
+		lines = append(lines, dimStyle.Render(ansi.Truncate("watching PR: "+links, width, "…")))
 	}
 	if v.BlockedReason != "" {
 		for _, l := range wrapDisplayWidth("blocked: "+v.BlockedReason, width) {

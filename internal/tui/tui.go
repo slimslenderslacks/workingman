@@ -17,6 +17,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/task"
@@ -1533,7 +1534,10 @@ func renderProjectCardBody(v ProjectView, width int) string {
 		statusLine = truncate(statusLine+"  "+branchTxt, inner)
 	}
 	breakdown := renderTaskBreakdown(v.TaskCounts, inner)
-	extra := dimStyle.Render(truncate(renderProjectCardExtra(v), inner))
+	// extra may contain a PR short link's OSC 8 hyperlink escape (see
+	// prShortLinks): unlike truncate, ansi.Truncate won't cut mid-escape and
+	// leave the terminal thinking a hyperlink is still open.
+	extra := dimStyle.Render(ansi.Truncate(renderProjectCardExtra(v), inner, "…"))
 
 	body := name + "\n" + statusLine + "\n" + breakdown + "\n" + extra
 	return style.Render(body)
@@ -1560,19 +1564,40 @@ func renderProjectCardExtra(v ProjectView) string {
 }
 
 // prShortLinks renders a project's still-open pull requests as compact
-// "org/name#123" references, comma-separated. Resolved (merged/closed)
-// entries are omitted — once every entry is resolved WatchingPR is false
-// and this is never called for it anyway, but a project can have several
-// PRs (one per repo) where only some remain open.
+// "org/name#123" references, comma-separated, each wrapped as a clickable
+// terminal hyperlink (see hyperlink). Resolved (merged/closed) entries are
+// omitted — once every entry is resolved WatchingPR is false and this is
+// never called for it anyway, but a project can have several PRs (one per
+// repo) where only some remain open.
 func prShortLinks(prs []project.PullRequest) string {
 	var parts []string
 	for _, pr := range prs {
 		if pr.State == "merged" || pr.State == "closed" {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%s#%d", pr.Repo, pr.Number))
+		label := fmt.Sprintf("%s#%d", pr.Repo, pr.Number)
+		parts = append(parts, hyperlink(prURL(pr), label))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// prURL resolves the URL a PR short link should open: the URL the review
+// agent recorded when it captured the PR (see review.tmpl), or, failing
+// that, the canonical GitHub URL built from repo ("org/name") and number.
+func prURL(pr project.PullRequest) string {
+	if pr.URL != "" {
+		return pr.URL
+	}
+	return fmt.Sprintf("https://github.com/%s/pull/%d", pr.Repo, pr.Number)
+}
+
+// hyperlink wraps label in an OSC 8 terminal hyperlink escape sequence so
+// terminals that support it (iTerm2, Kitty, WezTerm, Windows Terminal, tmux
+// with passthrough, ...) render label as clickable, opening url. Terminals
+// that don't recognize OSC 8 simply show label — the escapes carry no
+// glyphs of their own, so there's no unsupported-terminal fallback to write.
+func hyperlink(url, label string) string {
+	return ansi.SetHyperlink(url) + label + ansi.ResetHyperlink()
 }
 
 // renderTaskBreakdown renders the per-state task counts in a compact form.

@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
@@ -506,10 +507,28 @@ func TestRenderProjectCardExtraPrefersPRLinksOverCron(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := renderProjectCardExtra(tc.v); got != tc.want {
+			// PR short links carry an OSC 8 hyperlink escape around the visible
+			// label (see TestRenderProjectCardExtraPRLinksAreClickable); strip it
+			// here since this test is pinning visible content, not escapes.
+			if got := ansi.Strip(renderProjectCardExtra(tc.v)); got != tc.want {
 				t.Errorf("renderProjectCardExtra() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRenderProjectCardExtraPRLinksAreClickable checks the OSC 8 hyperlink
+// escape itself: each PR short link opens the pull request's URL, falling
+// back to the canonical GitHub URL when the review agent didn't record one.
+func TestRenderProjectCardExtraPRLinksAreClickable(t *testing.T) {
+	got := renderProjectCardExtra(ProjectView{WatchingPR: true, PullRequests: []project.PullRequest{
+		{Repo: "docker/desktop", Number: 42, State: "open", URL: "https://github.com/docker/desktop/pull/42"},
+		{Repo: "docker/cli", Number: 9, State: "open"},
+	}})
+	want := hyperlink("https://github.com/docker/desktop/pull/42", "docker/desktop#42") + ", " +
+		hyperlink("https://github.com/docker/cli/pull/9", "docker/cli#9")
+	if got != want {
+		t.Errorf("renderProjectCardExtra() = %q, want %q", got, want)
 	}
 }
 
