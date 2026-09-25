@@ -1571,14 +1571,24 @@ func renderProjectCardExtra(v ProjectView) string {
 // repo) where only some remain open.
 func prShortLinks(prs []project.PullRequest) string {
 	var parts []string
-	for _, pr := range prs {
-		if pr.State == "merged" || pr.State == "closed" {
-			continue
-		}
+	for _, pr := range openPullRequests(prs) {
 		label := fmt.Sprintf("%s#%d", pr.Repo, pr.Number)
 		parts = append(parts, hyperlink(prURL(pr), label))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// openPullRequests filters prs down to entries that aren't yet resolved
+// (merged/closed) — the ones still worth showing a link for.
+func openPullRequests(prs []project.PullRequest) []project.PullRequest {
+	var open []project.PullRequest
+	for _, pr := range prs {
+		if pr.State == "merged" || pr.State == "closed" {
+			continue
+		}
+		open = append(open, pr)
+	}
+	return open
 }
 
 // prURL resolves the URL a PR short link should open: the URL the review

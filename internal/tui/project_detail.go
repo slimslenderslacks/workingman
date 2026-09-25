@@ -137,14 +137,24 @@ func renderProjectDetailBadges(v ProjectView, width int) []string {
 		lines = append(lines, dimStyle.Render(truncate("cron: "+v.Cron, width)))
 	}
 	if v.WatchingPR {
-		links := prShortLinks(v.PullRequests)
-		if links == "" {
-			links = "expected"
+		open := openPullRequests(v.PullRequests)
+		if len(open) == 0 {
+			lines = append(lines, dimStyle.Render(truncate("watching PR: expected", width)))
+		} else {
+			lines = append(lines, dimStyle.Render(truncate("watching PR:", width)))
+			for _, pr := range open {
+				url := prURL(pr)
+				// Show the actual URL text rather than the compact "org/name#123"
+				// form the project card uses: a terminal that doesn't support OSC 8
+				// hyperlinks (many don't) still auto-linkifies plain URL text, so
+				// this reads — and works — as a clickable link either way. Wrapped
+				// in hyperlink() too for terminals that do support OSC 8. Uses
+				// ansi.Truncate, not truncate, since it won't cut mid-escape and
+				// leave the terminal thinking a hyperlink is still open.
+				line := "  " + hyperlink(url, url)
+				lines = append(lines, dimStyle.Render(ansi.Truncate(line, width, "…")))
+			}
 		}
-		// links may carry an OSC 8 hyperlink escape (see prShortLinks): unlike
-		// truncate, ansi.Truncate won't cut mid-escape and leave the terminal
-		// thinking a hyperlink is still open.
-		lines = append(lines, dimStyle.Render(ansi.Truncate("watching PR: "+links, width, "…")))
 	}
 	if v.BlockedReason != "" {
 		for _, l := range wrapDisplayWidth("blocked: "+v.BlockedReason, width) {

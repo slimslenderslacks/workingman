@@ -8,6 +8,40 @@ import (
 	"github.com/slimslenderslacks/work/internal/task"
 )
 
+// TestRenderProjectDetailBadgesShowsPRURLs pins the watching-PR badge's
+// content: unlike the compact "org/name#123" the project card grid uses, the
+// summary pane prints each open PR's actual URL as visible text (falling
+// back to the canonical GitHub URL when the review agent didn't record one)
+// — many terminals don't support OSC 8 hyperlinks, but virtually all of them
+// auto-linkify plain URL text, so this is what makes the link visible and
+// clickable rather than an opaque short label. It's still wrapped in an
+// OSC 8 escape too, for terminals that do support it.
+func TestRenderProjectDetailBadgesShowsPRURLs(t *testing.T) {
+	v := ProjectView{
+		WatchingPR: true,
+		PullRequests: []project.PullRequest{
+			{Repo: "docker/desktop", Number: 42, State: "open", URL: "https://github.com/docker/desktop/pull/42"},
+			{Repo: "docker/cli", Number: 9, State: "open"},
+			{Repo: "docker/cli", Number: 3, State: "merged"},
+		},
+	}
+	got := strings.Join(renderProjectDetailBadges(v, 100), "\n")
+	for _, want := range []string{
+		"https://github.com/docker/desktop/pull/42",
+		"https://github.com/docker/cli/pull/9",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("badges missing PR URL %q; got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "/pull/3") {
+		t.Errorf("merged PR should not get a link; got:\n%s", got)
+	}
+	if want := hyperlink("https://github.com/docker/desktop/pull/42", "https://github.com/docker/desktop/pull/42"); !strings.Contains(got, want) {
+		t.Errorf("PR URL should be wrapped in an OSC 8 hyperlink escape; got:\n%s", got)
+	}
+}
+
 // TestRenderProjectDetailHeaderListsRepos pins the header's repos line: every
 // entry in ProjectView.Repos, formatted "org/name" and comma-joined, so the
 // summary shows what a multi-repo project actually spans without opening
