@@ -5,6 +5,23 @@ Read the project description and existing tasks:
   project file: {{.ProjectPath}}
   tasks dir:    {{.TasksDir}}
 
+{{if .ProjectChanges}}
+IMPORTANT — this project's `.project.yaml` changed since you (or an earlier
+planning run) last worked on it. Here is what changed:
+
+{{range .ProjectChanges}}  - {{.}}
+{{end}}
+Take this into account: a changed `description` may mean the existing tasks no
+longer match what's wanted; an added `repos`/`new_repos` entry has already
+been cloned into your worktree (see {{.Worktree}} below) — you do NOT need to
+run any `git`/`wsp` command yourself to pick it up, just read from it; a
+removed repo entry means that repo's clone may still be sitting in the
+worktree but is no longer part of the project's declared scope, so don't
+start new tasks against it. Use your judgment on whether this warrants
+adjusting the existing task graph, the same way you would for any other
+incremental request below — this note is informational, not an instruction to
+re-plan everything from scratch.
+{{end}}
 Break the project into a set of tasks under `{{.TasksDir}}/*.yaml`. Each task
 file must include: name, description, depends_on (list of task names), status
 (start at `ready`), attempts (0), failure_reason (""), blocked_reason (""),
@@ -86,24 +103,56 @@ If this cycle genuinely has nothing to do, it is fine to leave every task
 the next firing.
 {{else}}
 IMPORTANT — incremental task requests. You may be re-invoked on a project that
-already has tasks, to incorporate a single new task a human added via the UI.
-A human-added task shows up as a task file whose `name:` is empty but whose
-`description:` is filled in (a "seed"). When you see a seed:
+already has tasks, to incorporate new work a human queued by dropping a
+markdown file into the project's `intake/` directory.
 
+{{if .IntakeFiles}}
+You have pending intake requests waiting right now:
+
+{{range .IntakeFiles}}  - {{.}}
+{{end}}
+For each one:
+
+  - Read the file's full content — that is the request, verbatim.
   - Preserve every existing task that already has a name and is populated —
     do NOT rewrite, renumber, re-plan, or delete tasks that are already
     `running`, `success`, `committed`, `failed`, or `blocked`, and do not
     disturb populated `ready` tasks either. This invocation is additive.
-  - Flesh out the seed: give it a descriptive `name`, set sensible
-    `depends_on` (referencing existing task names where appropriate), keep
-    `status: ready`, `attempts: 0`, `failure_reason: ""`, `blocked_reason: ""`,
-    and `model: default`. Preserve the human's `description` (you may refine
-    the wording but keep the intent).
-  - Write it out as `{{.TasksDir}}/<name>.yaml` and delete the original seed
-    file if it had a different name, so the task isn't duplicated on disk.
+  - Turn the request into one or more new tasks, depending on how much work
+    it describes — a short request becomes a single task, a larger one may
+    need to be split into several with `depends_on` between them (referencing
+    existing task names too, where appropriate). Give each a descriptive
+    `name`, and set `status: ready`, `attempts: 0`, `failure_reason: ""`,
+    `blocked_reason: ""`, and `model: default`. Preserve the intent of the
+    original request; you may refine the wording.
+  - Write each one out as `{{.TasksDir}}/<name>.yaml`.
+  - Once you have created the task(s) for that intake file, rename the file
+    itself by replacing its `.md` extension with `.processed` (e.g.
+    `intake/foo.md` -> `intake/foo.processed`). This is required — it is what
+    stops the same request from being offered to you again next time you run.
+    Do this for every file listed above before you finish.
+
+If a task file with an empty `name:` but a filled-in `description:` also
+exists in `{{.TasksDir}}` (a "seed" — the legacy way a single task used to be
+queued by hand), treat its description the same way: flesh it out into one or
+more named tasks following the same rules, then delete the seed file.
+
+When there is no seed and no intake file pending (the normal first-plan case,
+an empty tasks dir), break the project into tasks as described above.
+{{else}}
+If a task file with an empty `name:` but a filled-in `description:` exists in
+`{{.TasksDir}}` (a "seed" — the legacy way a single task used to be queued by
+hand), treat its `description` as the request. Preserve every existing task
+that already has a name and is populated — do NOT rewrite, renumber, re-plan,
+or delete tasks that are already `running`, `success`, `committed`, `failed`,
+or `blocked`, and do not disturb populated `ready` tasks either. Flesh the
+seed out into one or more named tasks with `depends_on`/`status: ready`/
+`attempts: 0`/`failure_reason: ""`/`blocked_reason: ""`/`model: default` as
+above, write each to `{{.TasksDir}}/<name>.yaml`, and delete the seed file.
 
 When there is no seed (the normal first-plan case, an empty tasks dir), break
 the project into tasks as described above.
+{{end}}
 {{end}}
 
 A task may optionally include `static_mcps:` — a YAML list of sbx static-MCP

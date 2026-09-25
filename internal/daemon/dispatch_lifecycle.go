@@ -34,6 +34,14 @@ const maxTaskAttempts = 3
 //   - status:committed → task agent should not commit; treat as invariant
 //     violation and block
 func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Project) {
+	if d.isStopped(projectPath) {
+		// enforceStopped killed this session; the task file is left exactly as
+		// it was (most likely still status:ready — nothing here ever wrote
+		// status:running), so a plain `:start` naturally re-dispatches it. Retrying
+		// or blocking now would fight the stop and could clobber it.
+		d.audit.Log("session_end_skipped_stopped", "path", projectPath)
+		return
+	}
 	t, err := task.Load(taskPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -135,6 +143,14 @@ func (d *Daemon) retainSandbox(taskPath string, t *task.Task) {
 // agent is treated as a hard failure — the project is blocked for the wolf
 // agent to investigate.
 func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Project) {
+	if d.isStopped(projectPath) {
+		// Same guard as afterTaskSession: a commit agent enforceStopped killed
+		// mid-commit leaves the task at whatever non-committed status it had
+		// (typically success), which `:start` resumes via the normal
+		// resume-pending-commit path — not by blocking the project here.
+		d.audit.Log("session_end_skipped_stopped", "path", projectPath)
+		return
+	}
 	t, err := task.Load(taskPath)
 	if err != nil {
 		d.audit.Log("task_load_error", "task", taskPath, "err", err.Error())

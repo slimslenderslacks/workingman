@@ -237,13 +237,13 @@ func (g *Graph) AllCommitted() bool {
 func (g *Graph) Empty() bool { return len(g.tasks) == 0 }
 
 // HasPendingSeed reports whether the tasks dir holds at least one pending seed:
-// a task file with a blank name and a non-blank description, written by `:task`
-// as the signal for the planning agent to flesh it into a real task. Seeds are
-// deliberately excluded from the graph itself (they have no name and no place in
-// the DAG yet), so this is the only way to tell the daemon "there is unplanned
-// work here." The daemon uses it to re-arm planning for a project whose seed was
-// orphaned — its `:task` status flip to `ready` was skipped or clobbered while
-// another agent held the project slot.
+// a task file with a blank name and a non-blank description, written by the
+// daemon's intake handler as the signal for the planning agent to flesh it
+// into a real task. Seeds are deliberately excluded from the graph itself
+// (they have no name and no place in the DAG yet), so this is the only way to
+// tell the daemon "there is unplanned work here." The daemon uses it to
+// re-arm planning for a project whose seed was orphaned — its status flip to
+// `ready` was skipped or clobbered while another agent held the project slot.
 func (g *Graph) HasPendingSeed() bool { return g.seeds > 0 }
 
 func (g *Graph) depsCommitted(name string) bool {

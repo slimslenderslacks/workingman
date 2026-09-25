@@ -32,33 +32,21 @@ var reviewPollSpecs = []string{"@every 2m", "@every 5m", "@every 15m", "@every 3
 // on the PR — so it enters the PR-resolution loop (status:reviewing) instead of
 // going straight to done.
 //
-// The trigger is "flag + probe": Review forces the loop; absent it, any project
-// with repos still gets a one-time PR probe (the review agent checks for an open
-// PR and goes done immediately if there is none). A repo-less project can't have
-// a PR, so it keeps the original terminal behaviour.
-//
-// A live recurring cron project is the exception: it rests at `done` between
-// firings and does its work by committing directly (it opens no PR), so the
-// probe would fire on EVERY cycle — spinning up a review agent each period only
-// to find no PR and return to done (the EmailPromotionSummary oscillation). Its
-// repos are not a PR signal, so the probe is skipped; such a project enters the
-// review loop only when it explicitly asks via `review: true`. An expired
-// schedule is treated as a one-shot again and keeps the probe.
-//
-// NoReview is the one-shot analogue of the cron exception: a repo-backed project
-// that is known never to open a PR (workspace setup, read-only health checks,
-// direct-to-branch commits) sets it to skip the probe and go straight to done,
-// instead of spinning up a review agent on every completion only to find no PR.
-// It suppresses only the repos proxy — an explicit `Review: true` still wins,
-// since that is a deliberate "a PR is expected" signal.
+// The loop is entered only on an explicit signal — never guessed from the
+// presence of repos: either `review: true` (a human/agent declared the goal
+// PR-shaped, even before a PR exists) or a PullRequests record already stamped
+// by an earlier review cycle (a fix-cycle return through here must keep
+// watching the same PR, not drop it). Absent both, the project goes straight to
+// `done` — there is no automatic probing for a PR that might exist. A human
+// puts a repo-backed project into the loop by running `:review`, which the
+// review agent then uses to look up (and record) any open PR.
 func (d *Daemon) transitionProjectComplete(projectPath string, p *project.Project) {
 	// The PR-resolution loop is scheduler-driven — it polls the PR on a cadence —
-	// so, like cron, it can only run when the daemon has a scheduler. Production
-	// always wires one; a scheduler-less daemon (dev/tests) keeps the original
-	// terminal behaviour instead of stranding the project in reviewing.
-	recurring := p.Cron != "" && !p.CronExpired()
-	probe := p.HasRepos() && !recurring && !p.NoReview
-	if d.scheduler != nil && (p.Review || probe) {
+	// so it can only run when the daemon has a scheduler. Production always wires
+	// one; a scheduler-less daemon (dev/tests) keeps the original terminal
+	// behaviour instead of stranding the project in reviewing.
+	watching := p.Review || len(p.PullRequests) > 0
+	if d.scheduler != nil && watching {
 		d.transitionProjectReviewing(projectPath, p)
 		return
 	}
@@ -245,6 +233,14 @@ func (d *Daemon) launchReviewAgent(projectPath string, p *project.Project) {
 //   - done/blocked → the loop is over (PR merged/closed, or a contested comment
 //     the reconciler escalated). Stop polling and route the new status.
 func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
+	if d.isStopped(projectPath) {
+		// enforceStopped killed this session directly (it also already
+		// unregistered the #review poll and cleared review state); a crash
+		// counted here would otherwise survive the stop and count toward
+		// maxReviewErrors on an unrelated future run.
+		d.audit.Log("session_end_skipped_stopped", "path", projectPath)
+		return
+	}
 	// A non-nil wait error means the review agent process itself failed — most
 	// often its sandbox could not be created (e.g. the github MCP gateway needs
 	// auth), so it never even looked at the PR. That is NOT a clean cycle: keying

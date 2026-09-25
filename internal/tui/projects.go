@@ -190,10 +190,11 @@ func loadProjectView(path string) (ProjectView, bool) {
 // This is deliberately NOT taskgraph.Load: that loader is strict (it aborts on
 // the first task with an empty name, a duplicate name, or a bad dependency),
 // which is right for the daemon but wrong for display. A single offending file
-// must not blank the whole pane. In particular `:task` seeds a task with an
-// empty name — the signal the planning agent keys off — and the pane must keep
-// showing the project's existing tasks (plus the new seed) while planning runs
-// to fill the name in, not wipe every task until it does. So we load each file
+// must not blank the whole pane. In particular the daemon's intake handler
+// seeds a task with an empty name — the signal the planning agent keys off —
+// and the pane must keep showing the project's existing tasks (plus the new
+// seed) while planning runs to fill the name in, not wipe every task until it
+// does. So we load each file
 // independently, skip any that fail to parse (a half-written file on disk), and
 // give an unnamed seed a display name from its filename stem so it shows up
 // immediately as a pending row. Mirrors ScanProjects' per-file resilience.
@@ -220,9 +221,10 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 		if model == "" {
 			model = task.ModelDefault
 		}
-		// An unnamed seed (just written by `:task`, not yet named by planning)
-		// still gets a row — under its filename stem — so the user sees their
-		// new task land instead of the pane appearing to lose everything.
+		// An unnamed seed (just written from an intake file, not yet named by
+		// planning) still gets a row — under its filename stem — so the user
+		// sees their new task land instead of the pane appearing to lose
+		// everything.
 		name := t.Name
 		if name == "" {
 			name = strings.TrimSuffix(e.Name(), ".yaml")

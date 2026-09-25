@@ -21,16 +21,19 @@ type projectCommand struct {
 // selected work stream report "no work stream selected" when run without one
 // (dispatchProjectCommand enforces that), so the menu stays complete rather
 // than shifting rows as selection changes. Each key has a unique first letter,
-// so typing that letter runs the command directly.
+// so typing that letter runs the command directly — except stop/start, which
+// both share `session`'s "s" and so are only reachable via j/k + enter; "stop"
+// and "start" were the names asked for, and shadowing the far more common
+// `session` shortcut for them isn't worth it.
 var projectCommands = []projectCommand{
-	{"task", "task", "queue a new task for planning"},
 	{"dir", "dir", "open a shell in the workspace sandbox"},
 	{"session", "session", "open/resume an interactive claude session"},
 	{"wolf", "wolf", "summon the wolf to investigate"},
 	{"review", "review", "watch this work stream's PR (or poll it now)"},
-	{"new", "new", "create a new work stream"},
 	{"cleanup", "cleanup", "prepare this work stream for archiving"},
 	{"archive", "archive", "archive this work stream"},
+	{"stop", "stop", "pause this work stream and kill its running agents"},
+	{"start", "start", "resume a stopped work stream"},
 }
 
 // handleCommandPickerKey drives the `:` command menu: j/k (or arrows) move the
@@ -67,29 +70,16 @@ func (m model) handleCommandPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // dispatchProjectCommand runs one work-stream command, chosen from the picker.
 // It leaves the picker (mode back to normal) and then performs the command:
-// new/task/archive open their own modal, wolf/cleanup act immediately, and
-// dir/session launch an interactive window off the UI goroutine. Commands that
-// operate on a specific work stream require one to be selected.
+// archive opens its own modal, wolf/cleanup act immediately, and dir/session
+// launch an interactive window off the UI goroutine. Commands that operate on
+// a specific work stream require one to be selected. A new work stream is
+// created by dropping a project.md file under the orch root — see the
+// daemon's handleProjectSeed — and new tasks are queued by dropping a
+// markdown file into the work stream's intake/ dir — see the daemon's
+// handleIntakeFile — neither goes through a TUI command.
 func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 	m.mode = modeNormal
 	switch cmd {
-	case "new":
-		// `new` creates a work stream from scratch, so it needs no selection.
-		m.mode = modeNewProject
-		m.newProjName = ""
-		m.newProjDesc = ""
-		m.newProjFocus = 0
-		m.newProjErr = ""
-	case "task":
-		// `task` seeds a new task into the selected work stream and re-runs the
-		// planning agent to flesh it out.
-		if m.projSel == "" {
-			m.statusMsg = "no work stream selected"
-			return m, nil
-		}
-		m.mode = modeNewTask
-		m.newTaskDesc = ""
-		m.newTaskErr = ""
 	case "cleanup":
 		// `cleanup` sets the work stream's cleanup request flag; the daemon
 		// launches the archive agent in response, which commits and pushes
@@ -155,6 +145,33 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusMsg = "watching the PR for " + name
 		}
+	case "stop":
+		// `stop` pauses the selected work stream: the daemon kills every agent
+		// session running for it and unregisters its cron/#review schedules.
+		// Immediate — no modal, since it's the emergency-brake command.
+		if m.projSel == "" {
+			m.statusMsg = "no work stream selected"
+			return m, nil
+		}
+		name, err := requestStop(m.projSel)
+		if err != nil {
+			m.statusMsg = "stop: " + err.Error()
+			return m, nil
+		}
+		m.statusMsg = "stopped " + name
+	case "start":
+		// `start` resumes a work stream `:stop` paused, handing it back to the
+		// daemon's normal routing. Immediate — no modal.
+		if m.projSel == "" {
+			m.statusMsg = "no work stream selected"
+			return m, nil
+		}
+		name, err := requestStart(m.projSel)
+		if err != nil {
+			m.statusMsg = "start: " + err.Error()
+			return m, nil
+		}
+		m.statusMsg = "resumed " + name
 	case "dir":
 		return m.openInteractive("shell")
 	case "session":

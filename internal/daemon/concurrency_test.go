@@ -74,6 +74,8 @@ func (m *gatedManager) Path(branch string) (string, error) { return "/tmp/ws/" +
 
 func (m *gatedManager) Remove(context.Context, string, bool) error { return nil }
 
+func (m *gatedManager) AddRepos(context.Context, string, []workspace.Repo) error { return nil }
+
 // seedWorkingProject writes a project at status:working with a single ready
 // task, so the daemon's very next observation routes straight to
 // dispatchNextTask → launchTaskAgent → runner.Start, the path that provisions

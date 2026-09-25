@@ -79,6 +79,91 @@ func TestRenderPlanningModesAreExclusive(t *testing.T) {
 	}
 }
 
+// TestRenderPlanningIntakeFilesListedWithProcessedInstruction pins the
+// contract for the intake-file trigger: every pending file must be named in
+// the rendered prompt, and the agent must be told to rename each one to
+// *.processed once it has created tasks from it — that rename is what stops
+// the daemon from re-queuing the same file forever.
+func TestRenderPlanningIntakeFilesListedWithProcessedInstruction(t *testing.T) {
+	out, err := Render(agent.PlanningAgent, Data{
+		Workspace:   "/ws",
+		ProjectPath: "/ws/.project.yaml",
+		TasksDir:    "/ws/tasks",
+		IntakeFiles: []string{"/ws/intake/add-healthz.md", "/ws/intake/fix-flaky-test.md"},
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"/ws/intake/add-healthz.md",
+		"/ws/intake/fix-flaky-test.md",
+		".processed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderPlanningNoIntakeFilesOmitsTheList guards the other side: with no
+// pending intake files, the prompt must not tell the agent to go looking for
+// (or rename) files that don't exist.
+func TestRenderPlanningNoIntakeFilesOmitsTheList(t *testing.T) {
+	out, err := Render(agent.PlanningAgent, Data{
+		Workspace:   "/ws",
+		ProjectPath: "/ws/.project.yaml",
+		TasksDir:    "/ws/tasks",
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(out, "pending intake requests waiting") {
+		t.Errorf("should not claim pending intake requests with none forwarded:\n%s", out)
+	}
+}
+
+// TestRenderPlanningProjectChangesListed pins the contract for the
+// repos/description/branch/cron diff: every change line must appear in the
+// rendered prompt, and the agent must be told newly-added repos are already
+// cloned so it doesn't try to git/wsp them itself.
+func TestRenderPlanningProjectChangesListed(t *testing.T) {
+	out, err := Render(agent.PlanningAgent, Data{
+		Workspace:      "/ws",
+		ProjectPath:    "/ws/.project.yaml",
+		TasksDir:       "/ws/tasks",
+		Worktree:       "/worktrees/widget",
+		ProjectChanges: []string{"repos: added docker/cli", "description changed:\n    was: a\n    now: b"},
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"repos: added docker/cli",
+		"description changed",
+		"been cloned into your worktree",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderPlanningNoProjectChangesOmitsTheNote guards the other side: with
+// nothing forwarded, the prompt must not claim the project changed.
+func TestRenderPlanningNoProjectChangesOmitsTheNote(t *testing.T) {
+	out, err := Render(agent.PlanningAgent, Data{
+		Workspace:   "/ws",
+		ProjectPath: "/ws/.project.yaml",
+		TasksDir:    "/ws/tasks",
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(out, "changed since you") {
+		t.Errorf("should not claim the project changed with nothing forwarded:\n%s", out)
+	}
+}
+
 // TestRenderPlanningReplanSpellsOutTheResetRules pins the details a re-plan gets
 // wrong silently. A carried-forward task that keeps last cycle's `summary:` or
 // `completed_at:` misreports what happened, and deleting a task without pruning

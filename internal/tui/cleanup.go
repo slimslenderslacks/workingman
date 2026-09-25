@@ -3,9 +3,21 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/slimslenderslacks/work/internal/project"
 )
+
+// projectDisplayName is the human-facing name for the project whose
+// .project.yaml lives at path — the basename of its control directory, which
+// is what the daemon and sandbox naming also key off. Empty path yields a
+// placeholder so a caller never renders a bare "in ".
+func projectDisplayName(path string) string {
+	if path == "" {
+		return "(none)"
+	}
+	return filepath.Base(filepath.Dir(path))
+}
 
 // requestCleanup flips the `cleanup: true` request flag on the project
 // identified by projectPath (the path of its .project.yaml) so the daemon

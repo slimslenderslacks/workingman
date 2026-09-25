@@ -170,6 +170,86 @@ func TestStatusReadyTriggersPlanningAgent(t *testing.T) {
 	}
 }
 
+// TestPlanningAgentSeesPendingIntakeFiles is the end-to-end half of the
+// intake-file contract: a project already status:ready with a pending
+// intake/*.md file must launch planning with that file's path forwarded all
+// the way into .orch/context.yaml and .orch/instructions.md — the mechanism
+// that lets the planning agent read the file itself rather than the daemon
+// pre-digesting it into a task seed.
+func TestPlanningAgentSeesPendingIntakeFiles(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+
+	root := t.TempDir()
+	socket := fmt.Sprintf("orch-intake-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	})
+
+	if err := os.MkdirAll(filepath.Join(root, "intake"), 0o755); err != nil {
+		t.Fatalf("mkdir intake: %v", err)
+	}
+	intakePath := filepath.Join(root, "intake", "add-healthz.md")
+	if err := os.WriteFile(intakePath, []byte("add a /healthz endpoint\n"), 0o644); err != nil {
+		t.Fatalf("write intake file: %v", err)
+	}
+
+	buf := &safeBuf{}
+	a := audit.New(buf)
+	r := &runner.Runner{
+		Launcher: &agent.TmuxLauncher{Socket: socket, PollInterval: 50 * time.Millisecond},
+		Audit:    a,
+		Command:  func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
+	}
+	d, err := New([]string{root}, a, WithRunner(r))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = d.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	if ok, snap := waitFor(t, buf, "watch_root"); !ok {
+		t.Fatalf("daemon never ready: %s", snap)
+	}
+
+	projectPath := filepath.Join(root, ".project.yaml")
+	if err := project.SaveAs(projectPath, &project.Project{
+		Description: "widget", Branch: "feat/widget", Status: project.StatusReady,
+		Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
+	}, project.WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+
+	if ok, snap := waitFor(t, buf, "session_started"); !ok {
+		t.Fatalf("planning session never started.\naudit:\n%s", snap)
+	}
+
+	ctxData, err := os.ReadFile(filepath.Join(root, ".orch", "context.yaml"))
+	if err != nil {
+		t.Fatalf("read context.yaml: %v", err)
+	}
+	if !strings.Contains(string(ctxData), intakePath) {
+		t.Errorf("context.yaml missing the pending intake path %q:\n%s", intakePath, ctxData)
+	}
+
+	instructions, err := os.ReadFile(filepath.Join(root, ".orch", "instructions.md"))
+	if err != nil {
+		t.Fatalf("read instructions.md: %v", err)
+	}
+	for _, want := range []string{intakePath, ".processed"} {
+		if !strings.Contains(string(instructions), want) {
+			t.Errorf("instructions.md missing %q:\n%s", want, instructions)
+		}
+	}
+
+	if ok, snap := waitForWithin(t, buf, "session_ended", 4*time.Second); !ok {
+		t.Fatalf("session never ended.\naudit:\n%s", snap)
+	}
+}
+
 // TestProjectAgentHandoffToPlanning is the regression for the scenario
 // reported in the field: project agent runs, writes status=ready, exits —
 // daemon must launch the planning agent. The bug was that the agent's

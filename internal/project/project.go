@@ -81,8 +81,8 @@ type Project struct {
 	// per-entry `visibility` applies here (default private).
 	NewRepos []Repo `yaml:"new_repos,omitempty"`
 	Branch   string `yaml:"branch"`
-	// Status omits itself when empty so a `:new` seed (description only, no
-	// status yet) doesn't write `status: ""` — which the Status unmarshaler
+	// Status omits itself when empty so a project.md-derived seed (description
+	// only, no status yet) doesn't write `status: ""` — which the Status unmarshaler
 	// would otherwise have to special-case on every read.
 	Status Status `yaml:"status,omitempty"`
 	Cron   string `yaml:"cron,omitempty"`
@@ -194,24 +194,13 @@ type Project struct {
 	// Review is the intent flag for the PR-resolution loop: completion of this
 	// project is gated on resolving a GitHub pull request's review comments and
 	// Actions runs, not merely on committing every task. When set, a `reviewing`
-	// poll that finds no open PR *keeps watching* (a PR is expected to appear);
-	// without it, the daemon still runs a one-time probe for any project that has
-	// repos, but a probe that finds no PR goes straight to `done`. Set by the
-	// project/planning agent when the seed goal is PR-shaped, or by a human.
-	// `omitempty` keeps the key out of files that don't use it.
+	// poll that finds no open PR *keeps watching* (a PR is expected to appear).
+	// Without it, completion goes straight to `done` — there is no automatic
+	// probing for a PR that might exist; a human puts the project into the loop
+	// by running `:review`, which looks up (and records into PullRequests) any
+	// open PR. Set by the project/planning agent when the seed goal is PR-shaped,
+	// or by a human. `omitempty` keeps the key out of files that don't use it.
 	Review bool `yaml:"review,omitempty"`
-	// NoReview opts a repo-backed project out of the one-time PR probe on
-	// completion. The probe (see transitionProjectComplete) fires for any project
-	// with repos because HasRepos() is only a *proxy* for "might have a PR" — but
-	// some repo-backed work never opens one (workspace setup, read-only health
-	// checks, direct-to-branch commits), so every completion spins up a review
-	// agent just to find no PR and return to done. Setting this skips the probe
-	// and goes straight to `done`. It suppresses only the repos proxy, not an
-	// explicit `Review: true` — if a human/agent said the work is PR-shaped, that
-	// intent wins and the loop still runs. Set by the planning agent when the goal
-	// clearly produces no PR, or by a human. `omitempty` keeps it out of files
-	// that don't use it.
-	NoReview bool `yaml:"no_review,omitempty"`
 	// ReviewNow is the one-shot *request* flag behind `:review` on a project that
 	// is already `reviewing`: "run the review agent now" instead of waiting for
 	// the next scheduled poll. The PR poll backs off to as slow as 30m when a PR
@@ -241,7 +230,14 @@ type Project struct {
 	// *consecutive fix cycles that never converge* with an in-memory counter that
 	// resets whenever a poll finds the PRs clean (see reviewFixCycles).
 	PullRequests []PullRequest `yaml:"pull_requests,omitempty"`
-	UpdatedBy    Writer        `yaml:"updated_by"`
+	// StoppedFrom records the status the project was in the moment `:stop` set
+	// Status to StatusStopped, so `:start` knows what to restore it to — the
+	// stop overwrites Status itself, so without this the prior state (working
+	// on a task graph? watching a PR? blocked on the wolf?) would be lost.
+	// Written by requestStop, cleared by requestStart. `omitempty` keeps it out
+	// of files that have never been stopped.
+	StoppedFrom Status `yaml:"stopped_from,omitempty"`
+	UpdatedBy   Writer `yaml:"updated_by"`
 }
 
 // PullRequest is the review agent's record of one GitHub pull request that backs
@@ -256,15 +252,6 @@ type PullRequest struct {
 	State   string `yaml:"state,omitempty"`
 }
 
-// HasRepos reports whether the project references any remote repository — the
-// precondition for a pull request to exist. The daemon uses it as the "probe"
-// half of the review trigger: a project with repos gets a one-time PR probe on
-// completion even without Review set, while a repo-less project skips straight
-// to done.
-func (p *Project) HasRepos() bool {
-	return len(p.Repos) > 0 || len(p.NewRepos) > 0
-}
-
 // Empty reports whether the file is the unpopulated placeholder the project
 // agent is meant to fill in. An empty file on disk is the canonical signal,
 // but we also treat a parsed-but-fieldless document as empty.
@@ -276,7 +263,8 @@ func (p *Project) Empty() bool {
 // Unpopulated reports whether the project still needs the project agent to
 // fill it in. A populated project always carries a status (the project agent
 // sets `ready` when it finishes); a truly empty file *and* a description-only
-// seed (written by `:new`) both have an empty status. This is the broader
+// seed (written by the daemon's handleProjectSeed from a project.md) both
+// have an empty status. This is the broader
 // signal the daemon routes on — Empty() only catches the fully blank file,
 // which would miss a seed that already has a description.
 func (p *Project) Unpopulated() bool {

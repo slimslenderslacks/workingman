@@ -145,11 +145,21 @@ func TestCommandPickerListsCleanupNextToArchive(t *testing.T) {
 // contract: handleCommandPickerKey runs the first command whose key starts with
 // the typed rune, so two commands sharing a first letter would make one of them
 // unreachable by keyboard — silently, since the menu would still list both.
+//
+// stop/start are a deliberate, documented exception (see projectCommands):
+// both start with "s", which `session` already owns and is reached far more
+// often, so they're only reachable via j/k + enter. Exempting them from this
+// check keeps that a one-place decision instead of a test failure someone has
+// to rediscover the reasoning for.
 func TestProjectCommandFirstLettersAreUnique(t *testing.T) {
+	exempt := map[string]bool{"stop": true, "start": true}
 	seen := map[byte]string{}
 	for _, c := range projectCommands {
 		if c.key == "" {
 			t.Fatalf("projectCommands has an entry with an empty key")
+		}
+		if exempt[c.key] {
+			continue
 		}
 		if prev, dup := seen[c.key[0]]; dup {
 			t.Errorf("commands %q and %q share the first letter %q; one is unreachable by shortcut",

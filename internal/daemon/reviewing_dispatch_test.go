@@ -137,12 +137,12 @@ func TestDoneRoutesPendingTasksWithoutReopening(t *testing.T) {
 }
 
 // TestRestingProjectWithPendingSeedReArmsPlanning covers the orphaned-seed
-// recovery: a `:task` addition flips a project to `ready` so planning fleshes the
-// seed into a real task, but that flip can be skipped or clobbered while another
-// agent holds the project slot (the mcp-server-instructions case — a review
-// agent's `done` write landed after the flip). When the daemon later observes a
-// resting project (done/reviewing) that still carries a pending seed, it must
-// re-arm planning by flipping the status back to `ready`.
+// recovery: an intake addition flips a project to `ready` so planning fleshes
+// the seed into a real task, but that flip can be skipped or clobbered while
+// another agent holds the project slot (the mcp-server-instructions case — a
+// review agent's `done` write landed after the flip). When the daemon later
+// observes a resting project (done/reviewing) that still carries a pending
+// seed, it must re-arm planning by flipping the status back to `ready`.
 func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 	for _, from := range []project.Status{project.StatusDone, project.StatusReviewing} {
 		t.Run(string(from), func(t *testing.T) {
@@ -153,7 +153,7 @@ func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 			if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 				t.Fatalf("mkdir: %v", err)
 			}
-			// The original work committed; then a human appended a :task seed
+			// The original work committed; then an intake file queued a seed
 			// (blank name + description) that never got planned.
 			mustSaveTask(t, filepath.Join(tasksDir, "landed.yaml"), &task.Task{Name: "landed", Status: task.StatusCommitted})
 			if err := os.WriteFile(filepath.Join(tasksDir, "seed.yaml"),

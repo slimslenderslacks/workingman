@@ -50,6 +50,30 @@ func (m *StubManager) Path(branch string) (string, error) {
 	return filepath.Join(m.Root, branch), nil
 }
 
+// AddRepos records the addition into the same breadcrumb file Create writes,
+// prefixed so tests can distinguish an initial Create from a later add. The
+// stub never actually clones anything, mirroring Create.
+func (m *StubManager) AddRepos(_ context.Context, branch string, repos []Repo) error {
+	if len(repos) == 0 {
+		return nil
+	}
+	if branch == "" {
+		return fmt.Errorf("workspace: branch is required")
+	}
+	dir := filepath.Join(m.Root, branch)
+	f, err := os.OpenFile(filepath.Join(dir, ".orch", "stub-repos.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for _, r := range repos {
+		if _, err := f.WriteString("added:" + r.Ref() + "\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *StubManager) Remove(_ context.Context, branch string, _ bool) error {
 	dir := filepath.Join(m.Root, branch)
 	err := os.RemoveAll(dir)

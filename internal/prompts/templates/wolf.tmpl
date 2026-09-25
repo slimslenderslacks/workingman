@@ -56,8 +56,9 @@ forward anything from the prior record that's still relevant.
 
 Special case — a project blocked before it was ever populated. If the project
 has no tasks yet and its `repos` / `branch` fields are empty, the project
-agent escalated to you because the user's `:new` description wasn't enough to
-build `.project.yaml` (the `blocked_reason` above is the specific question).
+agent escalated to you because the user's project.md description wasn't
+enough to build `.project.yaml` (the `blocked_reason` above is the specific
+question).
 In that case your job is to gather the missing details from the user, fill in
 the project fields (description, repos, branch, and optionally cron), clear
 `blocked_reason`, and set `status: ready` so planning can run. If the work

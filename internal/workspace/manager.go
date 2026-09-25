@@ -69,4 +69,12 @@ type Manager interface {
 	// content in the workspace root); pass it only when the caller has already
 	// verified the workspace is safe to remove.
 	Remove(ctx context.Context, branch string, force bool) error
+
+	// AddRepos clones repos into an ALREADY-existing workspace named branch —
+	// the counterpart to Create for a project whose repos/new_repos list grew
+	// after its workspace was first provisioned (Create is a no-op once the
+	// workspace exists; this is the only way such an addition actually lands
+	// on disk). A repo flagged Create is created empty on the remote first,
+	// same as Create does. Safe to call with an empty repos slice (a no-op).
+	AddRepos(ctx context.Context, branch string, repos []Repo) error
 }

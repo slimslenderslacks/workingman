@@ -81,12 +81,12 @@ func (d *Daemon) maybeWatchNewDir(path string) bool {
 		return false
 	}
 	// Walk the new subtree: install watches on every directory and dispatch
-	// any handler-matching files found within. Callers (the TUI's :new
-	// command, an agent scaffolding a project) commonly do mkdir+write
-	// back-to-back, so by the time we see the directory's Create event the
-	// .project.yaml inside has often already landed. Without this scan the
-	// file's own Create event is missed (the watch wasn't installed yet)
-	// and the project never gets dispatched.
+	// any handler-matching files found within. Callers (a human or script
+	// dropping a new project.md, an agent scaffolding a project) commonly do
+	// mkdir+write back-to-back, so by the time we see the directory's Create
+	// event the project.md (or .project.yaml) inside has often already
+	// landed. Without this scan the file's own Create event is missed (the
+	// watch wasn't installed yet) and the project never gets dispatched.
 	_ = filepath.WalkDir(path, func(p string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -112,11 +112,20 @@ func (d *Daemon) handlerFor(path string) eventHandler {
 	if base == ".project.yaml" {
 		return d.handleProject
 	}
+	if base == "project.md" {
+		return d.handleProjectSeed
+	}
 	// tasks/*.yaml files are observed for audit only — lifecycle reactions
 	// happen on session-end. Match the structural pattern "*/tasks/<name>.yaml"
 	// so unrelated YAML files in a project root are ignored.
 	if strings.HasSuffix(base, ".yaml") && filepath.Base(filepath.Dir(path)) == "tasks" {
 		return d.handleTask
+	}
+	// intake/*.md is how a new task gets queued for planning — see
+	// handleIntakeFile. Match the structural pattern "*/intake/<name>.md" the
+	// same way tasks/*.yaml is matched above.
+	if strings.HasSuffix(base, ".md") && filepath.Base(filepath.Dir(path)) == "intake" {
+		return d.handleIntakeFile
 	}
 	return nil
 }

@@ -35,36 +35,22 @@ const (
 // uiMode is the input mode the TUI is currently capturing keystrokes for.
 // Modes don't change pane focus — they layer a modal overlay on top of it.
 // modeCommandPicker is the command menu the user gets after pressing `:` on
-// the work-streams pane; modeNewProject is the modal dialog that prompts for a
-// project name after the "new" command is chosen.
+// the work-streams pane.
 type uiMode int
 
 const (
 	modeNormal uiMode = iota
 	// modeCommandPicker is the menu shown after `:` on the work-streams pane.
-	// It lists the project commands (task/dir/session/wolf/new/cleanup/archive);
-	// the user moves with j/k, runs one with enter (or its first letter), and
-	// cancels with esc. It replaces the old free-form `:command` line so the
-	// commands are discoverable rather than memorised.
+	// It lists the project commands (dir/session/wolf/review/cleanup/archive/
+	// stop/start); the user moves with j/k, runs one with enter (or its first
+	// letter), and cancels with esc. It replaces the old free-form `:command`
+	// line so the commands are discoverable rather than memorised.
 	modeCommandPicker
-	modeNewProject
-	// modeNewTask is the modal that prompts for a free-form task description
-	// after `:task`. On enter with a non-empty description it moves to
-	// modeConfirmNewTask to review the text; confirming there seeds a task
-	// file in the selected project's tasks/ dir and flips the project to
-	// status:ready so the daemon re-runs the planning agent, which fleshes
-	// out the seed and returns the project to status:working.
-	modeNewTask
 	// modeConfirmArchive is the yes/no confirmation shown after `:archive`.
 	// On confirm it moves the selected project's tree out of the workspace
 	// root into the sibling ~/<root>.backup dir; the project then disappears
 	// from the gallery on the next scan.
 	modeConfirmArchive
-	// modeConfirmNewTask is the yes/no confirmation shown after `enter` on a
-	// non-empty new-task description. It echoes the trimmed description back
-	// so the human can review it before it's seeded as a task file; `n`/esc
-	// returns to modeNewTask with the text still editable.
-	modeConfirmNewTask
 )
 
 // yamlSource picks what the YAML viewer pane renders: the selected
@@ -161,23 +147,15 @@ type model struct {
 	// than exiting — so the user can page through panes full-screen.
 	zoomed bool
 
-	// projectRoot is the directory where the `:new` command creates a new
-	// project's empty .project.yaml. Set by Run() from the first --root the
-	// caller passed in; empty in standalone test models.
+	// projectRoot is the first --root the caller passed in, used by `:archive`
+	// to compute the sibling backup directory. Empty in standalone test models.
 	projectRoot string
 
 	// Input-mode state. mode gates which key handler the Update loop hands
 	// the next keystroke to. cmdPickerIdx is the highlighted row of the
-	// command-picker menu (modeCommandPicker); newProjName / newProjDesc /
-	// newProjErr drive the new-project modal's two input fields and its inline
-	// error line, and newProjFocus selects which field (0 = name, 1 =
-	// description) receives keystrokes.
+	// command-picker menu (modeCommandPicker).
 	mode         uiMode
 	cmdPickerIdx int
-	newProjName  string
-	newProjDesc  string
-	newProjFocus int
-	newProjErr   string
 	// archiveTarget is the .project.yaml path captured when `:archive` opens
 	// the confirm modal, so the move acts on the project that was selected at
 	// the time even if a background scan reconciles projSel meanwhile.
@@ -187,15 +165,6 @@ type model struct {
 	// a fake. A nil remover means "no workspace manager wired in" and archive
 	// skips the removal.
 	wspRemover workspaceRemover
-	// newTaskDesc / newTaskErr drive the new-task modal's free-form
-	// description field and its inline error line. Populated only while
-	// mode == modeNewTask.
-	newTaskDesc string
-	newTaskErr  string
-	// newTaskPending is the trimmed description stashed when `enter` moves
-	// from modeNewTask to modeConfirmNewTask, mirroring archiveTarget. It's
-	// what the confirm modal echoes back and what gets seeded on `y`.
-	newTaskPending string
 
 	auditLines []string
 	auditCh    <-chan []string
@@ -423,14 +392,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modeCommandPicker:
 			return m.handleCommandPickerKey(msg)
-		case modeNewProject:
-			return m.handleNewProjectKey(msg)
-		case modeNewTask:
-			return m.handleNewTaskKey(msg)
 		case modeConfirmArchive:
 			return m.handleConfirmArchiveKey(msg)
-		case modeConfirmNewTask:
-			return m.handleConfirmNewTaskKey(msg)
 		}
 		return m.handleNormalKey(msg)
 	}
@@ -1127,6 +1090,14 @@ var (
 	paneTitleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("110"))
+	// modalBorder is the box style shared by every modal dialog (command
+	// picker, new-task, archive confirm). The same accent colour as the
+	// focused-pane border tells the user "this is the active thing" without
+	// needing a separate visual language.
+	modalBorder = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("212")).
+			Padding(1, 2)
 	focusedBorder = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("212")).
@@ -1140,6 +1111,7 @@ var (
 	statusBlocked   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	statusDone      = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
 	statusReviewing = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
+	statusStopped   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	statusRunning   = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 	dimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	cardNameStyle   = lipgloss.NewStyle().Bold(true)
@@ -1242,6 +1214,8 @@ func renderStatus(s string) string {
 		return statusDone.Render(s)
 	case "reviewing":
 		return statusReviewing.Render(s)
+	case "stopped":
+		return statusStopped.Render(s)
 	default:
 		return s
 	}
@@ -2011,17 +1985,8 @@ func (m model) View() string {
 	if m.mode == modeCommandPicker {
 		return m.renderCommandPickerModal()
 	}
-	if m.mode == modeNewProject {
-		return m.renderNewProjectModal()
-	}
-	if m.mode == modeNewTask {
-		return m.renderNewTaskModal()
-	}
 	if m.mode == modeConfirmArchive {
 		return m.renderConfirmArchiveModal()
-	}
-	if m.mode == modeConfirmNewTask {
-		return m.renderConfirmNewTaskModal()
 	}
 
 	// The ACP tab view takes over the whole window when open.
@@ -2510,9 +2475,8 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, audit
 	if sessionsRoot != "" {
 		m.acpCh = WatchACPSessions(tuiCtx, sessionsRoot, 0)
 	}
-	// `:new` writes the empty .project.yaml into the first --root the caller
-	// passed in. Standalone tui mode without any --root has no place to
-	// create projects; the command-line handler reports that gracefully.
+	// projectRoot backs `:archive`'s backup-directory computation. Standalone
+	// tui mode without any --root leaves it empty.
 	if len(roots) > 0 {
 		m.projectRoot = roots[0]
 	}

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -18,10 +20,11 @@ import (
 
 // handle is the single entry-point for fsnotify events. It routes by filename:
 // new directories are added to the watch set, .project.yaml events are sent to
-// handleProject. Task files are deliberately *not* watched — task-lifecycle
-// reactions are driven off session-end callbacks (see dispatch_lifecycle.go)
-// to avoid the race where an agent writes status:success and exits before
-// the daemon's session tracker sees the session end.
+// handleProject, and project.md events are sent to handleProjectSeed. Task
+// files are deliberately *not* watched — task-lifecycle reactions are driven
+// off session-end callbacks (see dispatch_lifecycle.go) to avoid the race
+// where an agent writes status:success and exits before the daemon's session
+// tracker sees the session end.
 func (d *Daemon) handle(ev fsnotify.Event) {
 	if ev.Op.Has(fsnotify.Create) && d.maybeWatchNewDir(ev.Name) {
 		return
@@ -78,17 +81,74 @@ func (d *Daemon) revisitProject(path string) {
 	d.dispatchProject(path, p)
 }
 
+// handleProjectSeed is how a new work stream gets created: a human (or a
+// script) drops `<root>/<project-name>/project.md` — a free-form description
+// of the work — and this turns it into the seed `<root>/<project-name>/.project.yaml`
+// that drives the rest of the project's lifecycle (see dispatchProject's
+// Unpopulated handling). The project's name is always the containing
+// directory's name, never read from the file itself.
+//
+// This is a one-time bootstrap trigger, not a live sync: if .project.yaml
+// already exists next to project.md, the project has already been
+// bootstrapped (or is mid-flight), so the file is left alone — including on a
+// later edit of project.md, which fires its own fsnotify event but is a no-op
+// here.
+func (d *Daemon) handleProjectSeed(path string) {
+	dir := filepath.Dir(path)
+	yamlPath := filepath.Join(dir, ".project.yaml")
+	if _, err := os.Stat(yamlPath); err == nil {
+		return
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		d.audit.Log("project_seed_stat_error", "path", yamlPath, "err", err.Error())
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return
+		}
+		d.audit.Log("project_seed_read_error", "path", path, "err", err.Error())
+		return
+	}
+	description := strings.TrimSpace(string(data))
+	if description == "" {
+		d.audit.Log("project_seed_empty", "path", path)
+		return
+	}
+	seed := &project.Project{Description: description}
+	if err := project.SaveAs(yamlPath, seed, project.WriterAgent); err != nil {
+		d.audit.Log("project_save_error", "path", yamlPath, "err", err.Error())
+		return
+	}
+	d.audit.Log("project_seed_created", "path", yamlPath, "name", filepath.Base(dir))
+	// The daemon's own watch on dir already covers yamlPath (it was added
+	// when this project's directory was first walked), so the write above
+	// fires its own fsnotify Create event and dispatchProject's Unpopulated
+	// routing picks it up from there — no need to dispatch it directly here.
+}
+
 // dispatchProject runs the empty-check, created_at stamp, and routing
 // logic. Factored out of handleProject so the cron callback can invoke it
 // directly: cron-driven re-evaluations must skip handleProject's
 // daemon-write filter (otherwise our own created_at stamp save, also
 // written as `daemon`, would silence every subsequent cron firing).
 func (d *Daemon) dispatchProject(path string, p *project.Project) {
+	// `:stop` outranks everything else — cleanup, cron, the status switch. A
+	// stopped project gets no further routing until `:start` restores its prior
+	// status; this call is what actually kills whatever agents were running for
+	// it and drops its schedules. It must be safe to call on every observation
+	// (a second `:stop`-triggered event, a daemon restart onto an
+	// already-stopped project) since there may be nothing left to stop.
+	if p.Status == project.StatusStopped {
+		d.enforceStopped(path)
+		return
+	}
 	if p.Unpopulated() {
-		// Covers both the legacy zero-byte file and the `:new` description
-		// seed (a file with only `description:` set). Either way the project
-		// agent runs next to fill in the rest; we return before the created_at
-		// stamp, which lands when the agent later saves status:ready.
+		// Covers both the legacy zero-byte file and the project.md-derived
+		// seed handleProjectSeed writes (a file with only `description:`
+		// set). Either way the project agent runs next to fill in the rest;
+		// we return before the created_at stamp, which lands when the agent
+		// later saves status:ready.
 		d.audit.Log("project_unpopulated", "path", path)
 		d.launchProjectRootAgent(path, agent.ProjectAgent, p)
 		return
@@ -131,17 +191,21 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 		d.launchArchiveAgent(path, p)
 		return
 	}
-	// A pending seed on a resting project (done/reviewing) is an orphaned `:task`
-	// addition: `:task` flips the project to `ready` so planning fleshes the seed
-	// into a real task, but that flip can be skipped (the project slot was busy
-	// with a review/other agent, so the planning launch dedup-skipped) or clobbered
-	// (a review agent's own status write landed after it, resetting done/reviewing).
-	// Either way the seed strands — unplanned work that never runs. Re-arm the
-	// normal path by flipping back to `ready` here; the switch below then routes to
-	// the planning agent, which carries its own crash-loop circuit breaker. Guarded
-	// to resting statuses so a seed observed mid-flight (working/ready/blocked) is
-	// left to that status's own handling.
-	if (p.Status == project.StatusDone || p.Status == project.StatusReviewing) && d.hasPendingSeed(path) {
+	// A pending seed or intake file on a resting project (done/reviewing) is
+	// orphaned work: handleIntakeFile (or, for a hand-written seed, a human
+	// editing tasks/ directly) flips the project to `ready` so planning can
+	// pick it up, but that flip can be skipped (the project slot was busy
+	// with a review/other agent, so the planning launch dedup-skipped) or
+	// clobbered (a review agent's own status write landed after it, resetting
+	// done/reviewing).
+	// Either way the request strands — unplanned work that never runs. Re-arm
+	// the normal path by flipping back to `ready` here; the switch below then
+	// routes to the planning agent, which carries its own crash-loop circuit
+	// breaker. Guarded to resting statuses so a seed/intake file observed
+	// mid-flight (working/ready/blocked) is left to that status's own
+	// handling.
+	if (p.Status == project.StatusDone || p.Status == project.StatusReviewing) &&
+		(d.hasPendingSeed(path) || hasPendingIntake(path)) {
 		d.audit.Log("seed_replan", "path", path, "from", string(p.Status))
 		updated := *p
 		updated.Status = project.StatusReady
@@ -220,6 +284,15 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", kind.String())
 		return
 	}
+	// Only the planning agent has a workspace whose repo set could have
+	// drifted from what it was last provisioned with — sync it (cloning any
+	// newly-added repo into the existing wsp workspace) and collect the
+	// human-readable diff before building its prompt. project/wolf agents
+	// don't have a wsp workspace at all.
+	var projectChanges []string
+	if kind == agent.PlanningAgent {
+		projectChanges = d.syncPlannedRepos(projectPath, p)
+	}
 	root := filepath.Dir(projectPath)
 	plan := runner.Plan{
 		Kind:        kind,
@@ -232,6 +305,13 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 		// ignore it. Forwarded from disk so a re-plan survives a daemon restart
 		// between the cron firing that requested it and the launch.
 		Replan: p.Replan,
+		// Only the planning template reads this either. A fresh scan at
+		// launch time rather than anything tracked in memory, so it survives
+		// a daemon restart between an intake file landing and the launch —
+		// the file itself, not yet renamed to *.processed, is the record.
+		IntakeFiles: pendingIntakeFiles(root),
+		// Only the planning template reads this too — see syncPlannedRepos.
+		ProjectChanges: projectChanges,
 	}
 	err := d.startSession(projectPath, plan, func(waitErr error) {
 		// The planning and project agents each get a circuit breaker: now that
@@ -328,8 +408,8 @@ func (d *Daemon) afterPlanningSession(projectPath string, waitErr error) {
 // crash-loop circuit breaker — the project-bootstrap analogue of
 // afterPlanningSession.
 //
-// The project agent's job is to turn the `:new` description seed into a
-// populated `.project.yaml` (status:ready), or, when the description isn't
+// The project agent's job is to turn the project.md-derived description seed
+// into a populated `.project.yaml` (status:ready), or, when the description isn't
 // enough, to escalate by setting status:blocked with a specific question.
 // Either outcome moves the project off the unpopulated (status:"") state the
 // daemon routes to the project agent. A session that ends with the file still
@@ -808,8 +888,9 @@ func (d *Daemon) dispatchPendingTasks(projectPath string, p *project.Project) bo
 	return d.dispatchReadyOrPending(projectPath, p, g)
 }
 
-// hasPendingSeed reports whether projectPath's tasks dir holds a pending `:task`
-// seed (a blank-name task with a description) awaiting the planning agent. A
+// hasPendingSeed reports whether projectPath's tasks dir holds a pending
+// intake seed (a blank-name task with a description) awaiting the planning
+// agent. A
 // graph that can't be loaded returns false: the structural error is surfaced and
 // blocked on the normal dispatch path (loadTaskGraph), not here, so this stays a
 // pure predicate with no side effects.

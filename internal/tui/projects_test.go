@@ -319,11 +319,12 @@ func TestScanProjectsOrdersTasksByCompletion(t *testing.T) {
 	}
 }
 
-// TestScanProjectsKeepsTasksWithUnnamedSeed guards the `:task` flow: the seed
-// it writes has an empty name (the signal planning keys off), and the strict
-// taskgraph loader aborts on that. The Tasks pane must NOT go blank in the
-// window before planning fills the name in — existing named tasks stay, and the
-// unnamed seed shows under its filename stem.
+// TestScanProjectsKeepsTasksWithUnnamedSeed guards the intake flow: the seed
+// the daemon writes from a dropped intake/*.md file has an empty name (the
+// signal planning keys off), and the strict taskgraph loader aborts on that.
+// The Tasks pane must NOT go blank in the window before planning fills the
+// name in — existing named tasks stay, and the unnamed seed shows under its
+// filename stem.
 func TestScanProjectsKeepsTasksWithUnnamedSeed(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "proj")
@@ -335,7 +336,8 @@ func TestScanProjectsKeepsTasksWithUnnamedSeed(t *testing.T) {
 	}, project.WriterAgent); err != nil {
 		t.Fatal(err)
 	}
-	// An existing, named task plus the freshly-seeded unnamed task `:task` wrote.
+	// An existing, named task plus the freshly-seeded unnamed task an intake
+	// file's arrival wrote.
 	writeTask(t, filepath.Join(dir, "tasks", "existing.yaml"),
 		&task.Task{Name: "existing", Status: task.StatusCommitted})
 	writeTask(t, filepath.Join(dir, "tasks", "my-new-idea.yaml"),

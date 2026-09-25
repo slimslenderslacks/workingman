@@ -82,20 +82,3 @@ func TestReviewFieldsRoundTrip(t *testing.T) {
 		}
 	}
 }
-
-func TestHasRepos(t *testing.T) {
-	cases := []struct {
-		name string
-		p    Project
-		want bool
-	}{
-		{"none", Project{}, false},
-		{"repos", Project{Repos: []Repo{{Org: "docker", Name: "gateway"}}}, true},
-		{"new_repos", Project{NewRepos: []Repo{{Org: "me", Name: "new"}}}, true},
-	}
-	for _, tc := range cases {
-		if got := tc.p.HasRepos(); got != tc.want {
-			t.Errorf("%s: HasRepos() = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-}

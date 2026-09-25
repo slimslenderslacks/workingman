@@ -130,6 +130,45 @@ func applyBaseBranches(ctx context.Context, workspaceDir, branch string, repos [
 	return nil
 }
 
+// AddRepos clones repos into the already-existing workspace named branch via
+// `wsp repo add`, which — unlike `wsp new` — operates on the CURRENT
+// directory rather than taking a workspace argument, so this resolves the
+// workspace path first and runs the command with that as its cwd.
+//
+// Mirrors Create's bootstrapping: repos flagged Create are created empty on
+// the remote first (ensureCreated), and every repo is registered in wsp's
+// global registry if it isn't already (ensureRegistered) — both are already
+// idempotent, so calling this repeatedly with the same repos is safe.
+func (m *WspManager) AddRepos(ctx context.Context, branch string, repos []Repo) error {
+	if len(repos) == 0 {
+		return nil
+	}
+	if branch == "" {
+		return fmt.Errorf("workspace: branch is required")
+	}
+	path, err := m.Path(branch)
+	if err != nil {
+		return fmt.Errorf("wsp repo add %s: %w", branch, err)
+	}
+	if err := m.ensureCreated(ctx, repos); err != nil {
+		return err
+	}
+	if err := m.ensureRegistered(ctx, repos); err != nil {
+		return err
+	}
+	args := []string{"repo", "add", "--json"}
+	for _, r := range repos {
+		args = append(args, r.Ref())
+	}
+	cmd := exec.CommandContext(ctx, m.binary(), args...)
+	cmd.Dir = path
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		return fmt.Errorf("wsp repo add %s in %s: %w: %s", branch, path, runErr, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func (m *WspManager) Path(branch string) (string, error) {
 	if branch == "" {
 		return "", fmt.Errorf("workspace: branch is required")

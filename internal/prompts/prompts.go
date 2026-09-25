@@ -49,8 +49,10 @@ type Data struct {
 	// or ruled out, if any — for WolfAgent.
 	BlockedSessionAttempted []string
 
-	Replan   bool   // for PlanningAgent: re-plan the existing tasks (a cron cycle) instead of preserving them
-	Worktree string // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
+	Replan         bool     // for PlanningAgent: re-plan the existing tasks (a cron cycle) instead of preserving them
+	IntakeFiles    []string // for PlanningAgent: absolute paths to pending intake/*.md files awaiting tasks
+	ProjectChanges []string // for PlanningAgent: human-readable .project.yaml changes since the last successful plan
+	Worktree       string   // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
 
 	// PushBranch, for the CommitAgent, tells it to push the branch after
 	// committing instead of leaving the commit local. Set by the daemon for a

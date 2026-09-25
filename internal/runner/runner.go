@@ -79,6 +79,24 @@ type Plan struct {
 	// Only the planning agent's prompt reads it. See project.Project.Replan.
 	Replan bool
 
+	// IntakeFiles are absolute paths to pending intake/*.md files — markdown
+	// dropped into the project's intake/ directory that hasn't yet been
+	// turned into tasks. Only the planning agent's prompt reads it: it's told
+	// to read each one, create the task(s) it describes, and rename it to
+	// *.processed so it isn't offered again next time. Forwarded from a fresh
+	// directory scan at launch time (see daemon.pendingIntakeFiles), not
+	// stored anywhere on disk.
+	IntakeFiles []string
+
+	// ProjectChanges is a human-readable line per intent field (description,
+	// repos/new_repos, branch, cron) that changed in .project.yaml since the
+	// planning agent last successfully ran — see
+	// project.PlannedSnapshot.Describe. Only the planning template reads it.
+	// Any newly-added repos it describes have already been cloned into the
+	// workspace by the daemon before this launch (see daemon.syncPlannedRepos),
+	// so the agent doesn't need to run anything itself to pick them up.
+	ProjectChanges []string
+
 	// BlockedReason, when set, is the message surfaced to the wolf agent
 	// describing why the project entered status:blocked. Ignored for any
 	// other Kind. Mirrors the project file's blocked_reason field but is
@@ -388,6 +406,8 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		BlockedSessionSummary:   p.BlockedSessionSummary,
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
 		Replan:                  p.Replan,
+		IntakeFiles:             p.IntakeFiles,
+		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
 		PushBranch:              p.PushBranch,
 	}
@@ -410,6 +430,8 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		BlockedSessionSummary:   p.BlockedSessionSummary,
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
 		Replan:                  p.Replan,
+		IntakeFiles:             p.IntakeFiles,
+		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
 		PushBranch:              p.PushBranch,
 	}

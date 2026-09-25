@@ -28,10 +28,12 @@ func newReviewDaemon(t *testing.T, root string) (*Daemon, *safeBuf, *scheduler.S
 	return d, buf, sched
 }
 
-// TestTransitionProjectCompleteRoutes covers the "flag + probe" entry decision:
-// a project with repos (or Review set) enters the reviewing loop and arms the
-// #review poll; a repo-less project with no flag keeps the original terminal
-// behaviour and stays out of the loop.
+// TestTransitionProjectCompleteRoutes covers the entry decision into the
+// PR-resolution loop: only an explicit signal — `review: true`, or a
+// PullRequests record already stamped by an earlier review cycle — enters
+// reviewing and arms the #review poll. Everything else, repos or no repos,
+// goes straight to done; there is no automatic probing for a PR that might
+// exist (a human starts the loop with `:review`).
 func TestTransitionProjectCompleteRoutes(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -40,10 +42,10 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 		wantPoll   bool
 	}{
 		{
-			name:       "repos probe",
+			name:       "repos alone do not enter the loop",
 			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}},
-			wantStatus: project.StatusReviewing,
-			wantPoll:   true,
+			wantStatus: project.StatusDone,
+			wantPoll:   false,
 		},
 		{
 			name:       "repoless no flag goes done",
@@ -58,10 +60,22 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 			wantPoll:   true,
 		},
 		{
+			// A fix cycle returning through here (task work finished, back to
+			// AllCommitted) must keep watching the PR it already recorded, even
+			// without `review: true` set.
+			name: "already-known PR keeps the loop going",
+			p: project.Project{
+				Description: "x", Branch: "b",
+				Repos:        []project.Repo{{Org: "docker", Name: "gateway"}},
+				PullRequests: []project.PullRequest{{Repo: "docker/gateway", Number: 1, State: "open"}},
+			},
+			wantStatus: project.StatusReviewing,
+			wantPoll:   true,
+		},
+		{
 			// A live recurring cron project commits directly and opens no PR, so
-			// its repos are not a PR signal — it rests at done and re-fires on cron
-			// instead of probing every cycle (the EmailPromotionSummary case).
-			name:       "recurring cron with repos skips the probe",
+			// it rests at done and re-fires on cron rather than entering the loop.
+			name:       "recurring cron with repos goes done",
 			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 390},
 			wantStatus: project.StatusDone,
 			wantPoll:   false,
@@ -70,28 +84,6 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 			// The flag still opts a recurring project into the loop explicitly.
 			name:       "recurring cron with review flag still reviews",
 			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 390, Review: true},
-			wantStatus: project.StatusReviewing,
-			wantPoll:   true,
-		},
-		{
-			// An expired schedule is a one-shot again, so the probe returns.
-			name:       "expired cron with repos still probes",
-			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 720},
-			wantStatus: project.StatusReviewing,
-			wantPoll:   true,
-		},
-		{
-			// no_review opts a repo-backed project out of the probe: workspace
-			// setup / health checks that never open a PR go straight to done.
-			name:       "no_review skips the repos probe",
-			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, NoReview: true},
-			wantStatus: project.StatusDone,
-			wantPoll:   false,
-		},
-		{
-			// An explicit review intent still wins over no_review.
-			name:       "review flag beats no_review",
-			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Review: true, NoReview: true},
 			wantStatus: project.StatusReviewing,
 			wantPoll:   true,
 		},

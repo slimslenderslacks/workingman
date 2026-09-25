@@ -42,8 +42,10 @@ type Context struct {
 	BlockedSessionSummary   string   `yaml:"blocked_session_summary,omitempty"`
 	BlockedSessionAttempted []string `yaml:"blocked_session_attempted,omitempty"`
 
-	Replan   bool   `yaml:"replan,omitempty"`
-	Worktree string `yaml:"worktree,omitempty"`
+	Replan         bool     `yaml:"replan,omitempty"`
+	IntakeFiles    []string `yaml:"intake_files,omitempty"`
+	ProjectChanges []string `yaml:"project_changes,omitempty"`
+	Worktree       string   `yaml:"worktree,omitempty"`
 
 	// PushBranch tells the commit agent to push after committing (review-fix
 	// tasks) rather than leaving the commit local. See prompts.Data.PushBranch.
