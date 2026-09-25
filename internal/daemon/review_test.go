@@ -1,16 +1,20 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/project"
+	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
 	"github.com/slimslenderslacks/work/internal/task"
+	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
 // newReviewDaemon builds a scheduler-backed, runner-less daemon. Like the cron
@@ -26,6 +30,92 @@ func newReviewDaemon(t *testing.T, root string) (*Daemon, *safeBuf, *scheduler.S
 		t.Fatalf("New: %v", err)
 	}
 	return d, buf, sched
+}
+
+// reviewDispatchDaemon builds a scheduler- AND runner-backed daemon, unlike
+// newReviewDaemon: a call into dispatchProject here can be observed all the
+// way through to an actual agent launch (via the recordingLauncher), not just
+// the routing/scheduling decision.
+func reviewDispatchDaemon(t *testing.T) (*Daemon, *recordingLauncher, string) {
+	t.Helper()
+	root := t.TempDir()
+	stubRoot := t.TempDir()
+	a := audit.New(&safeBuf{})
+	lch := &recordingLauncher{}
+	d, err := New([]string{root}, a,
+		WithScheduler(scheduler.New()),
+		WithRunner(&runner.Runner{
+			Workspaces: workspace.NewStub(stubRoot),
+			Launcher:   lch,
+			Audit:      a,
+			Command:    func(agent.Kind, string) []string { return []string{"true"} },
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.ctx = ctx
+	t.Cleanup(func() {
+		cancel()
+		lch.closeAll()
+		_ = d.watcher.Close()
+	})
+	return d, lch, root
+}
+
+// TestReviewCommandDispatchesReviewAgentImmediately covers `:review`
+// (internal/tui/review.go's requestReview) end to end through dispatchProject:
+// it must not just flip a flag and leave the review agent to run whenever the
+// #review poll next fires — it launches it in the very same dispatch, whether
+// starting the loop fresh (`review: true` on a project not yet watching) or
+// kicking one already watching a PR (`review_now: true`).
+func TestReviewCommandDispatchesReviewAgentImmediately(t *testing.T) {
+	t.Run("starting the loop fresh", func(t *testing.T) {
+		d, lch, root := reviewDispatchDaemon(t)
+		projectPath := filepath.Join(root, ".project.yaml")
+		p := &project.Project{
+			Description: "x", Branch: "feat/x", Status: project.StatusIdle,
+			Repos:  []project.Repo{{Org: "docker", Name: "gateway"}},
+			Review: true, // what requestReview writes on an idle, not-yet-watching project
+		}
+		if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
+			t.Fatalf("SaveAs: %v", err)
+		}
+
+		d.dispatchProject(projectPath, p)
+
+		if n := lch.countKind(agent.ReviewAgent); n != 1 {
+			t.Fatalf("review agent launches = %d, want 1 (dispatched immediately, not on the next poll)", n)
+		}
+	})
+
+	t.Run("kicking an already-watching project", func(t *testing.T) {
+		d, lch, root := reviewDispatchDaemon(t)
+		projectPath := filepath.Join(root, ".project.yaml")
+		p := &project.Project{
+			Description: "x", Branch: "feat/x", Status: project.StatusIdle,
+			Repos:        []project.Repo{{Org: "docker", Name: "gateway"}},
+			PullRequests: []project.PullRequest{{Repo: "docker/gateway", Number: 1, State: "open"}},
+			ReviewNow:    true, // what requestReview writes on an idle, already-watching project
+		}
+		if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
+			t.Fatalf("SaveAs: %v", err)
+		}
+
+		d.dispatchProject(projectPath, p)
+
+		if n := lch.countKind(agent.ReviewAgent); n != 1 {
+			t.Fatalf("review agent launches = %d, want 1 (bypassing the poll's backoff)", n)
+		}
+		updated, err := project.Load(projectPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if updated.ReviewNow {
+			t.Error("review_now should be cleared once the kick has been served")
+		}
+	})
 }
 
 // TestTransitionProjectCompleteRoutes covers the entry decision into the

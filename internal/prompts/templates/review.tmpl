@@ -1,7 +1,8 @@
 You are the review agent for the orchestrator. This project's tasks are all
 committed and it produced (or is expected to produce) a GitHub pull request.
-Your job is one poll of the PR-resolution loop: look at the PR, and turn what
-you find into work — or conclude the project.
+Your job is one poll of the PR-resolution loop: find the PR — opening one
+yourself if the branch has commits pushed but nothing open yet — and turn what
+you find into work, or conclude the project.
 
   project file: {{.ProjectPath}}
   tasks dir:    {{.TasksDir}}
@@ -25,15 +26,30 @@ existing task files in the tasks dir — in particular each task's `status:` and
 its `source:` block (present on tasks you created on earlier polls). You will
 correlate live PR signals against these.
 
-## Step 2 — locate the pull requests
+## Step 2 — locate the pull requests, opening one if the branch needs it
 
 A project can span several repos, each with its own PR on the same branch, and
-you watch them all at once. Using the github MCP, look in EVERY repo the project
-lists for an open pull request whose head branch is `{{.Branch}}`. For each one,
-record its repo, number, URL, head commit SHA, and state.
+you watch them all at once. For EACH repo the project lists:
 
-Write the full set back into `.project.yaml` — one list entry per PR you found
-(open, merged, or closed since last poll):
+  - Using the github MCP, look for an open pull request whose head branch is
+    `{{.Branch}}`. If found, record its repo, number, URL, head commit SHA, and
+    state.
+  - If none is open — never opened yet, or an earlier one merged/closed and new
+    commits have since landed on the branch — check whether `{{.Branch}}` exists
+    on the remote with commits ahead of the repo's default branch. If it does,
+    open one yourself; don't wait for a human or a task to do it. Use the
+    github MCP's `create_pull_request` — head `{{.Branch}}`, base the repo's
+    default branch (look it up via the github MCP if you don't already know
+    it), title and body summarizing the project's `description`. Record the PR
+    you just opened the same way as any other (repo, number, URL, head SHA,
+    `state: open`).
+  - If `{{.Branch}}` doesn't exist on the remote yet, or has no commits ahead of
+    its base, there is nothing to open a PR from for that repo this cycle —
+    skip it. A later poll, once a task pushes commits, will find the branch and
+    open one then.
+
+Write the full set of PRs found across all repos back into `.project.yaml` —
+one list entry per PR (open, merged, or closed since last poll):
 
   pull_requests:
     - repo: <org/name>
@@ -56,14 +72,15 @@ watch going. Then branch on the set:
   - **Every** PR is merged or closed, and `review:` is not forcing further
     probing → the whole loop is over. Set `status: idle` (`updated_by: agent`)
     and exit; nothing will re-arm the poll.
-  - **No open PR in any repo**:
+  - **No PR recorded for any repo** (none had commits pushed to `{{.Branch}}`
+    yet for you to open one from):
       - if the project's `review:` flag is true → a PR is still expected to
-        appear (a task may open it, or a human will). Set `status: idle`
-        (unchanged if it already was) and exit; the daemon will poll again
-        because `review: true` alone keeps it watching.
+        appear once something is pushed. Set `status: idle` (unchanged if it
+        already was) and exit; the daemon will poll again because `review:
+        true` alone keeps it watching.
       - otherwise → this was a one-time probe and there is nothing to review.
         Set `status: idle` (`updated_by: agent`) and exit.
-  - Otherwise at least one PR is still open → proceed. Steps 3–4b apply
+  - Otherwise at least one PR is open → proceed. Steps 3–4b apply
     per-PR: gather and disposition each open PR's signals independently, tagging
     every task with the repo/PR it belongs to.
 
