@@ -98,7 +98,7 @@ func renderProjectDetailBody(v ProjectView, auditLines []string, width int) stri
 }
 
 // renderProjectDetailHeader is the panel's first section: name, status +
-// branch, and how long ago the project was created.
+// branch, which repos the project spans, and how long ago it was created.
 func renderProjectDetailHeader(v ProjectView, width int) []string {
 	lines := []string{cardNameStyle.Render(truncate(v.Name, width))}
 
@@ -107,6 +107,14 @@ func renderProjectDetailHeader(v ProjectView, width int) []string {
 		statusLine = truncate(statusLine+"  "+dimStyle.Render(v.Branch), width)
 	}
 	lines = append(lines, statusLine)
+
+	if len(v.Repos) > 0 {
+		names := make([]string, len(v.Repos))
+		for i, r := range v.Repos {
+			names[i] = r.Org + "/" + r.Name
+		}
+		lines = append(lines, dimStyle.Render(truncate("repos: "+strings.Join(names, ", "), width)))
+	}
 
 	if !v.CreatedAt.IsZero() {
 		age := "created " + sessionAge(v.CreatedAt, time.Now()) + " ago"
@@ -148,8 +156,9 @@ func renderProjectDetailBadges(v ProjectView, width int) []string {
 
 // renderProjectDetailTasks renders the task graph: one line per task with a
 // status glyph and colored label, followed by an indented dependency line
-// when it has any — a readable substitute for a boxes-and-arrows DAG
-// diagram, in the same run order the Tasks pane itself uses.
+// when it has any, and an indented line naming the repos its commits landed
+// in when it has committed — a readable substitute for a boxes-and-arrows
+// DAG diagram, in the same run order the Tasks pane itself uses.
 func renderProjectDetailTasks(v ProjectView, width int) []string {
 	lines := []string{paneTitleStyle.Render(truncate(fmt.Sprintf("Tasks (%d)", len(v.Tasks)), width))}
 	if len(v.Tasks) == 0 {
@@ -163,6 +172,14 @@ func renderProjectDetailTasks(v ProjectView, width int) []string {
 		if len(t.DependsOn) > 0 {
 			dep := "    ← " + strings.Join(t.DependsOn, ", ")
 			lines = append(lines, dimStyle.Render(truncate(dep, width)))
+		}
+		if len(t.Commits) > 0 {
+			repos := make([]string, len(t.Commits))
+			for i, c := range t.Commits {
+				repos[i] = c.Repo
+			}
+			commit := "    ⎇ " + strings.Join(repos, ", ")
+			lines = append(lines, dimStyle.Render(truncate(commit, width)))
 		}
 	}
 	return lines

@@ -106,6 +106,12 @@ type TaskView struct {
 	// DependsOn mirrors the task file's `depends_on` list — the task graph's
 	// edges, for the detail pane's task-graph rendering.
 	DependsOn []string
+	// Commits mirrors the task file's `commits` list — one entry per repo
+	// the commit agent pushed changes to (Repo is the workspace-relative
+	// repo directory name, not "org/name" — see commit.tmpl), for the
+	// detail pane to show which repos a task actually touched. Empty on a
+	// task that hasn't committed, or that committed nothing.
+	Commits []task.Commit
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
@@ -270,6 +276,7 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 			Path:        t.Path,
 			CompletedAt: completedAt,
 			DependsOn:   append([]string(nil), t.DependsOn...),
+			Commits:     append([]task.Commit(nil), t.Commits...),
 		})
 	}
 	if len(tasks) == 0 {
@@ -527,6 +534,14 @@ func taskViewEqual(a, b TaskView) bool {
 	}
 	for i := range a.DependsOn {
 		if a.DependsOn[i] != b.DependsOn[i] {
+			return false
+		}
+	}
+	if len(a.Commits) != len(b.Commits) {
+		return false
+	}
+	for i := range a.Commits {
+		if a.Commits[i] != b.Commits[i] {
 			return false
 		}
 	}
