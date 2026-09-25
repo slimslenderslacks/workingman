@@ -56,7 +56,7 @@ func TestRenderProjectGridReflowsByWidth(t *testing.T) {
 		{Name: "alpha", Status: project.StatusReady},
 		{Name: "bravo", Status: project.StatusWorking},
 		{Name: "charlie", Status: project.StatusBlocked},
-		{Name: "delta", Status: project.StatusDone},
+		{Name: "delta", Status: project.StatusIdle},
 	}
 
 	// Pass a large row budget so the grid renders every project; this test
@@ -297,7 +297,7 @@ func TestSelectedCardBorderUsesAccentColor(t *testing.T) {
 // safe to add: a selected card and an unselected one occupy the same box, so
 // moving the cursor can't reflow the gallery. Both are one border thick on
 // every side, and cardDisplayRows accounts for the ring's two rows on top of
-// the card's own five.
+// the card's own four (name + status + breakdown + extra).
 func TestSelectionRingIsSizedLikeItsSpacer(t *testing.T) {
 	ring, spacer := projectCardRing(true), projectCardRing(false)
 	if got, want := ring.GetHorizontalBorderSize(), spacer.GetHorizontalBorderSize(); got != want {
@@ -306,7 +306,7 @@ func TestSelectionRingIsSizedLikeItsSpacer(t *testing.T) {
 	if got, want := ring.GetVerticalBorderSize(), spacer.GetVerticalBorderSize(); got != want {
 		t.Errorf("ring vertical size = %d, spacer = %d; they must match or the grid reflows on selection", got, want)
 	}
-	cardRows := cardBorder.GetVerticalBorderSize() + 3 // name + status + breakdown
+	cardRows := cardBorder.GetVerticalBorderSize() + 4 // name + status + breakdown + extra
 	if want := cardRows + ring.GetVerticalBorderSize(); cardDisplayRows != want {
 		t.Errorf("cardDisplayRows = %d, want %d (card + ring)", cardDisplayRows, want)
 	}
@@ -317,7 +317,7 @@ func TestSelectionRingIsSizedLikeItsSpacer(t *testing.T) {
 // geometry instead — the selected card gains a border ring while staying the
 // same width, which is what leaves the inner border visible.
 func TestSelectedCardRendersBothBorders(t *testing.T) {
-	v := ProjectView{Name: "alpha", Status: project.StatusDone, Archive: true}
+	v := ProjectView{Name: "alpha", Status: project.StatusIdle, Archive: true}
 	const width = cardTargetWidth
 
 	sel := strings.Split(renderProjectCard(v, width, true), "\n")
@@ -406,15 +406,45 @@ func TestCronActiveCardBorderIsGreenAndDistinct(t *testing.T) {
 	}
 }
 
+// TestWatchingPRCardBorderIsGreenAndDistinct mirrors
+// TestCronActiveCardBorderIsGreenAndDistinct for the collapsed
+// status:reviewing case: a different shade of green from cron-active, so the
+// two "this project wakes itself up for something" cases read as related but
+// distinguishable at a glance.
+func TestWatchingPRCardBorderIsGreenAndDistinct(t *testing.T) {
+	watching := cardWatchingPRBorder.GetBorderTopForeground()
+	plain := cardBorder.GetBorderTopForeground()
+	sel := cardSelectedRing.GetBorderTopForeground()
+	archived := cardArchivedBorder.GetBorderTopForeground()
+	cronActive := cardCronActiveBorder.GetBorderTopForeground()
+	if watching == plain {
+		t.Errorf("cardWatchingPRBorder must differ from cardBorder; both = %v", plain)
+	}
+	if watching == sel {
+		t.Errorf("cardWatchingPRBorder must differ from cardSelectedRing; both = %v", sel)
+	}
+	if watching == archived {
+		t.Errorf("cardWatchingPRBorder must differ from cardArchivedBorder; both = %v", archived)
+	}
+	if watching == cronActive {
+		t.Errorf("cardWatchingPRBorder must differ from cardCronActiveBorder (a different shade of green); both = %v", cronActive)
+	}
+	if got, want := cardWatchingPRBorder.GetHorizontalBorderSize(), cardBorder.GetHorizontalBorderSize(); got != want {
+		t.Errorf("cardWatchingPRBorder horizontal border size = %d, want %d", got, want)
+	}
+}
+
 // TestProjectCardBorderPrefersArchiveOverCron covers the card's own border,
-// which now encodes durable state only: archive beats cron-active, and
-// selection doesn't enter into it — the ring carries that instead, so a
-// selected card keeps showing what it is.
+// which now encodes durable state only: archive beats watching-a-PR beats
+// cron-active, and selection doesn't enter into it — the ring carries that
+// instead, so a selected card keeps showing what it is.
 func TestProjectCardBorderPrefersArchiveOverCron(t *testing.T) {
-	archived := ProjectView{Name: "alpha", Status: project.StatusDone, Archive: true}
+	archived := ProjectView{Name: "alpha", Status: project.StatusIdle, Archive: true}
 	normal := ProjectView{Name: "bravo", Status: project.StatusWorking}
 	cronActive := ProjectView{Name: "charlie", Status: project.StatusWorking, CronActive: true}
-	both := ProjectView{Name: "delta", Status: project.StatusDone, Archive: true, CronActive: true}
+	both := ProjectView{Name: "delta", Status: project.StatusIdle, Archive: true, CronActive: true}
+	watching := ProjectView{Name: "echo", Status: project.StatusIdle, WatchingPR: true}
+	watchingAndCron := ProjectView{Name: "foxtrot", Status: project.StatusIdle, WatchingPR: true, CronActive: true}
 
 	cases := []struct {
 		name string
@@ -425,6 +455,8 @@ func TestProjectCardBorderPrefersArchiveOverCron(t *testing.T) {
 		{"normal", normal, cardBorder},
 		{"cron-active", cronActive, cardCronActiveBorder},
 		{"archived and cron-active", both, cardArchivedBorder},
+		{"watching a PR", watching, cardWatchingPRBorder},
+		{"watching a PR and cron-active", watchingAndCron, cardWatchingPRBorder},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -436,11 +468,56 @@ func TestProjectCardBorderPrefersArchiveOverCron(t *testing.T) {
 	}
 }
 
+// TestRenderProjectCardExtraPrefersPRLinksOverCron pins the fourth card line's
+// content and priority: watched PRs win over a cron schedule when both apply,
+// merged/closed entries are omitted, and a plain project shows nothing.
+func TestRenderProjectCardExtraPrefersPRLinksOverCron(t *testing.T) {
+	cases := []struct {
+		name string
+		v    ProjectView
+		want string
+	}{
+		{"neither", ProjectView{}, ""},
+		{"cron only", ProjectView{CronActive: true, Cron: "@every 1h"}, "cron: @every 1h"},
+		{
+			"watching only",
+			ProjectView{WatchingPR: true, PullRequests: []project.PullRequest{
+				{Repo: "docker/desktop", Number: 42, State: "open"},
+			}},
+			"docker/desktop#42",
+		},
+		{
+			"watching and cron: PR wins",
+			ProjectView{
+				WatchingPR: true, CronActive: true, Cron: "@every 1h",
+				PullRequests: []project.PullRequest{{Repo: "docker/desktop", Number: 42, State: "open"}},
+			},
+			"docker/desktop#42",
+		},
+		{
+			"multiple PRs joined, resolved ones omitted",
+			ProjectView{WatchingPR: true, PullRequests: []project.PullRequest{
+				{Repo: "docker/desktop", Number: 42, State: "open"},
+				{Repo: "docker/cli", Number: 7, State: "merged"},
+				{Repo: "docker/cli", Number: 9, State: ""},
+			}},
+			"docker/desktop#42, docker/cli#9",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := renderProjectCardExtra(tc.v); got != tc.want {
+				t.Errorf("renderProjectCardExtra() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderArchivedProjectCardStaysIntact(t *testing.T) {
 	// The archived style must not change the card's shape: same line count and
 	// same width as a normal card, so a blue card doesn't fragment the grid.
-	archived := renderProjectCard(ProjectView{Name: "alpha", Status: project.StatusDone, Archive: true}, 32, false)
-	plain := renderProjectCard(ProjectView{Name: "alpha", Status: project.StatusDone}, 32, false)
+	archived := renderProjectCard(ProjectView{Name: "alpha", Status: project.StatusIdle, Archive: true}, 32, false)
+	plain := renderProjectCard(ProjectView{Name: "alpha", Status: project.StatusIdle}, 32, false)
 	for _, line := range strings.Split(archived, "\n") {
 		if got := lipgloss.Width(line); got != 32 {
 			t.Errorf("archived card line width = %d, want 32; line=%q", got, line)
@@ -481,6 +558,7 @@ func TestOptionGlyphSwitchesPane(t *testing.T) {
 func TestOptionGlyphSwitchesColumn(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m.focus = paneProjects // default focus (paneSessions) is already the alt-h target
+	m.rightVisible = true  // right column is hidden by default; show it so ¬ has somewhere to land
 
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'˙'}})
 	m = step.(model)
@@ -496,7 +574,7 @@ func TestOptionGlyphSwitchesColumn(t *testing.T) {
 	}
 	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'¬'}})
 	m = step.(model)
-	if m.focus != paneProjectYAML {
+	if m.focus != paneProjectDetail {
 		t.Fatalf("¬ glyph did not switch to yaml column: focus = %v", m.focus)
 	}
 }

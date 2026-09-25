@@ -146,7 +146,7 @@ func TestCronMaxRunsUnschedulesAfterFiring(t *testing.T) {
 		Branch:      "feat/cron-max-runs",
 		// Idle, so the firing has a cycle to start — an unstarted cycle is not
 		// charged against the limit at all (see TestCronSkippedFiringIsNotCounted).
-		Status:      project.StatusDone,
+		Status:      project.StatusIdle,
 		Cron:        "@every 1s",
 		CronMaxRuns: 1,
 		Repos:       []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -208,7 +208,7 @@ func TestCronMaxRunsYieldsThatManyCycles(t *testing.T) {
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "two cycles",
 		Branch:      "feat/cron-two-cycles",
-		Status:      project.StatusDone,
+		Status:      project.StatusIdle,
 		Cron:        "@every 1s",
 		CronMaxRuns: 2,
 		Repos:       []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -257,7 +257,7 @@ func TestCronFiringWithBudgetAlreadySpentDoesNoWork(t *testing.T) {
 	p := &project.Project{
 		Description: "budget spent",
 		Branch:      "feat/cron-spent",
-		Status:      project.StatusDone,
+		Status:      project.StatusIdle,
 		Cron:        "@every 1h", // long enough that only our direct call fires it
 		CronMaxRuns: 1,
 		Repos:       []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -296,7 +296,7 @@ func TestCronFiringWithBudgetAlreadySpentDoesNoWork(t *testing.T) {
 	if got.CronRuns != 1 {
 		t.Errorf("cron_runs = %d, want it left at 1 — nothing was run to count", got.CronRuns)
 	}
-	if got.Status != project.StatusDone || got.Replan {
+	if got.Status != project.StatusIdle || got.Replan {
 		t.Errorf("project = {status: %q, replan: %v}, want it untouched", got.Status, got.Replan)
 	}
 }
@@ -449,7 +449,7 @@ func TestCronUnregistersOnProjectDone(t *testing.T) {
 		t.Fatalf("scheduler should have registered the cron; Spec = %q", got)
 	}
 
-	// Mark project done — daemon's transitionProjectDone path should
+	// Mark project done — daemon's transitionProjectIdle path should
 	// unregister the cron. We simulate by writing done as the agent so
 	// handleProject sees the change. Then we transition via the all-committed
 	// path by leaving tasksDir absent and faking via direct call... actually
@@ -460,7 +460,7 @@ func TestCronUnregistersOnProjectDone(t *testing.T) {
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "cron-then-done",
 		Branch:      "feat/cron-done",
-		Status:      project.StatusDone,
+		Status:      project.StatusIdle,
 		Cron:        "@every 1s",
 		CronMaxRuns: 20,
 		Repos:       []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -469,7 +469,7 @@ func TestCronUnregistersOnProjectDone(t *testing.T) {
 	}
 
 	// handleProject doesn't currently unregister on status=done observed
-	// from a file event (it only unregisters via transitionProjectDone).
+	// from a file event (it only unregisters via transitionProjectIdle).
 	// So the scheduler should still hold the spec — that's the documented
 	// behaviour for now. Confirm.
 	time.Sleep(200 * time.Millisecond)

@@ -30,34 +30,32 @@ func newReviewDaemon(t *testing.T, root string) (*Daemon, *safeBuf, *scheduler.S
 
 // TestTransitionProjectCompleteRoutes covers the entry decision into the
 // PR-resolution loop: only an explicit signal — `review: true`, or a
-// PullRequests record already stamped by an earlier review cycle — enters
-// reviewing and arms the #review poll. Everything else, repos or no repos,
-// goes straight to done; there is no automatic probing for a PR that might
-// exist (a human starts the loop with `:review`).
+// PullRequests record already stamped by an earlier review cycle — arms the
+// #review poll on top of the idle status every case lands on. Everything
+// else, repos or no repos, settles at plain idle (WatchingPR false); there is
+// no automatic probing for a PR that might exist (a human starts the loop
+// with `:review`). Status alone can no longer distinguish the two outcomes —
+// see wantPoll and the WatchingPR assertion below.
 func TestTransitionProjectCompleteRoutes(t *testing.T) {
 	cases := []struct {
-		name       string
-		p          project.Project
-		wantStatus project.Status
-		wantPoll   bool
+		name     string
+		p        project.Project
+		wantPoll bool
 	}{
 		{
-			name:       "repos alone do not enter the loop",
-			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}},
-			wantStatus: project.StatusDone,
-			wantPoll:   false,
+			name:     "repos alone do not enter the loop",
+			p:        project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}},
+			wantPoll: false,
 		},
 		{
-			name:       "repoless no flag goes done",
-			p:          project.Project{Description: "x", Branch: "b"},
-			wantStatus: project.StatusDone,
-			wantPoll:   false,
+			name:     "repoless no flag goes idle",
+			p:        project.Project{Description: "x", Branch: "b"},
+			wantPoll: false,
 		},
 		{
-			name:       "review flag forces loop even repoless",
-			p:          project.Project{Description: "x", Branch: "b", Review: true},
-			wantStatus: project.StatusReviewing,
-			wantPoll:   true,
+			name:     "review flag forces loop even repoless",
+			p:        project.Project{Description: "x", Branch: "b", Review: true},
+			wantPoll: true,
 		},
 		{
 			// A fix cycle returning through here (task work finished, back to
@@ -69,23 +67,20 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 				Repos:        []project.Repo{{Org: "docker", Name: "gateway"}},
 				PullRequests: []project.PullRequest{{Repo: "docker/gateway", Number: 1, State: "open"}},
 			},
-			wantStatus: project.StatusReviewing,
-			wantPoll:   true,
+			wantPoll: true,
 		},
 		{
 			// A live recurring cron project commits directly and opens no PR, so
-			// it rests at done and re-fires on cron rather than entering the loop.
-			name:       "recurring cron with repos goes done",
-			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 390},
-			wantStatus: project.StatusDone,
-			wantPoll:   false,
+			// it rests idle and re-fires on cron rather than entering the loop.
+			name:     "recurring cron with repos goes idle",
+			p:        project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 390},
+			wantPoll: false,
 		},
 		{
 			// The flag still opts a recurring project into the loop explicitly.
-			name:       "recurring cron with review flag still reviews",
-			p:          project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 390, Review: true},
-			wantStatus: project.StatusReviewing,
-			wantPoll:   true,
+			name:     "recurring cron with review flag still reviews",
+			p:        project.Project{Description: "x", Branch: "b", Repos: []project.Repo{{Org: "docker", Name: "gateway"}}, Cron: "0 * * * *", CronMaxRuns: 720, CronRuns: 390, Review: true},
+			wantPoll: true,
 		},
 	}
 	for _, tc := range cases {
@@ -100,8 +95,11 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if got.Status != tc.wantStatus {
-				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
+			if got.Status != project.StatusIdle {
+				t.Errorf("status = %q, want idle", got.Status)
+			}
+			if got.WatchingPR() != tc.wantPoll {
+				t.Errorf("WatchingPR() = %v, want %v", got.WatchingPR(), tc.wantPoll)
 			}
 			spec := sched.Spec(reviewPollKey(projectPath))
 			if tc.wantPoll && spec != reviewPollSpecs[0] {
@@ -114,21 +112,22 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 	}
 }
 
-// TestReviewPollSelfHeals: a #review firing on a project that has since left
-// reviewing must retire its own schedule rather than keep dispatching.
+// TestReviewPollSelfHeals: a #review firing on a project that has since
+// settled at idle-and-not-watching must retire its own schedule rather than
+// keep dispatching.
 func TestReviewPollSelfHeals(t *testing.T) {
 	root := t.TempDir()
 	d, _, sched := newReviewDaemon(t, root)
 	projectPath := filepath.Join(root, ".project.yaml")
 
-	// Arm the poll, then move the project off reviewing (e.g. the reconciler
-	// concluded the PR was merged).
+	// Arm the poll, then move the project to plain idle (e.g. the reconciler
+	// concluded the PR was merged, leaving nothing to watch).
 	d.ensureReviewPoll(projectPath)
 	if sched.Spec(reviewPollKey(projectPath)) != reviewPollSpecs[0] {
 		t.Fatalf("precondition: poll should be registered")
 	}
 	if err := project.SaveAs(projectPath, &project.Project{
-		Description: "x", Branch: "b", Status: project.StatusDone,
+		Description: "x", Branch: "b", Status: project.StatusIdle,
 	}, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
 	}
@@ -136,19 +135,20 @@ func TestReviewPollSelfHeals(t *testing.T) {
 	d.onReviewPoll(projectPath)
 
 	if got := sched.Spec(reviewPollKey(projectPath)); got != "" {
-		t.Errorf("poll survived a firing after the project left reviewing: %q", got)
+		t.Errorf("poll survived a firing after the project stopped watching: %q", got)
 	}
 }
 
-// TestAfterReviewSessionCleanResets: a reconciler run that leaves the project in
-// reviewing (PR clean this cycle) clears the fix-churn counter and keeps
-// polling — the loop must not converge toward the runaway guard while idle.
+// TestAfterReviewSessionCleanResets: a reconciler run that leaves the project
+// idle-and-watching (PR clean this cycle) clears the fix-churn counter and
+// keeps polling — the loop must not converge toward the runaway guard while
+// idle.
 func TestAfterReviewSessionCleanResets(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
 	projectPath := filepath.Join(root, ".project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
-		Description: "x", Branch: "b", Status: project.StatusReviewing,
+		Description: "x", Branch: "b", Status: project.StatusIdle, Review: true,
 		Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
 	}, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
@@ -179,7 +179,7 @@ func TestReviewCrashDoesNotReadAsCleanAndBlocksAfterMax(t *testing.T) {
 	d, buf, _ := newReviewDaemon(t, root)
 	projectPath := filepath.Join(root, ".project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
-		Description: "x", Branch: "b", Status: project.StatusReviewing,
+		Description: "x", Branch: "b", Status: project.StatusIdle, Review: true,
 		Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
 	}, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
@@ -215,7 +215,7 @@ func TestReviewPollBacksOffWhenQuietAndResetsOnChange(t *testing.T) {
 	d, buf, sched := newReviewDaemon(t, root)
 	projectPath := filepath.Join(root, ".project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
-		Description: "x", Branch: "b", Status: project.StatusReviewing,
+		Description: "x", Branch: "b", Status: project.StatusIdle,
 		Repos:        []project.Repo{{Org: "docker", Name: "gateway"}},
 		PullRequests: []project.PullRequest{{Repo: "docker/gateway", Number: 1}},
 	}, project.WriterAgent); err != nil {
@@ -273,7 +273,7 @@ func TestReviewNowKickForcesImmediateReconcile(t *testing.T) {
 	d, buf, sched := newReviewDaemon(t, root)
 	projectPath := filepath.Join(root, ".project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
-		Description: "x", Branch: "b", Status: project.StatusReviewing,
+		Description: "x", Branch: "b", Status: project.StatusIdle, Review: true,
 		Repos:     []project.Repo{{Org: "docker", Name: "gateway"}},
 		ReviewNow: true,
 	}, project.WriterAgent); err != nil {

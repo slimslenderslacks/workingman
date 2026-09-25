@@ -30,27 +30,26 @@ func TestTLTogglesLeftColumn(t *testing.T) {
 
 func TestTRTogglesRightColumn(t *testing.T) {
 	m := newModel(nil, nil, nil, &fakeAttacher{})
-	if !m.rightVisible {
-		t.Fatal("rightVisible should default to true")
+	if m.rightVisible {
+		t.Fatal("rightVisible should default to false — the detail pane is opt-in")
 	}
 	m = pressKey(m, "t")
 	m = pressKey(m, "r")
-	if m.rightVisible {
-		t.Error("tr should have toggled rightVisible off")
+	if !m.rightVisible {
+		t.Error("tr should have toggled rightVisible on")
 	}
 	if m.pendingKey != "" {
 		t.Errorf("pendingKey = %q after tr, want cleared", m.pendingKey)
 	}
 	m = pressKey(m, "t")
 	m = pressKey(m, "r")
-	if !m.rightVisible {
-		t.Error("second tr should have toggled rightVisible back on")
+	if m.rightVisible {
+		t.Error("second tr should have toggled rightVisible back off")
 	}
 }
 
 // TestTChordDoesNotResolveUntilCompletedOrTimedOut is the crux of the
-// "without breaking the existing single-key t/p toggle" requirement: a lone
-// "t" must not immediately fire the standalone YAML-source switch, or "tl"/
+// "tl"/"tr" chord: a lone "t" must not immediately toggle anything, or "tl"/
 // "tr" could never be distinguished from "t" followed by an unrelated key.
 func TestTChordDoesNotResolveUntilCompletedOrTimedOut(t *testing.T) {
 	m := newModel(nil, nil, nil, &fakeAttacher{})
@@ -58,42 +57,38 @@ func TestTChordDoesNotResolveUntilCompletedOrTimedOut(t *testing.T) {
 	if m.pendingKey != "t" {
 		t.Fatalf("pendingKey = %q after t, want %q", m.pendingKey, "t")
 	}
-	if m.yamlSrc != yamlSourceProject {
-		t.Errorf("yamlSrc changed before the chord resolved: %v", m.yamlSrc)
+	if m.leftVisible != true || m.rightVisible != false {
+		t.Errorf("column visibility changed before the chord resolved: left=%v right=%v", m.leftVisible, m.rightVisible)
 	}
 }
 
-// TestTChordTimeoutResolvesStandaloneAction covers the "t" alone case: no
-// completing "l"/"r" arrives, so chordTimeoutDelay elapsing (simulated via
-// resolveChord instead of a real sleep) falls back to the plain YAML-viewer
-// toggle.
-func TestTChordTimeoutResolvesStandaloneAction(t *testing.T) {
+// TestTChordTimeoutClearsPendingKey covers the "t" alone case: no completing
+// "l"/"r" arrives, so chordTimeoutDelay elapsing (simulated via resolveChord
+// instead of a real sleep) just abandons the chord — there's no standalone
+// "t" action left to fall back to.
+func TestTChordTimeoutClearsPendingKey(t *testing.T) {
 	m := newModel(nil, nil, nil, &fakeAttacher{})
 	m = pressKey(m, "t")
 	m = resolveChord(m)
 	if m.pendingKey != "" {
 		t.Errorf("pendingKey = %q after timeout, want cleared", m.pendingKey)
 	}
-	if m.yamlSrc != yamlSourceTask {
-		t.Errorf("yamlSrc = %v after chord timeout, want yamlSourceTask", m.yamlSrc)
+	if m.leftVisible != true || m.rightVisible != false {
+		t.Errorf("column visibility should be untouched by a chord that timed out: left=%v right=%v", m.leftVisible, m.rightVisible)
 	}
 }
 
 // TestTChordFallsThroughToFreshKeyWhenNotLR covers "t" followed by any key
-// other than "l"/"r": the pending "t" resolves to its standalone action
-// (switch YAML viewer to task) and the new key is then handled normally,
-// rather than being swallowed by the chord.
+// other than "l"/"r": the pending "t" is abandoned and the new key is then
+// handled normally, rather than being swallowed by the chord.
 func TestTChordFallsThroughToFreshKeyWhenNotLR(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	step, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a"}, {ID: "b"}}})
 	m = step.(model)
 
 	m = pressKey(m, "t")
-	m = pressKey(m, "j") // not l/r: resolves t, then moves the session selection
+	m = pressKey(m, "j") // not l/r: abandons t, then moves the session selection
 
-	if m.yamlSrc != yamlSourceTask {
-		t.Errorf("yamlSrc = %v, want yamlSourceTask (t should have resolved)", m.yamlSrc)
-	}
 	if m.pendingKey != "" {
 		t.Errorf("pendingKey = %q, want cleared", m.pendingKey)
 	}
@@ -105,7 +100,7 @@ func TestTChordFallsThroughToFreshKeyWhenNotLR(t *testing.T) {
 // TestStaleChordTimeoutIsIgnored guards against a chord timer that fires
 // after its chord already resolved a different way (e.g. "tl" completed the
 // toggle before chordTimeoutDelay elapsed): the stale message must not
-// re-trigger the standalone "t" action.
+// re-trigger anything.
 func TestStaleChordTimeoutIsIgnored(t *testing.T) {
 	m := newModel(nil, nil, nil, &fakeAttacher{})
 	m = pressKey(m, "t")
@@ -115,9 +110,6 @@ func TestStaleChordTimeoutIsIgnored(t *testing.T) {
 	next, _ := m.Update(chordTimeoutMsg{seq: staleSeq})
 	m = next.(model)
 
-	if m.yamlSrc != yamlSourceProject {
-		t.Errorf("stale chord timeout changed yamlSrc to %v, want it to stay yamlSourceProject", m.yamlSrc)
-	}
 	if m.leftVisible {
 		t.Error("leftVisible should still be false; stale timeout must not re-toggle it")
 	}
@@ -131,10 +123,8 @@ func TestFooterAdvertisesColumnToggle(t *testing.T) {
 	if !strings.Contains(view, "tl/tr") {
 		t.Errorf("footer should advertise the tl/tr column toggle; got:\n%s", view)
 	}
-	// "tr" now toggles the YAML viewer as the right column, not the task
-	// list (which moved into the center column — see TestTaskPaneMovedToCenterColumn).
-	if !strings.Contains(view, "sessions/yaml") {
-		t.Errorf("footer should describe tl/tr as toggling sessions/yaml columns; got:\n%s", view)
+	if !strings.Contains(view, "sessions/detail") {
+		t.Errorf("footer should describe tl/tr as toggling sessions/detail columns; got:\n%s", view)
 	}
 	if !strings.Contains(view, "⌥h/⌥l") {
 		t.Errorf("footer should advertise the ⌥h/⌥l column-switch keys; got:\n%s", view)
@@ -142,11 +132,12 @@ func TestFooterAdvertisesColumnToggle(t *testing.T) {
 }
 
 // TestRightColumnWidthIsHalfTerminalWidth covers the requirement that the
-// YAML-viewer right column, unlike the fixed-width sessions column, is sized
-// to half of whatever the terminal's current width is — and stays that way
+// detail right column, unlike the fixed-width sessions column, is sized to
+// half of whatever the terminal's current width is — and stays that way
 // live across a resize.
 func TestRightColumnWidthIsHalfTerminalWidth(t *testing.T) {
 	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m.rightVisible = true
 	m.width, m.height = 200, 40
 
 	l := m.computeLayout()
@@ -162,11 +153,12 @@ func TestRightColumnWidthIsHalfTerminalWidth(t *testing.T) {
 }
 
 // TestTaskPaneMovedToCenterColumn is the layout-level companion to the
-// pane-assignment change: Tasks now stacks in the center column below
-// Projects, sized by splitCenterColumn, while the right column ("tr") holds
-// the YAML viewer instead.
+// pane-assignment change: Tasks stacks in the center column below Projects,
+// sized by splitCenterColumn, while the right column ("tr") holds the
+// project detail dashboard instead.
 func TestTaskPaneMovedToCenterColumn(t *testing.T) {
 	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m.rightVisible = true
 	m.width, m.height = 200, 40
 	m.projects = []ProjectView{{
 		Name:   "p",
@@ -192,11 +184,12 @@ func TestTaskPaneMovedToCenterColumn(t *testing.T) {
 
 func TestComputeLayoutDropsColumnsWhenToggledOff(t *testing.T) {
 	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m.rightVisible = true
 	m.width, m.height = 200, 40
 
 	full := m.computeLayout()
 	if full.leftW == 0 || full.rightW == 0 {
-		t.Fatalf("precondition: both columns should show by default; got leftW=%d rightW=%d", full.leftW, full.rightW)
+		t.Fatalf("precondition: both columns should show when both are toggled on; got leftW=%d rightW=%d", full.leftW, full.rightW)
 	}
 
 	m.leftVisible = false
@@ -293,12 +286,13 @@ func TestAuditStacksInCenterColumnBelowTasks(t *testing.T) {
 // TestSideColumnsFullHeightRegardlessOfAudit is the regression test for the
 // original bug: because audit's height used to be carved out of the window
 // height before the columns were sized, showing Audit shrank the left
-// (sessions) and right (YAML) columns even though it never visually
+// (sessions) and right (detail) columns even though it never visually
 // occupied any of their space. Now that audit sizing is scoped to the
 // center column, the side columns must get the full body height (window
 // height minus only the footer) whether or not Audit is showing.
 func TestSideColumnsFullHeightRegardlessOfAudit(t *testing.T) {
 	withAudit := newModel(nil, nil, make(<-chan []string), &fakeAttacher{})
+	withAudit.rightVisible = true
 	withAudit.width, withAudit.height = 200, 40
 	lWith := withAudit.computeLayout()
 	if lWith.auditH <= 0 {
@@ -306,6 +300,7 @@ func TestSideColumnsFullHeightRegardlessOfAudit(t *testing.T) {
 	}
 
 	withoutAudit := newModel(nil, nil, nil, &fakeAttacher{})
+	withoutAudit.rightVisible = true
 	withoutAudit.width, withoutAudit.height = 200, 40
 	lWithout := withoutAudit.computeLayout()
 	if lWithout.auditH != 0 {

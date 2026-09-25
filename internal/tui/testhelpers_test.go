@@ -68,13 +68,13 @@ func selectProject(t *testing.T, root, name string) (model, string) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, ".project.yaml")
-	yaml := "description: a project\nbranch: feature/x\nstatus: done\nupdated_by: daemon\n"
+	yaml := "description: a project\nbranch: feature/x\nstatus: idle\nupdated_by: daemon\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	m.projectRoot = root
-	m.projects = []ProjectView{{Name: name, Path: path, Status: project.StatusDone}}
+	m.projects = []ProjectView{{Name: name, Path: path, Status: project.StatusIdle}}
 	m.projSel = path
 	m = focusProjectsPane(t, m)
 	return m, path

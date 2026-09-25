@@ -111,7 +111,7 @@ func TestHappyPathFullProject(t *testing.T) {
 	// has no scheduler, so the PR-resolution loop is inert and completion keeps
 	// its original terminal behaviour (a scheduler-backed daemon would instead
 	// enter status:reviewing here — see the review tests).
-	if ok, snap := waitForWithin(t, buf, "project_done", 6*time.Second); !ok {
+	if ok, snap := waitForWithin(t, buf, "project_idle", 6*time.Second); !ok {
 		t.Fatalf("project never reached done.\naudit:\n%s", snap)
 	}
 
@@ -119,7 +119,7 @@ func TestHappyPathFullProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload project: %v", err)
 	}
-	if reloaded.Status != project.StatusDone {
+	if reloaded.Status != project.StatusIdle {
 		t.Errorf("project status = %q, want done", reloaded.Status)
 	}
 	if reloaded.UpdatedBy != project.WriterDaemon {

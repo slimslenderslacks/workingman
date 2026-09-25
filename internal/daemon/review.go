@@ -29,42 +29,43 @@ var reviewPollSpecs = []string{"@every 2m", "@every 5m", "@every 15m", "@every 3
 // transitionProjectComplete decides what "all tasks committed" means for a
 // project. A project that produced (or is expected to produce) a pull request
 // isn't finished when the code lands — reviewers and GitHub Actions keep acting
-// on the PR — so it enters the PR-resolution loop (status:reviewing) instead of
-// going straight to done.
+// on the PR — so it goes idle *and watched* (see Project.WatchingPR) instead of
+// idle and at rest.
 //
-// The loop is entered only on an explicit signal — never guessed from the
+// The watch is entered only on an explicit signal — never guessed from the
 // presence of repos: either `review: true` (a human/agent declared the goal
 // PR-shaped, even before a PR exists) or a PullRequests record already stamped
 // by an earlier review cycle (a fix-cycle return through here must keep
-// watching the same PR, not drop it). Absent both, the project goes straight to
-// `done` — there is no automatic probing for a PR that might exist. A human
-// puts a repo-backed project into the loop by running `:review`, which the
-// review agent then uses to look up (and record) any open PR.
+// watching the same PR, not drop it). Absent both, the project settles at plain
+// idle — there is no automatic probing for a PR that might exist. A human puts
+// a repo-backed project into the loop by running `:review`, which the review
+// agent then uses to look up (and record) any open PR.
 func (d *Daemon) transitionProjectComplete(projectPath string, p *project.Project) {
 	// The PR-resolution loop is scheduler-driven — it polls the PR on a cadence —
 	// so it can only run when the daemon has a scheduler. Production always wires
 	// one; a scheduler-less daemon (dev/tests) keeps the original terminal
-	// behaviour instead of stranding the project in reviewing.
-	watching := p.Review || len(p.PullRequests) > 0
-	if d.scheduler != nil && watching {
-		d.transitionProjectReviewing(projectPath, p)
+	// behaviour instead of stranding the project in a watch nothing will service.
+	if d.scheduler != nil && p.WatchingPR() {
+		d.transitionProjectIdleWatching(projectPath, p)
 		return
 	}
-	d.transitionProjectDone(projectPath, p)
+	d.transitionProjectIdle(projectPath, p)
 }
 
-// transitionProjectReviewing writes status:reviewing (as the daemon, so it does
-// not retrigger dispatch), registers the project's #review poll, and kicks an
-// immediate review-agent run so the first (or post-fix) reconcile doesn't wait a
-// full poll interval.
-func (d *Daemon) transitionProjectReviewing(projectPath string, p *project.Project) {
+// transitionProjectIdleWatching writes status:idle (as the daemon, so it does
+// not retrigger dispatch) for a project whose completion is gated on a pull
+// request, registers the project's #review poll, and kicks an immediate
+// review-agent run so the first (or post-fix) reconcile doesn't wait a full
+// poll interval. Unlike transitionProjectIdle it deliberately leaves the
+// #review poll armed rather than unregistering it.
+func (d *Daemon) transitionProjectIdleWatching(projectPath string, p *project.Project) {
 	updated := *p
-	updated.Status = project.StatusReviewing
+	updated.Status = project.StatusIdle
 	if err := project.Save(projectPath, &updated); err != nil {
 		d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
 		return
 	}
-	d.audit.Log("project_reviewing", "path", projectPath, "review", fmt.Sprintf("%t", updated.Review))
+	d.audit.Log("project_idle_watching", "path", projectPath, "review", fmt.Sprintf("%t", updated.Review))
 	// ensureReviewPoll arms the schedule and kicks the first poll immediately.
 	d.ensureReviewPoll(projectPath)
 }
@@ -73,13 +74,14 @@ func (d *Daemon) transitionProjectReviewing(projectPath string, p *project.Proje
 // the call that arms it, kicks the first review agent immediately rather than
 // waiting a full interval. "The call that arms it" covers every way a project
 // enters the loop: the automatic completion transition, a human's `:review`
-// (which writes status:reviewing and lands here via the fsnotify path), and a
-// daemon restart onto a project already in reviewing.
+// (which lands here via the fsnotify path since the project is already idle),
+// and a daemon restart onto a project that's idle-and-watching.
 //
 // It is idempotent: an observation of a project already being polled returns
-// without re-arming or re-dispatching, so it is safe to call on every reviewing
-// observation and — importantly — cannot re-dispatch on the review agent's own
-// clean-leave write (which keeps the project in reviewing between cycles).
+// without re-arming or re-dispatching, so it is safe to call on every
+// idle-and-watching observation and — importantly — cannot re-dispatch on the
+// review agent's own clean-leave write (which leaves the project idle between
+// cycles).
 func (d *Daemon) ensureReviewPoll(projectPath string) {
 	if d.scheduler == nil {
 		return
@@ -105,8 +107,10 @@ func (d *Daemon) ensureReviewPoll(projectPath string) {
 }
 
 // onReviewPoll is the #review schedule callback. It re-reads the project (the
-// file changes under a long-lived poll) and self-heals: if the project has left
-// reviewing since the poll was registered, it unregisters itself.
+// file changes under a long-lived poll) and self-heals: if the project has
+// left the idle-and-watching state since the poll was registered — moved off
+// idle entirely, or settled at idle-and-not-watching (WatchingPR now false) —
+// it unregisters itself.
 //
 // Otherwise it applies the change-detection gate before spending the expensive
 // review agent: a cheap host-side `gh` fingerprint of the PR (head SHA +
@@ -126,7 +130,7 @@ func (d *Daemon) onReviewPoll(projectPath string) {
 		d.scheduler.Unregister(reviewPollKey(projectPath))
 		return
 	}
-	if p.Status != project.StatusReviewing {
+	if p.Status != project.StatusIdle || !p.WatchingPR() {
 		d.scheduler.Unregister(reviewPollKey(projectPath))
 		return
 	}
@@ -152,7 +156,7 @@ func (d *Daemon) onReviewPoll(projectPath string) {
 	d.dispatchReviewAgent(projectPath, p)
 }
 
-// forceReviewNow honors a `:review` kick on an already-reviewing project: it
+// forceReviewNow honors a `:review` kick on an already-watched idle project: it
 // clears the one-shot ReviewNow request, snaps the poll cadence back to the
 // fast rung, and dispatches the review agent immediately — bypassing the poll's
 // change-detection gate so the reconcile happens now rather than at the next
@@ -221,17 +225,20 @@ func (d *Daemon) launchReviewAgent(projectPath string, p *project.Project) {
 }
 
 // afterReviewSession is the review agent's session-end callback. The reconciler
-// expresses its decision purely through the project status it left behind:
+// always leaves the project at exactly one of three statuses, but — since idle
+// no longer distinguishes "still watching" from "done" by itself — idle needs a
+// second look at PullRequests/Review (via WatchingPR) to tell which happened:
 //
-//   - reviewing → nothing to do this cycle (PR clean, or no PR yet with
-//     review:true). The PR is converging, so reset the fix-churn counter and
-//     keep polling.
-//   - working  → it created fix tasks. Count a fix cycle, stop polling while the
+//   - idle, still watching → nothing to do this cycle (PR clean, or no PR yet
+//     with review:true). The PR is converging, so reset the fix-churn counter
+//     and keep polling.
+//   - working → it created fix tasks. Count a fix cycle, stop polling while the
 //     tasks run, and route to them — unless the PR has churned through too many
 //     consecutive fix cycles without ever coming back clean, in which case block
 //     for the wolf.
-//   - done/blocked → the loop is over (PR merged/closed, or a contested comment
-//     the reconciler escalated). Stop polling and route the new status.
+//   - idle, not watching / blocked → the loop is over (PR merged/closed, or a
+//     contested comment the reconciler escalated). Stop polling and route the
+//     new status.
 func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
 	if d.isStopped(projectPath) {
 		// enforceStopped killed this session directly (it also already
@@ -245,9 +252,9 @@ func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
 	// often its sandbox could not be created (e.g. the github MCP gateway needs
 	// auth), so it never even looked at the PR. That is NOT a clean cycle: keying
 	// only on the resulting project status would misread the unchanged
-	// status:reviewing as "nothing to do" and retry forever, hiding the failure.
-	// Count consecutive crashes and, once they persist, block the project so the
-	// user is actually told the loop is stuck.
+	// idle-and-watching state as "nothing to do" and retry forever, hiding the
+	// failure. Count consecutive crashes and, once they persist, block the
+	// project so the user is actually told the loop is stuck.
 	if waitErr != nil {
 		n := d.bumpReviewErrors(projectPath)
 		d.audit.Log("review_error", "path", projectPath, "attempt", fmt.Sprintf("%d", n), "err", waitErr.Error())
@@ -276,8 +283,8 @@ func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
 		}
 		return
 	}
-	switch p.Status {
-	case project.StatusReviewing:
+	switch {
+	case p.Status == project.StatusIdle && p.WatchingPR():
 		d.resetReviewFixCycles(projectPath)
 		// Record the PR fingerprint AS OF this reconcile, so scheduled polls can
 		// tell when something new has happened since (and skip the agent when
@@ -288,14 +295,15 @@ func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
 			d.storeReviewFinger(projectPath, fp)
 		}
 		d.audit.Log("review_clean", "path", projectPath)
-	case project.StatusWorking:
+	case p.Status == project.StatusWorking:
 		n := d.bumpReviewFixCycles(projectPath)
 		if d.scheduler != nil {
 			d.scheduler.Unregister(reviewPollKey(projectPath))
 		}
-		// Leaving reviewing while tasks run: drop the poll-cadence state (a fresh
-		// baseline is taken when the project returns to reviewing). The fix-cycle
-		// counter is deliberately preserved — it only resets on a clean poll.
+		// Leaving the watch while tasks run: drop the poll-cadence state (a
+		// fresh baseline is taken when the project returns to idle-and-watching).
+		// The fix-cycle counter is deliberately preserved — it only resets on a
+		// clean poll.
 		d.clearReviewPolling(projectPath)
 		if n > maxReviewFixCycles {
 			d.transitionProjectBlocked(projectPath, p, fmt.Sprintf(
@@ -305,6 +313,9 @@ func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
 		d.audit.Log("review_fix_cycle", "path", projectPath, "cycle", fmt.Sprintf("%d", n))
 		d.revisitProject(projectPath)
 	default:
+		// Either idle-and-not-watching (every PR merged/closed, or a one-time
+		// probe with nothing to watch) or blocked (a contested comment/check the
+		// reconciler escalated) — either way the loop is over for now.
 		if d.scheduler != nil {
 			d.scheduler.Unregister(reviewPollKey(projectPath))
 		}

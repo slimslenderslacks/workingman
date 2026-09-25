@@ -32,8 +32,8 @@ you watch them all at once. Using the github MCP, look in EVERY repo the project
 lists for an open pull request whose head branch is `{{.Branch}}`. For each one,
 record its repo, number, URL, head commit SHA, and state.
 
-Write the full set back into `.project.yaml` as (keeping `status: reviewing` for
-now) — one list entry per PR you found (open, merged, or closed since last poll):
+Write the full set back into `.project.yaml` — one list entry per PR you found
+(open, merged, or closed since last poll):
 
   pull_requests:
     - repo: <org/name>
@@ -46,16 +46,23 @@ now) — one list entry per PR you found (open, merged, or closed since last pol
       ...
   updated_by: agent
 
-Then branch on the set:
+Note there is no `status: reviewing` to set or preserve — the project stays
+(or ends up) `idle` in every outcome below except the ones that say otherwise.
+Whether the daemon keeps polling is read back from this `pull_requests:` list
+and the `review:` flag, not from a status value you choose — leaving even one
+entry not `merged`/`closed`, or leaving `review: true`, is what keeps the
+watch going. Then branch on the set:
 
-  - **Every** PR is merged or closed → the whole loop is over. Set `status: done`
-    (`updated_by: agent`) and exit.
+  - **Every** PR is merged or closed, and `review:` is not forcing further
+    probing → the whole loop is over. Set `status: idle` (`updated_by: agent`)
+    and exit; nothing will re-arm the poll.
   - **No open PR in any repo**:
       - if the project's `review:` flag is true → a PR is still expected to
-        appear (a task may open it, or a human will). Leave `status: reviewing`
-        unchanged and exit; the daemon will poll again.
+        appear (a task may open it, or a human will). Set `status: idle`
+        (unchanged if it already was) and exit; the daemon will poll again
+        because `review: true` alone keeps it watching.
       - otherwise → this was a one-time probe and there is nothing to review.
-        Set `status: done` (`updated_by: agent`) and exit.
+        Set `status: idle` (`updated_by: agent`) and exit.
   - Otherwise at least one PR is still open → proceed. Steps 3–4b apply
     per-PR: gather and disposition each open PR's signals independently, tagging
     every task with the repo/PR it belongs to.
@@ -153,8 +160,9 @@ one or more related fixes have committed — insert a push task to publish it:
     `status: working` (`updated_by: agent`). The daemon dispatches them; when
     they commit, the project returns here for another poll — at which point a
     just-published fix's thread becomes resolvable.
-  - Otherwise (PR open, nothing to address and nothing unpublished) → leave
-    `status: reviewing` unchanged. The daemon keeps polling.
+  - Otherwise (PR open, nothing to address and nothing unpublished) → set
+    `status: idle` (or leave it, if already there). The daemon keeps polling
+    because at least one `pull_requests:` entry is still open.
 
 ## Task file schemas
 
@@ -219,11 +227,12 @@ write.
 
 ## Status enums (fixed — invalid values are rejected and your save is ignored)
 
-  project status: `ready` | `working` | `blocked` | `done` | `reviewing`
+  project status: `ready` | `working` | `blocked` | `idle`
   task status:    `ready` | `running` | `success` | `failed` | `blocked` | `committed`
 
 For YOUR exit, the project status is exactly one of: `working` (you created fix
-or push tasks), `done` (PR merged/closed, or no PR and not a review project),
-`blocked` (a contested comment or a non-converging check needs a human), or
-`reviewing` left unchanged (nothing to do this cycle; keep watching). New tasks
-you write always start `status: ready`, `attempts: 0`. Do not invent values.
+or push tasks), `idle` (whether that means PR merged/closed and nothing left to
+watch, or nothing to do this cycle and still watching — `pull_requests:` and
+`review:` carry that distinction, not the status), or `blocked` (a contested
+comment or a non-converging check needs a human). New tasks you write always
+start `status: ready`, `attempts: 0`. Do not invent values.

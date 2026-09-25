@@ -67,10 +67,10 @@ func requestStart(projectPath string) (string, error) {
 	// StoppedFrom should always be set by requestStop, but a hand-edited file
 	// could lack it; restoring to an empty status would read back as the
 	// "unpopulated" placeholder and misroute to the project agent, so fall back
-	// to done (an ordinary idle state) instead.
+	// to idle (the ordinary resting state) instead.
 	p.Status = p.StoppedFrom
 	if p.Status == "" {
-		p.Status = project.StatusDone
+		p.Status = project.StatusIdle
 	}
 	p.StoppedFrom = ""
 	if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {

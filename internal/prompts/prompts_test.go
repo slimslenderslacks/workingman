@@ -344,7 +344,8 @@ func TestRenderArchive(t *testing.T) {
 // TestRenderReview checks the review agent's prompt substitutes the project
 // paths and spells out the PR-resolution contract: it must use the github MCP
 // (not gh), correlate signals via each task's source, resolve threads whose fix
-// landed, and know the full project status enum including reviewing.
+// landed, and know the full project status enum (idle, not a separate
+// reviewing value — watching is read from pull_requests/review instead).
 func TestRenderReview(t *testing.T) {
 	out, err := Render(agent.ReviewAgent, Data{
 		Workspace:   "/orch/myproj",
@@ -363,7 +364,7 @@ func TestRenderReview(t *testing.T) {
 		"github` MCP",                // uses the MCP, not gh
 		"resolve_thread",             // resolves a thread once its fix lands
 		"source:",                    // correlation block on created tasks
-		"reviewing",                  // the status it may leave unchanged
+		"status: idle",               // the status it settles at either way
 		"merged or closed",           // the terminal condition
 		"updated_by: agent",          // write convention
 	} {

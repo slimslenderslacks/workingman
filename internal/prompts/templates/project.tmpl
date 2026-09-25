@@ -66,8 +66,8 @@ interactively. Fill in these fields:
   PR-resolution loop: the daemon polls the PR and turns review comments and
   failed Actions runs into follow-up tasks until the PR is merged or closed.
   Omit it (default false) for ordinary work — completion then goes straight to
-  `done`, with no automatic probing for a PR; a human starts the loop later via
-  `:review`. Never set it on a repo-less project.
+  `idle` with nothing watched, with no automatic probing for a PR; a human
+  starts the loop later via `:review`. Never set it on a repo-less project.
 
 Sensible defaults exist for everything except which repositories the work
 touches. If the description gives you enough to identify at least one
@@ -94,7 +94,7 @@ Do not write any other files.
 
 The `status:` field is a fixed enum (the daemon rejects any other value and
 your save will not take effect). Use exactly one of: `ready`, `working`,
-`blocked`, `done`. For your job here use `ready` when you populated the file
+`blocked`, `idle`. For your job here use `ready` when you populated the file
 or `blocked` when you had to escalate. Do not invent values like `active` or
 `pending`.
 

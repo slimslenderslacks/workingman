@@ -334,7 +334,7 @@ func TestNumericPrefixTaskFilenames(t *testing.T) {
 	// tasks/register-repo.yaml — or it would log task_load_error and block.
 	// Project should reach done (no other tasks; this daemon has no scheduler, so
 	// the PR-resolution loop is inert and completion is terminal as before).
-	if ok, snap := waitForWithin(t, buf, "project_done", 6*time.Second); !ok {
+	if ok, snap := waitForWithin(t, buf, "project_idle", 6*time.Second); !ok {
 		t.Fatalf("project never reached done — likely task_load_error from wrong path.\naudit:\n%s", snap)
 	}
 	if strings.Contains(buf.String(), "task_missing_after_session") || strings.Contains(buf.String(), "task_load_error") {

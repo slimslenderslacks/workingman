@@ -93,7 +93,7 @@ func TestIntakeFileInNewDirIsPickedUp(t *testing.T) {
 	}
 	projectPath := filepath.Join(sub, ".project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
-		Description: "x", Branch: "b", Status: project.StatusDone,
+		Description: "x", Branch: "b", Status: project.StatusIdle,
 	}, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestIntakeFileEmptyIsIgnored(t *testing.T) {
 	}
 	projectPath := filepath.Join(sub, ".project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
-		Description: "x", Branch: "b", Status: project.StatusDone,
+		Description: "x", Branch: "b", Status: project.StatusIdle,
 	}, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
 	}
@@ -158,8 +158,8 @@ func TestIntakeFileEmptyIsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if reloaded.Status != project.StatusDone {
-		t.Errorf("status = %q, want untouched (done)", reloaded.Status)
+	if reloaded.Status != project.StatusIdle {
+		t.Errorf("status = %q, want untouched (idle)", reloaded.Status)
 	}
 }
 
@@ -211,13 +211,23 @@ func TestPendingIntakeFilesNoIntakeDir(t *testing.T) {
 }
 
 // TestHasPendingIntakeReArmsRestingProject covers the orphan-recovery half of
-// the contract: a resting (done/reviewing) project with an un-renamed
-// intake/*.md file left over — its status flip skipped or clobbered while
-// another agent held the project slot — must be re-armed back to ready the
-// same way a stranded task-graph seed already is.
+// the contract: an idle project with an un-renamed intake/*.md file left over
+// — its status flip skipped or clobbered while another agent held the
+// project slot — must be re-armed back to ready the same way a stranded
+// task-graph seed already is. Covers both idle sub-cases (see
+// Project.WatchingPR): plain idle, and idle-while-watching a PR — the
+// re-arm applies the same either way, exactly as it did for the two
+// separate statuses (done/reviewing) this collapsed from.
 func TestHasPendingIntakeReArmsRestingProject(t *testing.T) {
-	for _, from := range []project.Status{project.StatusDone, project.StatusReviewing} {
-		t.Run(string(from), func(t *testing.T) {
+	cases := []struct {
+		name string
+		p    project.Project
+	}{
+		{"idle", project.Project{}},
+		{"idle watching a PR", project.Project{Review: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			buf := &safeBuf{}
 			d, err := New([]string{root}, audit.New(buf))
@@ -232,11 +242,12 @@ func TestHasPendingIntakeReArmsRestingProject(t *testing.T) {
 				t.Fatalf("writeFile: %v", err)
 			}
 
-			p := &project.Project{
-				Description: "x", Branch: "b", Status: from,
-				Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
-			}
-			d.dispatchProject(projectPath, p)
+			p := tc.p
+			p.Description = "x"
+			p.Branch = "b"
+			p.Status = project.StatusIdle
+			p.Repos = []project.Repo{{Org: "docker", Name: "gateway"}}
+			d.dispatchProject(projectPath, &p)
 
 			got, err := project.Load(projectPath)
 			if err != nil {

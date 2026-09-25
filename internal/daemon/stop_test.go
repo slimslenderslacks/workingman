@@ -64,7 +64,7 @@ func TestDispatchStoppedIsIdempotent(t *testing.T) {
 	d, _, sched := newReviewDaemon(t, root)
 	projectPath := filepath.Join(root, ".project.yaml")
 
-	p := &project.Project{Description: "x", Branch: "b", Status: project.StatusStopped, StoppedFrom: project.StatusDone}
+	p := &project.Project{Description: "x", Branch: "b", Status: project.StatusStopped, StoppedFrom: project.StatusIdle}
 	d.dispatchProject(projectPath, p)
 	d.dispatchProject(projectPath, p)
 
@@ -172,7 +172,8 @@ func TestStoppedGuardsSkipReviewSessionEnd(t *testing.T) {
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b",
 		Status:      project.StatusStopped,
-		StoppedFrom: project.StatusReviewing,
+		StoppedFrom: project.StatusIdle,
+		Review:      true,
 		Repos:       []project.Repo{{Org: "docker", Name: "gateway"}},
 	}, project.WriterDaemon); err != nil {
 		t.Fatalf("seed project: %v", err)

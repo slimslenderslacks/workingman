@@ -48,7 +48,8 @@ func (d *Daemon) handle(ev fsnotify.Event) {
 //   - status: ready    → planning agent
 //   - status: working  → dispatch first ready task
 //   - status: blocked  → wolf agent
-//   - status: done     → no-op
+//   - status: idle     → pending tasks if any, else (re-)arm the PR watch if
+//                         the project is still watching one (Project.WatchingPR)
 func (d *Daemon) handleProject(path string) {
 	p, err := project.Load(path)
 	if err != nil {
@@ -191,21 +192,19 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 		d.launchArchiveAgent(path, p)
 		return
 	}
-	// A pending seed or intake file on a resting project (done/reviewing) is
-	// orphaned work: handleIntakeFile (or, for a hand-written seed, a human
-	// editing tasks/ directly) flips the project to `ready` so planning can
-	// pick it up, but that flip can be skipped (the project slot was busy
-	// with a review/other agent, so the planning launch dedup-skipped) or
-	// clobbered (a review agent's own status write landed after it, resetting
-	// done/reviewing).
+	// A pending seed or intake file on a resting (idle) project is orphaned
+	// work: handleIntakeFile (or, for a hand-written seed, a human editing
+	// tasks/ directly) flips the project to `ready` so planning can pick it
+	// up, but that flip can be skipped (the project slot was busy with a
+	// review/other agent, so the planning launch dedup-skipped) or clobbered
+	// (a review agent's own status write landed after it, resetting back to
+	// idle).
 	// Either way the request strands — unplanned work that never runs. Re-arm
 	// the normal path by flipping back to `ready` here; the switch below then
 	// routes to the planning agent, which carries its own crash-loop circuit
-	// breaker. Guarded to resting statuses so a seed/intake file observed
-	// mid-flight (working/ready/blocked) is left to that status's own
-	// handling.
-	if (p.Status == project.StatusDone || p.Status == project.StatusReviewing) &&
-		(d.hasPendingSeed(path) || hasPendingIntake(path)) {
+	// breaker. Guarded to idle so a seed/intake file observed mid-flight
+	// (working/ready/blocked) is left to that status's own handling.
+	if p.Status == project.StatusIdle && (d.hasPendingSeed(path) || hasPendingIntake(path)) {
 		d.audit.Log("seed_replan", "path", path, "from", string(p.Status))
 		updated := *p
 		updated.Status = project.StatusReady
@@ -234,35 +233,33 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 			reason = "project marked blocked by " + string(p.UpdatedBy)
 		}
 		d.launchWolfAgent(path, p, reason)
-	case project.StatusReviewing:
-		// `reviewing` means "the PR is open", not "there is no work left." A human
-		// (or an agent) can queue manual tasks alongside the PR watch, so dispatch
-		// any pending task work first. When work is dispatched it takes the
-		// project's agent slot and the project stays reviewing; on commit it
-		// returns here and the poll re-arms (transitionProjectComplete →
-		// transitionProjectReviewing). Only when nothing is pending do we fall
-		// through to the PR-watch behavior below.
+	case project.StatusIdle:
+		// Idle is terminal for the automatic cycle, but a human can still
+		// append manual tasks — those still need to run. Dispatch any that
+		// are pending first; a fully-committed graph is a no-op and the
+		// project stays idle (dispatchPendingTasks does not re-run the
+		// completion transition, so an idle project is never spuriously
+		// moved). If work is dispatched it takes the project's agent slot; on
+		// commit it returns here and re-evaluates from scratch.
 		if d.dispatchPendingTasks(path, p) {
 			return
 		}
-		// The PR-resolution loop is driven by the project's #review poll, not by
-		// this fsnotify path. Just (re)register the poll — idempotent, so it is
-		// safe on every observation and is how a daemon restart or an agent's own
-		// status:reviewing write re-arms polling. The poll dispatches the review
-		// agent (see onReviewPoll).
-		d.ensureReviewPoll(path)
-		// A `:review` on an already-reviewing project sets ReviewNow to demand an
-		// immediate reconcile instead of waiting out the poll's backoff.
-		if p.ReviewNow {
-			d.forceReviewNow(path, p)
+		// p.WatchingPR() answers "is this idle project also watching a pull
+		// request" — the same question status:reviewing used to answer by
+		// itself. The PR-resolution loop is driven by the project's #review
+		// poll, not by this fsnotify path; just (re)register it — idempotent,
+		// so it is safe on every observation and is how a daemon restart or
+		// an agent's own idle write re-arms polling. The poll dispatches the
+		// review agent (see onReviewPoll).
+		if p.WatchingPR() {
+			d.ensureReviewPoll(path)
+			// A `:review` kick on an already-watched project sets ReviewNow to
+			// demand an immediate reconcile instead of waiting out the poll's
+			// backoff.
+			if p.ReviewNow {
+				d.forceReviewNow(path, p)
+			}
 		}
-	case project.StatusDone:
-		// Done is terminal for the automatic cycle, but a human can still append
-		// manual tasks to a finished project — those still need to run. Dispatch
-		// any that are pending; a fully-committed graph is a no-op and the project
-		// stays done (dispatchPendingTasks does not re-run the completion
-		// transition, so a done project is never spuriously moved).
-		d.dispatchPendingTasks(path, p)
 	}
 }
 
@@ -726,18 +723,22 @@ func (d *Daemon) countCronRun(projectPath string) *project.Project {
 // that a finished project has nothing to do with.
 //
 // "Idle" is the whole subtlety. A firing must not disturb a project that is
-// mid-flight, so only `done` (the recurring case: last cycle finished, this one
-// begins) and `ready` (planning hasn't run or is being retried — mark it as a
-// re-plan and let it run) are rewritten. The others are deliberately left to
-// their existing routing:
+// mid-flight, so only a genuinely resting `idle` project (the recurring case:
+// last cycle finished, this one begins) and `ready` (planning hasn't run or
+// is being retried — mark it as a re-plan and let it run) are rewritten. The
+// others are deliberately left to their existing routing:
 //
 //   - working — tasks are running or waiting to run. Rewriting the status would
 //     re-plan the graph out from under live task agents, and the tasks the
 //     planner deleted would still be mid-commit. The firing falls through to
 //     dispatchNextTask's recovery poll, which is the pre-existing behaviour, and
-//     the cycle re-plans on the firing after the project reaches done.
+//     the cycle re-plans on the firing after the project reaches idle.
 //   - blocked — something needs a human or the wolf. Re-planning would paper
 //     over the failure and lose the blocked_reason that explains it.
+//   - idle-but-watching (p.WatchingPR()) — a PR is still open, or one is
+//     expected. Re-planning out from under an active review loop would strand
+//     it, so this is treated the same as "not idle" here even though the
+//     status value is the same as the truly-resting case.
 //
 // A project being wound down is skipped for the same reason `:cleanup` outranks
 // status routing in dispatchProject: the archive agent is trying to leave the
@@ -755,7 +756,9 @@ func (d *Daemon) requestCronReplan(projectPath string, p *project.Project) strin
 		skip = "cleanup requested"
 	case p.Archive:
 		skip = "project is archived"
-	case p.Status != project.StatusDone && p.Status != project.StatusReady:
+	case p.Status == project.StatusIdle && p.WatchingPR():
+		skip = "watching a pull request"
+	case p.Status != project.StatusIdle && p.Status != project.StatusReady:
 		skip = "status " + string(p.Status) + " is not idle"
 	}
 	if skip != "" {

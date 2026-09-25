@@ -11,7 +11,7 @@ import (
 
 func TestCommandPickerReviewStartsReviewing(t *testing.T) {
 	root := t.TempDir()
-	m, projPath := selectProject(t, root, "widget") // seeded status:done
+	m, projPath := selectProject(t, root, "widget") // seeded status:idle
 
 	m, _ = runProjectCommand(t, m, "review")
 
@@ -26,8 +26,11 @@ func TestCommandPickerReviewStartsReviewing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading project: %v", err)
 	}
-	if p.Status != project.StatusReviewing {
-		t.Errorf("project status = %q, want reviewing", p.Status)
+	if p.Status != project.StatusIdle {
+		t.Errorf("project status = %q, want idle", p.Status)
+	}
+	if !p.WatchingPR() {
+		t.Errorf("WatchingPR() = false, want true after starting the loop")
 	}
 	// Written as agent so the daemon acts on it rather than filtering its own write.
 	if p.UpdatedBy != project.WriterAgent {
@@ -80,9 +83,10 @@ func TestRequestReviewWithoutProjectErrors(t *testing.T) {
 }
 
 // TestRequestReviewKicksReviewingProject pins the overload: `:review` on a
-// project already in the loop must NOT re-flip status (it's already reviewing)
-// but instead set the one-shot ReviewNow request the daemon acts on, and report
-// kicked=true so the caller can say "running now" rather than "watching".
+// project already idle-and-watching a PR must NOT re-flip status (it's
+// already idle) but instead set the one-shot ReviewNow request the daemon
+// acts on, and report kicked=true so the caller can say "running now" rather
+// than "watching".
 func TestRequestReviewKicksReviewingProject(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "widget")
@@ -90,25 +94,25 @@ func TestRequestReviewKicksReviewingProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, ".project.yaml")
-	yaml := "description: p\nbranch: b\nstatus: reviewing\nupdated_by: daemon\n"
+	yaml := "description: p\nbranch: b\nstatus: idle\nreview: true\nupdated_by: daemon\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	_, kicked, err := requestReview(path)
 	if err != nil {
-		t.Fatalf("requestReview on a reviewing project: %v", err)
+		t.Fatalf("requestReview on an idle-and-watching project: %v", err)
 	}
 	if !kicked {
-		t.Errorf("kicked = false, want true for an already-reviewing project")
+		t.Errorf("kicked = false, want true for an already-watching project")
 	}
 
 	p, err := project.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Status != project.StatusReviewing {
-		t.Errorf("status = %q, want reviewing left untouched", p.Status)
+	if p.Status != project.StatusIdle {
+		t.Errorf("status = %q, want idle left untouched", p.Status)
 	}
 	if !p.ReviewNow {
 		t.Errorf("ReviewNow = false, want the request flag set")

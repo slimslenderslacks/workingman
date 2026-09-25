@@ -89,12 +89,12 @@ func TestRequestStopWithoutProjectErrors(t *testing.T) {
 
 // TestRequestStartResumesToStoppedFrom pins the resume contract: `:start`
 // restores Status from StoppedFrom (whatever it was — ready, working,
-// blocked, reviewing, done) and clears the field, handing the project back to
-// the daemon's ordinary routing with no extra state left over.
+// blocked, idle) and clears the field, handing the project back to the
+// daemon's ordinary routing with no extra state left over.
 func TestRequestStartResumesToStoppedFrom(t *testing.T) {
 	for _, from := range []project.Status{
 		project.StatusReady, project.StatusWorking, project.StatusBlocked,
-		project.StatusReviewing, project.StatusDone,
+		project.StatusIdle,
 	} {
 		t.Run(string(from), func(t *testing.T) {
 			root := t.TempDir()
@@ -148,7 +148,7 @@ func TestRequestStartFallsBackToDoneWithoutStoppedFrom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != project.StatusDone {
+	if got.Status != project.StatusIdle {
 		t.Errorf("status = %q, want done fallback", got.Status)
 	}
 }
@@ -192,7 +192,7 @@ func TestCommandPickerStopAndStart(t *testing.T) {
 	if p.Status != project.StatusStopped {
 		t.Errorf("status = %q, want stopped", p.Status)
 	}
-	if p.StoppedFrom != project.StatusDone {
+	if p.StoppedFrom != project.StatusIdle {
 		t.Errorf("stopped_from = %q, want done", p.StoppedFrom)
 	}
 
@@ -205,7 +205,7 @@ func TestCommandPickerStopAndStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Status != project.StatusDone {
+	if p.Status != project.StatusIdle {
 		t.Errorf("status = %q, want done restored", p.Status)
 	}
 }

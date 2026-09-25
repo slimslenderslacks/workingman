@@ -57,12 +57,33 @@ type ProjectView struct {
 	// project.CronStopReason, the same predicate the daemon unschedules on, so
 	// the border and the schedule can't disagree.
 	CronActive bool
+	// Cron is the raw schedule spec (e.g. "@every 1h"), shown in the card body
+	// alongside the green border when CronActive is set. Empty when there is
+	// no schedule.
+	Cron string
+	// WatchingPR mirrors project.Project.WatchingPR() — true when the project
+	// is idle (status:idle) AND still being watched for PR review (Review, or
+	// an unresolved PullRequests entry). The gallery renders those cards with
+	// a green border too, a different shade from CronActive's, and lists the
+	// watched PRs in the card body. Only meaningful (and only ever true) for
+	// an idle project — one mid-fix-cycle (status:working) renders as an
+	// ordinary working card instead, even though the same PR is still being
+	// tracked underneath.
+	WatchingPR bool
+	// PullRequests mirrors the project file's recorded pull requests, for the
+	// card body's short-link line when WatchingPR is set.
+	PullRequests []project.PullRequest
 	// LoadErr is the parse error when the project's .project.yaml exists but
 	// couldn't be decoded (e.g. an agent wrote a malformed field). Empty for a
 	// healthy project. When set, the other structured fields are zero and the
 	// gallery renders the card with an error badge instead of dropping it —
 	// so a bad file is visible and debuggable rather than silently missing.
 	LoadErr string
+	// BlockedReason mirrors the project file's `blocked_reason` field — why a
+	// blocked project is stuck, for the detail pane to surface without the
+	// user having to open the raw file. Empty whenever the project isn't
+	// blocked (see project.Project.BlockedReason's own contract).
+	BlockedReason string
 }
 
 // TaskView is the snapshot the Tasks pane renders for one task: name, model,
@@ -82,6 +103,9 @@ type TaskView struct {
 	// committed (or committed before the field existed). The Tasks pane sorts
 	// by it so completed tasks appear in the order they actually ran.
 	CompletedAt time.Time
+	// DependsOn mirrors the task file's `depends_on` list — the task graph's
+	// edges, for the detail pane's task-graph rendering.
+	DependsOn []string
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
@@ -153,8 +177,8 @@ func loadProjectView(path string) (ProjectView, bool) {
 	if err != nil {
 		// A malformed file used to be dropped, which made the project vanish
 		// from the gallery with no clue why. Surface it instead: a card with
-		// the parse error, so the user can select it and read the raw YAML in
-		// the pane below to spot the bad field.
+		// the parse error, so the user can select it and see the error in the
+		// detail pane and spot the bad field by opening the file directly.
 		return ProjectView{
 			Name:       filepath.Base(filepath.Dir(path)),
 			Path:       path,
@@ -168,18 +192,22 @@ func loadProjectView(path string) (ProjectView, bool) {
 		createdAt = *pr.CreatedAt
 	}
 	return ProjectView{
-		Name:        filepath.Base(filepath.Dir(path)),
-		Path:        path,
-		Description: pr.Description,
-		Branch:      pr.Branch,
-		Status:      pr.Status,
-		Repos:       append([]project.Repo(nil), pr.Repos...),
-		TaskCounts:  counts,
-		Tasks:       tasks,
-		LastUpdate:  mtime,
-		CreatedAt:   createdAt,
-		Archive:     pr.Archive,
-		CronActive:  pr.Cron != "" && !pr.CronExpired(),
+		Name:         filepath.Base(filepath.Dir(path)),
+		Path:         path,
+		Description:  pr.Description,
+		Branch:       pr.Branch,
+		Status:       pr.Status,
+		Repos:        append([]project.Repo(nil), pr.Repos...),
+		TaskCounts:   counts,
+		Tasks:        tasks,
+		LastUpdate:   mtime,
+		CreatedAt:    createdAt,
+		Archive:      pr.Archive,
+		CronActive:   pr.Cron != "" && !pr.CronExpired(),
+		Cron:         pr.Cron,
+		WatchingPR:    pr.Status == project.StatusIdle && pr.WatchingPR(),
+		PullRequests:  append([]project.PullRequest(nil), pr.PullRequests...),
+		BlockedReason: pr.BlockedReason,
 	}, true
 }
 
@@ -241,6 +269,7 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 			Status:      t.Status,
 			Path:        t.Path,
 			CompletedAt: completedAt,
+			DependsOn:   append([]string(nil), t.DependsOn...),
 		})
 	}
 	if len(tasks) == 0 {
@@ -428,6 +457,8 @@ func projectViewEqual(a, b ProjectView) bool {
 		a.Description != b.Description || a.Branch != b.Branch ||
 		a.Status != b.Status || a.LoadErr != b.LoadErr ||
 		a.Archive != b.Archive || a.CronActive != b.CronActive ||
+		a.Cron != b.Cron || a.WatchingPR != b.WatchingPR ||
+		a.BlockedReason != b.BlockedReason ||
 		!a.LastUpdate.Equal(b.LastUpdate) {
 		return false
 	}
@@ -436,6 +467,14 @@ func projectViewEqual(a, b ProjectView) bool {
 	}
 	for i := range a.Repos {
 		if a.Repos[i] != b.Repos[i] {
+			return false
+		}
+	}
+	if len(a.PullRequests) != len(b.PullRequests) {
+		return false
+	}
+	for i := range a.PullRequests {
+		if a.PullRequests[i] != b.PullRequests[i] {
 			return false
 		}
 	}
@@ -480,6 +519,14 @@ func taskViewEqual(a, b TaskView) bool {
 	}
 	for i := range a.Policies {
 		if a.Policies[i] != b.Policies[i] {
+			return false
+		}
+	}
+	if len(a.DependsOn) != len(b.DependsOn) {
+		return false
+	}
+	for i := range a.DependsOn {
+		if a.DependsOn[i] != b.DependsOn[i] {
 			return false
 		}
 	}

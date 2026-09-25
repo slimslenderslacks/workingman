@@ -66,7 +66,7 @@ func TestCronFiringRequestsReplanOnDoneProject(t *testing.T) {
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "nightly triage",
 		Branch:      "feat/triage",
-		Status:      project.StatusDone,
+		Status:      project.StatusIdle,
 		Cron:        "@every 1s",
 		CronMaxRuns: 20, // stop condition; required for the schedule to register
 		Repos:       []project.Repo{{Org: "octo", Name: "widget"}},
@@ -206,7 +206,7 @@ func TestCronFiringSkipsProjectBeingArchived(t *testing.T) {
 			p := &project.Project{
 				Description: "winding down",
 				Branch:      "feat/done",
-				Status:      project.StatusDone,
+				Status:      project.StatusIdle,
 				Cron:        "@every 1s",
 				CronMaxRuns: 20,
 				Repos:       []project.Repo{{Org: "octo", Name: "widget"}},
@@ -226,7 +226,7 @@ func TestCronFiringSkipsProjectBeingArchived(t *testing.T) {
 			if got.Replan {
 				t.Errorf("replan set on a project being archived: %+v", got)
 			}
-			if got.Status != project.StatusDone {
+			if got.Status != project.StatusIdle {
 				t.Errorf("status = %q, want it left at done", got.Status)
 			}
 		})
@@ -260,13 +260,13 @@ func TestProjectDoneKeepsLiveCronSchedule(t *testing.T) {
 		t.Fatalf("cron should be registered before the transition; Spec = %q", got)
 	}
 
-	d.transitionProjectDone(projectPath, p)
+	d.transitionProjectIdle(projectPath, p)
 
 	if got := sched.Spec(projectPath); got != "@every 1h" {
 		t.Errorf("schedule dropped on done; Spec = %q, want it kept so the next firing re-plans", got)
 	}
-	if ok, snap := waitFor(t, buf, "cron_kept_on_done"); !ok {
-		t.Errorf("expected cron_kept_on_done in the audit log:\n%s", snap)
+	if ok, snap := waitFor(t, buf, "cron_kept_on_idle"); !ok {
+		t.Errorf("expected cron_kept_on_idle in the audit log:\n%s", snap)
 	}
 }
 
@@ -299,7 +299,7 @@ func TestProjectDoneUnregistersExpiredCron(t *testing.T) {
 	// Same project, run limit now reached.
 	spent := *live
 	spent.CronRuns = spent.CronMaxRuns
-	d.transitionProjectDone(projectPath, &spent)
+	d.transitionProjectIdle(projectPath, &spent)
 
 	if !waitForSpecGone(t, sched, projectPath) {
 		t.Errorf("expired schedule survived the done transition; Spec = %q", sched.Spec(projectPath))

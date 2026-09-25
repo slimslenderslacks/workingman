@@ -275,11 +275,13 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 	}
 }
 
-// transitionProjectDone writes the project file with status:done and
-// updated_by:daemon. The daemon write self-filters in handleProject so this
-// will not retrigger dispatch.
+// transitionProjectIdle writes the project file with status:idle and
+// updated_by:daemon — the "genuinely at rest, nothing being watched" case
+// (see transitionProjectComplete, which is what decides between this and
+// arming the PR watch instead). The daemon write self-filters in
+// handleProject so this will not retrigger dispatch.
 //
-// A project with a live cron schedule keeps it: `done` is the resting state
+// A project with a live cron schedule keeps it: idle is the resting state
 // between cycles, not the end of the work stream, and the next firing is what
 // flips it back to ready for a re-plan (see requestCronReplan). Unregistering
 // here — which this function used to do unconditionally — made every cron
@@ -291,24 +293,25 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 // registerCronIfAny), and once that trips the schedule unregisters itself. So a
 // finished one-shot — no cron, or a cron that has expired — still gets dropped
 // here.
-func (d *Daemon) transitionProjectDone(projectPath string, p *project.Project) {
+func (d *Daemon) transitionProjectIdle(projectPath string, p *project.Project) {
 	updated := *p
-	updated.Status = project.StatusDone
+	updated.Status = project.StatusIdle
 	if err := project.Save(projectPath, &updated); err != nil {
 		d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
 		return
 	}
 	if d.scheduler != nil {
 		if recurring := updated.Cron != "" && !updated.CronExpired(); recurring {
-			d.audit.Log("cron_kept_on_done", "path", projectPath, "spec", updated.Cron)
+			d.audit.Log("cron_kept_on_idle", "path", projectPath, "spec", updated.Cron)
 		} else {
 			d.scheduler.Unregister(projectPath)
 		}
-		// The PR-resolution poll (if any) is done once the project is done.
+		// The PR-resolution poll (if any) is done once the project settles at
+		// idle-and-not-watching.
 		d.scheduler.Unregister(reviewPollKey(projectPath))
 	}
 	d.clearReviewState(projectPath)
-	d.audit.Log("project_done", "path", projectPath)
+	d.audit.Log("project_idle", "path", projectPath)
 }
 
 // transitionProjectBlocked writes status:blocked to the project file as the

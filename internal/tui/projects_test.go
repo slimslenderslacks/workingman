@@ -377,7 +377,7 @@ func TestScanProjectsCarriesArchiveFlag(t *testing.T) {
 		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
 			Description: name,
 			Branch:      "feat/" + name,
-			Status:      project.StatusDone,
+			Status:      project.StatusIdle,
 			Archive:     archive,
 		}, project.WriterAgent); err != nil {
 			t.Fatal(err)
@@ -399,6 +399,56 @@ func TestScanProjectsCarriesArchiveFlag(t *testing.T) {
 	}
 	if got["dirty"] {
 		t.Errorf("project without archive should leave ProjectView.Archive false")
+	}
+}
+
+// TestScanProjectsCarriesWatchingPRAndCron pins ProjectView's newest fields:
+// WatchingPR/PullRequests only surface (and only read true) for an idle
+// project actually watching a PR — a working project with the same
+// review/pull_requests data must not render as watching — and Cron carries
+// the raw spec text alongside CronActive for display.
+func TestScanProjectsCarriesWatchingPRAndCron(t *testing.T) {
+	root := t.TempDir()
+
+	mk := func(name string, p project.Project) {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p.Description = name
+		p.Branch = "feat/" + name
+		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &p, project.WriterAgent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("watching", project.Project{Status: project.StatusIdle, Review: true,
+		PullRequests: []project.PullRequest{{Repo: "docker/desktop", Number: 42, State: "open"}}})
+	mk("resolved", project.Project{Status: project.StatusIdle,
+		PullRequests: []project.PullRequest{{Repo: "docker/desktop", Number: 1, State: "merged"}}})
+	mk("mid-fix-cycle", project.Project{Status: project.StatusWorking, Review: true,
+		PullRequests: []project.PullRequest{{Repo: "docker/desktop", Number: 2, State: "open"}}})
+	mk("scheduled", project.Project{Status: project.StatusIdle, Cron: "@every 1h", CronMaxRuns: 10})
+
+	views, err := ScanProjects([]string{root})
+	if err != nil {
+		t.Fatalf("ScanProjects: %v", err)
+	}
+	byName := map[string]ProjectView{}
+	for _, v := range views {
+		byName[v.Name] = v
+	}
+
+	if v := byName["watching"]; !v.WatchingPR || len(v.PullRequests) != 1 || v.PullRequests[0].Number != 42 {
+		t.Errorf("watching project view = %+v, want WatchingPR=true with the PR carried through", v)
+	}
+	if v := byName["resolved"]; v.WatchingPR {
+		t.Errorf("resolved project view = %+v, want WatchingPR=false (every PR merged/closed)", v)
+	}
+	if v := byName["mid-fix-cycle"]; v.WatchingPR {
+		t.Errorf("working project view = %+v, want WatchingPR=false (only idle projects render as watching)", v)
+	}
+	if v := byName["scheduled"]; !v.CronActive || v.Cron != "@every 1h" {
+		t.Errorf("scheduled project view = %+v, want CronActive=true and Cron=\"@every 1h\"", v)
 	}
 }
 
@@ -525,7 +575,7 @@ func TestProjectViewEqualDetectsCronActiveFlip(t *testing.T) {
 // snapshot, otherwise the blue border waits for some unrelated field to
 // change before it appears.
 func TestProjectViewEqualDetectsArchiveFlip(t *testing.T) {
-	base := ProjectView{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusDone}
+	base := ProjectView{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusIdle}
 	archived := base
 	archived.Archive = true
 	if projectViewEqual(base, archived) {
@@ -533,6 +583,32 @@ func TestProjectViewEqualDetectsArchiveFlip(t *testing.T) {
 	}
 	if !projectViewEqual(archived, archived) {
 		t.Errorf("projectViewEqual must still report identical views as equal")
+	}
+}
+
+// A PR resolving (or a new one appearing) must make the poller emit a new
+// snapshot, otherwise the watching-PR border/short-links line lingers or
+// misses an update until some unrelated field changes.
+func TestProjectViewEqualDetectsWatchingPRFlip(t *testing.T) {
+	base := ProjectView{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusIdle}
+	watching := base
+	watching.WatchingPR = true
+	if projectViewEqual(base, watching) {
+		t.Errorf("projectViewEqual must report a difference when WatchingPR flips")
+	}
+	if !projectViewEqual(watching, watching) {
+		t.Errorf("projectViewEqual must still report identical views as equal")
+	}
+
+	withPR := watching
+	withPR.PullRequests = []project.PullRequest{{Repo: "docker/desktop", Number: 1, State: "open"}}
+	if projectViewEqual(watching, withPR) {
+		t.Errorf("projectViewEqual must report a difference when the PullRequests list changes")
+	}
+	resolved := withPR
+	resolved.PullRequests = []project.PullRequest{{Repo: "docker/desktop", Number: 1, State: "merged"}}
+	if projectViewEqual(withPR, resolved) {
+		t.Errorf("projectViewEqual must report a difference when a PR's state changes")
 	}
 }
 

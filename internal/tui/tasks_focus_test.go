@@ -94,8 +94,8 @@ func TestTaskViewCarriesPathFromDisk(t *testing.T) {
 // alt-k scope: now that Audit stacks in the center column too, alt-j/alt-k
 // cycles through all three center-column panes — Projects, Tasks, Audit —
 // wrapping at either end, restoring the keyboard path onto Audit. It still
-// doesn't reach the side columns (Sessions, the YAML viewer) — alt-h/alt-l
-// own those.
+// doesn't reach the side columns (Sessions, the detail dashboard) — alt-h/
+// alt-l own those.
 func TestAltJKCyclesCenterColumnPanesIncludingAudit(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
 	m = focusPane(t, m, paneProjects)
@@ -134,7 +134,7 @@ func TestAltJKCyclesCenterColumnPanesIncludingAudit(t *testing.T) {
 	}
 
 	// A no-op on the side columns.
-	for _, p := range []pane{paneSessions, paneProjectYAML} {
+	for _, p := range []pane{paneSessions, paneProjectDetail} {
 		m = focusPane(t, m, p)
 		step, _ := m.Update(altJ)
 		m = step.(model)
@@ -152,6 +152,7 @@ func TestAltJKCyclesCenterColumnPanesIncludingAudit(t *testing.T) {
 // column restores whichever of Projects/Tasks/Audit was last focused there.
 func TestAltHAltLStepOneColumnAtATime(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
+	m.rightVisible = true
 	m = focusPane(t, m, paneTasks)
 
 	altH := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}, Alt: true}
@@ -180,21 +181,21 @@ func TestAltHAltLStepOneColumnAtATime(t *testing.T) {
 	// old bug (jumping straight from one side column to the other) is fixed.
 	step, _ = m.Update(altL)
 	m = step.(model)
-	if m.focus != paneProjectYAML {
-		t.Fatalf("alt-l from tasks: focus = %v, want paneProjectYAML", m.focus)
+	if m.focus != paneProjectDetail {
+		t.Fatalf("alt-l from tasks: focus = %v, want paneProjectDetail", m.focus)
 	}
 	// Already at the right end: alt-l stays put instead of wrapping.
 	step, _ = m.Update(altL)
 	m = step.(model)
-	if m.focus != paneProjectYAML {
-		t.Fatalf("alt-l at right end: focus = %v, want it to stay paneProjectYAML (no wrap)", m.focus)
+	if m.focus != paneProjectDetail {
+		t.Fatalf("alt-l at right end: focus = %v, want it to stay paneProjectDetail (no wrap)", m.focus)
 	}
 
 	// alt-h steps back to center, remembering Tasks.
 	step, _ = m.Update(altH)
 	m = step.(model)
 	if m.focus != paneTasks {
-		t.Fatalf("alt-h from yaml viewer: focus = %v, want paneTasks (lastCenterFocus)", m.focus)
+		t.Fatalf("alt-h from detail pane: focus = %v, want paneTasks (lastCenterFocus)", m.focus)
 	}
 
 	// Toggled-off side columns make the step towards them a no-op from center.
@@ -213,20 +214,21 @@ func TestAltHAltLStepOneColumnAtATime(t *testing.T) {
 }
 
 // TestAltHFromRightColumnStepsToCenterNotLeft is a regression test for the
-// reported bug: alt-h from the right (YAML) column used to jump straight to
-// the left (sessions) column because the old handler only checked whether
-// focus was already on the sessions pane. One alt-h press must land on
-// center; a second is required to reach the left column.
+// reported bug: alt-h from the right (detail) column used to jump straight
+// to the left (sessions) column because the old handler only checked
+// whether focus was already on the sessions pane. One alt-h press must land
+// on center; a second is required to reach the left column.
 func TestAltHFromRightColumnStepsToCenterNotLeft(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
+	m.rightVisible = true
 	m = focusPane(t, m, paneProjects)
-	m = focusPane(t, m, paneProjectYAML) // arrive on the right column with Projects as lastCenterFocus
+	m = focusPane(t, m, paneProjectDetail) // arrive on the right column with Projects as lastCenterFocus
 
 	altH := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}, Alt: true}
 	step, _ := m.Update(altH)
 	m = step.(model)
 	if m.focus != paneProjects {
-		t.Fatalf("alt-h from yaml viewer: focus = %v, want paneProjects (center) rather than skipping straight to sessions", m.focus)
+		t.Fatalf("alt-h from detail pane: focus = %v, want paneProjects (center) rather than skipping straight to sessions", m.focus)
 	}
 	step, _ = m.Update(altH)
 	m = step.(model)
@@ -273,123 +275,20 @@ func TestArrowsLeaveProjectSelectionAloneWhenTasksFocused(t *testing.T) {
 	}
 }
 
-func TestYAMLViewerShowsTaskFileAfterPressingT(t *testing.T) {
+// TestDetailPaneShowsSelectedProjectsTaskGraph is the integration-level
+// companion to project_detail_test.go's unit tests: with the right column
+// shown, it renders the selected project's name and its task graph,
+// end-to-end through Update/View rather than calling the render helpers
+// directly.
+func TestDetailPaneShowsSelectedProjectsTaskGraph(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
-	// Default is project YAML; pressing t starts a possible "tl"/"tr" chord,
-	// which resolves to the plain YAML-source flip once chordTimeoutDelay
-	// elapses without a completing "l"/"r" (simulated here via resolveChord
-	// instead of a real sleep).
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	m = step.(model)
-	m = resolveChord(m)
+	m.rightVisible = true
 
 	view := m.View()
-	// Default selection is the first task alphabetically — "alpha". The task
-	// file content (not a pane title) is what proves the source flipped.
-	if !strings.Contains(view, "name: alpha") {
-		t.Errorf("expected YAML pane to show selected task's content (name: alpha); got:\n%s", view)
-	}
-}
-
-func TestYAMLViewerSwapsTaskFilesOnSelectionChange(t *testing.T) {
-	m, _, _ := withTaskFixtures(t)
-	// Switch to task source first, then change the selection.
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	m = step.(model)
-	m = focusPane(t, m, paneTasks)
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	m = step.(model)
-
-	view := m.View()
-	if !strings.Contains(view, "name: beta") {
-		t.Errorf("after selecting second task, YAML pane should show 'name: beta'; got:\n%s", view)
-	}
-}
-
-func TestYAMLViewerStaysOnTaskWhenFocusMovesAway(t *testing.T) {
-	m, _, _ := withTaskFixtures(t)
-	// Flip to task source; the viewer now shows task YAML (task content, not a
-	// pane title, is the tell now that titles are gone). "t" alone resolves
-	// to the flip once the chord timeout elapses (see resolveChord).
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	m = step.(model)
-	m = resolveChord(m)
-	if !strings.Contains(m.View(), "name: alpha") {
-		t.Fatalf("expected task YAML content after pressing t")
-	}
-
-	// Cycle pane focus with down. The viewer should keep showing task YAML
-	// regardless of which pane is focused — p/t are the only switches now.
-	for i := 0; i < 4; i++ {
-		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}, Alt: true})
-		m = step.(model)
-		if !strings.Contains(m.View(), "name: alpha") {
-			t.Errorf("task YAML content lost after down #%d (focus=%v)", i+1, m.focus)
+	for _, want := range []string{"proj", "alpha", "beta", "← alpha"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("detail pane missing %q; got:\n%s", want, view)
 		}
-	}
-
-	// Pressing p flips back to project YAML (project fields reappear).
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
-	m = step.(model)
-	if !strings.Contains(m.View(), "branch:") {
-		t.Errorf("expected project YAML content after pressing p")
-	}
-}
-
-func TestYamlScrollResetsOnTaskSelectionChange(t *testing.T) {
-	m, _, _ := withTaskFixtures(t)
-	// Switch to task source so scroll position belongs to the task file.
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	m = step.(model)
-	m = focusPane(t, m, paneTasks)
-	m.yamlScroll = 7
-
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	m = step.(model)
-
-	if m.yamlScroll != 0 {
-		t.Errorf("yamlScroll = %d, want 0 after switching task selection", m.yamlScroll)
-	}
-}
-
-func TestYamlScrollResetsOnPTToggle(t *testing.T) {
-	m, _, _ := withTaskFixtures(t)
-	// Scroll into the project file, then flip to task source. "t" alone
-	// resolves to the flip once the chord timeout elapses (see resolveChord).
-	m.yamlScroll = 5
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	m = step.(model)
-	m = resolveChord(m)
-	if m.yamlScroll != 0 {
-		t.Errorf("yamlScroll = %d after t toggle, want 0 (different file)", m.yamlScroll)
-	}
-
-	// Scroll the task file, then flip back to project.
-	m.yamlScroll = 4
-	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
-	m = step.(model)
-	if m.yamlScroll != 0 {
-		t.Errorf("yamlScroll = %d after p toggle, want 0 (different file)", m.yamlScroll)
-	}
-}
-
-func TestPTReplaysSameSourceDoesNotResetScroll(t *testing.T) {
-	m, _, _ := withTaskFixtures(t)
-	// Already on project source by default. Pressing p again must not
-	// blow away the user's scroll position.
-	m.yamlScroll = 6
-	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
-	m = step.(model)
-	if m.yamlScroll != 6 {
-		t.Errorf("pressing p while already on project should preserve scroll; got %d, want 6", m.yamlScroll)
-	}
-}
-
-func TestFooterAdvertisesPTToggle(t *testing.T) {
-	m, _, _ := withTaskFixtures(t)
-	view := m.View()
-	if !strings.Contains(view, "p/t") {
-		t.Errorf("footer should advertise the p/t YAML toggle; got:\n%s", view)
 	}
 }
 

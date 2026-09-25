@@ -162,7 +162,7 @@ func newCleanupHarness(t *testing.T, name, branch string) *cleanupHarness {
 	if err := project.SaveAs(h.projPath, &project.Project{
 		Description: "ship the " + name,
 		Branch:      branch,
-		Status:      project.StatusDone,
+		Status:      project.StatusIdle,
 		Repos:       []project.Repo{{Org: "octo", Name: "widget"}},
 	}, project.WriterAgent); err != nil {
 		t.Fatalf("save project: %v", err)
@@ -298,7 +298,7 @@ func TestCleanupToArchiveEndToEnd(t *testing.T) {
 		t.Fatalf("project file never settled on archive: true / cleanup cleared: %+v\n%s",
 			h.loadProject(t), h.audit.String())
 	}
-	if got := h.loadProject(t).Status; got != project.StatusDone {
+	if got := h.loadProject(t).Status; got != project.StatusIdle {
 		t.Errorf("status = %q, want it left at done — the cleanup owns `archive`, not the status", got)
 	}
 	// A finished cleanup must not leave anything behind that re-dispatches.

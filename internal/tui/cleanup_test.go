@@ -33,7 +33,7 @@ func TestCommandPickerCleanupRequestsArchiveAgent(t *testing.T) {
 		t.Errorf("project updated_by = %q, want agent (the daemon ignores its own writes)", p.UpdatedBy)
 	}
 	// The request must not disturb the work stream's own state.
-	if p.Status != project.StatusDone {
+	if p.Status != project.StatusIdle {
 		t.Errorf("project status = %q, want it left at done", p.Status)
 	}
 	if p.Archive {
@@ -92,7 +92,7 @@ func TestRequestCleanupSetsFlagAsAgent(t *testing.T) {
 
 func TestRequestCleanupOnArchivedProjectIsRefused(t *testing.T) {
 	path := writeProjectFile(t, t.TempDir(), "widget",
-		"description: p\nbranch: b\nstatus: done\narchive: true\nupdated_by: agent\n")
+		"description: p\nbranch: b\nstatus: idle\narchive: true\nupdated_by: agent\n")
 
 	_, err := requestCleanup(path)
 	if err == nil {

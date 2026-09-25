@@ -1,11 +1,11 @@
 // Package tui hosts the orch terminal UI. The body is three columns: an
 // optional left column listing agent sessions (toggled by "tl"), a center
 // column stacking the projects gallery and the selected project's tasks,
-// and an optional right column showing the project/task YAML viewer
-// (toggled by "tr"), sized to half the terminal's width. All three reflect
-// live state — projects from the .project.yaml files scanned by
-// WatchProjects, sessions from a channel the daemon feeds in via its
-// WatchSessions adapter.
+// and an optional right column showing a curated status dashboard for the
+// selected project (toggled by "tr", hidden by default), sized to half the
+// terminal's width. All three reflect live state — projects from the
+// .project.yaml files scanned by WatchProjects, sessions from a channel the
+// daemon feeds in via its WatchSessions adapter.
 package tui
 
 import (
@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/task"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
@@ -26,7 +27,7 @@ type pane int
 
 const (
 	paneSessions pane = iota
-	paneProjectYAML
+	paneProjectDetail
 	paneProjects
 	paneTasks
 	paneAudit
@@ -53,17 +54,6 @@ const (
 	modeConfirmArchive
 )
 
-// yamlSource picks what the YAML viewer pane renders: the selected
-// project's .project.yaml or the selected task's YAML file. The user
-// flips this with the p / t keys; focus changes do NOT — moving focus
-// elsewhere lets the viewer keep showing what the user asked for.
-type yamlSource int
-
-const (
-	yamlSourceProject yamlSource = iota
-	yamlSourceTask
-)
-
 type projectsMsg struct {
 	views []ProjectView
 }
@@ -77,16 +67,17 @@ type auditMsg struct {
 }
 
 // chordTimeoutMsg fires chordTimeoutDelay after a "t" keypress if no
-// completing key ("l"/"r") arrives first, resolving the pending chord to its
-// standalone action. seq must match model.pendingSeq for the Update handler
-// to act on it — otherwise it's a stale timer left over from a chord that
-// already resolved (or was replaced by a new one) before it fired.
+// completing key ("l"/"r") arrives first, clearing the pending chord since
+// there's no standalone "t" action left to fall back to. seq must match
+// model.pendingSeq for the Update handler to act on it — otherwise it's a
+// stale timer left over from a chord that already resolved (or was replaced
+// by a new one) before it fired.
 type chordTimeoutMsg struct{ seq int }
 
 // chordTimeoutDelay is how long handleNormalKey waits after "t" for a
-// completing "l"/"r" before falling back to the standalone YAML-viewer
-// toggle. Short enough that the fallback feels immediate, long enough to
-// comfortably type the second key of the "tl"/"tr" chord.
+// completing "l"/"r" before giving up on the chord. Short enough that typing
+// a bare "t" for some other purpose doesn't feel like it's hanging, long
+// enough to comfortably type the second key of the "tl"/"tr" chord.
 const chordTimeoutDelay = 300 * time.Millisecond
 
 func waitForChordTimeout(seq int) tea.Cmd {
@@ -110,34 +101,11 @@ type model struct {
 	attacher   tmuxAttacher
 	statusMsg  string
 
-	// yamlScroll is the index of the first visible wrapped line of the
-	// project-YAML viewer. Derived from yamlCursor so the cursor line stays
-	// in view. Reset to 0 whenever projSel or taskSel changes so a fresh
-	// selection opens from the top of the file.
-	yamlScroll int
-	// yamlCursor is the wrapped-line index of the highlighted cursor line in
-	// the YAML viewer. Moved by j/k while the YAML pane is focused; the view
-	// scrolls to keep it visible. Reset to 0 alongside yamlScroll.
-	yamlCursor int
-
 	// taskSel is the file path of the currently-selected task. Drives the
-	// Tasks pane's row highlight and feeds the YAML viewer when yamlSrc is
-	// yamlSourceTask. Empty when no task is selected (e.g. the project has
-	// no tasks yet); reconciled against the current task list the same way
-	// projSel is reconciled against the project list.
+	// Tasks pane's row highlight. Empty when no task is selected (e.g. the
+	// project has no tasks yet); reconciled against the current task list
+	// the same way projSel is reconciled against the project list.
 	taskSel string
-
-	// yamlSrc picks which file the YAML viewer renders. Toggled via the p
-	// / t keys; defaults to yamlSourceProject so a fresh model opens on
-	// the project view that existed before the task viewer was added.
-	yamlSrc yamlSource
-
-	// yamlExpanded controls whether the metadata viewer's long free-text
-	// fields (description, summary) render in full or collapsed to a few
-	// lines. Defaults to false (collapsed) so the shorter, scannable fields
-	// stay on screen; the "tt" chord toggles it (see collapseYAMLBlocks and
-	// the pending-"t" resolution in handleNormalKey).
-	yamlExpanded bool
 
 	// zoomed maximizes the focused pane: when set, View renders only the
 	// focused pane filling the whole body (reclaiming the audit strip too),
@@ -198,10 +166,11 @@ type model struct {
 	interactive InteractiveLauncher
 
 	// leftVisible / rightVisible show or hide the sessions-as-left-column and
-	// YAML-viewer-as-right-column panes. Both default true (the full
-	// three-column layout) and are flipped by the "tl" / "tr" chords so the
-	// user can reclaim horizontal space for the center column (projects +
-	// tasks).
+	// detail-dashboard-as-right-column panes, flipped by the "tl" / "tr"
+	// chords. leftVisible defaults true (sessions are useful at a glance);
+	// rightVisible defaults false — the detail pane is opt-in, since most of
+	// the time the center column's projects/tasks are all a user needs and
+	// the extra half-terminal-width column is better reclaimed for them.
 	leftVisible  bool
 	rightVisible bool
 
@@ -216,9 +185,8 @@ type model struct {
 	// pendingKey holds a chord's first keystroke while handleNormalKey waits
 	// to see whether the next key completes it. Currently only "t" starts a
 	// chord: "l"/"r" resolve it to toggle-left/toggle-right (see leftVisible/
-	// rightVisible above), and any other key means the user wasn't typing a
-	// chord at all, so "t" resolves to its own standalone action (switch the
-	// YAML viewer to task content) before the new key is handled normally.
+	// rightVisible above); any other key means the user wasn't typing a
+	// chord at all, so it falls through and is handled normally instead.
 	// pendingSeq tags each pending chord so a stale chordTimeoutMsg from an
 	// already-resolved (or since-replaced) chord is ignored — see
 	// waitForChordTimeout.
@@ -239,7 +207,7 @@ func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh 
 		attacher:        attacher,
 		wspRemover:      workspace.NewWsp(),
 		leftVisible:     true,
-		rightVisible:    true,
+		rightVisible:    false,
 		lastCenterFocus: paneProjects,
 	}
 }
@@ -312,16 +280,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case projectsMsg:
 		m.projects = msg.views
 		m.loaded = true
-		prevProjSel := m.projSel
 		m.projSel = reconcileProjectSelection(m.projects, m.projSel)
-		if m.projSel != prevProjSel && m.yamlSrc == yamlSourceProject {
-			m.yamlScroll = 0
-		}
-		prevTaskSel := m.taskSel
 		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
-		if m.taskSel != prevTaskSel && m.yamlSrc == yamlSourceTask {
-			m.yamlScroll = 0
-		}
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, waitForProjects(m.projCh)
 	case sessionsMsg:
@@ -368,7 +328,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chordTimeoutMsg:
 		if m.pendingKey == "t" && m.pendingSeq == msg.seq {
 			m.pendingKey = ""
-			m = m.applyYAMLSourceTask()
 		}
 		return m, nil
 	case tea.MouseMsg:
@@ -407,12 +366,9 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	// Resolve a pending "t" chord first. "l"/"r" complete it as a
-	// toggle-left/toggle-right column command; "t" completes it as the
-	// expand/collapse toggle for the metadata viewer's description/summary
-	// fields; any other key means the user wasn't typing a "t?" chord at all,
-	// so "t" resolves to its own standalone action (switch the YAML viewer to
-	// task content) and `key` falls through to be handled normally below,
-	// exactly as if no chord had been pending.
+	// toggle-left/toggle-right column command; any other key means the user
+	// wasn't typing a "t?" chord at all, so `key` falls through to be
+	// handled normally below, exactly as if no chord had been pending.
 	if m.pendingKey == "t" {
 		m.pendingKey = ""
 		switch key {
@@ -424,15 +380,6 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rightVisible = !m.rightVisible
 			m.statusMsg = ""
 			return m, nil
-		case "t":
-			// "tt" folds/unfolds the long description and summary block scalars
-			// in the metadata viewer (see collapseYAMLBlocks). Returning here
-			// keeps the second "t" from re-arming the chord via the switch below.
-			m.yamlExpanded = !m.yamlExpanded
-			m.statusMsg = ""
-			return m, nil
-		default:
-			m = m.applyYAMLSourceTask()
 		}
 	}
 
@@ -459,7 +406,7 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "h":
 		// j/k move the selection (or scroll) WITHIN the focused pane; k is the
 		// vim "up" (previous project/task/session, or a line-scroll up in the
-		// YAML pane), h is kept as a horizontal alias. Pane focus itself moves
+		// Audit pane), h is kept as a horizontal alias. Pane focus itself moves
 		// with alt-j/alt-k (see below). Cursor keys are intentionally unbound.
 		m = m.moveSelectionInPane(-1)
 		m.statusMsg = ""
@@ -467,13 +414,8 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Next item within the focused pane (j is the vim "down").
 		m = m.moveSelectionInPane(1)
 		m.statusMsg = ""
-	case "p":
-		// Switch the YAML viewer to project content. Independent of pane
-		// focus — the user can keep navigating tasks while the viewer
-		// stays on the project file.
-		m = m.applyYAMLSourceProject()
 	case "t":
-		// Might be the start of a "tl"/"tr" chord (toggle the sessions/tasks
+		// Might be the start of a "tl"/"tr" chord (toggle the sessions/detail
 		// column) — deferred until the next key, or chordTimeoutDelay,
 		// resolves it one way or the other (see the pendingKey check above
 		// and the chordTimeoutMsg case in Update).
@@ -481,28 +423,6 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingSeq++
 		m.statusMsg = ""
 		return m, waitForChordTimeout(m.pendingSeq)
-	case "ctrl+f":
-		// Vim-style page-down on whichever YAML view is currently visible.
-		// Independent of pane focus — the user can be navigating projects or
-		// tasks and still page through the YAML pane below. The page size is
-		// one screen minus one row of context overlap, matching less/vim.
-		// renderProjectYAML clamps yamlScroll on overflow, so we don't need
-		// the line count here.
-		if page := yamlPageSize(m); page > 0 {
-			m = m.pageYAML(page)
-		}
-		m.statusMsg = ""
-	case "ctrl+b":
-		// Vim-style page-up on whichever YAML view is currently visible.
-		if page := yamlPageSize(m); page > 0 {
-			m = m.pageYAML(-page)
-		}
-		m.statusMsg = ""
-	case "G":
-		// Vim-style jump to the end of the YAML buffer. Like ctrl+f/ctrl+b it
-		// acts on whichever YAML view is visible, independent of pane focus.
-		m = m.yamlToEnd()
-		m.statusMsg = ""
 	case "alt+j", "∆":
 		// ⌥j steps focus forward through the three panes stacked in the
 		// center column — Projects -> Tasks -> Audit — wrapping back to
@@ -523,13 +443,13 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m = m.cycleCenterFocus(-1)
 		m.statusMsg = ""
 	case "alt+h", "˙":
-		// ⌥h always steps focus one column to the left — right (YAML viewer)
+		// ⌥h always steps focus one column to the left — right (detail pane)
 		// -> center -> left (sessions) — never skipping the center column and
 		// never wrapping: it stops as soon as focus is on the left column, or
 		// on the center column with the left column not visible. See
 		// focusLeftColumn/focusCenterColumn.
 		switch m.focus {
-		case paneProjectYAML:
+		case paneProjectDetail:
 			m = m.focusCenterColumn()
 		case paneProjects, paneTasks, paneAudit:
 			m = m.focusLeftColumn()
@@ -556,136 +476,29 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applyYAMLSourceProject switches the YAML viewer to project content,
-// resetting scroll/cursor when the source actually changes. Shared by the
-// plain "p" key and any chord fallback that needs the same effect.
-func (m model) applyYAMLSourceProject() model {
-	if m.yamlSrc != yamlSourceProject {
-		m.yamlSrc = yamlSourceProject
-		m.yamlScroll, m.yamlCursor = 0, 0
-	}
-	m.statusMsg = ""
-	return m
-}
-
-// applyYAMLSourceTask switches the YAML viewer to task content, resetting
-// scroll/cursor when the source actually changes. This is the standalone "t"
-// action — the one a lone "t" keypress resolves to once it's clear (by a
-// non-"l"/"r" key, or chordTimeoutDelay elapsing) that the user wasn't typing
-// the "tl"/"tr" chord.
-func (m model) applyYAMLSourceTask() model {
-	if m.yamlSrc != yamlSourceTask {
-		m.yamlSrc = yamlSourceTask
-		m.yamlScroll, m.yamlCursor = 0, 0
-	}
-	m.statusMsg = ""
-	return m
-}
-
 // moveSelectionInPane moves the selection (or scroll position) by delta within
-// the currently focused pane: project in Work Streams, task in Tasks, session in
-// Agent Sessions, or a one-line scroll in the YAML pane. delta is -1 for the
-// previous item (left) and +1 for the next (right). Changing the project or task
-// resets the YAML scroll when the viewer is showing that file, and changing the
-// project reconciles the dependent task/session selections — mirroring the
-// behaviour the up/down keys used to carry before they became pane switches.
+// the currently focused pane: project in Work Streams, task in Tasks, session
+// in Agent Sessions, or the cursor line in Audit. delta is -1 for the
+// previous item (left) and +1 for the next (right). Changing the project
+// reconciles the dependent task/session selections — mirroring the
+// behaviour the up/down keys used to carry before they became pane
+// switches. A no-op when focus is on the detail pane — it's a fixed summary,
+// not a scrollable buffer.
 func (m model) moveSelectionInPane(delta int) model {
 	switch m.focus {
 	case paneSessions:
 		m.sessSel = moveSelection(m.sessions, m.sessSel, delta)
 	case paneProjects:
-		prev := m.projSel
 		m.projSel = moveProjectSelection(m.projects, m.projSel, delta)
-		if m.projSel != prev && m.yamlSrc == yamlSourceProject {
-			m.yamlScroll, m.yamlCursor = 0, 0
-		}
 		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
-	case paneProjectYAML:
-		// j/k move the highlighted cursor line; the view follows it.
-		m = m.moveYAMLCursor(delta)
 	case paneTasks:
-		prev := m.taskSel
 		m.taskSel = moveTaskSelection(m.selectedProjectTasks(), m.taskSel, delta)
-		if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
-			m.yamlScroll, m.yamlCursor = 0, 0
-		}
 	case paneAudit:
 		// j/k move the highlighted cursor line through the audit tail; the view
 		// follows it.
 		m = m.moveAuditCursor(delta)
 	}
-	return m
-}
-
-// yamlViewport returns the YAML pane's inner content width and visible row
-// count from the current layout, or ok=false when the pane isn't in the
-// layout. It mirrors renderProjectYAML's frame math (border + horizontal
-// padding) so a cursor/scroll computed here lines up with what's drawn.
-func (m model) yamlViewport() (innerWidth, contentRows int, ok bool) {
-	l := m.computeLayout()
-	if l.yamlH <= 0 {
-		return 0, 0, false
-	}
-	bs := m.borderStyle(paneProjectYAML)
-	innerWidth = l.rightW - bs.GetHorizontalFrameSize()
-	contentRows = l.yamlH - bs.GetVerticalFrameSize()
-	if innerWidth < 0 {
-		innerWidth = 0
-	}
-	if contentRows < 0 {
-		contentRows = 0
-	}
-	return innerWidth, contentRows, true
-}
-
-// moveYAMLCursor shifts the YAML viewer's cursor line by delta and re-derives
-// the scroll offset so the cursor stays visible. A no-op when the pane isn't
-// laid out or the body has nothing navigable (an error/placeholder).
-func (m model) moveYAMLCursor(delta int) model {
-	iw, rows, ok := m.yamlViewport()
-	if !ok {
-		return m
-	}
-	lines, isErr := m.yamlLines(iw)
-	if isErr || len(lines) == 0 {
-		return m
-	}
-	m.yamlCursor, m.yamlScroll = reconcileYAMLView(m.yamlCursor+delta, m.yamlScroll, len(lines), rows)
-	return m
-}
-
-// pageYAML scrolls the YAML viewport by delta rows (ctrl+f / ctrl+b), carrying
-// the cursor along by the same amount so it keeps its position relative to the
-// visible window. Like moveYAMLCursor it is a no-op when the pane isn't laid
-// out or the body isn't navigable.
-func (m model) pageYAML(delta int) model {
-	iw, rows, ok := m.yamlViewport()
-	if !ok {
-		return m
-	}
-	lines, isErr := m.yamlLines(iw)
-	if isErr || len(lines) == 0 {
-		return m
-	}
-	m.yamlCursor, m.yamlScroll = reconcileYAMLView(m.yamlCursor+delta, m.yamlScroll+delta, len(lines), rows)
-	return m
-}
-
-// yamlToEnd jumps the YAML viewport to the bottom of the buffer (vim "G"),
-// putting the cursor on the last line; reconcileYAMLView scrolls so it's
-// visible. Like pageYAML it is a no-op when the pane isn't laid out or the body
-// isn't navigable (an error/placeholder).
-func (m model) yamlToEnd() model {
-	iw, rows, ok := m.yamlViewport()
-	if !ok {
-		return m
-	}
-	lines, isErr := m.yamlLines(iw)
-	if isErr || len(lines) == 0 {
-		return m
-	}
-	m.yamlCursor, m.yamlScroll = reconcileYAMLView(len(lines)-1, m.yamlScroll, len(lines), rows)
 	return m
 }
 
@@ -715,9 +528,46 @@ func (m model) moveAuditCursor(delta int) model {
 	if !ok || len(m.auditLines) == 0 {
 		return m
 	}
-	m.auditCursor, m.auditScroll = reconcileYAMLView(m.auditCursor+delta, m.auditScroll, len(m.auditLines), rows)
+	m.auditCursor, m.auditScroll = reconcileScrollCursor(m.auditCursor+delta, m.auditScroll, len(m.auditLines), rows)
 	return m
 }
+
+// reconcileScrollCursor clamps a cursor line index into [0, n-1] and derives
+// the scroll offset (index of the first visible line) so the cursor sits
+// within a contentRows-tall viewport. n is the total number of display
+// lines. Returns (0, 0) for an empty body. Shared by every pane that scrolls
+// a cursor through a list of lines (currently just Audit).
+func reconcileScrollCursor(cursor, scroll, n, contentRows int) (int, int) {
+	if n == 0 {
+		return 0, 0
+	}
+	if contentRows < 1 {
+		contentRows = 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > n-1 {
+		cursor = n - 1
+	}
+	if cursor < scroll {
+		scroll = cursor
+	}
+	if cursor >= scroll+contentRows {
+		scroll = cursor - contentRows + 1
+	}
+	if maxScroll := n - contentRows; scroll > maxScroll {
+		scroll = maxScroll
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	return cursor, scroll
+}
+
+// scrollCursorStyle highlights the current line in a scrollable pane (Audit)
+// as a reversed bar.
+var scrollCursorStyle = lipgloss.NewStyle().Reverse(true)
 
 // handleACPKey processes a keystroke while the full-window ACP tab view is open.
 // alt-j/alt-k (or h/l) switch tabs; esc (or `a`) returns to the normal two-pane
@@ -743,7 +593,7 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleMouse routes a mouse event to its pane. The body is three columns
 // side by side — sessions (left, optional), the center column stacking
-// projects/tasks/audit, the project/task YAML viewer (right, optional) — so
+// projects/tasks/audit, the project detail dashboard (right, optional) — so
 // X picks the column first; Y then picks the pane/row within it, via
 // handleCenterClick for the center column's own vertical stack.
 //
@@ -755,8 +605,8 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 //   - Audit pane (center, bottom, optional): focus only; alt-j/alt-k also
 //     reach it as part of the center column's focus cycle (see
 //     cycleCenterFocus).
-//   - Project/task YAML column (right, optional): focus only; the body is
-//     read-only and scrolled via keyboard.
+//   - Project detail column (right, optional): focus only; the body is a
+//     fixed, read-only summary with nothing to select.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
@@ -773,7 +623,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	l := m.computeLayout()
 
 	// Horizontal layout (left → right): sessions, center (projects/tasks/
-	// audit), the YAML viewer. The bands here mirror View()'s
+	// audit), the detail dashboard. The bands here mirror View()'s
 	// JoinHorizontal exactly so click routing and rendering can't drift.
 	centerStart := l.leftW
 	rightStart := centerStart + l.centerW
@@ -782,7 +632,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.handleSessionsClick(msg.Y, l)
 	}
 	if l.rightW > 0 && msg.X >= rightStart {
-		return m.handleYAMLClick()
+		return m.handleDetailClick()
 	}
 	return m.handleCenterClick(msg.X-centerStart, msg.Y, l)
 }
@@ -804,11 +654,11 @@ func (m model) handleSessionsClick(y int, l uiLayout) (tea.Model, tea.Cmd) {
 	return m.attachSelected()
 }
 
-// handleYAMLClick focuses the project/task YAML column. The pane is
-// read-only and scrolled via keyboard, so — unlike Projects/Tasks/Sessions —
-// a click only changes focus; there's nothing in it to select.
-func (m model) handleYAMLClick() (tea.Model, tea.Cmd) {
-	m.focus = paneProjectYAML
+// handleDetailClick focuses the project detail column. The pane is
+// read-only — a fixed summary of the selected project, nothing to scroll or
+// select — so a click only changes focus.
+func (m model) handleDetailClick() (tea.Model, tea.Cmd) {
+	m.focus = paneProjectDetail
 	m.statusMsg = ""
 	return m, nil
 }
@@ -833,11 +683,7 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 		if idx < 0 || idx >= len(m.projects) {
 			return m, nil
 		}
-		prev := m.projSel
 		m.projSel = m.projects[idx].Path
-		if m.projSel != prev && m.yamlSrc == yamlSourceProject {
-			m.yamlScroll = 0
-		}
 		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, nil
@@ -853,11 +699,7 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 		// projectsEnd to make it relative to the tasks pane's own top.
 		start, end := centerWindow(len(tasks), taskIndex(tasks, m.taskSel), listMaxRows(l.tasksH))
 		if rel := taskRowAtY(y-projectsEnd, 0, end-start); rel >= 0 {
-			prev := m.taskSel
 			m.taskSel = tasks[start+rel].Path
-			if m.taskSel != prev && m.yamlSrc == yamlSourceTask {
-				m.yamlScroll = 0
-			}
 		}
 		return m, nil
 	}
@@ -874,29 +716,6 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 	m.focus = paneProjects
 	m.lastCenterFocus = paneProjects
 	return m, nil
-}
-
-// yamlPageSize returns the number of lines ctrl+f / ctrl+b should scroll
-// the YAML pane by — one screen minus one row of context overlap so the
-// last visible line before a page-down becomes the first line after it
-// (matching less/vim convention). Returns 0 when the YAML pane is not in
-// the layout, so the caller can treat that as "no-op".
-func yamlPageSize(m model) int {
-	l := m.computeLayout()
-	if l.yamlH <= 0 {
-		return 0
-	}
-	// Vertical chrome inside the pane: top border + bottom border = 2 rows.
-	// The remainder is visible content.
-	const chromeRows = 2
-	contentRows := l.yamlH - chromeRows
-	if contentRows < 1 {
-		return 0
-	}
-	if contentRows == 1 {
-		return 1
-	}
-	return contentRows - 1
 }
 
 // taskRowAtY maps an absolute y row to a task index using the tasks pane's
@@ -1057,7 +876,7 @@ func (m model) focusLeftColumn() model {
 	return m
 }
 
-// focusRightColumn shifts focus onto the project/task YAML column (alt-l),
+// focusRightColumn shifts focus onto the project detail column (alt-l),
 // remembering the center-column pane to return to. A no-op when the right
 // column is toggled off.
 func (m model) focusRightColumn() model {
@@ -1067,7 +886,7 @@ func (m model) focusRightColumn() model {
 	if m.focus == paneProjects || m.focus == paneTasks || m.focus == paneAudit {
 		m.lastCenterFocus = m.focus
 	}
-	m.focus = paneProjectYAML
+	m.focus = paneProjectDetail
 	m.statusMsg = ""
 	return m
 }
@@ -1106,16 +925,21 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1)
-	statusReady     = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	statusWorking   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	statusBlocked   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	statusDone      = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
-	statusReviewing = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
-	statusStopped   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	statusRunning   = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
-	dimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	cardNameStyle   = lipgloss.NewStyle().Bold(true)
-	cardBorder      = lipgloss.NewStyle().
+	statusReady   = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	statusWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	statusBlocked = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	// statusDone colors both a project's "idle" status text and (via
+	// taskStatusStyle/acptabs.go) unrelated "finished, green" concepts
+	// elsewhere — a task reaching success/committed, an ACP session reaching
+	// StateCompleted. All three read as "settled, nothing pending" so sharing
+	// one color is intentional, not a naming leftover from when this specific
+	// var backed a project status literally called "done".
+	statusDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
+	statusStopped = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	statusRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	cardNameStyle = lipgloss.NewStyle().Bold(true)
+	cardBorder    = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 1)
@@ -1154,6 +978,15 @@ var (
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("82")).
 				Padding(0, 1)
+	// cardWatchingPRBorder marks an idle project still being watched for PR
+	// review (project.Project.WatchingPR) — the collapsed status:reviewing
+	// case. A different shade of green ("42", a spring green) from
+	// cardCronActiveBorder's "82" so the two "this project wakes itself up
+	// for something" cases read as related but distinguishable at a glance.
+	cardWatchingPRBorder = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("42")).
+				Padding(0, 1)
 	sessionRowSelectedStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("212")).
@@ -1184,15 +1017,17 @@ const (
 // Card sizing. Width is a target; the layout falls back to a single-column
 // stack when the projects pane is too narrow to fit a card at this size.
 // cardDisplayRows is the rendered height of a card: selection ring + top
-// border + name + status + breakdown + bottom border + ring = 7 rows. Every
-// card carries the ring's two rows, drawn or reserved (see cardRingSpacer), so
-// this height is the same for selected and unselected cards. The grid uses it
-// to decide how many full card rows fit in the projects pane.
+// border + name + status + breakdown + extra (cron schedule or watched-PR
+// links, blank if neither applies) + bottom border + ring = 8 rows. Every
+// card carries the ring's two rows and the extra line, drawn or reserved (see
+// cardRingSpacer and renderProjectCardExtra), so this height is the same for
+// every card regardless of selection or content. The grid uses it to decide
+// how many full card rows fit in the projects pane.
 const (
 	cardTargetWidth = 30
 	cardMinWidth    = 20
 	cardGap         = 1
-	cardDisplayRows = 7
+	cardDisplayRows = 8
 )
 
 func (m model) borderStyle(p pane) lipgloss.Style {
@@ -1210,10 +1045,8 @@ func renderStatus(s string) string {
 		return statusWorking.Render(s)
 	case "blocked":
 		return statusBlocked.Render(s)
-	case "done":
+	case "idle":
 		return statusDone.Render(s)
-	case "reviewing":
-		return statusReviewing.Render(s)
 	case "stopped":
 		return statusStopped.Render(s)
 	default:
@@ -1636,6 +1469,8 @@ func projectCardBorder(v ProjectView) lipgloss.Style {
 	switch {
 	case v.Archive:
 		return cardArchivedBorder
+	case v.WatchingPR:
+		return cardWatchingPRBorder
 	case v.CronActive:
 		return cardCronActiveBorder
 	default:
@@ -1684,7 +1519,8 @@ func renderProjectCardBody(v ProjectView, width int) string {
 
 	// A project whose .project.yaml failed to parse gets an error card instead
 	// of a normal status/branch/task line: a red badge plus the parse message,
-	// so it stays visible and the user can select it to inspect the raw YAML.
+	// so it stays visible and the user can select it to see the error and go
+	// fix the file directly.
 	if v.LoadErr != "" {
 		badge := statusErrStyle.Render(truncate("⚠ parse error", inner))
 		detail := dimStyle.Render(truncate(v.LoadErr, inner))
@@ -1697,9 +1533,46 @@ func renderProjectCardBody(v ProjectView, width int) string {
 		statusLine = truncate(statusLine+"  "+branchTxt, inner)
 	}
 	breakdown := renderTaskBreakdown(v.TaskCounts, inner)
+	extra := dimStyle.Render(truncate(renderProjectCardExtra(v), inner))
 
-	body := name + "\n" + statusLine + "\n" + breakdown
+	body := name + "\n" + statusLine + "\n" + breakdown + "\n" + extra
 	return style.Render(body)
+}
+
+// renderProjectCardExtra is the card's fourth content line: the watched PRs'
+// short links when the project is idle-and-watching (see
+// ProjectView.WatchingPR), else the cron schedule when one is live, else
+// blank. Every card reserves this line (blank if neither applies) so the
+// grid's per-card height stays uniform — see cardDisplayRows.
+//
+// Priority when both could apply (a recurring project also watching a PR):
+// the PR watch is shown. It's the more transient, attention-worthy of the
+// two — a live review conversation — versus a cron schedule, which is
+// steady-state background behavior the border color alone already conveys.
+func renderProjectCardExtra(v ProjectView) string {
+	if v.WatchingPR {
+		return prShortLinks(v.PullRequests)
+	}
+	if v.CronActive {
+		return "cron: " + v.Cron
+	}
+	return ""
+}
+
+// prShortLinks renders a project's still-open pull requests as compact
+// "org/name#123" references, comma-separated. Resolved (merged/closed)
+// entries are omitted — once every entry is resolved WatchingPR is false
+// and this is never called for it anyway, but a project can have several
+// PRs (one per repo) where only some remain open.
+func prShortLinks(prs []project.PullRequest) string {
+	var parts []string
+	for _, pr := range prs {
+		if pr.State == "merged" || pr.State == "closed" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s#%d", pr.Repo, pr.Number))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // renderTaskBreakdown renders the per-state task counts in a compact form.
@@ -1763,15 +1636,14 @@ const projectsMinHeight = paneChromeRows + cardDisplayRows
 // falling back to projects alone.
 const tasksMinHeight = 4
 
-// yamlMinHeight is the floor for the project/task YAML pane — now the right
-// column's own single pane ("tr") rather than a pane stacked in the center
-// column. 3 rows = top border + 1 content line + bottom border. Below this
-// the column is dropped entirely rather than rendered unusably short; it
-// also doubles as rightColumnMinHeight below.
+// yamlMinHeight is the floor for the project detail pane — the right
+// column's own single pane ("tr"). 3 rows = top border + 1 content line +
+// bottom border. Below this the column is dropped entirely rather than
+// rendered unusably short; it also doubles as rightColumnMinHeight below.
 const yamlMinHeight = 3
 
 // leftColumnWidth is the target width for the sessions column (left, "tl")
-// when its toggle is on. The YAML-viewer column (right, "tr") has no fixed
+// when its toggle is on. The detail column (right, "tr") has no fixed
 // target width of its own — it's sized to half the current terminal width,
 // computed live in computeLayout, so it stays proportional as the terminal
 // resizes. minCenterWidth is the floor the center column (projects + tasks)
@@ -1787,7 +1659,7 @@ const (
 // leftColumnMinHeight / rightColumnMinHeight are the height floors below
 // which a column is dropped entirely rather than rendered unusably short:
 // enough for the sessions column to show one full session box, or for the
-// YAML pane to show its border plus one content line.
+// detail pane to show its border plus one content line.
 const (
 	leftColumnMinHeight  = paneChromeRows + sessionBoxHeight
 	rightColumnMinHeight = yamlMinHeight
@@ -1799,7 +1671,7 @@ const (
 //
 // The body is three columns side by side: an optional left column (sessions,
 // "tl"), a center column stacking projects, tasks, and the audit log in that
-// order, and an optional right column holding the project/task YAML viewer
+// order, and an optional right column holding the project detail dashboard
 // ("tr"), sized to half the terminal's current width. leftW/rightW are 0
 // when the corresponding column is toggled off or the terminal is too
 // narrow to give it room without starving the center column; tasksH/auditH
@@ -1829,8 +1701,8 @@ func (m model) computeLayout() uiLayout {
 	}
 	rightW := 0
 	if m.rightVisible && bodyH >= rightColumnMinHeight {
-		// The YAML column is half the terminal's current width rather than a
-		// fixed constant (see leftColumnWidth's doc comment above), so it's
+		// The detail column is half the terminal's current width rather than
+		// a fixed constant (see leftColumnWidth's doc comment above), so it's
 		// recomputed here every render instead of being a package-level
 		// const like leftColumnWidth.
 		candidate := bodyW / 2
@@ -1879,7 +1751,7 @@ func (m model) computeLayout() uiLayout {
 // of the column so it can't dominate a tall terminal. When there isn't room
 // for both projects and tasks at their minimums, tasks (and, before it,
 // audit) is dropped and projects takes the rest — the same fallback the
-// YAML viewer used to get before tasks took its place in the center column.
+// detail pane used to get before tasks took its place in the center column.
 //
 // All clamps prefer fitting within bodyH over hitting the per-pane minimums
 // so the center column's stack never overflows past bodyH.
@@ -2025,7 +1897,7 @@ func (m model) View() string {
 	}
 	columns = append(columns, center)
 	if l.rightW > 0 {
-		columns = append(columns, m.renderProjectYAML(l.rightW, l.yamlH))
+		columns = append(columns, m.renderProjectDetail(l.rightW, l.yamlH))
 	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top, columns...)
 
@@ -2040,8 +1912,8 @@ func (m model) renderFocusedPane(width, height int) string {
 	switch m.focus {
 	case paneTasks:
 		return m.renderTasks(width, height)
-	case paneProjectYAML:
-		return m.renderProjectYAML(width, height)
+	case paneProjectDetail:
+		return m.renderProjectDetail(width, height)
 	case paneSessions:
 		return m.renderSessions(width, height)
 	case paneAudit:
@@ -2057,10 +1929,9 @@ func (m model) renderFocusedPane(width, height int) string {
 // at; switching project swaps the content.
 //
 // The row matching taskSel gets the highlighted treatment (same pink accent
-// used by the session row selection) so the user can see which task the
-// YAML viewer is currently pointing at when this pane is focused. The Tasks
-// pane uses the focused border when m.focus == paneTasks so the user knows
-// the pane accepts up/down input.
+// used by the session row selection) so the user can see which task is
+// currently selected. The Tasks pane uses the focused border when
+// m.focus == paneTasks so the user knows the pane accepts up/down input.
 //
 // `height` is the total rows the pane should occupy. Borders eat 2 of them.
 func (m model) renderTasks(width, height int) string {
@@ -2207,7 +2078,7 @@ func (m model) selectedProjectTasks() []TaskView {
 //
 // When selected, every cell is rendered with the accent background/foreground
 // used elsewhere for "active selection" so the user can see at a glance
-// which task the YAML viewer is mirroring.
+// which task is currently selected.
 func renderTaskRow(t TaskView, c taskColumns, selected bool) string {
 	model := t.Model
 	if model == "" {
@@ -2353,7 +2224,7 @@ func (m model) renderAudit(width, height int) string {
 	// walk the tail. Otherwise the pane stays display-only, pinning the newest
 	// lines to the bottom the way `tail -f` does.
 	if m.focus == paneAudit {
-		cursor, scroll := reconcileYAMLView(m.auditCursor, m.auditScroll, len(m.auditLines), maxLines)
+		cursor, scroll := reconcileScrollCursor(m.auditCursor, m.auditScroll, len(m.auditLines), maxLines)
 		end := scroll + maxLines
 		if end > len(m.auditLines) {
 			end = len(m.auditLines)
@@ -2363,7 +2234,7 @@ func (m model) renderAudit(width, height int) string {
 			if i == cursor {
 				// Width pads the highlight to a full-width bar so the cursor
 				// line reads clearly regardless of the log line's length.
-				line = yamlCursorStyle.Width(innerWidth).Render(line)
+				line = scrollCursorStyle.Width(innerWidth).Render(line)
 			} else {
 				line = dimStyle.Render(line)
 			}
@@ -2407,7 +2278,7 @@ func (m model) renderFooter() string {
 		if m.zoomed {
 			zoomHint = "z: restore panes"
 		}
-		base := "⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  p/t: project/task yaml  •  tl/tr: toggle sessions/yaml column  •  tt: expand/collapse desc  •  enter/click: attach  •  q: quit"
+		base := "⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  tl/tr: toggle sessions/detail column  •  enter/click: attach  •  q: quit"
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}
@@ -2427,8 +2298,8 @@ func paneName(p pane) string {
 	switch p {
 	case paneSessions:
 		return "sessions"
-	case paneProjectYAML:
-		return "yaml"
+	case paneProjectDetail:
+		return "detail"
 	case paneTasks:
 		return "tasks"
 	case paneAudit:

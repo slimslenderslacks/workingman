@@ -19,14 +19,15 @@ import (
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
-// TestReviewingRoutesPendingTasksBeforePR pins the routing rule that a project
-// with an open PR (`reviewing`) still runs manual tasks queued alongside the
-// watch: when a ready task exists the dispatch takes priority and the project
-// keeps its `reviewing` status, and only a fully-committed graph falls through
-// to (re)arm the PR poll. Runner-less, so the dispatch itself no-ops — the
-// observable is the status/poll routing, which is what changed.
-func TestReviewingRoutesPendingTasksBeforePR(t *testing.T) {
-	t.Run("ready task takes priority and keeps reviewing", func(t *testing.T) {
+// TestIdleWatchingRoutesPendingTasksBeforePR pins the routing rule that an
+// idle project still watching an open PR (see Project.WatchingPR) still runs
+// manual tasks queued alongside the watch: when a ready task exists the
+// dispatch takes priority and the project stays idle-and-watching, and only a
+// fully-committed graph falls through to (re)arm the PR poll. Runner-less, so
+// the dispatch itself no-ops — the observable is the status/poll routing,
+// which is what changed.
+func TestIdleWatchingRoutesPendingTasksBeforePR(t *testing.T) {
+	t.Run("ready task takes priority and keeps watching", func(t *testing.T) {
 		root := t.TempDir()
 		d, _, sched := newReviewDaemon(t, root)
 		projectPath := filepath.Join(root, ".project.yaml")
@@ -35,12 +36,13 @@ func TestReviewingRoutesPendingTasksBeforePR(t *testing.T) {
 			t.Fatalf("mkdir: %v", err)
 		}
 		// The original work is committed (this is how the project reached
-		// reviewing); a human then appended a manual task that is still ready.
+		// idle-and-watching); a human then appended a manual task that is
+		// still ready.
 		mustSaveTask(t, filepath.Join(tasksDir, "landed.yaml"), &task.Task{Name: "landed", Status: task.StatusCommitted})
 		mustSaveTask(t, filepath.Join(tasksDir, "manual-fix.yaml"), &task.Task{Name: "manual-fix", Status: task.StatusReady})
 
 		p := &project.Project{
-			Description: "x", Branch: "b", Status: project.StatusReviewing,
+			Description: "x", Branch: "b", Status: project.StatusIdle, Review: true,
 			Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
 		}
 		d.dispatchProject(projectPath, p)
@@ -49,8 +51,8 @@ func TestReviewingRoutesPendingTasksBeforePR(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if got.Status != project.StatusReviewing {
-			t.Errorf("status = %q, want reviewing (pending work must not change the status)", got.Status)
+		if got.Status != project.StatusIdle {
+			t.Errorf("status = %q, want idle (pending work must not change the status)", got.Status)
 		}
 		// Pending work took priority and returned before the poll was armed.
 		if spec := sched.Spec(reviewPollKey(projectPath)); spec != "" {
@@ -69,7 +71,7 @@ func TestReviewingRoutesPendingTasksBeforePR(t *testing.T) {
 		mustSaveTask(t, filepath.Join(tasksDir, "landed.yaml"), &task.Task{Name: "landed", Status: task.StatusCommitted})
 
 		p := &project.Project{
-			Description: "x", Branch: "b", Status: project.StatusReviewing,
+			Description: "x", Branch: "b", Status: project.StatusIdle, Review: true,
 			Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
 		}
 		d.dispatchProject(projectPath, p)
@@ -78,8 +80,8 @@ func TestReviewingRoutesPendingTasksBeforePR(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if got.Status != project.StatusReviewing {
-			t.Errorf("status = %q, want reviewing", got.Status)
+		if got.Status != project.StatusIdle {
+			t.Errorf("status = %q, want idle", got.Status)
 		}
 		if spec := sched.Spec(reviewPollKey(projectPath)); spec != reviewPollSpecs[0] {
 			t.Errorf("review poll spec = %q, want %q (a committed graph must keep watching the PR)", spec, reviewPollSpecs[0])
@@ -87,13 +89,13 @@ func TestReviewingRoutesPendingTasksBeforePR(t *testing.T) {
 	})
 }
 
-// TestDoneRoutesPendingTasksWithoutReopening covers the `done` counterpart: a
-// finished project someone appended a task to runs it, and — crucially — a done
-// project is never spuriously moved. dispatchPendingTasks does not re-run the
-// completion transition, so neither a pending nor a fully-committed graph flips
-// a done project (a done project with repos would otherwise re-open the PR
-// watch).
-func TestDoneRoutesPendingTasksWithoutReopening(t *testing.T) {
+// TestIdleRoutesPendingTasksWithoutReopening covers the plain-idle
+// counterpart (not watching a PR): a finished project someone appended a
+// task to runs it, and — crucially — an idle project is never spuriously
+// moved off idle. dispatchPendingTasks does not re-run the completion
+// transition, so neither a pending nor a fully-committed graph flips it (an
+// idle project with repos would otherwise re-open the PR watch).
+func TestIdleRoutesPendingTasksWithoutReopening(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		seed    []*task.Task
@@ -120,7 +122,7 @@ func TestDoneRoutesPendingTasksWithoutReopening(t *testing.T) {
 			}
 
 			p := &project.Project{
-				Description: "x", Branch: "b", Status: project.StatusDone,
+				Description: "x", Branch: "b", Status: project.StatusIdle,
 				Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
 			}
 			d.dispatchProject(projectPath, p)
@@ -129,8 +131,8 @@ func TestDoneRoutesPendingTasksWithoutReopening(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if got.Status != project.StatusDone {
-				t.Errorf("status = %q, want done (a done project must not be moved by dispatch)", got.Status)
+			if got.Status != project.StatusIdle {
+				t.Errorf("status = %q, want idle (an idle project must not be moved by dispatch)", got.Status)
 			}
 		})
 	}
@@ -140,12 +142,19 @@ func TestDoneRoutesPendingTasksWithoutReopening(t *testing.T) {
 // recovery: an intake addition flips a project to `ready` so planning fleshes
 // the seed into a real task, but that flip can be skipped or clobbered while
 // another agent holds the project slot (the mcp-server-instructions case — a
-// review agent's `done` write landed after the flip). When the daemon later
-// observes a resting project (done/reviewing) that still carries a pending
-// seed, it must re-arm planning by flipping the status back to `ready`.
+// review agent's idle write landed after the flip). When the daemon later
+// observes an idle project — watching a PR or not — that still carries a
+// pending seed, it must re-arm planning by flipping the status back to
+// `ready`.
 func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
-	for _, from := range []project.Status{project.StatusDone, project.StatusReviewing} {
-		t.Run(string(from), func(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p    project.Project
+	}{
+		{"idle", project.Project{}},
+		{"idle watching a PR", project.Project{Review: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			d, buf, _ := newReviewDaemon(t, root)
 			projectPath := filepath.Join(root, ".project.yaml")
@@ -161,11 +170,12 @@ func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 				t.Fatalf("write seed: %v", err)
 			}
 
-			p := &project.Project{
-				Description: "x", Branch: "b", Status: from,
-				Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
-			}
-			d.dispatchProject(projectPath, p)
+			p := tc.p
+			p.Description = "x"
+			p.Branch = "b"
+			p.Status = project.StatusIdle
+			p.Repos = []project.Repo{{Org: "docker", Name: "gateway"}}
+			d.dispatchProject(projectPath, &p)
 
 			got, err := project.Load(projectPath)
 			if err != nil {
@@ -180,7 +190,7 @@ func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 		})
 	}
 
-	t.Run("no seed leaves done untouched", func(t *testing.T) {
+	t.Run("no seed leaves idle untouched", func(t *testing.T) {
 		root := t.TempDir()
 		d, _, sched := newReviewDaemon(t, root)
 		projectPath := filepath.Join(root, ".project.yaml")
@@ -190,28 +200,28 @@ func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 		}
 		mustSaveTask(t, filepath.Join(tasksDir, "landed.yaml"), &task.Task{Name: "landed", Status: task.StatusCommitted})
 
-		p := &project.Project{Description: "x", Branch: "b", Status: project.StatusDone}
+		p := &project.Project{Description: "x", Branch: "b", Status: project.StatusIdle}
 		d.dispatchProject(projectPath, p)
 
 		got, err := project.Load(projectPath)
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if got.Status != project.StatusDone {
-			t.Errorf("status = %q, want done (no seed, nothing to re-arm)", got.Status)
+		if got.Status != project.StatusIdle {
+			t.Errorf("status = %q, want idle (no seed, nothing to re-arm)", got.Status)
 		}
 		if spec := sched.Spec(reviewPollKey(projectPath)); spec != "" {
-			t.Errorf("unexpected review poll for a plain done project: %q", spec)
+			t.Errorf("unexpected review poll for a plain idle project: %q", spec)
 		}
 	})
 }
 
-// TestReviewingProjectDispatchesReadyTaskAgent is the end-to-end proof that a
-// ready task under `reviewing` actually launches a task agent (not just a
-// routing decision): the manual task runs even though the project has an open
-// PR. Same shape as the push-dispatch test — a real tmux launcher, a stub
-// workspace, and a fake command that just sleeps.
-func TestReviewingProjectDispatchesReadyTaskAgent(t *testing.T) {
+// TestIdleWatchingProjectDispatchesReadyTaskAgent is the end-to-end proof
+// that a ready task under an idle-and-watching project actually launches a
+// task agent (not just a routing decision): the manual task runs even though
+// the project has an open PR. Same shape as the push-dispatch test — a real
+// tmux launcher, a stub workspace, and a fake command that just sleeps.
+func TestIdleWatchingProjectDispatchesReadyTaskAgent(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not on PATH")
 	}
@@ -231,7 +241,8 @@ func TestReviewingProjectDispatchesReadyTaskAgent(t *testing.T) {
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "reviewing dispatch",
 		Branch:      "feat/reviewing",
-		Status:      project.StatusReviewing,
+		Status:      project.StatusIdle,
+		Review:      true,
 		Repos:       []project.Repo{{Org: "docker", Name: "gateway"}},
 	}, project.WriterAgent); err != nil {
 		t.Fatalf("seed project: %v", err)

@@ -193,24 +193,25 @@ type Project struct {
 	CreatedAt *time.Time `yaml:"created_at,omitempty"`
 	// Review is the intent flag for the PR-resolution loop: completion of this
 	// project is gated on resolving a GitHub pull request's review comments and
-	// Actions runs, not merely on committing every task. When set, a `reviewing`
-	// poll that finds no open PR *keeps watching* (a PR is expected to appear).
-	// Without it, completion goes straight to `done` — there is no automatic
-	// probing for a PR that might exist; a human puts the project into the loop
-	// by running `:review`, which looks up (and records into PullRequests) any
-	// open PR. Set by the project/planning agent when the seed goal is PR-shaped,
-	// or by a human. `omitempty` keeps the key out of files that don't use it.
+	// Actions runs, not merely on committing every task. When set, an idle
+	// project with no open PR yet *keeps watching* (a PR is expected to
+	// appear) — see WatchingPR. Without it, completion is plain idle with
+	// nothing watched — there is no automatic probing for a PR that might
+	// exist; a human puts the project into the loop by running `:review`,
+	// which looks up (and records into PullRequests) any open PR. Set by the
+	// project/planning agent when the seed goal is PR-shaped, or by a human.
+	// `omitempty` keeps the key out of files that don't use it.
 	Review bool `yaml:"review,omitempty"`
-	// ReviewNow is the one-shot *request* flag behind `:review` on a project that
-	// is already `reviewing`: "run the review agent now" instead of waiting for
-	// the next scheduled poll. The PR poll backs off to as slow as 30m when a PR
-	// is quiet (see reviewPollSpecs), so a human who wants an on-demand reconcile
-	// needs a way to jump the queue.
+	// ReviewNow is the one-shot *request* flag behind `:review` on a project
+	// that is already idle-and-watching (see WatchingPR): "run the review
+	// agent now" instead of waiting for the next scheduled poll. The PR poll
+	// backs off to as slow as 30m when a PR is quiet (see reviewPollSpecs), so
+	// a human who wants an on-demand reconcile needs a way to jump the queue.
 	//
 	// It follows the same request-flag contract as Cleanup: the TUI sets it and
 	// writes as WriterAgent (a daemon-authored write is dropped by the daemon's
 	// own fsnotify filter and would never be seen); the daemon, on observing a
-	// reviewing project with the flag set, clears it — as the daemon, so the
+	// watched idle project with the flag set, clears it — as the daemon, so the
 	// clear can't retrigger dispatch — snaps the poll cadence back to fast, and
 	// dispatches the review agent immediately (a run already in flight makes the
 	// kick a no-op). Unlike Cleanup the flag is cleared before the run rather than
@@ -221,8 +222,8 @@ type Project struct {
 	// PullRequests are the pull requests the review agent is watching for this
 	// project — one per repo that has an open PR on the project's branch, so a
 	// project spanning several repos can review a PR in each at once. The review
-	// agent stamps this list on every poll; the loop reaches done only when every
-	// entry is merged or closed. The TUI reads it to surface the PRs.
+	// agent stamps this list on every poll; the loop settles once every entry is
+	// merged or closed (see WatchingPR). The TUI reads it to surface the PRs.
 	//
 	// The PR-resolution loop's runaway guard is deliberately NOT a field here: a
 	// legitimately long-lived PR can sit open for days, so a persisted lifetime
@@ -306,6 +307,36 @@ func (p *Project) CronExpired() bool {
 // instead of inventing a default deadline.
 func (p *Project) CronUnbounded() bool {
 	return p.Cron != "" && p.CronUntil == nil && p.CronMaxRuns <= 0
+}
+
+// WatchingPR reports whether an idle project should still be treated as "in
+// the PR-resolution loop" — the single predicate that replaces the old
+// status:reviewing value. True when either the project's declared intent
+// (Review) says a PR is wanted even before one exists, or at least one
+// recorded pull request hasn't reached a terminal state yet. False means the
+// project is genuinely at rest: nothing further to watch.
+//
+// This is consulted both to decide whether to arm the #review poll on an
+// idle project (see the daemon's dispatchProject and ensureReviewPoll) and,
+// after each poll, whether to keep it armed — so the review agent no longer
+// needs to choose between two status values to signal "keep watching" vs
+// "done"; it just always leaves the project idle, and the daemon derives the
+// answer from PullRequests' own recorded state.
+func (p *Project) WatchingPR() bool {
+	return p.Review || hasOpenPR(p.PullRequests)
+}
+
+// hasOpenPR reports whether any entry in prs is not yet merged or closed. An
+// entry with an empty/unrecognised State is treated conservatively as still
+// open, so an interrupted or malformed poll never causes the loop to drop a
+// PR it hasn't actually confirmed is resolved.
+func hasOpenPR(prs []PullRequest) bool {
+	for _, pr := range prs {
+		if pr.State != "merged" && pr.State != "closed" {
+			return true
+		}
+	}
+	return false
 }
 
 func Load(path string) (*Project, error) {
