@@ -5,3 +5,13 @@
 # Playwright MCP artifacts — page snapshots/screenshots can contain
 # candidate PII when driving the interview-feedback skill.
 /.playwright-mcp/
+
+# macOS Finder metadata
+.DS_Store
+
+# sbx diagnostics bundles
+/sbx-diagnostics-*.zip
+
+# Stray personal/scratch files
+/inspect.sh
+/Transcript - Bruno Bonamici - Staff Software Engineer, Agentic Platform.md
