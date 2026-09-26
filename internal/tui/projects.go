@@ -29,6 +29,11 @@ type ProjectView struct {
 	Branch      string
 	Status      project.Status
 	Repos       []project.Repo
+	// NewRepos mirrors the project file's `new_repos` — repos that don't yet
+	// exist and the daemon creates on first workspace use. Kept separate from
+	// Repos so the detail pane can label them distinctly (they aren't
+	// "involved" yet in the same sense until they exist).
+	NewRepos []project.Repo
 	// TaskCounts holds the number of tasks observed in each task.Status. A
 	// status with zero tasks is omitted from the map.
 	TaskCounts map[task.Status]int
@@ -204,6 +209,7 @@ func loadProjectView(path string) (ProjectView, bool) {
 		Branch:       pr.Branch,
 		Status:       pr.Status,
 		Repos:        append([]project.Repo(nil), pr.Repos...),
+		NewRepos:     append([]project.Repo(nil), pr.NewRepos...),
 		TaskCounts:   counts,
 		Tasks:        tasks,
 		LastUpdate:   mtime,
@@ -474,6 +480,14 @@ func projectViewEqual(a, b ProjectView) bool {
 	}
 	for i := range a.Repos {
 		if a.Repos[i] != b.Repos[i] {
+			return false
+		}
+	}
+	if len(a.NewRepos) != len(b.NewRepos) {
+		return false
+	}
+	for i := range a.NewRepos {
+		if a.NewRepos[i] != b.NewRepos[i] {
 			return false
 		}
 	}

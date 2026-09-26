@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/task"
 )
 
@@ -98,7 +99,8 @@ func renderProjectDetailBody(v ProjectView, auditLines []string, width int) stri
 }
 
 // renderProjectDetailHeader is the panel's first section: name, status +
-// branch, which repos the project spans, and how long ago it was created.
+// branch, which repos the project spans (existing and, separately, any not
+// yet created), and how long ago it was created.
 func renderProjectDetailHeader(v ProjectView, width int) []string {
 	lines := []string{cardNameStyle.Render(truncate(v.Name, width))}
 
@@ -109,11 +111,14 @@ func renderProjectDetailHeader(v ProjectView, width int) []string {
 	lines = append(lines, statusLine)
 
 	if len(v.Repos) > 0 {
-		names := make([]string, len(v.Repos))
-		for i, r := range v.Repos {
-			names[i] = r.Org + "/" + r.Name
-		}
-		lines = append(lines, dimStyle.Render(truncate("repos: "+strings.Join(names, ", "), width)))
+		lines = append(lines, dimStyle.Render(truncate("repos: "+strings.Join(repoNames(v.Repos), ", "), width)))
+	}
+	if len(v.NewRepos) > 0 {
+		// Distinguished from Repos: these don't exist yet — the daemon
+		// creates them on first workspace use — so lumping them into the
+		// same "repos:" line would misreport the project as already
+		// spanning a repo it hasn't touched.
+		lines = append(lines, dimStyle.Render(truncate("new repos: "+strings.Join(repoNames(v.NewRepos), ", "), width)))
 	}
 
 	if !v.CreatedAt.IsZero() {
@@ -121,6 +126,16 @@ func renderProjectDetailHeader(v ProjectView, width int) []string {
 		lines = append(lines, dimStyle.Render(truncate(age, width)))
 	}
 	return lines
+}
+
+// repoNames formats each repo as "org/name", the same short form prShortLinks
+// and the project card grid already use for pull requests.
+func repoNames(repos []project.Repo) []string {
+	names := make([]string, len(repos))
+	for i, r := range repos {
+		names[i] = r.Org + "/" + r.Name
+	}
+	return names
 }
 
 // renderProjectDetailBadges surfaces the "interesting things" about a

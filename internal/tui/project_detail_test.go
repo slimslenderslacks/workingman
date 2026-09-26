@@ -66,6 +66,34 @@ func TestRenderProjectDetailHeaderListsRepos(t *testing.T) {
 	}
 }
 
+// TestRenderProjectDetailHeaderListsNewRepos pins the header's separate
+// "new repos:" line for ProjectView.NewRepos — repos the daemon hasn't
+// created yet — and that it's kept distinct from the "repos:" line rather
+// than merged into it, since a project doesn't yet span a repo that doesn't
+// exist.
+func TestRenderProjectDetailHeaderListsNewRepos(t *testing.T) {
+	v := ProjectView{
+		Name:  "alpha",
+		Repos: []project.Repo{{Org: "docker", Name: "desktop"}},
+		NewRepos: []project.Repo{
+			{Org: "slimslenderslacks", Name: "brandnew"},
+			{Org: "slimslenderslacks", Name: "brandnew2"},
+		},
+	}
+	got := strings.Join(renderProjectDetailHeader(v, 80), "\n")
+	if !strings.Contains(got, "repos: docker/desktop") {
+		t.Errorf("header missing repos line; got:\n%s", got)
+	}
+	if !strings.Contains(got, "new repos: slimslenderslacks/brandnew, slimslenderslacks/brandnew2") {
+		t.Errorf("header missing new repos line; got:\n%s", got)
+	}
+
+	none := strings.Join(renderProjectDetailHeader(ProjectView{Name: "alpha"}, 80), "\n")
+	if strings.Contains(none, "new repos:") {
+		t.Errorf("header should omit the new repos line with none recorded; got:\n%s", none)
+	}
+}
+
 // TestRenderProjectDetailTasksShowsCommittedRepos pins the task graph's
 // per-task commit line: the repos a committed task's commits landed in (task
 // file field `commits[].repo`, a workspace-relative repo dir name — not
