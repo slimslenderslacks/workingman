@@ -109,7 +109,8 @@ type TaskView struct {
 	// by it so completed tasks appear in the order they actually ran.
 	CompletedAt time.Time
 	// DependsOn mirrors the task file's `depends_on` list — the task graph's
-	// edges, for the detail pane's task-graph rendering.
+	// edges, for the detail pane's task-graph rendering and the Tasks pane's
+	// "deps" column.
 	DependsOn []string
 	// Commits mirrors the task file's `commits` list — one entry per repo
 	// the commit agent pushed changes to (Repo is the workspace-relative
@@ -117,6 +118,12 @@ type TaskView struct {
 	// detail pane to show which repos a task actually touched. Empty on a
 	// task that hasn't committed, or that committed nothing.
 	Commits []task.Commit
+	// CreatedAt is the task file's filesystem birth time (see birthTime),
+	// since no task on disk records when it was created — only when it
+	// completed. Best-effort: it falls back to ModTime on platforms that
+	// don't expose a true birth time, and is zero if the file could not be
+	// stat'd. The Tasks pane's "age" column renders time-since-CreatedAt.
+	CreatedAt time.Time
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
@@ -273,6 +280,10 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 		if t.CompletedAt != nil {
 			completedAt = *t.CompletedAt
 		}
+		var createdAt time.Time
+		if info, statErr := os.Stat(path); statErr == nil {
+			createdAt = birthTime(info)
+		}
 		tasks = append(tasks, TaskView{
 			Name:        name,
 			Model:       model,
@@ -283,6 +294,7 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 			CompletedAt: completedAt,
 			DependsOn:   append([]string(nil), t.DependsOn...),
 			Commits:     append([]task.Commit(nil), t.Commits...),
+			CreatedAt:   createdAt,
 		})
 	}
 	if len(tasks) == 0 {

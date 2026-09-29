@@ -296,10 +296,13 @@ func TestMouseClickOnTaskRowSelectsIt(t *testing.T) {
 	m, taskAPath, taskBPath := withTaskFixtures(t)
 	l := m.computeLayout()
 	// Tasks is now stacked in the center column below Projects, starting at
-	// y = l.projectsH. Inside its own band: row 0 top border, row 1 column
-	// header, row 2 the first task, row 3 the second task.
+	// y = l.projectsH. Inside its own band: row 0 top border, then the
+	// dependency-graph tree (see taskDepTree) — alpha is selected by
+	// default and beta depends on it, a 2-member graph, so that's rows 1-2
+	// ("alpha" then, indented under it, "beta") — then row 3 column header,
+	// row 4 the first task, row 5 the second task.
 	clickX := l.leftW + 5
-	clickY := l.projectsH + 3
+	clickY := l.projectsH + 5
 	step, _ := m.Update(tea.MouseMsg{
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,

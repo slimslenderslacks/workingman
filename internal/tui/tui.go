@@ -11,6 +11,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -694,12 +695,18 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 		m.lastCenterFocus = paneTasks
 		m.statusMsg = ""
 		tasks := m.selectedProjectTasks()
+		// The dependency-graph tree (if the selection's graph has more than
+		// one task) sits above the header and eats into the same row budget
+		// the table's data rows use — width is irrelevant to how many lines
+		// it produces, so 0 is fine here; see taskDepTree and
+		// taskTreeMaxLines for why this must match renderTasks' call.
+		treeRows := len(taskDepTree(tasks, m.taskSel, 0, taskTreeMaxLines(l.tasksH)))
 		// The pane may be scrolled (centered on the selection), so map the
 		// clicked visible row through the same window the renderer used. y is
 		// relative to the center column's top, so shift it down by
 		// projectsEnd to make it relative to the tasks pane's own top.
-		start, end := centerWindow(len(tasks), taskIndex(tasks, m.taskSel), listMaxRows(l.tasksH))
-		if rel := taskRowAtY(y-projectsEnd, 0, end-start); rel >= 0 {
+		start, end := centerWindow(len(tasks), taskIndex(tasks, m.taskSel), listMaxRows(l.tasksH)-treeRows)
+		if rel := taskRowAtY(y-projectsEnd, 0, end-start, treeRows); rel >= 0 {
 			m.taskSel = tasks[start+rel].Path
 		}
 		return m, nil
@@ -720,12 +727,13 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 }
 
 // taskRowAtY maps an absolute y row to a task index using the tasks pane's
-// table layout: top border (1) + column header (1) + one row per task.
-// Returns -1 for clicks on the chrome (incl. the header row) or beyond the
-// last task.
-func taskRowAtY(y, paneTop, count int) int {
+// table layout: top border (1) + the dependency-graph tree if one is
+// showing (treeRows, see taskDepTree) + column header (1) + one row per
+// task. Returns -1 for clicks on the chrome (incl. the tree and header
+// rows) or beyond the last task.
+func taskRowAtY(y, paneTop, count, treeRows int) int {
 	const chromeRows = 2 // top border + column header
-	rel := y - paneTop - chromeRows
+	rel := y - paneTop - chromeRows - treeRows
 	if rel < 0 || rel >= count {
 		return -1
 	}
@@ -992,6 +1000,13 @@ var (
 				Bold(true).
 				Foreground(lipgloss.Color("212")).
 				Background(lipgloss.Color("236"))
+	// taskRowRelatedStyle marks a Tasks-pane row connected to the selected
+	// task by a depends_on edge (either direction) — see relatedTaskNames.
+	// Blue "110", the same hue as paneTitleStyle, reads as "structurally
+	// related" rather than an alert or the selection itself, so it doesn't
+	// collide with the selection-pink or any status colour.
+	taskRowRelatedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("110"))
 	// sessionRowInteractiveStyle marks a row whose agent kind waits for a
 	// human (project / wolf). Yellow is chosen so it doesn't collide with
 	// the selection-pink or any of the status colours, and so it reads as
@@ -1961,7 +1976,9 @@ func (m model) renderFocusedPane(width, height int) string {
 // renderTasks draws the per-project task list pane as a table: one header
 // row plus one row per task with columns name | model | mcps | rules |
 // status. The list is bound to whichever project projSel currently points
-// at; switching project swaps the content.
+// at; switching project swaps the content. When the selected task's
+// dependency graph has more than one member, a tree of that graph (see
+// taskDepTree) is drawn above the header.
 //
 // The row matching taskSel gets the highlighted treatment (same pink accent
 // used by the session row selection) so the user can see which task is
@@ -1990,80 +2007,337 @@ func (m model) renderTasks(width, height int) string {
 		return style.Render(clampLines(b.String(), innerHeight))
 	}
 
+	// When the selected task's dependency graph has more than one task in
+	// it, draw that graph as a tree right above the table (see taskDepTree)
+	// so its shape is explicit rather than left to the deps/age columns and
+	// row highlighting alone. taskTreeMaxLines caps it from the same pane
+	// height handleCenterClick uses, so the two stay in lockstep about how
+	// many rows the tree consumed — see taskRowAtY.
+	treeLines := taskDepTree(tasks, m.taskSel, innerWidth, taskTreeMaxLines(height))
+	for _, l := range treeLines {
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+
 	cols := taskColumnWidths(innerWidth)
 	b.WriteString(renderTaskHeader(cols))
 
-	// 1 chrome row above (the column header) which we just wrote — so task
-	// data rows fit in innerHeight-1. Scroll the window so the selected row
+	// Related-by-depends_on names for whichever task is selected, so rows
+	// tied to it by an edge (either direction) get the dimmer "related"
+	// treatment below — see relatedTaskNames.
+	related := relatedTaskNames(tasks, m.taskSel)
+	statusByName := taskStatusByName(tasks)
+
+	// 1 chrome row above (the column header) which we just wrote, plus
+	// whatever the tree above it used — so task data rows fit in
+	// innerHeight-1-len(treeLines). Scroll the window so the selected row
 	// stays centered when the list outgrows the pane.
-	maxRows := innerHeight - 1
+	maxRows := innerHeight - 1 - len(treeLines)
 	if maxRows < 0 {
 		maxRows = 0
 	}
 	start, end := centerWindow(len(tasks), taskIndex(tasks, m.taskSel), maxRows)
 	for _, t := range tasks[start:end] {
 		b.WriteString("\n")
-		b.WriteString(renderTaskRow(t, cols, t.Path == m.taskSel))
+		state := taskRowPlain
+		switch {
+		case t.Path == m.taskSel:
+			state = taskRowSelected
+		case related[t.Name]:
+			state = taskRowRelated
+		}
+		b.WriteString(renderTaskRow(t, cols, state, pendingDeps(t, statusByName)))
 	}
 	return style.Render(clampLines(b.String(), innerHeight))
+}
+
+// relatedTaskNames returns the set of task names connected to the task at
+// selPath by a depends_on edge in either direction — its own dependencies,
+// plus every task that depends on it — so renderTasks can highlight the
+// whole neighborhood of whichever task is selected. Returns nil if selPath
+// doesn't match a task in tasks or that task has no edges at all, so the
+// common case (nothing selected, or a leaf task with no deps or dependents)
+// allocates nothing.
+func relatedTaskNames(tasks []TaskView, selPath string) map[string]bool {
+	var sel *TaskView
+	for i := range tasks {
+		if tasks[i].Path == selPath {
+			sel = &tasks[i]
+			break
+		}
+	}
+	if sel == nil {
+		return nil
+	}
+	var related map[string]bool
+	for _, dep := range sel.DependsOn {
+		if related == nil {
+			related = map[string]bool{}
+		}
+		related[dep] = true
+	}
+	for _, t := range tasks {
+		for _, dep := range t.DependsOn {
+			if dep == sel.Name {
+				if related == nil {
+					related = map[string]bool{}
+				}
+				related[t.Name] = true
+				break
+			}
+		}
+	}
+	return related
+}
+
+// taskStatusByName indexes tasks by name for pendingDeps' dependency-status
+// lookups. Task names are unique within a project (taskgraph enforces it),
+// so a plain map suffices.
+func taskStatusByName(tasks []TaskView) map[string]task.Status {
+	m := make(map[string]task.Status, len(tasks))
+	for _, t := range tasks {
+		m[t.Name] = t.Status
+	}
+	return m
+}
+
+// pendingDeps counts how many of t's depends_on names refer to a task that
+// hasn't reached status:committed yet — i.e. how many of its dependencies
+// are still actually blocking it. A dependency name absent from
+// statusByName (already archived, or a graph inconsistency) counts as
+// resolved: this column is about live blocking, not graph bookkeeping.
+func pendingDeps(t TaskView, statusByName map[string]task.Status) int {
+	n := 0
+	for _, dep := range t.DependsOn {
+		if s, ok := statusByName[dep]; ok && s != task.StatusCommitted {
+			n++
+		}
+	}
+	return n
+}
+
+// taskTreeHardCap bounds the dependency-graph tree's height even in a very
+// tall pane — past a handful of rows the tree stops helping and starts
+// pushing the table itself out of view, so this is the ceiling regardless
+// of how much room taskTreeMaxLines would otherwise grant it.
+const taskTreeHardCap = 6
+
+// taskTreeMaxLines caps how many lines the dependency-graph tree above the
+// Tasks table may use for a pane of paneHeight total rows: the same chrome
+// budget (border + column header) as the table itself, minus room for at
+// least one visible data row, then capped at taskTreeHardCap. renderTasks
+// and handleCenterClick both call this with the same l.tasksH so the
+// rendered tree and the mouse click-router's row math never disagree about
+// how many lines the tree consumed — see taskRowAtY.
+func taskTreeMaxLines(paneHeight int) int {
+	budget := paneHeight - listPaneChromeRows - 1
+	if budget <= 0 {
+		return 0
+	}
+	if budget > taskTreeHardCap {
+		return taskTreeHardCap
+	}
+	return budget
+}
+
+// taskDepTree renders the dependency graph containing the task at selPath
+// as a tree, one line per task, when that graph — its dependencies and
+// dependents, transitively — has more than one member; an isolated task
+// with no edges at all (or selPath matching nothing) renders nothing. The
+// graph's roots (members with no dependency inside the graph) start each
+// branch; each branch descends through "depends on me" edges the way a
+// build order would unfold. The selected task's own line renders bold so
+// it's easy to spot inside its own graph.
+//
+// Line count, not just content, is capped at maxLines — a trailing dim
+// "… N more" line replaces whatever didn't fit — because renderTasks and
+// handleCenterClick both rely on len() of the result to keep the table's
+// row math and the tree in lockstep (see taskTreeMaxLines); width only
+// truncates each line's text, so it never affects that count.
+func taskDepTree(tasks []TaskView, selPath string, width, maxLines int) []string {
+	if maxLines <= 0 {
+		return nil
+	}
+	var sel *TaskView
+	for i := range tasks {
+		if tasks[i].Path == selPath {
+			sel = &tasks[i]
+			break
+		}
+	}
+	if sel == nil {
+		return nil
+	}
+
+	order := make(map[string]int, len(tasks))
+	statusOf := make(map[string]task.Status, len(tasks))
+	depsOf := make(map[string][]string, len(tasks))
+	dependentsOf := make(map[string][]string, len(tasks))
+	for i, t := range tasks {
+		order[t.Name] = i
+		statusOf[t.Name] = t.Status
+		depsOf[t.Name] = t.DependsOn
+		for _, dep := range t.DependsOn {
+			dependentsOf[dep] = append(dependentsOf[dep], t.Name)
+		}
+	}
+
+	// BFS the undirected union of edges to find sel's connected component —
+	// everything reachable from it by a depends_on edge in either direction.
+	component := map[string]bool{sel.Name: true}
+	queue := []string{sel.Name}
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		for _, n := range depsOf[name] {
+			if !component[n] {
+				component[n] = true
+				queue = append(queue, n)
+			}
+		}
+		for _, n := range dependentsOf[name] {
+			if !component[n] {
+				component[n] = true
+				queue = append(queue, n)
+			}
+		}
+	}
+	if len(component) <= 1 {
+		return nil
+	}
+
+	var roots []string
+	for name := range component {
+		root := true
+		for _, dep := range depsOf[name] {
+			if component[dep] {
+				root = false
+				break
+			}
+		}
+		if root {
+			roots = append(roots, name)
+		}
+	}
+	sort.Slice(roots, func(i, j int) bool { return order[roots[i]] < order[roots[j]] })
+
+	// A member can have more than one dependency inside the graph, so a DFS
+	// from every root can legitimately render it more than once (once per
+	// parent branch) — the same convention dependency-tree tools like
+	// `npm ls`/`mvn dependency:tree` use. safetyCap just guards against
+	// unbounded output on a pathological graph; it is not the display cap.
+	safetyCap := len(component) * 4
+	var lines []string
+	var walk func(name, prefix string, isLast bool, path map[string]bool)
+	walk = func(name, prefix string, isLast bool, path map[string]bool) {
+		if len(lines) >= safetyCap || path[name] {
+			return
+		}
+		branch, childPrefix := "├── ", prefix+"│   "
+		if isLast {
+			branch, childPrefix = "└── ", prefix+"    "
+		}
+		style := taskStatusStyle(statusOf[name])
+		if name == sel.Name {
+			style = style.Bold(true)
+		}
+		label := fmt.Sprintf("%s%s%s %s", prefix, branch, taskStatusGlyph(statusOf[name]), name)
+		lines = append(lines, style.Render(truncate(label, width)))
+
+		path[name] = true
+		defer delete(path, name)
+
+		children := append([]string(nil), dependentsOf[name]...)
+		sort.Slice(children, func(i, j int) bool { return order[children[i]] < order[children[j]] })
+		var visible []string
+		for _, c := range children {
+			if component[c] {
+				visible = append(visible, c)
+			}
+		}
+		for i, child := range visible {
+			if len(lines) >= safetyCap {
+				return
+			}
+			walk(child, childPrefix, i == len(visible)-1, path)
+		}
+	}
+	for i, root := range roots {
+		if len(lines) >= safetyCap {
+			break
+		}
+		walk(root, "", i == len(roots)-1, map[string]bool{})
+	}
+
+	if len(lines) <= maxLines {
+		return lines
+	}
+	shown := lines[:maxLines-1]
+	shown = append(shown, dimStyle.Render(truncate(fmt.Sprintf("… %d more", len(lines)-(maxLines-1)), width)))
+	return shown
 }
 
 // taskColumns holds the per-column character widths the tasks table renders
 // with. Computed once per render from the pane's inner width so the header
 // and every data row share the same alignment.
 type taskColumns struct {
-	name, model, mcps, rules, status int
+	name, model, mcps, rules, deps, age, status int
 }
 
-// Column gap is one space; five columns means four gaps.
+// Column gap is one space; seven columns means six gaps.
 const (
 	taskColGap           = 1
-	taskColGaps          = 4
+	taskColGaps          = 6
 	taskColModelDefault  = 10
 	taskColMCPsDefault   = 18
 	taskColRulesDefault  = 6
+	taskColDepsDefault   = 6
+	taskColAgeDefault    = 5
 	taskColStatusDefault = 10
 	taskColMinNameWidth  = 4
-	taskColMinTotalWidth = taskColMinNameWidth + taskColModelDefault + taskColMCPsDefault + taskColRulesDefault + taskColStatusDefault + taskColGaps*taskColGap
+	taskColMinTotalWidth = taskColMinNameWidth + taskColModelDefault + taskColMCPsDefault + taskColRulesDefault + taskColDepsDefault + taskColAgeDefault + taskColStatusDefault + taskColGaps*taskColGap
 )
 
-// taskColumnWidths sizes the five columns to fill innerWidth. The model,
-// mcps, rules and status columns get fixed defaults; the name column takes
-// whatever's left. When the pane is too narrow to honour the defaults, the
-// model/mcps columns shrink (in that order) before name drops below its
-// minimum. mcps and rules can both drop to 0 — they're informational, so
-// truncating them to nothing is better than crowding name and status.
+// taskColumnWidths sizes the seven columns to fill innerWidth. The model,
+// mcps, rules, deps, age and status columns get fixed defaults; the name
+// column takes whatever's left. When the pane is too narrow to honour the
+// defaults, columns shrink in this order — mcps (verbose) → deps → rules →
+// age → model — before name drops below its minimum. mcps, rules, deps and
+// age can all drop to 0 — they're informational, so truncating them to
+// nothing is better than crowding name and status.
 func taskColumnWidths(innerWidth int) taskColumns {
 	c := taskColumns{
 		name:   0,
 		model:  taskColModelDefault,
 		mcps:   taskColMCPsDefault,
 		rules:  taskColRulesDefault,
+		deps:   taskColDepsDefault,
+		age:    taskColAgeDefault,
 		status: taskColStatusDefault,
 	}
 	required := func() int {
 		gaps := 0
-		if c.model > 0 {
-			gaps++
+		for _, n := range []int{c.model, c.mcps, c.rules, c.deps, c.age, c.status} {
+			if n > 0 {
+				gaps++
+			}
 		}
-		if c.mcps > 0 {
-			gaps++
-		}
-		if c.rules > 0 {
-			gaps++
-		}
-		if c.status > 0 {
-			gaps++
-		}
-		return c.model + c.mcps + c.rules + c.status + gaps*taskColGap
+		return c.model + c.mcps + c.rules + c.deps + c.age + c.status + gaps*taskColGap
 	}
 	// Shrink the optional informational columns when there isn't enough
-	// room. Order: mcps (verbose) → rules (small) → model (small).
+	// room. Order: mcps (verbose) → deps (verbose) → rules (small) → age
+	// (small) → model (small).
 	for innerWidth-required() < taskColMinNameWidth && c.mcps > 0 {
 		c.mcps--
 	}
+	for innerWidth-required() < taskColMinNameWidth && c.deps > 0 {
+		c.deps--
+	}
 	for innerWidth-required() < taskColMinNameWidth && c.rules > 0 {
 		c.rules--
+	}
+	for innerWidth-required() < taskColMinNameWidth && c.age > 0 {
+		c.age--
 	}
 	for innerWidth-required() < taskColMinNameWidth && c.model > 0 {
 		c.model--
@@ -2085,6 +2359,8 @@ func renderTaskHeader(c taskColumns) string {
 		padCell("model", c.model),
 		padCell("mcps", c.mcps),
 		padCell("rules", c.rules),
+		padCell("deps", c.deps),
+		padCell("age", c.age),
 		padCell("status", c.status),
 	}
 	return dimStyle.Render(strings.Join(nonEmpty(cells), strings.Repeat(" ", taskColGap)))
@@ -2105,16 +2381,36 @@ func (m model) selectedProjectTasks() []TaskView {
 	return nil
 }
 
+// taskRowState is the visual treatment renderTaskRow gives a row: the plain
+// default (with just the status cell coloured), the bold/background "this
+// is the selected row" treatment, or the dimmer "related to the selected
+// row by a depends_on edge" treatment — one of sel's own dependencies, or a
+// task that depends on sel — that lets the user see a task's dependency
+// neighborhood at a glance by moving the selection onto it, without needing
+// a dedicated graph column (see relatedTaskNames).
+type taskRowState int
+
+const (
+	taskRowPlain taskRowState = iota
+	taskRowSelected
+	taskRowRelated
+)
+
 // renderTaskRow lays one task out as a row in the table: name | model |
-// mcps | rules | status. Each cell is padded to its column width so the
-// columns line up; columns sized to 0 by taskColumnWidths drop out entirely.
-// The status column is the only one that carries colour — same palette as
-// the project status indicator so the eye learns one mapping.
+// mcps | rules | deps | age | status. Each cell is padded to its column
+// width so the columns line up; columns sized to 0 by taskColumnWidths drop
+// out entirely. pending is the row's already-computed pendingDeps count —
+// how many of its dependencies aren't committed yet — rendered in the deps
+// cell instead of the dependency names themselves, which don't fit a
+// narrow column once a task has more than one or two.
 //
-// When selected, every cell is rendered with the accent background/foreground
-// used elsewhere for "active selection" so the user can see at a glance
-// which task is currently selected.
-func renderTaskRow(t TaskView, c taskColumns, selected bool) string {
+// In the plain state the status column is the only one that carries
+// colour, same palette as the project status indicator so the eye learns
+// one mapping. The selected and related states instead recolour the whole
+// row uniformly (selected: the same accent used elsewhere for "active
+// selection"; related: a dimmer, distinct hue) so the highlight reads at a
+// glance without competing with the status colouring.
+func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) string {
 	model := t.Model
 	if model == "" {
 		// Defensive: TaskView already mirrors task.Load()'s backfill, but
@@ -2130,6 +2426,14 @@ func renderTaskRow(t TaskView, c taskColumns, selected bool) string {
 	if n := len(t.Policies); n > 0 {
 		rules = strconv.Itoa(n)
 	}
+	deps := "-"
+	if len(t.DependsOn) > 0 {
+		deps = strconv.Itoa(pending)
+	}
+	age := "-"
+	if !t.CreatedAt.IsZero() {
+		age = formatAge(time.Since(t.CreatedAt))
+	}
 	status := string(t.Status)
 
 	cells := []string{
@@ -2137,17 +2441,22 @@ func renderTaskRow(t TaskView, c taskColumns, selected bool) string {
 		padCell(truncate(model, c.model), c.model),
 		padCell(truncate(mcps, c.mcps), c.mcps),
 		padCell(truncate(rules, c.rules), c.rules),
+		padCell(truncate(deps, c.deps), c.deps),
+		padCell(truncate(age, c.age), c.age),
 		padCell(truncate(status, c.status), c.status),
 	}
 	gap := strings.Repeat(" ", taskColGap)
 	plain := strings.Join(nonEmpty(cells), gap)
-	if selected {
+	switch state {
+	case taskRowSelected:
 		return sessionRowSelectedStyle.Render(padToWidth(plain, c.totalWidth()))
+	case taskRowRelated:
+		return taskRowRelatedStyle.Render(padToWidth(plain, c.totalWidth()))
 	}
 	// Re-emit non-status cells as plain and recolour just the status cell so
 	// the table tints stay subtle.
 	if c.status > 0 {
-		nonStatus := nonEmpty(cells[:4])
+		nonStatus := nonEmpty(cells[:6])
 		joined := strings.Join(nonStatus, gap)
 		statusCell := taskStatusStyle(t.Status).Render(truncate(status, c.status))
 		statusCell = padCell(statusCell, c.status)
@@ -2159,12 +2468,36 @@ func renderTaskRow(t TaskView, c taskColumns, selected bool) string {
 	return plain
 }
 
+// formatAge renders d as a compact, single-unit-pair age string in the
+// style of kubectl's AGE column (e.g. "45s", "12m", "3h", "5d", "2y") so it
+// fits the tasks table's narrow age column regardless of how old the task
+// is. Negative durations (a clock skew edge case) render as "0s".
+func formatAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		days := int(d.Hours() / 24)
+		if days < 365 {
+			return fmt.Sprintf("%dd", days)
+		}
+		return fmt.Sprintf("%dy", days/365)
+	}
+}
+
 // totalWidth is the rendered width of a row including gaps. Used by the
 // selected-row highlight so the accent background fills the full column.
 func (c taskColumns) totalWidth() int {
 	w := 0
 	gaps := 0
-	for _, n := range []int{c.name, c.model, c.mcps, c.rules, c.status} {
+	for _, n := range []int{c.name, c.model, c.mcps, c.rules, c.deps, c.age, c.status} {
 		if n > 0 {
 			w += n
 			gaps++
