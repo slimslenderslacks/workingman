@@ -168,6 +168,18 @@ sibling tasks. Example:
     - github
     - web-search
 
+IMPORTANT — Logseq. If the project description, an intake request, or a seed
+mentions Logseq at all (the user's notes/graph, a journal page, a block, any
+"write this up in logseq" style ask), every task that touches it MUST include
+`logseq` in its `static_mcps`. The sandbox has no other way to reach the
+graph: without that entry the task agent cannot read or write Logseq and the
+task will fail or silently do nothing. When in doubt — the mention is there
+but you are unsure which tasks need it — attach it to the tasks that plausibly
+touch notes rather than leaving it off. Example:
+
+  static_mcps:
+    - logseq
+
 A task may also optionally include `policies:` — a YAML list of sandbox
 policy rules applied with `sbx policy ...` immediately after the task's
 sandbox is created and before any tool runs inside it. Each rule has three
