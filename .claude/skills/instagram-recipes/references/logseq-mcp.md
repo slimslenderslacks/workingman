@@ -67,6 +67,11 @@ The rest (`property-type`, `property-cardinality`, `property-classes`,
   dedupes before writing.
 - **`edit` needs a real uuid.** Temp ids only resolve within the call that
   created them.
+- **`page-id` takes a page uuid, and a block uuid slips through.** `getPage`
+  returns `entity.uuid` (the page) alongside a `blocks` list whose uuids look
+  the same. Passing a block uuid as `page-id` is accepted by validation and
+  the dry run still reports the counts you expected, so this one is silent —
+  read the value out of `entity`, not out of `blocks`.
 
 ### Reading block order
 

@@ -119,12 +119,12 @@ further or the page demands a login:
 - **On the host:** the `claude-in-chrome` skill, which drives the user's own
   logged-in Chrome. Invoke that skill before using any `mcp__claude-in-chrome__*`
   tool. If the user has declined the extension, don't re-ask — treat it as
-  unavailable for the session and fall through to Rung 4.
+  unavailable for the session and carry on down the ladder.
 
 Don't log in, don't dismiss consent walls by clicking through anything that
 looks like an account action, and don't try to defeat a login requirement. If
-the page demands auth and no logged-in browser is available, that URL is a
-Rung 4 miss.
+the page demands auth and no logged-in browser is available, move on to
+Rung 3 and Rung 4 — a narrated reel is still fully recoverable from its audio.
 
 ### Rung 3 — Follow an off-platform recipe link
 
@@ -137,23 +137,70 @@ substack" without linking it (`WebSearch("<handle> substack <dish name>")`).
 
 **Expect a paywall.** "Recipe on my substack" is usually a conversion funnel,
 and the post will show an intro plus the first ingredient before cutting off.
-A truncated post is a Rung 4 miss — record the URL in the report so the user
-can decide whether to subscribe, and never reconstruct the rest from a generic
-version of the dish.
+Record the URL either way, so the user can decide whether to subscribe. A
+truncated post is not the end of the line, though: try Rung 4 before writing
+the reel off, since the narration often gives the method the paywall is
+charging for. Never reconstruct the rest from a generic version of the dish.
 
-### Rung 4 — Give up honestly
+### Rung 4 — Transcribe the voiceover
+
+Plenty of cooking reels carry the whole method in narration while the caption
+says nothing. This is very much reachable, and it is often the rung that saves
+a post the earlier rungs wrote off.
+
+Nothing needs to be installed permanently. Pull the audio with a standalone
+`yt-dlp` in the scratchpad, then transcribe locally:
+
+```bash
+cd "$SCRATCH"
+curl -sL -o yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
+chmod +x yt-dlp
+
+# cheap first: Instagram occasionally carries auto-captions
+./yt-dlp --list-subs "<url>"
+
+# otherwise take the audio
+./yt-dlp -f bestaudio/best -o 'clip.%(ext)s' "<url>"
+
+# nix gives ffmpeg + whisper.cpp ephemerally, no profile change
+nix shell nixpkgs#ffmpeg --command \
+  ffmpeg -y -loglevel error -i clip.m4a -ar 16000 -ac 1 -c:a pcm_s16le clip.wav
+curl -sL -o ggml-small.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+nix shell nixpkgs#whisper-cpp --command whisper-cli -m ggml-small.en.bin -f clip.wav -nt
+```
+
+Notes that matter:
+
+- `whisper-cli` needs 16 kHz mono WAV — it will not take the `.m4a` directly.
+- `small.en` (465 MB) over `base.en`: ingredient names and quantities are
+  exactly what a smaller model garbles. A 90-second reel transcribes in
+  seconds either way.
+- `-nt` drops timestamps, which is what you want for prose.
+- If `nix` isn't on the machine, ask before `brew install`-ing anything —
+  that's a lasting change to the user's system, unlike the above.
+- Everything (binary, audio, model) lives in the scratchpad. Don't put any of
+  it in the repo.
+
+A voiceover is speech, so expect no quantities at all — narration runs to
+"a ton of arugula" and "cook until soft". Write it down that way. The texture
+and timing cues the cook gives out loud (`until it's more porridge than soup`)
+are the real content; capture those faithfully and mark every amount as not
+given.
+
+Record in **Notes** that the method came from the voiceover rather than any
+written source, so the user knows why the quantities are missing.
+
+### Rung 5 — Give up honestly
 
 If no rung produced a recipe, **do not write a page**. Collect the misses and
-report them at the end with the reason (`comments needed a browser`,
-`recipe is only spoken in the video`, `post unavailable`). Offer to retry the
-browser rung. Never substitute a generic internet recipe for the real one —
-the user wants *that creator's* version.
+report them at the end with the reason (`recipe is behind a substack paywall`,
+`author never posted it`, `post unavailable`, `silent reel, no narration`).
+Never substitute a generic internet recipe for the real one — the user wants
+*that creator's* version.
 
-### Transcribing from the video
-
-Out of scope. If the recipe exists only as narration or on-screen text in the
-video, say so and treat it as a Rung 4 miss rather than guessing from the
-caption's adjectives.
+If the method exists only as on-screen text rather than speech, Rung 4 won't
+reach it; say so plainly rather than guessing from the caption's adjectives.
 
 ---
 
@@ -310,6 +357,11 @@ Rules that bite:
 - **`add` + new page:** give it a temporary string `id` (`temp-<slug>`) and
   reference that same string from each block's `page-id`.
 - **`edit`:** `id` must be a real block uuid from `getPage`. A temp id won't do.
+- **`page-id` must be a PAGE uuid, not a block uuid.** When appending to an
+  existing page, take it from `getPage`'s `entity.uuid` — *not* from one of the
+  blocks in the same response, which sit right next to it and look identical.
+  **The dry run does not catch this**: a block uuid passes validation and
+  reports the expected counts. Read the id out of `entity`, deliberately.
 - **Block order is operation order.** Emit the blocks of a page in the order you
   want them read.
 - **Unknown keys are rejected**, with a message like
