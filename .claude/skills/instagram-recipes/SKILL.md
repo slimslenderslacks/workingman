@@ -1,14 +1,20 @@
 ---
 name: instagram-recipes
-description: Extract a recipe from one or more Instagram reels/posts and file each as its own Logseq page, then link it from the "Instagram Recipe Intake" index page (newest first). Pulls the title, a 2-3 sentence description, ingredients, numbered steps, and the source URL from the caption and, when the caption is thin, from the comments. Use when the user shares instagram.com/reel/... or instagram.com/p/... links and wants them saved as recipes, or says "save this recipe", "add these reels to logseq", or runs /instagram-recipes.
+description: Extract a recipe from one or more short cooking videos — Instagram reels/posts, Facebook videos, fb.watch links — and file each as its own Logseq page, then link it from the "Instagram Recipe Intake" index page (newest first). Pulls the title, a 2-3 sentence description, ingredients, numbered steps, and the source URL from the caption, the comments, or the voiceover audio. Use when the user shares instagram.com/reel/..., instagram.com/p/..., fb.watch/... or facebook.com video links and wants them saved as recipes, or says "save this recipe", "add these reels to logseq", or runs /instagram-recipes.
 ---
 
 # Instagram Recipe Intake
 
-Turn Instagram cooking reels into clean, cookable Logseq pages.
+Turn short cooking videos into clean, cookable Logseq pages.
 
-One reel in, one Logseq page out, plus a dated reference at the top of the
+One video in, one Logseq page out, plus a dated reference at the top of the
 **Instagram Recipe Intake** index page.
+
+Instagram is the common case and names the skill, but the whole ladder below
+works unchanged on **Facebook** (`fb.watch/...`, `facebook.com/<id>/videos/...`)
+— same Meta backend, same `yt-dlp` support. Everything lands in the same
+intake queue regardless of platform; note the platform on the page when it
+isn't Instagram.
 
 **Hard rule: never invent an ingredient, a quantity, or a step.** A recipe page
 that looks complete but was half-guessed is worse than one that admits a gap.
@@ -17,8 +23,9 @@ See [Gaps](#gaps-and-honesty).
 
 ## When to Use
 
-- User pastes one or more `instagram.com/reel/...` or `instagram.com/p/...` links
-  and wants them saved, filed, or "added to logseq"
+- User pastes one or more `instagram.com/reel/...`, `instagram.com/p/...`,
+  `fb.watch/...` or `facebook.com/<id>/videos/...` links and wants them saved,
+  filed, or "added to logseq"
 - User runs `/instagram-recipes`
 - User asks what's in their recipe intake queue
 
@@ -92,6 +99,15 @@ move to Rung 2.
 Also treat as incomplete: "recipe in comments", "full recipe on my substack",
 "link in bio", a caption that's pure vibes with no quantities.
 
+**On Facebook, skip WebFetch and use `yt-dlp --dump-json`** — one call returns
+`uploader`, `title`, `description`, `duration`, `webpage_url`, and the
+`automatic_captions` languages. It is faster and more literal than WebFetch,
+and it resolves an `fb.watch` shortlink to its canonical
+`facebook.com/<page-id>/videos/<video-id>/` form, which is what belongs on the
+page — shortlinks are shares and shouldn't be persisted. Facebook descriptions
+are usually much thinner than Instagram captions (often just a filename), so
+expect to continue down the ladder.
+
 ### Rung 2 — Read the comments
 
 Creators very often drop the full recipe as their own first or pinned comment.
@@ -156,8 +172,9 @@ cd "$SCRATCH"
 curl -sL -o yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
 chmod +x yt-dlp
 
-# cheap first: Instagram occasionally carries auto-captions
+# cheap first: Facebook usually has auto-captions, Instagram usually doesn't
 ./yt-dlp --list-subs "<url>"
+./yt-dlp --write-auto-subs --sub-langs en_US --skip-download -o clip "<url>"
 
 # otherwise take the audio
 ./yt-dlp -f bestaudio/best -o 'clip.%(ext)s' "<url>"
@@ -172,6 +189,15 @@ nix shell nixpkgs#whisper-cpp --command whisper-cli -m ggml-small.en.bin -f clip
 
 Notes that matter:
 
+- **Platform auto-captions are a starting point, not the answer.** Take them
+  when they exist (they're free), but they mangle exactly the words a recipe
+  turns on. A real example: Facebook's captions gave `Ridiculio` and
+  `flirtacell`, which Whisper resolved to **radicchio** and **fleur de sel**.
+  Run Whisper too and prefer it wherever the two disagree on an ingredient.
+- When a single word still looks wrong, re-run with beam search
+  (`-bo 5 -bs 5`) and see whether the two decodings agree. Agreement is worth
+  recording; persistent disagreement belongs in **Notes** as an uncertainty,
+  not silently resolved in your favour.
 - `whisper-cli` needs 16 kHz mono WAV — it will not take the `.m4a` directly.
 - `small.en` (465 MB) over `base.en`: ingredient names and quantities are
   exactly what a smaller model garbles. A 90-second reel transcribes in
@@ -214,7 +240,7 @@ From the harvested text, produce five things:
 | **Description** | 2-3 sentences, your own words. What the dish is, what makes it worth cooking, and any defining technique or timing. No hashtags, no `@` handles, no "this is a good one!". |
 | **Ingredients** | One per line, quantity first, in the order the recipe uses them. Keep the creator's units. Preserve sub-groupings (`for the sauce:` / `for the breadcrumbs:`) as their own heading lines. Drop brand spam where it's incidental (`Farm Boy™ Tomato Paste` → `tomato paste`) but keep a brand when it's genuinely the point (`gochujang`, `Calabrian chili paste`). |
 | **Instructions** | Simple numbered steps. Split run-on caption paragraphs into one action per step. Keep temperatures, times, and visual cues (`until fork tender`, `9-10 minutes`) — those are the recipe. Aim for 4-12 steps; if you're at 20, you're over-splitting. |
-| **Source URL** | The **canonical** reel URL: `https://www.instagram.com/reel/<shortcode>/`. Strip `?utm_source=`, `?igsh=`, and especially `&stkn=` — share tokens are scoped and expire, and they're not something to persist into a note. |
+| **Source URL** | The **canonical** URL. Instagram: `https://www.instagram.com/reel/<shortcode>/` — strip `?utm_source=`, `?igsh=`, and especially `&stkn=`, since share tokens are scoped and expire. Facebook: the `facebook.com/<page-id>/videos/<video-id>/` form that `yt-dlp` reports as `webpage_url`, never the `fb.watch` shortlink. |
 
 ### Dedupe before you write
 
@@ -237,6 +263,7 @@ Blocks, in order:
 ```
 1.  <the 2-3 sentence description>
 2.  **Source:** [@<handle>](https://www.instagram.com/<handle>/) — [reel](<canonical url>)
+    (Facebook: `**Source:** [<Page name> on Facebook](<canonical url>)`)
 3.  **Captured:** [[Oct 1st, 2026]]
 4.  ## Ingredients
 5.  <one block per ingredient>
@@ -289,7 +316,7 @@ Entry block format — one line, one block:
 Create it with an intro block, then the entries newest-first:
 
 ```
-1.  Recipes pulled from Instagram reels, newest first. Each entry links to its own page.
+1.  Recipes pulled from Instagram reels and other short cooking videos, newest first. Each entry links to its own page.
 2.  [[Newest Recipe]] — @handle · [[Oct 1st, 2026]]
 3.  [[Older Recipe]] — @handle · [[Oct 1st, 2026]]
 ```
