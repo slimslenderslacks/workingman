@@ -17,6 +17,27 @@ type Sender interface {
 	Send(title, message string) error
 }
 
+// TopicSender is the richer, topic-aware notification interface. Topic is a
+// free-form tag ("wolf", "workingman", "daemon") that lets a destination
+// route or label the message — a messaging channel maps it to a chat or a
+// "[wolf]" prefix. Senders that do not understand topics (Osascript) simply
+// implement Sender; use the package-level SendTopic helper to call either
+// kind uniformly.
+type TopicSender interface {
+	Sender
+	SendTopic(topic, title, message string) error
+}
+
+// SendTopic delivers a topic-tagged notification through s, using SendTopic
+// when s implements TopicSender and falling back to plain Send (dropping the
+// topic) otherwise. Existing Sender-only implementations keep working.
+func SendTopic(s Sender, topic, title, message string) error {
+	if ts, ok := s.(TopicSender); ok {
+		return ts.SendTopic(topic, title, message)
+	}
+	return s.Send(title, message)
+}
+
 // Osascript displays a macOS notification using the system `osascript`
 // command. AppleScript embeds strings via double-quoted literals; we
 // pre-escape backslashes and quotes to keep titles/messages that contain
@@ -55,6 +76,8 @@ type Noop struct{}
 
 func (Noop) Send(_, _ string) error { return nil }
 
+func (Noop) SendTopic(_, _, _ string) error { return nil }
+
 // Recorder is a test Sender that captures every Send call for later
 // assertion. Safe for concurrent use.
 type Recorder struct {
@@ -62,14 +85,20 @@ type Recorder struct {
 	calls []Call
 }
 
+// Call is one recorded notification. Topic is empty for plain Send calls.
 type Call struct {
 	Title, Message string
+	Topic          string
 }
 
 func (r *Recorder) Send(title, message string) error {
+	return r.SendTopic("", title, message)
+}
+
+func (r *Recorder) SendTopic(topic, title, message string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, Call{Title: title, Message: message})
+	r.calls = append(r.calls, Call{Title: title, Message: message, Topic: topic})
 	return nil
 }
 
