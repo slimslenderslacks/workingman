@@ -13,6 +13,16 @@
 // backend is picked per channel with `options.mode: cloud | bridge` (cloud is
 // the default); see Factory and docs/whatsapp-bridge.md.
 //
+// Channel is the Cloud API backend (Meta Graph API). CloudClient is its
+// outbound half: SendText converts Markdown to WhatsApp markup (FormatMessage),
+// splits long text under 4096 characters (ChunkMessage), retries 429/5xx with
+// bounded backoff, and reports Graph errors as *GraphError. A send outside the
+// 24-hour customer-service window satisfies errors.Is(err,
+// ErrOutsideServiceWindow) so callers can fall back. The access token is
+// redacted from every error and log line. The inbound webhook is separate.
+// It ports hermes-agent's gateway/platforms/whatsapp_cloud.py (send path) and
+// the formatting half of whatsapp_common.py.
+//
 // The one rule that shapes everything here is fail closed: this channel
 // drives an agent that can read orch state, so a zero-value config, an empty
 // allowlist, a missing self id, or an unknown chat type all deny.
