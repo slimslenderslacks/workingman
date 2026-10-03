@@ -44,6 +44,9 @@ func main() {
 	if len(args) > 0 && args[0] == "status" {
 		os.Exit(runStatus(args[1:], os.Stdout, os.Stderr))
 	}
+	if len(args) > 0 && args[0] == "whatsapp" {
+		os.Exit(runWhatsApp(args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	runDaemon(args)
 }
 
