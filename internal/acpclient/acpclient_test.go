@@ -98,13 +98,19 @@ func (a *agentConn) updateText(sessionID, kind, text string) {
 // faithful streaming, framed-by-newline transport without touching the disk.
 func newTestClient(t *testing.T, handler func(a *agentConn)) *Client {
 	t.Helper()
+	return newTestClientOpts(t, Options{}, handler)
+}
+
+// newTestClientOpts is newTestClient with Options.
+func newTestClientOpts(t *testing.T, opts Options, handler func(a *agentConn)) *Client {
+	t.Helper()
 	clientConn, agentSide := net.Pipe()
 	a := &agentConn{t: t, c: agentSide, br: bufio.NewReader(agentSide)}
 	go func() {
 		defer agentSide.Close()
 		handler(a)
 	}()
-	c := newClient(clientConn)
+	c := newClient(clientConn, opts)
 	t.Cleanup(func() { c.Close() })
 	return c
 }

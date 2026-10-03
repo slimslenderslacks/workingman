@@ -397,10 +397,44 @@ a TUI-less setup until the daemon-side attach lands). (b) `acpclient.Connect`
 issues `session/new`, so a TUI that restarts mid-conversation reconnects to the
 same `claude-acp-client` process but starts a fresh ACP session (the replayed
 transcript is only history; the agent's context for new turns is new). Binding
-to the existing session id is the follow-up "tune in" work. (c) The hub fans
+to the existing session id is what `acpchat` (below) does for a *second*
+client; the TUI's own reconnect still re-runs `session/new`. (c) The hub fans
 every frame out to every client, but JSON-RPC ids are per-client, so two
 simultaneous *prompting* clients can see each other's responses; use the
-daemon-side attach primitive, not a second raw client, for that.
+daemon-side attach primitive (`internal/acpchat`, below), not a second raw
+client, for that.
+
+**Tuning in from the daemon (`internal/acpchat`).** `acpchat.Attach(ctx, idOrDir,
+opts)` joins a *running* session's conversation while the TUI stays attached:
+
+- It adopts the existing ACP session id (`acpclient.Client.Adopt`) instead of
+  running `session/new` (a second, empty conversation) or `session/load` (the
+  agent would replay the whole history to every client, duplicating the TUI's
+  scrollback). The id comes from the newest `sessionId` in the session's
+  `stream.log`, else from the first frame on the live socket (`DiscoverTimeout`;
+  `CreateIfMissing` runs the full handshake for a TUI-less daemon). If another
+  client later runs `session/new`, the conversation follows it
+  (`EventSessionChanged`).
+- Its request ids live in a private range (`acpclient.Options.DistinctIDs`), so
+  the hub's response fan-out can't cross-complete the two clients' calls.
+- `Ask(ctx, text, OnProgress(..), FinalSegmentOnly())` sends one prompt and
+  returns the assistant text with reasoning/tool noise stripped; a second
+  concurrent `Ask` gets `ErrBusy`; a cancelled `ctx` sends `session/cancel`.
+- `Events()` is the observe-only stream: assistant text from turns *other*
+  clients started (`Own == false`), closed by an `EventTurnEnd` carrying the full
+  reply — what a channel relays when the human types into the wolf.
+- Agent permission requests go to `Options.OnPermission` (default: reject) and
+  are also surfaced as `EventPermission`.
+- A dropped socket (the hub evicts slow clients) is reconnected on the same
+  session id; `ErrSessionGone` when the session directory is gone, its status is
+  exited/failed, or the socket stays unreachable for `ConnectTimeout`.
+
+Limits: if two clients start turns at the same instant their chunks can't be told
+apart (the hub doesn't echo one client's requests to the other), so the tail of a
+turn that began *before* our `Ask` is attributed correctly but a truly
+simultaneous one is not. Adoption is verified against an in-process fake agent;
+confirm it once against a live `claude-acp-client` (a `session/prompt` to a
+session id this connection never created).
 
 ---
 
