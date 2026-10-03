@@ -32,6 +32,10 @@
 // gateway/platforms/whatsapp_cloud.py (send and webhook paths) and the
 // formatting half of whatsapp_common.py.
 //
+// The setup sub-package backs `orch whatsapp setup|status|test`: field
+// validators, the channels.yaml/secrets-file writer and the Meta console
+// instructions. CloudClient.PhoneNumberInfo is the Graph check they share.
+//
 // The one rule that shapes everything here is fail closed: this channel
 // drives an agent that can read orch state, so a zero-value config, an empty
 // allowlist, a missing self id, or an unknown chat type all deny.

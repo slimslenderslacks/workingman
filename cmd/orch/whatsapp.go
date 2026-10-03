@@ -15,8 +15,15 @@ import (
 
 const whatsappUsage = `usage: orch whatsapp <subcommand>
 
-subcommands:
+subcommands (Cloud API backend):
+  setup   configure the Business Cloud API channel: credentials, owner allowlist, webhook
+  status  show the (masked) config, Graph reachability and the webhook listener
+  test    send a test message and print its id or the error
+
+subcommands (bridge backend):
   pair    link a personal WhatsApp number to the bridge backend by QR code
+
+Run "orch whatsapp <subcommand> -h" for its flags.
 `
 
 // runWhatsApp implements `orch whatsapp ...`. Returns the process exit code.
@@ -28,6 +35,12 @@ func runWhatsApp(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "pair":
 		return runWhatsAppPair(args[1:], stdin, stdout, stderr)
+	case "setup":
+		return runWhatsAppSetup(args[1:], stdin, stdout, stderr)
+	case "status":
+		return runWhatsAppStatus(args[1:], stdout, stderr)
+	case "test":
+		return runWhatsAppTest(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, whatsappUsage)
 		return 0
