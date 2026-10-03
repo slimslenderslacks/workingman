@@ -9,9 +9,10 @@ import (
 	"github.com/slimslenderslacks/work/internal/acpclient"
 )
 
-// acptabs.go holds the ACP-session tab view: a tab per live non-interactive ACP
-// session, each showing the prompts sent to that agent and the assistant output
-// streaming back. The state here is pure (no sockets, no goroutines) so it can
+// acptabs.go holds the ACP-session tab view: a tab per live ACP session, each
+// showing the prompts sent to that agent and the assistant output streaming
+// back. A persistent (conversational) session — the wolf — is also typeable:
+// its tab is marked interactive and carries a draft message line. The state here is pure (no sockets, no goroutines) so it can
 // be unit-tested in isolation; acpwatch.go owns the live wiring that feeds these
 // structures from real session.Store discovery + acpclient connections.
 
@@ -66,6 +67,11 @@ type acpTab struct {
 	// — discovered but not yet dialed, so status/entries carry no real information
 	// yet. upsert (called once the session is actually watched) clears this.
 	placeholder bool
+	// interactive marks a persistent (conversational) session — the wolf — that
+	// accepts typed messages. draft is the message being composed in this tab; it
+	// is per-tab so switching tabs doesn't lose or leak a half-typed message.
+	interactive bool
+	draft       string
 }
 
 // acpTabs is the collection of tabs plus the selected index. The zero value is
@@ -107,6 +113,24 @@ func (a *acpTabs) upsert(id, title string) {
 		return
 	}
 	a.appendTab(acpTab{id: id, title: title, status: acpclient.StateConnecting, curMsg: -1})
+}
+
+// setInteractive marks the tab for id as accepting typed messages (or not).
+func (a *acpTabs) setInteractive(id string, interactive bool) {
+	if i := a.indexOf(id); i >= 0 {
+		a.tabs[i].interactive = interactive
+	}
+}
+
+// selectID moves the selection to the tab with the given id and reports whether
+// it exists. Used to jump straight to a session's tab from the sessions pane.
+func (a *acpTabs) selectID(id string) bool {
+	i := a.indexOf(id)
+	if i < 0 {
+		return false
+	}
+	a.sel = i
+	return true
 }
 
 // upsertPlaceholder adds a placeholder tab for a session discovered in
@@ -611,7 +635,8 @@ func (m model) renderACPView() string {
 	if m.acpToolsExpanded {
 		toolHint = "z: collapse tools"
 	}
-	hint := hintStyle.Render("⌥j/⌥k: switch tab  •  " + toolHint + "  •  esc: back  •  q: quit")
+	hintText := "⌥j/⌥k: switch tab  •  " + toolHint + "  •  esc: back  •  q: quit"
+	hint := hintStyle.Render(hintText)
 
 	if len(m.acp.tabs) == 0 {
 		body := dimStyle.Render("(no active ACP sessions)")
@@ -621,6 +646,19 @@ func (m model) renderACPView() string {
 	bar := lipgloss.NewStyle().MaxWidth(width).Render(renderACPTabBar(m.acp.tabs, m.acp.sel, width))
 
 	t, _ := m.acp.selected()
+	// A conversational tab gets one extra row for its message line (and a hint
+	// that says how to use it); the body shrinks by the same row so the composed
+	// view's height is unchanged.
+	inputRows := 0
+	if t.interactive {
+		inputRows = 1
+		if m.acpComposing {
+			hintText = "enter: send  •  esc: stop typing  •  ctrl+u: clear  •  ⌥j/⌥k: switch tab"
+		} else {
+			hintText = "enter: type a message  •  " + hintText
+		}
+		hint = hintStyle.Render(truncate(hintText, width))
+	}
 	var statusLine string
 	if t.placeholder {
 		statusLine = dimStyle.Render("○ starting…")
@@ -638,7 +676,7 @@ func (m model) renderACPView() string {
 	// see acp-session-screen-rendering-glitch. Reserving this row means the
 	// composed view is always at least one row shorter than m.height, so that
 	// transient overshoot can never reach the real ceiling.
-	bodyOuterH := height - acpChromeRows - 1
+	bodyOuterH := height - acpChromeRows - 1 - inputRows
 	if bodyOuterH < 3 {
 		bodyOuterH = 3
 	}
@@ -660,7 +698,12 @@ func (m model) renderACPView() string {
 		Width(innerW + unfocusedBorder.GetHorizontalPadding()).
 		Height(innerH).MaxWidth(width).Render(bodyContent)
 
-	view := lipgloss.JoinVertical(lipgloss.Left, header, bar, statusLine, box, hint)
+	parts := []string{header, bar, statusLine, box}
+	if t.interactive {
+		parts = append(parts, m.renderACPInputLine(t, width))
+	}
+	parts = append(parts, hint)
+	view := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	// Defensive clamp: whatever the pieces above composed to, never hand the
 	// altscreen more than m.height rows — a single bad line count upstream
 	// should not by itself be able to scroll the terminal.
@@ -668,4 +711,23 @@ func (m model) renderACPView() string {
 		view = strings.Join(lines[:height], "\n")
 	}
 	return view
+}
+
+// renderACPInputLine draws the message line under a conversational tab: the
+// draft with a cursor while composing, a prompt to start otherwise, and any
+// send error from the last attempt. Truncated to width so a long draft can't
+// wrap onto a phantom row (see the altscreen overflow notes in renderACPView);
+// when it overflows, the tail (where the cursor is) is what stays visible.
+func (m model) renderACPInputLine(t *acpTab, width int) string {
+	if m.acpInputErr != "" {
+		return statusErrStyle.Render(truncate(m.acpInputErr, width))
+	}
+	if !m.acpComposing {
+		return dimStyle.Render(truncate("(enter to message this session)", width))
+	}
+	line := "› " + t.draft
+	if r := []rune(line); width > 2 && len(r) > width-1 {
+		line = "…" + string(r[len(r)-(width-2):])
+	}
+	return line + "▏"
 }

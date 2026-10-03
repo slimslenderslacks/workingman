@@ -295,6 +295,20 @@ own session key (`wolfSessionKey`, a `#wolf` suffix) so it can run in tandem
 with whatever else the project's main slot is doing, and it dedups against
 that key rather than the project's.
 
+With an `AcpLauncher` (the production wiring) the wolf is a **persistent ACP
+session** — `acp-wrapper --persistent` in its own `<work-stream>-wolf` sandbox
+— rather than a host tmux window, so the TUI, the daemon and messaging channels
+can share its conversation; `orch --wolf-host` keeps the old host/tmux wolf. See
+`agents.md` §5 for the trade-offs (what the sandboxed wolf can't see) and the
+full lifecycle. The session-end edge in this diagram is therefore defined by the
+wrapper, not by a window closing: the ACP wolf's session ends — firing the
+`onEnd` → `revisitProject` callback — once the project has stayed out of
+`blocked` for the unblock grace (default 2m), after 24h with no ACP traffic, or
+when the agent/wrapper exits. Its first turn finishing (typically by asking the
+user a question) is not an end, and a re-block inside the grace keeps the
+existing wolf rather than ending it. After a daemon restart `reconcileSessions`
+re-adopts a live wolf under the wolf key (not the project's main slot).
+
 `launchWolfAgent` reads back a durable `blocked-session.yaml` record
 (`project.BlockedSessionPath`, `internal/project/blocked_session.go`) if a
 prior wolf invocation left one, and folds its `Summary`/`Attempted` fields

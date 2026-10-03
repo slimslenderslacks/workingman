@@ -329,12 +329,12 @@ func (d *Daemon) shutdown() {
 }
 
 // detachable reports whether a session of this kind should survive an orch
-// shutdown/restart rather than being closed: exactly the ACP-backed,
-// non-interactive kinds (project, planning, task, commit), which run as a
-// standalone acp-wrapper host process the daemon does not need to keep alive
-// to keep running. Interactive kinds (wolf, archive) and the legacy tmux path
-// (no AcpLauncher configured) are unaffected — those sessions are still
-// closed on shutdown as before.
+// shutdown/restart rather than being closed: exactly the ACP-backed kinds
+// (project, planning, task, commit, review, and the wolf unless it runs on the
+// host via WolfOnHost), which run as a standalone acp-wrapper host process the
+// daemon does not need to keep alive to keep running. The archive agent, a
+// --wolf-host wolf and the legacy tmux path (no AcpLauncher configured) are
+// unaffected — those sessions are still closed on shutdown as before.
 func (d *Daemon) detachable(kind agent.Kind) bool {
 	return d.runner != nil && d.runner.UsesACP(kind)
 }

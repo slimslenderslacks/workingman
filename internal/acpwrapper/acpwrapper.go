@@ -27,10 +27,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/policy"
+	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
 )
@@ -95,6 +97,32 @@ type Config struct {
 	// Leave false for interactive/long-lived sessions that should survive
 	// transient TUI disconnects.
 	ExitWhenEmpty bool
+
+	// Persistent makes this a conversational session (the wolf): the opposite
+	// of ExitWhenEmpty's one-shot lifecycle. The wrapper does NOT shut the ACP
+	// client down when the last connected client leaves — the human (TUI) and
+	// other processes (the daemon, a messaging channel) may come and go while
+	// the agent keeps its conversation. The session instead ends when the
+	// agent itself exits, the wrapper is signalled, or one of the opt-in end
+	// conditions below fires. Mutually exclusive with ExitWhenEmpty. Recorded
+	// in session.json so watchers know the first completed turn is not the end.
+	Persistent bool
+
+	// UnblockGrace, in persistent mode with a ProjectPath, ends the session once
+	// the project file has not been `status: blocked` for this long (continuously
+	// — a re-block inside the grace resets the clock). It is how an ACP wolf
+	// "finishes": the wolf resolves the block by editing .project.yaml, then the
+	// wrapper closes the conversation after a short grace that lets the wolf
+	// finish its closing message. Living in the wrapper (not the daemon) means it
+	// still works after a daemon restart, which cannot signal an adopted session.
+	// Zero disables.
+	UnblockGrace time.Duration
+
+	// IdleTimeout, in persistent mode, ends the session after this long with no
+	// ACP traffic in either direction — the backstop for a conversation nobody
+	// finished (or for a wrapper whose project file could not be watched). Zero
+	// disables.
+	IdleTimeout time.Duration
 
 	// TaskPath, when set, is the host path to the task's YAML file. On exit the
 	// wrapper re-reads it to decide whether to keep the sandbox: a task left in
@@ -220,6 +248,7 @@ func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.T
 		ProjectPath:   c.ProjectPath,
 		TaskPath:      c.TaskPath,
 		Kind:          c.Kind,
+		Persistent:    c.Persistent,
 		SigningBroken: c.signingPreflightFailed,
 	}
 }
@@ -322,6 +351,19 @@ func (c *Config) normalize() error {
 	}
 	if c.SessionID == "." || c.SessionID == ".." || strings.ContainsAny(c.SessionID, `/\`) {
 		return fmt.Errorf("acpwrapper: invalid session id %q: must be a single path segment", c.SessionID)
+	}
+
+	if c.Persistent && c.ExitWhenEmpty {
+		return errors.New("acpwrapper: persistent and exit-when-empty are mutually exclusive (a session is either conversational or one-shot)")
+	}
+	if c.UnblockGrace < 0 || c.IdleTimeout < 0 {
+		return errors.New("acpwrapper: unblock grace and idle timeout must not be negative")
+	}
+	if (c.UnblockGrace > 0 || c.IdleTimeout > 0) && !c.Persistent {
+		return errors.New("acpwrapper: unblock grace / idle timeout only apply to a persistent session")
+	}
+	if c.UnblockGrace > 0 && strings.TrimSpace(c.ProjectPath) == "" {
+		return errors.New("acpwrapper: unblock grace needs the project path to watch")
 	}
 
 	if strings.TrimSpace(c.KitPath) == "" {
@@ -748,7 +790,25 @@ func Run(ctx context.Context, c Config) error {
 		ln.Close()
 	}()
 
-	serve(ctx, ln, procStdin, procStdout, logW, c.ExitWhenEmpty)
+	// Persistent sessions end on conditions other than "last client left".
+	// endSession closes the ACP client's stdin — the same EOF the exit-when-empty
+	// path uses — so the agent exits, proc.Wait cancels ctx, and serve unwinds.
+	// The unblock watcher is stopped with ctx; both are idempotent via sync.Once.
+	var endOnce sync.Once
+	endSession := func(reason string) {
+		endOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ending persistent session (%s)\n", c.SessionID, reason)
+			_ = procStdin.Close()
+		})
+	}
+	if c.Persistent && c.UnblockGrace > 0 {
+		go watchUnblocked(ctx, c.ProjectPath, c.UnblockGrace, unblockPollInterval, func() { endSession("project no longer blocked") })
+	}
+	serve(ctx, ln, procStdin, procStdout, logW, serveOptions{
+		exitWhenEmpty: c.ExitWhenEmpty,
+		idleTimeout:   c.IdleTimeout,
+		endIdle:       func() { endSession("idle timeout") },
+	})
 
 	// The agent has exited: tear the sandbox down so per-task sandboxes don't
 	// accumulate across a project's run — unless we're shutting down on a
@@ -778,6 +838,18 @@ func Run(ctx context.Context, c Config) error {
 	return nil
 }
 
+// serveOptions selects how a session ends. The zero value is persistent with no
+// automatic end: the hub just bridges until the agent exits or ctx is cancelled.
+type serveOptions struct {
+	// exitWhenEmpty is orch's one-shot mode: shut the agent down when the last
+	// client leaves (see hub.enableExitWhenEmpty).
+	exitWhenEmpty bool
+	// idleTimeout, when > 0 (persistent sessions), calls endIdle after that long
+	// with no ACP traffic (see hub.watchIdle).
+	idleTimeout time.Duration
+	endIdle     func()
+}
+
 // serve bridges TUI connections on ln to the one sandboxed ACP client's stdio
 // until the listener is closed. A single hub fans the ACP client's stdout out
 // to every connected client and serializes each client's framed input into the
@@ -789,10 +861,13 @@ func Run(ctx context.Context, c Config) error {
 // connection with the hub. When ln is closed (ctx cancelled or ACP client
 // exited) the hub is torn down and serve returns. logW, when non-nil, receives a
 // copy of every agent frame for reconnect replay (see hub.log).
-func serve(ctx context.Context, ln net.Listener, procStdin io.WriteCloser, procStdout io.Reader, logW io.Writer, exitWhenEmpty bool) {
+func serve(ctx context.Context, ln net.Listener, procStdin io.WriteCloser, procStdout io.Reader, logW io.Writer, opts serveOptions) {
 	h := newHub(procStdin, logW)
-	if exitWhenEmpty {
+	if opts.exitWhenEmpty {
 		h.enableExitWhenEmpty(procStdin)
+	}
+	if opts.idleTimeout > 0 && opts.endIdle != nil {
+		go h.watchIdle(ctx, opts.idleTimeout, opts.endIdle)
 	}
 	// One reader drains the ACP client's stdout and broadcasts whole frames to
 	// every connected client. It also tears the hub down on stdout EOF.
@@ -804,5 +879,66 @@ func serve(ctx context.Context, ln net.Listener, procStdin io.WriteCloser, procS
 			return
 		}
 		h.add(conn)
+	}
+}
+
+// unblockPollInterval is how often a persistent session re-reads its project
+// file to see whether the block it was summoned for has been resolved. A var so
+// tests can shorten it.
+var unblockPollInterval = 2 * time.Second
+
+// unblockTracker turns a stream of "is the project blocked right now?"
+// observations into "has it been unblocked for the whole grace period?". The
+// clock starts at the first unblocked observation and resets whenever the
+// project is blocked again, so a quick re-block (a second failure while the wolf
+// is still wrapping up) keeps the conversation alive.
+type unblockTracker struct {
+	grace time.Duration
+	since time.Time // zero while blocked
+}
+
+// observe records one observation at now and reports whether the grace period
+// has fully elapsed with the project continuously unblocked.
+func (t *unblockTracker) observe(now time.Time, blocked bool) bool {
+	if blocked {
+		t.since = time.Time{}
+		return false
+	}
+	if t.since.IsZero() {
+		t.since = now
+	}
+	return now.Sub(t.since) >= t.grace
+}
+
+// watchUnblocked polls the project file at path every interval and calls end
+// once the project has been out of status:blocked for grace (see Config.
+// UnblockGrace). A file that exists but can't be read or parsed right now — most
+// likely caught mid-write by the very agent we're watching — is skipped without
+// advancing or resetting the clock; a file that is gone counts as unblocked
+// (there is nothing left for the wolf to unblock). Returns after calling end, or
+// when ctx is done.
+func watchUnblocked(ctx context.Context, path string, grace, interval time.Duration, end func()) {
+	tr := unblockTracker{grace: grace}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			p, err := project.Load(path)
+			switch {
+			case err == nil:
+				if tr.observe(now, p.Status == project.StatusBlocked) {
+					end()
+					return
+				}
+			case errors.Is(err, fs.ErrNotExist):
+				if tr.observe(now, false) {
+					end()
+					return
+				}
+			}
+		}
 	}
 }

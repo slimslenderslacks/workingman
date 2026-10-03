@@ -425,3 +425,61 @@ func TestRenderAllKinds(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderWolfHostVsSandboxed: the wolf's instructions differ by where it
+// runs. A host wolf keeps the macOS-notification-and-attach guidance; a
+// sandboxed (ACP) wolf is told what it can't do and to ask in the conversation,
+// which is shown in the TUI and relayed to any configured channel (named
+// generically — no channel-specific wording).
+func TestRenderWolfHostVsSandboxed(t *testing.T) {
+	base := Data{ProjectPath: "/ws/.project.yaml", Workspace: "/ws", BlockedSessionPath: "/ws/blocked-session.yaml"}
+
+	host, err := Render(agent.WolfAgent, base)
+	if err != nil {
+		t.Fatalf("Render host: %v", err)
+	}
+	for _, want := range []string{"you run on the host", "send a macOS notification", "attach to this session"} {
+		if !strings.Contains(host, want) {
+			t.Errorf("host wolf missing %q in:\n%s", want, host)
+		}
+	}
+	for _, bad := range []string{"you are sandboxed", "messaging", "channel"} {
+		if strings.Contains(host, bad) {
+			t.Errorf("host wolf should not mention %q:\n%s", bad, host)
+		}
+	}
+
+	sb := base
+	sb.Sandboxed = true
+	sb.Worktree = "/wsp/feat-x"
+	boxed, err := Render(agent.WolfAgent, sb)
+	if err != nil {
+		t.Fatalf("Render sandboxed: %v", err)
+	}
+	for _, want := range []string{
+		"you run inside a sandbox",
+		"you are sandboxed",
+		"/wsp/feat-x", // the source mount
+		"no `sbx`, `wsp`, or `osascript`",
+		"ask your question as a normal",
+		"messaging",
+		"channel",
+		"ends it shortly after the project leaves `blocked`",
+		"make the status change\nyour last write",
+	} {
+		if !strings.Contains(boxed, want) {
+			t.Errorf("sandboxed wolf missing %q in:\n%s", want, boxed)
+		}
+	}
+	for _, bad := range []string{"you run on the host", "send a macOS notification", "attach to this session", "WhatsApp"} {
+		if strings.Contains(boxed, bad) {
+			t.Errorf("sandboxed wolf should not say %q:\n%s", bad, boxed)
+		}
+	}
+	// The durable-record instructions are common to both.
+	for _, out := range []string{host, boxed} {
+		if !strings.Contains(out, "/ws/blocked-session.yaml") {
+			t.Errorf("missing durable record path in:\n%s", out)
+		}
+	}
+}

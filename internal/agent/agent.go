@@ -89,7 +89,10 @@ func ParseKind(s string) (Kind, bool) {
 // user itself.
 //
 // The runner uses this to pick the right claude flags; the TUI uses it to
-// highlight sessions that won't make progress until someone attaches.
+// highlight sessions that won't make progress until someone attaches. It does
+// NOT decide the launch path: the archive agent runs in tmux, while the wolf is
+// interactive but runs as a persistent ACP session when an ACP launcher is
+// configured (see runner.Runner.UsesACP).
 func (k Kind) Interactive() bool {
 	return k == WolfAgent || k == ArchiveAgent
 }

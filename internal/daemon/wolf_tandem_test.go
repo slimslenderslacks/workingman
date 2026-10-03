@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/slimslenderslacks/work/internal/agent"
@@ -74,5 +75,95 @@ func TestWolfRunsInTandemWithMainSession(t *testing.T) {
 	d.launchWolfAgent(projectPath, p, "summoned again")
 	if got := len(d.ListSessions()); got != 2 {
 		t.Errorf("second wolf launch should dedup; ListSessions len = %d, want 2", got)
+	}
+}
+
+// TestLaunchWolfAgentUnderACPIsPersistent verifies the wolf, when the runner has
+// an AcpLauncher, launches as a persistent ACP session in its own sandbox: the
+// wrapper gets --persistent (not the one-shot --exit-when-empty), the unblock
+// grace that lets it end when the project leaves `blocked`, and the wolf's own
+// sandbox/kind; the session is tracked under the wolf key, is detachable across
+// a daemon restart, and its prompt tells it that it is sandboxed.
+func TestLaunchWolfAgentUnderACPIsPersistent(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	acp := &recordingLauncher{}
+	d.runner = &runner.Runner{
+		Launcher:     spawningLauncher{},
+		AcpLauncher:  acp,
+		Kit:          "kit",
+		SessionsRoot: t.TempDir(),
+	}
+
+	root := t.TempDir()
+	projectPath := filepath.Join(root, "myproj", ".project.yaml")
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := &project.Project{Branch: "feat/x", Status: project.StatusBlocked}
+	d.launchWolfAgent(projectPath, p, "task failed")
+
+	if !d.hasSession(wolfSessionKey(projectPath)) {
+		t.Fatal("wolf did not launch")
+	}
+	cmd := strings.Join(acp.launched()[0].Command, " ")
+	for _, want := range []string{"--persistent", "--unblock-grace", "--idle-timeout", "--kind wolf", "--sandbox myproj-wolf", "--project-path " + projectPath} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("wrapper command missing %q: %s", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "--exit-when-empty") {
+		t.Errorf("a conversational wolf must not be one-shot: %s", cmd)
+	}
+	if !d.detachable(agent.WolfAgent) {
+		t.Error("ACP wolf should survive a daemon restart (detachable)")
+	}
+	infos := d.ListSessions()
+	if len(infos) != 1 || infos[0].SandboxName != "myproj-wolf" {
+		t.Errorf("ListSessions = %+v, want one session with sandbox myproj-wolf", infos)
+	}
+
+	instructions, err := os.ReadFile(filepath.Join(filepath.Dir(projectPath), ".orch", "instructions.md"))
+	if err != nil {
+		t.Fatalf("read instructions.md: %v", err)
+	}
+	if !strings.Contains(string(instructions), "you are sandboxed") {
+		t.Errorf("ACP wolf instructions should say it is sandboxed:\n%s", instructions)
+	}
+}
+
+// TestLaunchWolfAgentOnHostStaysOnTmux verifies the --wolf-host escape hatch:
+// even with an AcpLauncher configured, WolfOnHost keeps the wolf on the host
+// tmux path (no ACP wrapper, no sandbox, host-flavored prompt).
+func TestLaunchWolfAgentOnHostStaysOnTmux(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	acp := &recordingLauncher{}
+	tmux := &recordingLauncher{}
+	d.runner = &runner.Runner{
+		Launcher:     tmux,
+		AcpLauncher:  acp,
+		WolfOnHost:   true,
+		Kit:          "kit",
+		SessionsRoot: t.TempDir(),
+		Command:      func(agent.Kind, string) []string { return []string{"claude", "hi"} },
+	}
+
+	projectPath := filepath.Join(t.TempDir(), "myproj", ".project.yaml")
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d.launchWolfAgent(projectPath, &project.Project{Branch: "feat/x", Status: project.StatusBlocked}, "task failed")
+
+	if got := acp.launched(); len(got) != 0 {
+		t.Errorf("WolfOnHost must not use the ACP launcher, got %+v", got)
+	}
+	if got := tmux.launched(); len(got) != 1 || got[0].Command[0] != "claude" {
+		t.Fatalf("wolf should launch once on the tmux path, got %+v", got)
+	}
+	instructions, err := os.ReadFile(filepath.Join(filepath.Dir(projectPath), ".orch", "instructions.md"))
+	if err != nil {
+		t.Fatalf("read instructions.md: %v", err)
+	}
+	if strings.Contains(string(instructions), "you are sandboxed") || !strings.Contains(string(instructions), "macOS notification") {
+		t.Errorf("host wolf instructions should keep the host guidance:\n%s", instructions)
 	}
 }

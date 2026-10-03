@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/policy"
+	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
 )
@@ -856,4 +858,265 @@ func TestSessionRecordReflectsSigningBroken(t *testing.T) {
 	if !rec.SigningBroken {
 		t.Errorf("sessionRecord().SigningBroken = false, want true after failed preflight")
 	}
+}
+
+func TestNormalizePersistentValidation(t *testing.T) {
+	base := Config{SessionID: "s", KitPath: "k", Workspaces: []string{"/r"}}
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+		want   string // "" = must normalize cleanly
+	}{
+		{"persistent alone is fine", func(c *Config) { c.Persistent = true }, ""},
+		{"persistent with end conditions", func(c *Config) {
+			c.Persistent, c.ProjectPath, c.UnblockGrace, c.IdleTimeout = true, "/p/.project.yaml", time.Minute, time.Hour
+		}, ""},
+		{"persistent and exit-when-empty clash", func(c *Config) { c.Persistent, c.ExitWhenEmpty = true, true }, "mutually exclusive"},
+		{"unblock grace needs persistent", func(c *Config) { c.ProjectPath, c.UnblockGrace = "/p", time.Minute }, "only apply to a persistent session"},
+		{"idle timeout needs persistent", func(c *Config) { c.IdleTimeout = time.Minute }, "only apply to a persistent session"},
+		{"unblock grace needs a project path", func(c *Config) { c.Persistent, c.UnblockGrace = true, time.Minute }, "needs the project path"},
+		{"negative idle timeout", func(c *Config) { c.Persistent, c.IdleTimeout = true, -time.Second }, "must not be negative"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			cfg.Workspaces = append([]string(nil), base.Workspaces...)
+			tt.mutate(&cfg)
+			err := cfg.normalize()
+			switch {
+			case tt.want == "" && err != nil:
+				t.Fatalf("normalize() = %v, want nil", err)
+			case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+				t.Fatalf("normalize() error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestSessionRecordReflectsPersistent: session.json carries Persistent so
+// watchers know the first completed turn is not the end of the session.
+func TestSessionRecordReflectsPersistent(t *testing.T) {
+	if rec := (Config{SessionID: "s"}).sessionRecord(session.StatusRunning, time.Time{}, time.Time{}); rec.Persistent {
+		t.Error("one-shot session recorded as persistent")
+	}
+	if rec := (Config{SessionID: "s", Persistent: true}).sessionRecord(session.StatusRunning, time.Time{}, time.Time{}); !rec.Persistent {
+		t.Error("persistent session not recorded as persistent")
+	}
+}
+
+func TestUnblockTracker(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	tr := unblockTracker{grace: 10 * time.Second}
+
+	if tr.observe(t0, true) {
+		t.Fatal("blocked project must never end the session")
+	}
+	// Unblocked, but the grace hasn't elapsed.
+	if tr.observe(t0.Add(1*time.Second), false) {
+		t.Fatal("ended immediately on unblock; the wolf needs its grace to finish")
+	}
+	if tr.observe(t0.Add(10*time.Second), false) {
+		t.Fatal("ended 9s into a 10s grace")
+	}
+	// A re-block inside the grace resets the clock...
+	if tr.observe(t0.Add(11*time.Second), true) {
+		t.Fatal("blocked project must never end the session")
+	}
+	if tr.observe(t0.Add(20*time.Second), false) {
+		t.Fatal("grace should restart from the second unblock, not the first")
+	}
+	// ...and a full grace after the second unblock ends it.
+	if !tr.observe(t0.Add(30*time.Second), false) {
+		t.Fatal("grace elapsed with the project continuously unblocked; want end")
+	}
+}
+
+func TestWatchUnblockedEndsOnceProjectLeavesBlocked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".project.yaml")
+	if err := project.SaveAs(path, &project.Project{Branch: "b", Status: project.StatusBlocked, BlockedReason: "x"}, project.WriterAgent); err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchUnblocked(ctx, path, 60*time.Millisecond, 10*time.Millisecond, func() { close(ended) })
+
+	select {
+	case <-ended:
+		t.Fatal("session ended while the project was still blocked")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := project.SaveAs(path, &project.Project{Branch: "b", Status: project.StatusWorking}, project.WriterAgent); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("session did not end after the project left blocked")
+	}
+}
+
+func TestWatchUnblockedTreatsMissingProjectAsUnblocked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gone", ".project.yaml")
+	ended := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchUnblocked(ctx, path, 30*time.Millisecond, 10*time.Millisecond, func() { close(ended) })
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a deleted project file should end the wolf's session")
+	}
+}
+
+func TestWatchUnblockedStopsWithContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".project.yaml")
+	if err := project.SaveAs(path, &project.Project{Branch: "b", Status: project.StatusBlocked, BlockedReason: "x"}, project.WriterAgent); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		watchUnblocked(ctx, path, time.Hour, 10*time.Millisecond, func() { t.Error("end called after cancel") })
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchUnblocked did not return after ctx cancel")
+	}
+}
+
+// TestHubExitWhenEmptyVsPersistent contrasts the two lifecycles: one-shot mode
+// closes the agent's stdin once the last client leaves; persistent mode (the
+// default hub, no enableExitWhenEmpty) keeps the agent running so the human
+// and other processes can come and go.
+func TestHubExitWhenEmptyVsPersistent(t *testing.T) {
+	run := func(t *testing.T, oneShot bool) (stdinEOF bool) {
+		stdinR, stdinW := io.Pipe()
+		stdoutR, stdoutW := io.Pipe()
+		defer stdoutW.Close()
+		h := newHub(stdinW, nil)
+		if oneShot {
+			h.enableExitWhenEmpty(stdinW)
+		}
+		go h.run(stdoutR)
+
+		tui, wrapper := net.Pipe()
+		h.add(wrapper)
+		tui.Close() // the only client leaves
+
+		got := make(chan error, 1)
+		go func() {
+			_, err := stdinR.Read(make([]byte, 1))
+			got <- err
+		}()
+		select {
+		case err := <-got:
+			return errors.Is(err, io.EOF)
+		case <-time.After(300 * time.Millisecond):
+			stdinW.Close() // unblock the reader goroutine
+			return false
+		}
+	}
+	if !run(t, true) {
+		t.Error("exit-when-empty: agent stdin should hit EOF after the last client leaves")
+	}
+	if run(t, false) {
+		t.Error("persistent: agent stdin must stay open after the last client leaves")
+	}
+}
+
+func TestHubWatchIdleEndsQuietSession(t *testing.T) {
+	h, _, _ := newTestHub(t)
+	ended := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.watchIdle(ctx, 80*time.Millisecond, func() { close(ended) })
+	select {
+	case <-ended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle session was never ended")
+	}
+}
+
+// TestHubWatchIdleCountsTrafficBothWays: frames from the agent AND from a client
+// reset the idle clock, so a conversation in progress is never cut off; only
+// real traffic counts, not merely being connected.
+func TestHubWatchIdleCountsTrafficBothWays(t *testing.T) {
+	h, stdinR, stdoutW := newTestHub(t)
+	go io.Copy(io.Discard, stdinR)
+
+	tui, wrapper := net.Pipe()
+	defer tui.Close()
+	h.add(wrapper)
+	go io.Copy(io.Discard, tui)
+
+	var ended atomic.Bool
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.watchIdle(ctx, 150*time.Millisecond, func() { ended.Store(true) })
+
+	// 500ms of alternating traffic, each gap well under the timeout.
+	for i := 0; i < 10; i++ {
+		if i%2 == 0 {
+			stdoutW.Write([]byte("agent\n"))
+		} else {
+			tui.Write([]byte("client\n"))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if ended.Load() {
+		t.Fatal("session ended despite steady traffic")
+	}
+	// Traffic stops; the connected-but-silent client must not keep it alive.
+	deadline := time.Now().Add(3 * time.Second)
+	for !ended.Load() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !ended.Load() {
+		t.Fatal("session never ended after traffic stopped")
+	}
+}
+
+// TestServePersistentIdleEndsAgent wires the idle timeout through serve the way
+// Run does: endIdle closes the agent's stdin (the agent's EOF/exit signal) while
+// a persistent session otherwise ignores clients coming and going.
+func TestServePersistentIdleEndsAgent(t *testing.T) {
+	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "a.sock"))
+	if err != nil {
+		t.Skipf("cannot listen on a unix socket here: %v", err)
+	}
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	defer stdoutW.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan struct{})
+	go func() {
+		serve(ctx, ln, stdinW, stdoutR, nil, serveOptions{
+			idleTimeout: 80 * time.Millisecond,
+			endIdle:     func() { stdinW.Close() },
+		})
+		close(served)
+	}()
+
+	got := make(chan error, 1)
+	go func() {
+		_, err := stdinR.Read(make([]byte, 1))
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("agent stdin read = %v, want EOF from the idle end", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle persistent session never closed the agent's stdin")
+	}
+	ln.Close()
+	<-served
 }

@@ -143,9 +143,14 @@ daemon ignores its own fsnotify events.
 ## Observability
 
 - **Audit log** (`--audit-log`): one line per event. `tail -f` it.
-- **Tmux sessions**: `tmux list-sessions` shows every live agent. Attach
-  with `tmux attach -t <name>` to watch claude work or drive an interactive
-  agent (project / wolf).
+- **Tmux sessions**: `tmux list-sessions` shows the agents that still run in
+  tmux (archive, and the wolf with `--wolf-host` or without `--acp-kit`).
+  Attach with `tmux attach -t <name>` to drive one.
+- **ACP sessions** (`--acp-kit`): planning/task/commit/review agents and, by
+  default, the wolf run as ACP sessions. Press `a` in the TUI for the tab view
+  (or enter on a session row); the wolf's tab is interactive — press enter to
+  type to it. `--wolf-host` runs the wolf on the host in tmux instead (full
+  host access, but only reachable via tmux).
 - **State snapshot** (`--state-file`, `orch status`): the daemon's in-memory
   state (live sessions, wolf in flight, failure counters, review polls)
   published as JSON for external readers. See

@@ -62,6 +62,14 @@ type Data struct {
 	// thread-resolve is truthful. False for ordinary tasks, whose commits stay
 	// local until the archive agent publishes them at cleanup.
 	PushBranch bool
+
+	// Sandboxed, for the WolfAgent, is true when the wolf runs inside an sbx
+	// sandbox (the ACP path) rather than directly on the host (the legacy tmux
+	// path / --wolf-host escape hatch). A sandboxed wolf can only see the
+	// control dir (and the project's wsp worktree, if any) and cannot reach host
+	// tooling — sbx, the other agents' sandboxes, osascript — so its template
+	// drops the host-only advice and tells it so.
+	Sandboxed bool
 }
 
 // tmplFuncs are the helpers available to every template. `sub` lets the

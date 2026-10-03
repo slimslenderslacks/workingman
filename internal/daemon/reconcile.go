@@ -73,8 +73,16 @@ func (d *Daemon) reconcileSessions() {
 		projectPath := rec.ProjectPath
 		sess := newReconciledSession(rec.ID, store, nil)
 		onEnd := func(error) { d.revisitProject(projectPath) }
-		if d.trackSession(projectPath, sess, kind, taskNameFor(rec.TaskPath), onEnd) {
-			d.audit.Log("session_reconciled", "key", projectPath, "kind", rec.Kind, "id", rec.ID)
+		// A wolf lives in its own slot (see launchWolfAgent) so it can run in
+		// tandem with the project's main agent; adopting it under the bare
+		// project path would both occupy that main slot and let a second
+		// wolf launch alongside it.
+		key := projectPath
+		if kind == agent.WolfAgent {
+			key = wolfSessionKey(projectPath)
+		}
+		if d.trackSession(key, sess, kind, taskNameFor(rec.TaskPath), onEnd) {
+			d.audit.Log("session_reconciled", "key", key, "kind", rec.Kind, "id", rec.ID)
 		}
 	}
 }

@@ -9,7 +9,8 @@ ACP/sandbox launch path superseding the tmux+`sbx exec` path for non-interactive
 agents, and a review agent design.md never mentions).
 
 Every agent's role is defined by `agent.Kind` (`internal/agent/agent.go`).
-`Kind.Interactive()` splits the seven into two launch families:
+`Kind.Interactive()` splits the seven into two families, but the *launch path*
+is no longer exactly that split (see the wolf):
 
 - **Autonomous** (project, planning, task, commit, review) — run under
   `claude --print` (single turn, then exit) as an **ACP session** backed by a
@@ -17,12 +18,21 @@ Every agent's role is defined by `agent.Kind` (`internal/agent/agent.go`).
   Runner.startACP`), when the daemon is wired with an `AcpLauncher` (production
   always is). The wrapper creates the sandbox (with `acp-kit` layered on),
   execs the ACP client, and serves `<SessionsRoot>/<id>/agent.sock` for the TUI
-  to stream. There is no tmux window to attach to for these.
-- **Interactive** (wolf, archive) — always take the legacy path: a tmux window
-  inside the shared umbrella session `orch` (`internal/agent/tmux.go`), running
-  `claude --dangerously-skip-permissions` (no `--print`) inside `sbx exec -it
-  <sandbox>`, so a human can attach (`tmux attach -t orch`) and drive the
-  conversation or answer a macOS notification.
+  to stream. There is no tmux window to attach to for these. The wrapper is
+  launched `--exit-when-empty`: it ends when the TUI watcher that drove the one
+  prompt disconnects.
+- **Interactive** (wolf, archive) — a human is expected in the loop.
+  - The **archive** agent always takes the legacy path: a tmux window inside the
+    shared umbrella session `orch` (`internal/agent/tmux.go`), running `claude
+    --dangerously-skip-permissions` (no `--print`) inside `sbx exec -it
+    <sandbox>`, so a human can attach (`tmux attach -t orch`) and drive the
+    conversation or answer a macOS notification.
+  - The **wolf** is a *persistent* ACP session (conversational: no
+    exit-when-empty; it ends when its work is done, see §5) when an
+    `AcpLauncher` is configured, so the TUI, the daemon and messaging channels
+    can all tune in to one conversation. `orch --wolf-host` (`Runner.WolfOnHost`)
+    keeps the pre-ACP host/tmux wolf as an escape hatch. `Runner.UsesACP(kind)`
+    is the single place that answers "does this kind run under ACP?".
 
 Every launch, regardless of family, gets the same two-file handoff written
 into its working directory by `internal/setup/setup.go` before the process
@@ -253,17 +263,52 @@ stop condition, review-loop escalations, etc.) always ends by calling
 branch (covers a block set by a human, the project agent, or a daemon
 restart finding the file already blocked).
 
+**Two launch modes.** Which one runs is decided by `Runner.UsesACP`:
+
+| | ACP wolf (default with `--acp-kit`) | host wolf (`--wolf-host`, or no `--acp-kit`) |
+|---|---|---|
+| process | `acp-wrapper --persistent` host process → sandboxed `claude-acp-client` | tmux window running `claude --dangerously-skip-permissions` |
+| where it runs | sbx sandbox `<work-stream>-wolf` (`runner.ACPSandboxNameFor`) | directly on the host, no sandbox (`SandboxNameFor` returns `""`) |
+| who can talk to it | anything that can dial `<SessionsRoot>/<id>/agent.sock`: the TUI tab, the daemon, a messaging channel | a human attached to tmux |
+| survives an `orch` restart | yes (`detachable`; re-adopted under the wolf key by `reconcileSessions`) | no (closed on shutdown, like before) |
+| ends | see "Completion" below | when its tmux window closes |
+
 **Workspace/session.** `WorkingDir` = control dir (like project/planning), so
-no wsp provisioning of its own, but `Repos`/`Branch` are still forwarded in
-case the wolf needs to look at source — `SandboxNameFor` deliberately returns
-`""` for `WolfAgent`: the wolf runs **outside any sandbox**, directly on the
-host, so it can diagnose sandbox-related blocks too. It is tracked under a
-session key distinct from the project's main slot
-(`wolfSessionKey = projectPath + "#wolf"`), so it can run *in tandem* with a
-task/commit/planning session rather than waiting for that slot to free up.
-Being interactive, it takes the tmux path: a window inside the `orch` umbrella
-session, `claude --dangerously-skip-permissions` with no `--print`, so the
-process stays at the prompt for a human to drive.
+no wsp provisioning of its own; `Repos`/`Branch` are still forwarded in case
+the wolf needs to look at source. It is tracked under a session key distinct
+from the project's main slot (`wolfSessionKey = projectPath + "#wolf"`), so it
+can run *in tandem* with a task/commit/planning session rather than waiting
+for that slot to free up. `Plan.Persistent` is set for every wolf launch; it
+only has an effect on the ACP path.
+
+**Host access: what the ACP wolf gets and loses.** The decision (goal 3): the
+wolf runs sandboxed by default, because anything that must be reachable by the
+daemon, the TUI and a messaging channel has to be a long-lived ACP session, and
+ACP sessions are sandboxed (the wrapper owns sandbox creation). To keep it
+useful it is given:
+
+- **Mounts:** the control dir (primary/cwd — it holds `.project.yaml`,
+  `tasks/`, `blocked-session.yaml` and `.orch/`, i.e. everything the wolf
+  writes) and, when the project has `Repos`+`Branch`, the project's wsp
+  worktree as a second mount (provisioned idempotently by
+  `Runner.resolveWolfWorktree`, **best-effort**: a wsp failure is audited as
+  `wolf_worktree_unavailable` and the wolf launches without the source mount,
+  since a broken wsp is exactly the kind of thing it is summoned to look at).
+- **Prompt:** `prompts.Data.Sandboxed` / `.orch/context.yaml: sandboxed: true`
+  switch `wolf.tmpl` to the sandboxed wording: what it can see, what it can't
+  do, and to ask the user to perform host-only fixes.
+
+What it **loses** versus the host wolf: it cannot run `sbx`, so it cannot
+`sbx exec` into or inspect the sandbox a failed task/commit agent ran in (the
+wrapper deliberately keeps those for post-mortems); no `wsp`, no `osascript`,
+no host git credentials or SSH signing agent, no access to the daemon's audit
+log / sessions dir (outside the mounts), and sbx's default network policy. So
+**sandbox-, sbx-, wsp- and credential-related blocks are better diagnosed with
+`--wolf-host`.** Everything that is decided from files — task
+`failure_reason`s, the blocked-session record, the source, the project/task
+YAML it must edit — works unchanged. `--wolf-host` is a daemon-wide switch
+(`Runner.WolfOnHost`, logged as `wolf_host` at `daemon_start`); there is no
+per-project override yet.
 
 **Reads/writes.** Reads the project's `blocked_reason`, the failed/blocked
 tasks' `failure_reason`/`blocked_reason` (`FailedTasks`, paths gathered by
@@ -275,23 +320,87 @@ ultimately updates `.project.yaml`/task files to move the project out of
 project's `.project.yaml`.
 
 **Prompt structure (`wolf.tmpl`).** Opens with scope rules (only this
-project's files), the blocked reason and failed-task list, and any inherited
-prior summary/attempted list so a second wolf run doesn't re-derive
-diagnosis from scratch. Then: "investigate... you may need input from the
-user — send a macOS notification and wait for them to attach." Documents two
-special cases: (1) a project blocked before it was ever populated (fill in
-the missing fields the project agent couldn't infer, clear `blocked_reason`,
-set `ready`); (2) a project blocked out of the PR-review loop (four specific
+project's files; "you run on the host" vs "you run inside a sandbox …"), the
+blocked reason and failed-task list, and any inherited prior summary/attempted
+list so a second wolf run doesn't re-derive diagnosis from scratch. Sandboxed
+wolves then get an ENVIRONMENT paragraph (what they can't do). Then:
+"investigate…". When it needs the user, the *host* wolf is told to send a macOS
+notification and wait for them to attach to tmux; the *sandboxed* wolf is told
+to ask in the conversation and stop — the message appears in the TUI's wolf tab
+and is relayed to whatever messaging channel is configured (the template stays
+channel-agnostic), and the answer arrives as its next prompt — and to make the
+`blocked → …` status change its **last** write (see Completion). Documents two
+special cases: (1) a project blocked before it was ever populated (fill in the
+missing fields the project agent couldn't infer, clear `blocked_reason`, set
+`ready`); (2) a project blocked out of the PR-review loop (four specific
 `blocked_reason` shapes from the review agent, and the instruction that the
-"almost always" correct exit is back to `status: reviewing`, not `working` or
-`done`). Ends with the fixed status enums for both project and task.
+"almost always" correct exit is back to `status: idle` with the PR watch data
+intact). Ends with the fixed status enums for both project and task.
 
 **Completion signal / lifecycle.** No enforced schema — the wolf just edits
-whatever files resolve the block. When its tmux window closes,
-`launchWolfAgent`'s `onEnd` callback calls `revisitProject`, which re-reads
+whatever files resolve the block. Whatever ends the session, the daemon's
+`launchWolfAgent` `onEnd` callback calls `revisitProject`, which re-reads
 `.project.yaml` from scratch and re-routes based on whatever status the wolf
 left behind (bypassing the daemon-write filter, since wolf writes as
 `updated_by: agent`).
+
+How an **ACP wolf ends** (the wrapper owns all of this, so it works headless and
+across daemon restarts; the host wolf just lives until its window closes). The
+first turn finishing is *not* an end — the wolf typically finishes its first
+turn by asking the user something. It ends on the first of:
+
+1. **Project unblocked (the normal exit).** `acp-wrapper --unblock-grace D`
+   (default 2m, `Runner.PersistentUnblockGrace` / `orch --wolf-unblock-grace`,
+   negative disables) polls the project file and, once its `status` has been
+   anything but `blocked` *continuously* for D (a re-block inside the grace
+   resets the clock; a deleted file counts as unblocked), closes the ACP
+   client's stdin so the agent exits. The grace lets the wolf finish its closing
+   message after flipping the status — hence the template's "make the status
+   change your last write".
+2. **Idle timeout.** `acp-wrapper --idle-timeout D` (default 24h,
+   `Runner.PersistentIdleTimeout` / `orch --wolf-idle-timeout`, negative
+   disables) ends the session after D with no ACP frame in either direction.
+   Merely having a TUI open doesn't count as activity. It is the backstop for a
+   block nobody answered; the durable `blocked-session.yaml` means little is
+   lost, and a re-summon starts a fresh wolf from it. (The stranded-session
+   reaper still never reaps the wolf — it is `Interactive()` — so this is the
+   only timer.)
+3. **The agent exits / the wrapper is signalled / the daemon closes it**
+   (`:stop`, `session.Close()`): the usual paths.
+
+On a clean self-exit the wrapper removes the sandbox (no task file to retain it
+for); on a signal it keeps it (so a restart can resume), and it is reused
+because the sandbox name is stable per project.
+
+A second block arriving while a wolf is still inside its unblock grace dedups
+against the live session (`launchWolfAgent` → `session_skip_duplicate`): the
+old conversation continues (its wrapper sees `blocked` again and does not end),
+so the user keeps talking to the same wolf — which has the *old* block's context
+in its prompt; it re-reads `.project.yaml`/the blocked-session record if asked.
+
+**TUI.** An ACP wolf appears in the sessions pane with its sandbox name, and
+**enter/click on that row opens the ACP tab view on the wolf's tab**
+(`attachSelected`; there is no tmux window to `tmux attach` to). The wolf's tab
+is marked *interactive* (`session.json: persistent` → `acpTabEvent.interactive`):
+the watcher (`internal/tui/acpwatch.go`) drives the opening prompt once and then
+**stays connected**, relaying messages typed in the tab (`acpInputs`,
+`servePersistentInput`) as successive turns. In the tab: **enter** starts
+composing, **enter** sends, **esc** stops composing (keeps the draft), **ctrl+u**
+clears, ⌥j/⌥k switch tabs; the usual single-letter commands (q, z, h, l) are
+disabled only while composing. The host wolf (`--wolf-host`) is unchanged: enter
+on its row `tmux attach`es.
+
+**Known limits.** (a) The opening prompt, like every ACP agent's, is delivered
+by a TUI watcher, so a `--headless` daemon with nobody watching never prompts an
+ACP wolf (the same is already true of planning/task/commit; use `--wolf-host` for
+a TUI-less setup until the daemon-side attach lands). (b) `acpclient.Connect`
+issues `session/new`, so a TUI that restarts mid-conversation reconnects to the
+same `claude-acp-client` process but starts a fresh ACP session (the replayed
+transcript is only history; the agent's context for new turns is new). Binding
+to the existing session id is the follow-up "tune in" work. (c) The hub fans
+every frame out to every client, but JSON-RPC ids are per-client, so two
+simultaneous *prompting* clients can see each other's responses; use the
+daemon-side attach primitive, not a second raw client, for that.
 
 ---
 

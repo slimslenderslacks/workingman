@@ -50,7 +50,8 @@ type SessionInfo struct {
 	Interactive bool
 	// SandboxName is the sbx sandbox the agent is running inside. Populated
 	// only for ACP-routed sessions (the daemon's runner has an AcpLauncher
-	// and the agent kind is non-interactive); empty otherwise, because the
+	// and Runner.UsesACP(kind) — every kind but archive, and the wolf unless
+	// it runs on the host); empty otherwise, because the
 	// legacy tmux + `sbx exec` path treats the sandbox as an implementation
 	// detail. Matches the name visible in `sbx ls` — underscores already
 	// normalized to hyphens.
@@ -76,7 +77,7 @@ func (d *Daemon) ListSessions() []SessionInfo {
 			Interactive: entry.kind.Interactive(),
 		}
 		if d.runner != nil && d.runner.UsesACP(entry.kind) {
-			info.SandboxName = runner.SandboxNameFor(entry.kind, key, entry.taskName)
+			info.SandboxName = runner.ACPSandboxNameFor(entry.kind, key, entry.taskName)
 		}
 		out = append(out, info)
 	}

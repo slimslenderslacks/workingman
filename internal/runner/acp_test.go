@@ -2,10 +2,12 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/policy"
@@ -384,7 +386,9 @@ func TestACPLaunchTaskAgentForwardsSandboxCleanupFlags(t *testing.T) {
 	}
 }
 
-func TestInteractiveAgentNeverUsesACP(t *testing.T) {
+// TestArchiveAgentNeverUsesACP: the archive agent is interactive and has no
+// persistent-ACP mode, so even a fully ACP-wired runner keeps it on tmux.
+func TestArchiveAgentNeverUsesACP(t *testing.T) {
 	workingDir := t.TempDir()
 	projectPath := filepath.Join(workingDir, ".project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
@@ -400,14 +404,290 @@ func TestInteractiveAgentNeverUsesACP(t *testing.T) {
 		Command:      func(_ agent.Kind, _ string) []string { return []string{"claude", "hi"} },
 	}
 	if _, err := r.Start(context.Background(), Plan{
-		Kind:        agent.WolfAgent,
+		Kind:        agent.ArchiveAgent,
 		WorkingDir:  workingDir,
 		ProjectPath: projectPath,
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if tmux.last.Command[0] != "claude" {
-		t.Errorf("wolf agent should use the tmux launcher with the built command, got %v", tmux.last.Command)
+		t.Errorf("archive agent should use the tmux launcher with the built command, got %v", tmux.last.Command)
+	}
+}
+
+// TestWolfOnHostUsesTmux: the --wolf-host escape hatch keeps the wolf on the
+// legacy host/tmux path, unsandboxed, even when an AcpLauncher is configured.
+func TestWolfOnHostUsesTmux(t *testing.T) {
+	workingDir := t.TempDir()
+	projectPath := filepath.Join(workingDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tmux := &fakeLauncher{}
+	r := &Runner{
+		Launcher:     tmux,
+		AcpLauncher:  &failLauncher{t: t},
+		WolfOnHost:   true,
+		Kit:          "kit",
+		SessionsRoot: t.TempDir(),
+		Command:      func(_ agent.Kind, _ string) []string { return []string{"claude", "hi"} },
+	}
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.WolfAgent,
+		WorkingDir:  workingDir,
+		ProjectPath: projectPath,
+		Persistent:  true, // meaningless on the tmux path; must be ignored
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if tmux.last.Command[0] != "claude" {
+		t.Errorf("host wolf should use the tmux launcher with the built command, got %v", tmux.last.Command)
+	}
+	instructions, err := os.ReadFile(filepath.Join(workingDir, ".orch", "instructions.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(instructions), "you are sandboxed") {
+		t.Errorf("host wolf must not be told it is sandboxed:\n%s", instructions)
+	}
+}
+
+func TestUsesACPWolf(t *testing.T) {
+	cases := []struct {
+		name string
+		r    Runner
+		kind agent.Kind
+		want bool
+	}{
+		{"wolf under ACP", Runner{AcpLauncher: &fakeLauncher{}}, agent.WolfAgent, true},
+		{"wolf on host", Runner{AcpLauncher: &fakeLauncher{}, WolfOnHost: true}, agent.WolfAgent, false},
+		{"wolf without ACP", Runner{}, agent.WolfAgent, false},
+		{"archive stays on tmux", Runner{AcpLauncher: &fakeLauncher{}}, agent.ArchiveAgent, false},
+		{"planning under ACP unaffected by WolfOnHost", Runner{AcpLauncher: &fakeLauncher{}, WolfOnHost: true}, agent.PlanningAgent, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.r.UsesACP(tc.kind); got != tc.want {
+				t.Errorf("UsesACP(%s) = %v, want %v", tc.kind, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestACPSandboxNameFor(t *testing.T) {
+	projectPath := "/orch/my_proj/.project.yaml"
+	if got := ACPSandboxNameFor(agent.WolfAgent, projectPath, ""); got != "my-proj-wolf" {
+		t.Errorf("wolf sandbox = %q, want my-proj-wolf", got)
+	}
+	if got := ACPSandboxNameFor(agent.WolfAgent, "", ""); got != "" {
+		t.Errorf("wolf sandbox without a project = %q, want empty", got)
+	}
+	// Every other kind is exactly SandboxNameFor.
+	if got, want := ACPSandboxNameFor(agent.TaskAgent, projectPath, "t1"), SandboxNameFor(agent.TaskAgent, projectPath, "t1"); got != want {
+		t.Errorf("task sandbox = %q, want %q", got, want)
+	}
+	// The host wolf contract is unchanged: no sandbox.
+	if got := SandboxNameFor(agent.WolfAgent, projectPath, ""); got != "" {
+		t.Errorf("SandboxNameFor(wolf) = %q, want empty (host path)", got)
+	}
+}
+
+// TestACPLaunchWolfPersistent: the wolf launches through acp-wrapper as a
+// persistent session — --persistent instead of --exit-when-empty, with its own
+// sandbox, the worktree as a second mount, the unblock/idle end conditions, and
+// a session.json marked Persistent so watchers keep the tab open and typeable.
+func TestACPLaunchWolfPersistent(t *testing.T) {
+	wsRoot := t.TempDir()
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sessionsRoot := t.TempDir()
+
+	acp := &fakeLauncher{}
+	tmux := &fakeLauncher{}
+	r := &Runner{
+		Workspaces:   workspace.NewStub(wsRoot),
+		Launcher:     tmux,
+		AcpLauncher:  acp,
+		Kit:          "kit-ref",
+		SessionsRoot: sessionsRoot,
+	}
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:          agent.WolfAgent,
+		WorkingDir:    orchDir,
+		ProjectPath:   projectPath,
+		Branch:        "feat-x",
+		Repos:         []workspace.Repo{{Identity: "github.com/acme/widgets", Shortname: "widgets"}},
+		BlockedReason: "boom",
+		Persistent:    true,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if tmux.last.Name != "" {
+		t.Errorf("tmux launcher was used for the ACP wolf: %+v", tmux.last)
+	}
+
+	cmd := acp.last.Command
+	if !hasFlag(cmd, "--persistent") {
+		t.Errorf("expected --persistent in argv, got %v", cmd)
+	}
+	if hasFlag(cmd, "--exit-when-empty") {
+		t.Errorf("a persistent session must not be one-shot: %v", cmd)
+	}
+	if got := argValue(cmd, "--unblock-grace"); got != DefaultUnblockGrace.String() {
+		t.Errorf("--unblock-grace = %q, want %q", got, DefaultUnblockGrace)
+	}
+	if got := argValue(cmd, "--idle-timeout"); got != DefaultPersistentIdleTimeout.String() {
+		t.Errorf("--idle-timeout = %q, want %q", got, DefaultPersistentIdleTimeout)
+	}
+	if got := argValue(cmd, "--kind"); got != "wolf" {
+		t.Errorf("--kind = %q, want wolf", got)
+	}
+	if got := argValue(cmd, "--project-path"); got != projectPath {
+		t.Errorf("--project-path = %q, want %q", got, projectPath)
+	}
+	if got, want := argValue(cmd, "--sandbox"), filepath.Base(orchDir)+"-wolf"; got != want {
+		t.Errorf("--sandbox = %q, want %q", got, want)
+	}
+	// Control dir first (the agent's cwd), source worktree second; no extra orch
+	// mount since the control dir already is the orch dir.
+	wantWorktree := filepath.Join(wsRoot, "feat-x")
+	if ws := argValues(cmd, "--workspace"); len(ws) != 2 || ws[0] != orchDir || ws[1] != wantWorktree {
+		t.Errorf("--workspace = %v, want [%q %q]", ws, orchDir, wantWorktree)
+	}
+
+	store := session.Store{Root: sessionsRoot}
+	rec, err := store.Read(acp.last.Name)
+	if err != nil {
+		t.Fatalf("read session.json: %v", err)
+	}
+	if !rec.Persistent || rec.Kind != "wolf" {
+		t.Errorf("session.json = %+v, want persistent wolf", rec)
+	}
+
+	instructions, err := os.ReadFile(filepath.Join(orchDir, ".orch", "instructions.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(instructions)
+	if !strings.Contains(out, "you are sandboxed") || !strings.Contains(out, wantWorktree) {
+		t.Errorf("sandboxed wolf instructions should say so and name the worktree:\n%s", out)
+	}
+	if strings.Contains(out, "send a macOS") {
+		t.Errorf("sandboxed wolf can't osascript; instructions still say to:\n%s", out)
+	}
+	ctxYAML, err := os.ReadFile(filepath.Join(orchDir, ".orch", "context.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ctxYAML), "sandboxed: true") {
+		t.Errorf("context.yaml should record that the wolf is sandboxed:\n%s", ctxYAML)
+	}
+}
+
+// TestACPLaunchWolfKnobs: zero uses the defaults, negative disables the
+// corresponding end condition, positive is passed through.
+func TestACPLaunchWolfKnobs(t *testing.T) {
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	acp := &fakeLauncher{}
+	r := &Runner{
+		Launcher:               &fakeLauncher{},
+		AcpLauncher:            acp,
+		Kit:                    "kit-ref",
+		SessionsRoot:           t.TempDir(),
+		PersistentUnblockGrace: -1,
+		PersistentIdleTimeout:  90 * time.Minute,
+	}
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.WolfAgent,
+		WorkingDir:  orchDir,
+		ProjectPath: projectPath,
+		Persistent:  true,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cmd := acp.last.Command
+	if hasFlag(cmd, "--unblock-grace") {
+		t.Errorf("negative grace should disable the flag: %v", cmd)
+	}
+	if got := argValue(cmd, "--idle-timeout"); got != (90 * time.Minute).String() {
+		t.Errorf("--idle-timeout = %q, want %q", got, 90*time.Minute)
+	}
+}
+
+// brokenWorkspaces is a workspace.Manager whose Create always fails.
+type brokenWorkspaces struct{ workspace.Manager }
+
+func (brokenWorkspaces) Create(context.Context, string, []workspace.Repo) (string, error) {
+	return "", errors.New("wsp is broken")
+}
+
+// TestACPLaunchWolfSurvivesWorktreeFailure: the wolf exists to diagnose broken
+// projects, so a worktree it can't provision must degrade to "no source mount",
+// not fail the launch.
+func TestACPLaunchWolfSurvivesWorktreeFailure(t *testing.T) {
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	acp := &fakeLauncher{}
+	r := &Runner{
+		Workspaces:   brokenWorkspaces{},
+		Launcher:     &fakeLauncher{},
+		AcpLauncher:  acp,
+		Kit:          "kit-ref",
+		SessionsRoot: t.TempDir(),
+	}
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.WolfAgent,
+		WorkingDir:  orchDir,
+		ProjectPath: projectPath,
+		Branch:      "feat-x",
+		Repos:       []workspace.Repo{{Identity: "github.com/acme/widgets", Shortname: "widgets"}},
+		Persistent:  true,
+	}); err != nil {
+		t.Fatalf("Start should tolerate a worktree failure for the wolf: %v", err)
+	}
+	if ws := argValues(acp.last.Command, "--workspace"); len(ws) != 1 || ws[0] != orchDir {
+		t.Errorf("--workspace = %v, want just the control dir", ws)
+	}
+}
+
+// A one-shot agent is unchanged by the new knobs: exit-when-empty, no
+// persistent-only flags.
+func TestACPLaunchTaskStaysOneShot(t *testing.T) {
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	acp := &fakeLauncher{}
+	r := &Runner{
+		Workspaces:   workspace.NewStub(t.TempDir()),
+		Launcher:     &fakeLauncher{},
+		AcpLauncher:  acp,
+		Kit:          "kit-ref",
+		SessionsRoot: t.TempDir(),
+	}
+	if _, err := r.Start(context.Background(), Plan{
+		Kind:        agent.TaskAgent,
+		Branch:      "feat-x",
+		ProjectPath: projectPath,
+		TaskName:    "first",
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cmd := acp.last.Command
+	if !hasFlag(cmd, "--exit-when-empty") || hasFlag(cmd, "--persistent") || hasFlag(cmd, "--unblock-grace") || hasFlag(cmd, "--idle-timeout") {
+		t.Errorf("task agent should stay one-shot: %v", cmd)
 	}
 }
 

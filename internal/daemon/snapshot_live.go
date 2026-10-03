@@ -379,7 +379,7 @@ func (d *Daemon) liveSessionSnapshots() []SessionSnapshot {
 		}
 		if d.runner != nil && d.runner.UsesACP(entry.kind) {
 			id := entry.sess.Name()
-			s.SandboxName = runner.SandboxNameFor(entry.kind, projectPath, entry.taskName)
+			s.SandboxName = runner.ACPSandboxNameFor(entry.kind, projectPath, entry.taskName)
 			s.ACP = &ACPInfo{SessionID: id}
 			if sessionsRoot != "" {
 				store := session.Store{Root: sessionsRoot}

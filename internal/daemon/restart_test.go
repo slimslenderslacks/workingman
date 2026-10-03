@@ -184,3 +184,63 @@ func TestReconcileSessionsDiscoversOnDiskSession(t *testing.T) {
 		t.Errorf("a duplicate agent was dispatched despite the reconciled session.\naudit:\n%s", buf.String())
 	}
 }
+
+// TestReconcileSessionsAdoptsWolfUnderWolfKey asserts an ACP wolf found on disk
+// after a restart is tracked under the wolf's own session key, not the bare
+// project path: the wolf runs in tandem with the project's main agent, so
+// adopting it into the main slot would block that slot, and a later summon would
+// not dedup against it.
+func TestReconcileSessionsAdoptsWolfUnderWolfKey(t *testing.T) {
+	root := t.TempDir()
+	sessionsRoot := t.TempDir()
+
+	projectPath := filepath.Join(root, ".project.yaml")
+	p := &project.Project{Description: "test", Branch: "feat/x", Status: project.StatusIdle}
+	if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+
+	store, err := session.NewStore(sessionsRoot)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	now := time.Now()
+	if err := store.Write(session.Session{
+		ID:          "wolf-alpha",
+		SandboxName: "alpha-wolf",
+		Status:      session.StatusRunning,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		ProjectPath: projectPath,
+		Kind:        "wolf",
+		Persistent:  true,
+	}); err != nil {
+		t.Fatalf("Write session record: %v", err)
+	}
+
+	buf := &safeBuf{}
+	d, err := New([]string{root}, audit.New(buf), WithRunner(&runner.Runner{AcpLauncher: stubLauncher{}, SessionsRoot: sessionsRoot}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = d.Run(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	if ok, snap := waitFor(t, buf, "session_reconciled"); !ok {
+		t.Fatalf("daemon never reconciled the on-disk wolf.\naudit:\n%s", snap)
+	}
+	if !d.hasSession(wolfSessionKey(projectPath)) {
+		t.Errorf("reconciled wolf not tracked under the wolf key %q", wolfSessionKey(projectPath))
+	}
+	if d.hasSession(projectPath) {
+		t.Errorf("reconciled wolf occupies the project's main slot")
+	}
+}

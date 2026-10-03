@@ -352,6 +352,16 @@ func (d *Daemon) transitionProjectBlocked(projectPath string, p *project.Project
 // As with the other project-root agents, the session-end callback re-runs
 // handleProject so that if wolf flipped the project back to ready/working,
 // the daemon picks up where things left off.
+//
+// When the runner has an AcpLauncher the wolf is a persistent ACP session (see
+// runner.Runner.UsesACP) that ends when the wolf is done — concretely, once the
+// project has stayed out of `blocked` for the wrapper's unblock grace — and not
+// merely when its first turn finishes. The session-end callback below therefore
+// fires then, and revisitProject routes on whatever status the wolf left. If the
+// project is blocked AGAIN while an old wolf is still inside that grace window,
+// the dedup above keeps the old session (and its conversation) rather than
+// racing a second wolf for the same sandbox; its wrapper sees the re-block and
+// does not end, so the user simply keeps talking to the same wolf.
 func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason string) {
 	if d.runner == nil {
 		return
@@ -394,6 +404,14 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 		BlockedSessionPath:      blockedSessionPath,
 		BlockedSessionSummary:   priorSummary,
 		BlockedSessionAttempted: priorAttempted,
+		// The wolf is conversational: when it runs under ACP its wrapper must
+		// outlive client disconnects (TUI restarts, a channel tuning in) rather
+		// than exit after the first turn like the one-shot agents. It ends when
+		// the project leaves `blocked` (the wolf resolved it), on the idle
+		// timeout, or when the wolf itself exits — see acpwrapper.Config.Persistent.
+		// Ignored on the host/tmux path, where the claude process is already
+		// long-lived.
+		Persistent: true,
 	}
 	d.audit.Log("wolf_dispatch", "path", projectPath, "reason", reason)
 	// Ignore start error here: the project is already blocked, recursing

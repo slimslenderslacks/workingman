@@ -65,6 +65,9 @@ func runDaemon(args []string) {
 	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, planning/task/commit agents launch as acp-wrapper-backed ACP sessions instead of tmux+`sbx exec claude -p`")
 	acpWrapper := fs.String("acp-wrapper", "", "path to the acp-wrapper binary (default: acp-wrapper on PATH)")
 	sessionsRoot := fs.String("sessions-root", "", "root dir holding per-session dirs for ACP agents (default ~/.workingman/sessions)")
+	wolfHost := fs.Bool("wolf-host", false, "escape hatch: run the wolf agent in a tmux window directly on the host (full host access, no sandbox, only reachable by attaching to tmux) instead of as a persistent ACP session in its own sandbox. Only matters when --acp-kit is set")
+	wolfUnblockGrace := fs.Duration("wolf-unblock-grace", 0, "how long an ACP wolf lingers after its project leaves status:blocked before its conversation is ended (0 = default 2m, negative = never end on unblock)")
+	wolfIdleTimeout := fs.Duration("wolf-idle-timeout", 0, "end an ACP wolf after this long with no ACP traffic (0 = default 24h, negative = never)")
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
 	if err := fs.Parse(args); err != nil {
@@ -146,7 +149,8 @@ func runDaemon(args []string) {
 	// launched as acp-wrapper-backed ACP sessions rather than tmux windows
 	// running `sbx exec claude -p`. The wrapper is a host process: its stderr
 	// (diagnostics) goes to a log file so it never corrupts the TUI alt-screen.
-	// Interactive agents (project/wolf) keep the tmux launcher above.
+	// The wolf also runs as a (persistent) ACP session unless --wolf-host is set;
+	// the archive agent keeps the tmux launcher above.
 	if *acpKit != "" {
 		acpLogPath := filepath.Join(filepath.Dir(*auditPath), "acp-wrapper.log")
 		acpLog, err := os.OpenFile(acpLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -158,6 +162,9 @@ func runDaemon(args []string) {
 		r.Kit = *acpKit
 		r.AcpWrapperPath = *acpWrapper
 		r.SessionsRoot = *sessionsRoot
+		r.WolfOnHost = *wolfHost
+		r.PersistentUnblockGrace = *wolfUnblockGrace
+		r.PersistentIdleTimeout = *wolfIdleTimeout
 	} else {
 		// No ACP kit configured: keep the legacy sandboxed tmux path for
 		// non-interactive agents so the daemon still functions standalone.
@@ -203,6 +210,7 @@ func runDaemon(args []string) {
 		"tmux", tmuxBin,
 		"tmux_session", *tmuxSession,
 		"acp_kit", *acpKit,
+		"wolf_host", fmt.Sprintf("%t", *wolfHost),
 		"state_file", stateFilePath,
 	)
 

@@ -160,6 +160,14 @@ type model struct {
 	// default (keeping the transcript readable); the `z` key toggles this to
 	// reveal every tool call's output.
 	acpToolsExpanded bool
+	// acpComposing is true while the user is typing a message into the selected
+	// conversational tab (keys are captured as text, not commands). acpInputErr
+	// is the last send failure, shown on the message line until the next key.
+	// acpSend delivers a typed message to a session's watcher; it is
+	// acpInputs.Send in production and swapped in tests.
+	acpComposing bool
+	acpInputErr  string
+	acpSend      func(id, text string) error
 
 	// interactive opens the ad-hoc `:dir` shell and `:session` claude windows
 	// for a work stream. Wired by Run in integrated daemon mode; nil in
@@ -211,6 +219,7 @@ func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh 
 		leftVisible:     true,
 		rightVisible:    false,
 		lastCenterFocus: paneProjects,
+		acpSend:         acpInputs.Send,
 	}
 }
 
@@ -308,6 +317,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.kind {
 		case acpTabAdded:
 			m.acp.upsert(msg.id, msg.title)
+			m.acp.setInteractive(msg.id, msg.interactive)
 		case acpTabStarting:
 			m.acp.upsertPlaceholder(msg.id, msg.title)
 		case acpTabPrompt:
@@ -573,8 +583,14 @@ var scrollCursorStyle = lipgloss.NewStyle().Reverse(true)
 
 // handleACPKey processes a keystroke while the full-window ACP tab view is open.
 // alt-j/alt-k (or h/l) switch tabs; esc (or `a`) returns to the normal two-pane
-// UI; q and ctrl+c still quit the whole TUI. Cursor keys are unbound.
+// UI; q and ctrl+c still quit the whole TUI. Cursor keys are unbound. On a
+// conversational tab (the wolf) enter starts composing a message — see
+// handleACPComposeKey.
 func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.acpComposing {
+		return m.handleACPComposeKey(msg)
+	}
+	m.acpInputErr = ""
 	switch msg.String() {
 	case "q":
 		return m, tea.Quit
@@ -589,6 +605,70 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.acp.prev()
 	case "z":
 		m.acpToolsExpanded = !m.acpToolsExpanded
+	case "enter", "i":
+		if t, ok := m.acp.selected(); ok && t.interactive {
+			m.acpComposing = true
+		}
+	}
+	return m, nil
+}
+
+// handleACPComposeKey handles keys while typing a message into a conversational
+// tab: everything printable is text, enter sends, esc stops typing (the draft is
+// kept), ctrl+u clears it, and alt-j/alt-k still switch tabs. Typing is a
+// separate mode so the view's single-letter commands (q, z, h, l) stay usable on
+// every other tab and when not composing.
+func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	t, ok := m.acp.selected()
+	if !ok || !t.interactive {
+		m.acpComposing = false
+		return m, nil
+	}
+	m.acpInputErr = ""
+	switch msg.String() {
+	case "esc":
+		m.acpComposing = false
+		return m, nil
+	case "alt+j":
+		m.acp.next()
+		m.acpComposing = false
+		return m, nil
+	case "alt+k":
+		m.acp.prev()
+		m.acpComposing = false
+		return m, nil
+	case "ctrl+u":
+		t.draft = ""
+		return m, nil
+	}
+	switch msg.Type {
+	case tea.KeyEnter:
+		text := strings.TrimSpace(t.draft)
+		if text == "" {
+			return m, nil
+		}
+		send := m.acpSend
+		if send == nil {
+			send = acpInputs.Send
+		}
+		if err := send(t.id, text); err != nil {
+			// Keep the draft so nothing typed is lost; show why it didn't go.
+			m.acpInputErr = err.Error()
+			return m, nil
+		}
+		t.draft = ""
+	case tea.KeyBackspace:
+		if r := []rune(t.draft); len(r) > 0 {
+			t.draft = string(r[:len(r)-1])
+		}
+	case tea.KeySpace:
+		t.draft += " "
+	case tea.KeyRunes:
+		if msg.Alt {
+			return m, nil
+		}
+		// A paste can carry newlines; a message is a single line.
+		t.draft += strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(string(msg.Runes))
 	}
 	return m, nil
 }
@@ -754,7 +834,27 @@ func (m model) attachSelected() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.statusMsg = ""
+	// An ACP-backed session (planning/task/commit/wolf) has no tmux window to
+	// attach to: its "attach" is the ACP tab view, opened on that session's tab.
+	// For the wolf this is how a human watches and types into it.
+	if m.acpCh != nil && selectedIsACP(m.sessions, m.sessSel) {
+		m.acp.selectID(target)
+		m.showACP = true
+		return m, nil
+	}
 	return m, m.attacher.Attach(target)
+}
+
+// selectedIsACP reports whether the session row with the given id is ACP-backed
+// (it carries a sandbox name, which only ACP sessions do — see
+// SessionView.SandboxName).
+func selectedIsACP(views []SessionView, id string) bool {
+	for _, v := range views {
+		if v.ID == id {
+			return v.SandboxName != ""
+		}
+	}
+	return false
 }
 
 func selectedTmuxTarget(views []SessionView, id string) (string, bool) {

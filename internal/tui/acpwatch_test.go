@@ -57,6 +57,10 @@ func (f *fakeACPConn) Connect(ctx context.Context, cwd string) error {
 
 func (f *fakeACPConn) Prompt(ctx context.Context, text string) (string, error) {
 	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return "", acpclient.ErrConnectionClosed // like the real client on a dropped connection
+	}
 	f.promptsSent = append(f.promptsSent, text)
 	f.mu.Unlock()
 	if f.promptBlocks {
@@ -871,5 +875,223 @@ func waitForKind(t *testing.T, ch <-chan acpTabEvent, kind acpEventKind, dur tim
 			t.Fatalf("timed out waiting for event kind %d", kind)
 			return acpTabEvent{}
 		}
+	}
+}
+
+// writePersistentSession persists a running, persistent (wolf) session.json.
+func writePersistentSession(t *testing.T, root, id string, promptCount int) session.Store {
+	t.Helper()
+	store := session.Store{Root: root}
+	if err := store.Write(session.Session{
+		ID:          id,
+		SandboxName: id,
+		Status:      session.StatusRunning,
+		CreatedAt:   time.Now(),
+		SocketPath:  store.SocketPath(id),
+		Workspaces:  []string{"/work/" + id},
+		Kind:        "wolf",
+		Persistent:  true,
+		PromptCount: promptCount,
+	}); err != nil {
+		t.Fatalf("write session %s: %v", id, err)
+	}
+	return store
+}
+
+// TestWatchPersistentSessionStaysConnectedAndRelaysTypedMessages is the wolf's
+// TUI contract: the opening prompt is driven once, but — unlike a one-shot agent
+// — the watcher does NOT disconnect when that turn ends; it keeps the
+// connection, and whatever the human types (acpInputs.Send) goes out as the next
+// turn and is echoed into the tab.
+func TestWatchPersistentSessionStaysConnectedAndRelaysTypedMessages(t *testing.T) {
+	root := t.TempDir()
+	writePersistentSession(t, root, "wolf-one", 0)
+
+	conn := newFakeACPConn()
+	dial := func(_ context.Context, _ string) (acpConn, error) { return conn, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "open")
+	defer stopWatch(cancel, ch)
+
+	// Collect everything the watcher emits (it blocks on an unread channel).
+	var (
+		evMu   sync.Mutex
+		events []acpTabEvent
+	)
+	go func() {
+		for ev := range ch {
+			evMu.Lock()
+			events = append(events, ev)
+			evMu.Unlock()
+		}
+	}()
+	sawEvent := func(match func(acpTabEvent) bool) bool {
+		evMu.Lock()
+		defer evMu.Unlock()
+		for _, ev := range events {
+			if match(ev) {
+				return true
+			}
+		}
+		return false
+	}
+	waitUntil := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	waitUntil("an interactive tab", func() bool {
+		return sawEvent(func(ev acpTabEvent) bool { return ev.kind == acpTabAdded && ev.id == "wolf-one" && ev.interactive })
+	})
+	waitUntil("the opening prompt", func() bool { return conn.numPrompts() == 1 })
+
+	// The opening turn is over; the connection must stay open (a one-shot watcher
+	// closes it here).
+	time.Sleep(100 * time.Millisecond)
+	conn.mu.Lock()
+	closed := conn.closed
+	conn.mu.Unlock()
+	if closed {
+		t.Fatal("watcher closed a persistent session's connection after its first turn")
+	}
+
+	// Typing into the tab reaches the agent as the next turn.
+	waitUntil("input registration", func() bool { return acpInputs.Send("wolf-one", "what failed?") == nil })
+	waitUntil("the typed message to be sent", func() bool { return conn.numPrompts() == 2 })
+	conn.mu.Lock()
+	sent := append([]string(nil), conn.promptsSent...)
+	conn.mu.Unlock()
+	if sent[0] != "open" || sent[1] != "what failed?" {
+		t.Fatalf("prompts sent = %v, want [open, what failed?]", sent)
+	}
+	// The typed message is echoed into the tab as a prompt block.
+	waitUntil("the typed message echo", func() bool {
+		return sawEvent(func(ev acpTabEvent) bool { return ev.kind == acpTabPrompt && ev.text == "what failed?" })
+	})
+}
+
+// A reconnected persistent session (PromptCount>0) must not be re-prompted but
+// must still accept typed messages.
+func TestWatchPersistentReconnectAcceptsInputWithoutReprompting(t *testing.T) {
+	root := t.TempDir()
+	writePersistentSession(t, root, "wolf-re", 1)
+
+	conn := newFakeACPConn()
+	dial := func(_ context.Context, _ string) (acpConn, error) { return conn, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "open")
+	defer stopWatch(cancel, ch)
+	go func() {
+		for range ch {
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := acpInputs.Send("wolf-re", "still there?"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reconnected persistent session never registered for input")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for conn.numPrompts() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	conn.mu.Lock()
+	sent := append([]string(nil), conn.promptsSent...)
+	conn.mu.Unlock()
+	if len(sent) != 1 || sent[0] != "still there?" {
+		t.Fatalf("prompts sent = %v, want only the typed message (no opening re-prompt)", sent)
+	}
+}
+
+// TestWatchOneShotSessionRejectsInput: only persistent sessions take typed
+// input, and a one-shot session still disconnects after its turn.
+func TestWatchOneShotSessionRejectsInput(t *testing.T) {
+	root := t.TempDir()
+	writeRunningSession(t, root, "task-shot")
+
+	conn := newFakeACPConn()
+	dial := func(_ context.Context, _ string) (acpConn, error) { return conn, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "go")
+	defer stopWatch(cancel, ch)
+
+	added := waitForKind(t, ch, acpTabAdded, 2*time.Second)
+	if added.interactive {
+		t.Error("a one-shot session's tab must not be interactive")
+	}
+	if err := acpInputs.Send("task-shot", "hello?"); err == nil {
+		t.Error("Send to a one-shot session should fail")
+	}
+}
+
+func TestACPInputRouter(t *testing.T) {
+	r := &acpInputRouter{boxes: map[string]chan string{}}
+	if err := r.Send("nobody", "x"); err == nil {
+		t.Error("Send to an unregistered session should fail")
+	}
+	ch := r.register("s")
+	for i := 0; i < acpInputQueue; i++ {
+		if err := r.Send("s", "m"); err != nil {
+			t.Fatalf("Send %d: %v", i, err)
+		}
+	}
+	if err := r.Send("s", "overflow"); err == nil {
+		t.Error("Send past the queue bound should fail rather than block")
+	}
+	// A recycled id's new inbox must survive the old watcher's late unregister.
+	newCh := r.register("s")
+	r.unregister("s", ch)
+	if err := r.Send("s", "x"); err != nil {
+		t.Errorf("stale unregister removed the replacement inbox: %v", err)
+	}
+	r.unregister("s", newCh)
+	if err := r.Send("s", "x"); err == nil {
+		t.Error("Send after unregister should fail")
+	}
+}
+
+// When a persistent session's connection closes (the wrapper ended the
+// conversation: project unblocked, idle, agent exit), its watcher must stop
+// accepting input rather than queue messages nobody will send.
+func TestWatchPersistentStopsWhenConnectionCloses(t *testing.T) {
+	root := t.TempDir()
+	writePersistentSession(t, root, "wolf-end", 1)
+
+	conn := newFakeACPConn()
+	dial := func(_ context.Context, _ string) (acpConn, error) { return conn, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 10*time.Millisecond, dial, aliveProbe, "open")
+	defer stopWatch(cancel, ch)
+	go func() {
+		for range ch {
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for acpInputs.Send("wolf-end", "ping") != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("session never registered for input")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	conn.Close() // the wrapper went away
+
+	deadline = time.Now().Add(2 * time.Second)
+	for acpInputs.Send("wolf-end", "ping") == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("watcher still accepting input after its connection closed")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

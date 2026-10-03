@@ -126,6 +126,14 @@ type Session struct {
 	// session-end handling once it reconnects to a session it did not launch.
 	Kind string `json:"kind,omitempty"`
 
+	// Persistent is true for a conversational session (the wolf): the wrapper
+	// keeps it open across client disconnects and ends it only when the agent
+	// exits, the project leaves `blocked`, or it goes idle (see
+	// acpwrapper.Config.Persistent). The TUI keys off this to keep a watcher
+	// attached after the opening turn and to let a human type into the tab,
+	// rather than treating the first completed turn as the end of the session.
+	Persistent bool `json:"persistent,omitempty"`
+
 	// SigningBroken is true when this session's commit signing was disabled at
 	// runtime because the SSH agent sbx forwards into the sandbox proved to
 	// hold no key (acpwrapper's signingPreflight failed). Commits still
