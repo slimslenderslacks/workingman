@@ -41,6 +41,9 @@ func main() {
 		runTUI(args[1:])
 		return
 	}
+	if len(args) > 0 && args[0] == "status" {
+		os.Exit(runStatus(args[1:], os.Stdout, os.Stderr))
+	}
 	runDaemon(args)
 }
 
@@ -60,6 +63,7 @@ func runDaemon(args []string) {
 	acpWrapper := fs.String("acp-wrapper", "", "path to the acp-wrapper binary (default: acp-wrapper on PATH)")
 	sessionsRoot := fs.String("sessions-root", "", "root dir holding per-session dirs for ACP agents (default ~/.workingman/sessions)")
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
+	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -79,6 +83,11 @@ func runDaemon(args []string) {
 	}
 	defer f.Close()
 	a := audit.New(f)
+	// Pre-load the in-memory audit tail from what earlier runs wrote so the
+	// state snapshot's recent-events list is useful immediately after a restart.
+	if lines, err := audit.TailFile(*auditPath, 500); err == nil {
+		a.Seed(lines)
+	}
 
 	// Point the SSH agent at 1Password when the inherited one can't sign.
 	// A GUI/login-shell SSH_AUTH_SOCK is the macOS system (launchd) agent,
@@ -152,11 +161,30 @@ func runDaemon(args []string) {
 		r.Sandbox = runner.DefaultSandboxCreator
 	}
 
-	d, err := daemon.New(roots, a,
+	dopts := []daemon.Option{
 		daemon.WithRunner(r),
 		daemon.WithNotifier(&notify.Osascript{}),
 		daemon.WithScheduler(scheduler.New()),
-	)
+	}
+	stateFilePath, err := resolveStateFile(*stateFile, *sessionsRoot)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if stateFilePath != "" {
+		dopts = append(dopts,
+			daemon.WithStateFile(stateFilePath, 0),
+			daemon.WithRuntimeInfo(daemon.RuntimeInfo{
+				WorkspaceManager: *workspaceMode,
+				AcpKit:           *acpKit,
+				AcpWrapper:       *acpWrapper,
+				SessionsRoot:     *sessionsRoot,
+				TmuxSession:      *tmuxSession,
+				AuditLog:         absPath(*auditPath),
+				Headless:         *headless,
+			}),
+		)
+	}
+	d, err := daemon.New(roots, a, dopts...)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -172,6 +200,7 @@ func runDaemon(args []string) {
 		"tmux", tmuxBin,
 		"tmux_session", *tmuxSession,
 		"acp_kit", *acpKit,
+		"state_file", stateFilePath,
 	)
 
 	if *headless {

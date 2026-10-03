@@ -146,6 +146,10 @@ daemon ignores its own fsnotify events.
 - **Tmux sessions**: `tmux list-sessions` shows every live agent. Attach
   with `tmux attach -t <name>` to watch claude work or drive an interactive
   agent (project / wolf).
+- **State snapshot** (`--state-file`, `orch status`): the daemon's in-memory
+  state (live sessions, wolf in flight, failure counters, review polls)
+  published as JSON for external readers. See
+  [docs/state-snapshot.md](docs/state-snapshot.md).
 
 ## Example `.project.yaml`
 

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -84,6 +85,10 @@ type Daemon struct {
 	// ACP stream activity before the stranded-session reaper terminates it.
 	// See reaper.go.
 	sessionIdleTimeout time.Duration
+
+	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
+	// unless WithStateFile configured a path.
+	snapshot snapshotState
 }
 
 const (
@@ -187,8 +192,21 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		dispatchChains:     map[string]chan struct{}{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 	}
+	d.snapshot.startedAt = time.Now()
+	d.snapshot.pid = os.Getpid()
+	d.snapshot.collector = newSnapshotCollector()
+	d.snapshot.kick = make(chan struct{}, 1)
 	for _, opt := range opts {
 		opt(d)
+	}
+	if d.snapshot.path != "" {
+		if err := validateStateFile(d.snapshot.path, roots); err != nil {
+			w.Close()
+			return nil, fmt.Errorf("daemon: %w", err)
+		}
+		// Any audit line is a hint that state moved (session start/stop,
+		// project/task transitions, failures); the loop debounces the burst.
+		a.OnLog(d.markSnapshotDirty)
 	}
 	return d, nil
 }
@@ -215,6 +233,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.reconcileSessions()
 	d.startupScan()
 	go d.reapLoop(ctx)
+	if d.snapshot.path != "" {
+		// Publish immediately so a reader never sees a stale file from a
+		// previous run once we're up, then keep it fresh.
+		if err := d.writeSnapshot(true); err != nil {
+			d.logSnapshotError(err)
+		}
+		go d.snapshotLoop(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -280,6 +306,7 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 // project/wolf agents) are actually closed here — detachable ones are simply
 // dropped from local tracking, exactly like a deliberate detach.
 func (d *Daemon) shutdown() {
+	defer d.writeFinalSnapshot()
 	d.watcher.Close()
 	if d.scheduler != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -341,6 +368,7 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, t
 		taskName:  taskName,
 	}
 	d.sessionsMu.Unlock()
+	d.markSnapshotDirty()
 
 	// Detachable (ACP-backed) sessions must not be waited on under d.ctx:
 	// processSession.Wait itself closes the session (SIGTERM) the moment its
@@ -365,6 +393,7 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, t
 			fields = append(fields, "err", waitErr.Error())
 		}
 		d.audit.Log("session_ended", fields...)
+		d.markSnapshotDirty()
 		if onEnd == nil {
 			return
 		}

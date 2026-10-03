@@ -37,6 +37,9 @@ func (d *Daemon) handle(ev fsnotify.Event) {
 		return
 	}
 	h(ev.Name)
+	// A project/task/intake file changed: refresh the state snapshot (a no-op
+	// when publishing is off).
+	d.markSnapshotDirty()
 }
 
 // handleProject reads the .project.yaml file, drops the event if the daemon
