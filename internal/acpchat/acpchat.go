@@ -182,12 +182,22 @@ type Conversation struct {
 	// response would otherwise leave it stuck.
 	foreignActive bool
 	gone          error // set once, terminal
+	created       bool  // this conversation ran session/new itself (CreateIfMissing)
 
 	events eventQueue
 }
 
 // ID is the session directory id this conversation is attached to.
 func (c *Conversation) ID() string { return c.id }
+
+// Created reports whether this conversation had to create the ACP session
+// itself (CreateIfMissing) because no other client had. Such a session has not
+// been given its opening prompt by anyone, so the caller should.
+func (c *Conversation) Created() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.created
+}
 
 // SessionID is the ACP session id currently being spoken to ("" mid-reconnect to
 // a restarted session).
@@ -745,6 +755,9 @@ func (c *Conversation) dialAndBind(ctx context.Context, rec session.Session, red
 			return nil, fmt.Errorf("acpchat: create session: %w", err)
 		}
 		id = client.SessionID()
+		c.mu.Lock()
+		c.created = true
+		c.mu.Unlock()
 	} else if id == "" {
 		client.Close()
 		return nil, fmt.Errorf("%w in %s", ErrNoSession, c.id)

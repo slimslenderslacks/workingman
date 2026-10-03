@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -469,9 +470,9 @@ func TestRetry_StopsWhenContextEnds(t *testing.T) {
 func TestRetry_TransportErrorsAfterConnectAreNotRetried(t *testing.T) {
 	// A server that hangs up mid-request: the message may have been accepted,
 	// so repeating it could deliver twice.
-	var hits int
+	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		hits.Add(1)
 		hj, _ := w.(http.Hijacker)
 		conn, _, _ := hj.Hijack()
 		conn.Close()
@@ -485,8 +486,8 @@ func TestRetry_TransportErrorsAfterConnectAreNotRetried(t *testing.T) {
 	if _, err := c.SendText(context.Background(), "15551234567", "hi", ""); err == nil {
 		t.Fatal("expected an error")
 	}
-	if hits != 1 {
-		t.Errorf("%d requests; a possibly-delivered message must not be resent", hits)
+	if n := hits.Load(); n != 1 {
+		t.Errorf("%d requests; a possibly-delivered message must not be resent", n)
 	}
 }
 

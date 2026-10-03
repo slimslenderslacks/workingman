@@ -95,14 +95,20 @@ func setupChannels(configPath, logDir, stateDir string, a *audit.Logger) (*daemo
 // never stalls dispatch — and WithChannels carries the wolf lifecycle
 // messages. Disabled channels keep the plain macOS notifier.
 func (c *daemonChannels) options(a *audit.Logger) []daemon.Option {
+	return c.optionsWithLocal(a, &notify.Osascript{})
+}
+
+// optionsWithLocal is options with the local (macOS) half of the notifier
+// replaced, so a test can run the production wiring without pop-ups.
+func (c *daemonChannels) optionsWithLocal(a *audit.Logger, local notify.Sender) []daemon.Option {
 	if !c.enabled() {
-		return []daemon.Option{daemon.WithNotifier(&notify.Osascript{})}
+		return []daemon.Option{daemon.WithNotifier(local)}
 	}
 	chNotifier := notify.NewAsync(channels.NewNotifier(c.reg), func(err error) {
 		a.Log("channel_send_error", "event", "notify", "err", err.Error())
 	})
 	return []daemon.Option{
-		daemon.WithNotifier(notify.NewMulti(&notify.Osascript{}, chNotifier)),
+		daemon.WithNotifier(notify.NewMulti(local, chNotifier)),
 		daemon.WithChannels(c.reg, c.index,
 			daemon.WithWolfStartInterval(c.cfg.Notify.WolfStartIntervalDuration())),
 	}

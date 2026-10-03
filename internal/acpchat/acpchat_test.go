@@ -592,6 +592,14 @@ func TestAttachWithoutSessionIsErrNoSession(t *testing.T) {
 	}
 }
 
+func TestAdoptedSessionIsNotCreated(t *testing.T) {
+	a := newFakeAgent(t)
+	tuiClient(t, a)
+	if conv := attach(t, a); conv.Created() {
+		t.Error("Created() = true for a session another client had already created")
+	}
+}
+
 func TestCreateIfMissingRunsHandshake(t *testing.T) {
 	a := newFakeAgent(t)
 	opts := a.options()
@@ -608,6 +616,9 @@ func TestCreateIfMissingRunsHandshake(t *testing.T) {
 	}
 	if strings.Join(methods, ",") != "initialize,session/new,session/set_mode" {
 		t.Errorf("handshake = %v", methods)
+	}
+	if !conv.Created() {
+		t.Error("Created() = false for a session the conversation created itself")
 	}
 	if reply, err := conv.Ask(testCtx(t), "hi"); err != nil || reply != "echo: hi" {
 		t.Errorf("Ask = %q, %v", reply, err)

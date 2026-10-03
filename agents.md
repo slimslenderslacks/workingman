@@ -393,10 +393,30 @@ clears, ⌥j/⌥k switch tabs; the usual single-letter commands (q, z, h, l) are
 disabled only while composing. The host wolf (`--wolf-host`) is unchanged: enter
 on its row `tmux attach`es.
 
+**Messaging channels: start/end notifications and conversation.** With
+`channels.yaml` configured (`docs/channels.md`) the wolf is also reachable from
+a phone. `launchWolfAgent` creates a `wolfAnnouncement` and, once the session is
+really up (not on a failed launch, not on the dedup no-op above), sends on topic
+`wolf` — asynchronously, under a timeout, so a slow channel never stalls
+dispatch — `🐺 wolf is running for <work-stream>`, the (truncated) blocked reason,
+the failed tasks and "Reply to this message to talk to the wolf." The returned
+message id is recorded in the conversation index (`ConversationTarget` = project
+path, `#wolf` key, session id). When the session ends, `🐺 wolf finished for
+<work-stream>: project now <status>` follows — only if the start message went
+out. At most one start message per work stream per `notify.wolf_start_interval`
+(default 10m; `wolf_start_suppressed`). A *reply* to the start message is
+routed by the router to that wolf's session (`acpchat.Attach`) and the wolf's
+answer comes back labelled `[wolf <work-stream>]`; `/wolf` binds a whole chat to
+the wolf, and anything the TUI user types into the wolf is relayed to the bound
+chat (observe mode), as are its tool-permission requests (rejected on timeout).
+The wolf prompt stays channel-agnostic: it just asks in the conversation and
+stops. Code: `internal/daemon/channels_notify.go`, `internal/router`.
+
 **Known limits.** (a) The opening prompt, like every ACP agent's, is delivered
 by a TUI watcher, so a `--headless` daemon with nobody watching never prompts an
 ACP wolf (the same is already true of planning/task/commit; use `--wolf-host` for
-a TUI-less setup until the daemon-side attach lands). (b) `acpclient.Connect`
+a TUI-less setup). The one exception is the workingman agent (§8): the router
+creates and primes its session itself, because nothing else would. (b) `acpclient.Connect`
 issues `session/new`, so a TUI that restarts mid-conversation reconnects to the
 same `claude-acp-client` process but starts a fresh ACP session (the replayed
 transcript is only history; the agent's context for new turns is new). Binding
@@ -415,7 +435,9 @@ opts)` joins a *running* session's conversation while the TUI stays attached:
   agent would replay the whole history to every client, duplicating the TUI's
   scrollback). The id comes from the newest `sessionId` in the session's
   `stream.log`, else from the first frame on the live socket (`DiscoverTimeout`;
-  `CreateIfMissing` runs the full handshake for a TUI-less daemon). If another
+  `CreateIfMissing` runs the full handshake for a TUI-less daemon, and
+`Conversation.Created()` tells the caller it did, so the session still needs its
+opening prompt — the router sends it for the workingman agent). If another
   client later runs `session/new`, the conversation follows it
   (`EventSessionChanged`).
 - Its request ids live in a private range (`acpclient.Options.DistinctIDs`), so
@@ -667,3 +689,14 @@ on (and is a startup error without `--acp-kit`); `=off` disables it.
 `StartedAt`, or `false` when it isn't running (disabled, between restarts, launch
 failing). The inbound-message router attaches through it with `acpchat` (see
 `docs/channels.md`; live wolves are listed by `Daemon.WolfSessions`).
+
+**Who starts its conversation.** In a TUI session the watcher discovers the
+persistent session, runs `session/new` and sends the usual opening prompt. Under
+`--headless` nobody does, so the router attaches with `CreateIfMissing`, and when
+`Conversation.Created()` reports it had to create the ACP session it first sends
+`router.OpeningPrompt` ("Read .orch/instructions.md and .orch/context.yaml, then
+follow the instructions.") and discards the reply, so the agent has read
+`workingman.tmpl` before the first question reaches it. A question that arrives
+while the agent is still booting gets *"The workingman agent is starting up, try
+again in a minute."* rather than a hang. Replies go back to the asking chat
+(a `workingman` topic route is optional); every reply passes `audit.Redact`.

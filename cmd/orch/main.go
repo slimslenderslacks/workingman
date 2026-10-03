@@ -34,6 +34,24 @@ func (r *rootsFlag) Set(s string) error {
 	return nil
 }
 
+// usageHeader is the top of `orch --help`: the daemon is the default command,
+// the subcommands are dispatched by main before flag parsing, so the flag
+// package's own listing (which follows) would not mention them.
+const usageHeader = `usage: orch --root <dir> [flags]        run the daemon, with the TUI unless --headless
+       orch tui --root <dir>            run only the TUI over a directory
+       orch status [--json]             print the running daemon's state snapshot
+       orch whatsapp <subcommand>       set up and check the WhatsApp channel (see docs/channels.md)
+
+whatsapp subcommands:
+  setup    configure the Business Cloud API channel: credentials, owner allowlist, webhook
+  status   show the (masked) config, Graph reachability and the webhook listener
+  test     send a test message and print its id or the error
+  pair     link a personal WhatsApp number to the bridge backend by QR code
+
+Run "orch <subcommand> -h" for a subcommand's flags. Daemon flags:
+
+`
+
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 && args[0] == "tui" {
@@ -42,6 +60,10 @@ func main() {
 	}
 	if len(args) > 0 && args[0] == "status" {
 		os.Exit(runStatus(args[1:], os.Stdout, os.Stderr))
+	}
+	if len(args) > 0 && args[0] == "help" {
+		fmt.Fprint(os.Stdout, usageHeader)
+		return
 	}
 	if len(args) > 0 && args[0] == "whatsapp" {
 		os.Exit(runWhatsApp(args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -55,13 +77,17 @@ func main() {
 // keeps the pre-TUI behaviour: pure daemon loop, no terminal UI.
 func runDaemon(args []string) {
 	fs := flag.NewFlagSet("orch", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), usageHeader)
+		fs.PrintDefaults()
+	}
 	var roots rootsFlag
 	fs.Var(&roots, "root", "directory to watch (repeatable)")
 	auditPath := fs.String("audit-log", "logs/audit.log", "path to the audit log")
 	workspaceMode := fs.String("workspace-manager", "wsp", `workspace manager: "wsp" (real) or "stub" (test/dev)`)
 	stubRoot := fs.String("stub-workspace-root", "", `when --workspace-manager=stub, directory where workspaces are created (default: $TMPDIR/orch-workspaces)`)
 	tmuxSession := fs.String("tmux-session", agent.DefaultUmbrellaSession, "name of the umbrella tmux session every agent's window lives in")
-	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, planning/task/commit agents launch as acp-wrapper-backed ACP sessions instead of tmux+`sbx exec claude -p`")
+	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, the planning/task/commit agents, the wolf and the workingman agent launch as acp-wrapper-backed ACP sessions instead of tmux+'sbx exec claude -p'")
 	acpWrapper := fs.String("acp-wrapper", "", "path to the acp-wrapper binary (default: acp-wrapper on PATH)")
 	sessionsRoot := fs.String("sessions-root", "", "root dir holding per-session dirs for ACP agents (default ~/.workingman/sessions)")
 	wolfHost := fs.Bool("wolf-host", false, "escape hatch: run the wolf agent in a tmux window directly on the host (full host access, no sandbox, only reachable by attaching to tmux) instead of as a persistent ACP session in its own sandbox. Only matters when --acp-kit is set")

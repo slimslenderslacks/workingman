@@ -309,6 +309,20 @@ user a question) is not an end, and a re-block inside the grace keeps the
 existing wolf rather than ending it. After a daemon restart `reconcileSessions`
 re-adopts a live wolf under the wolf key (not the project's main slot).
 
+**Wolf start/end notifications.** When channels are configured
+(`docs/channels.md`) the wolf's lifecycle is also announced on the `wolf` topic,
+outside the state machine — it never changes a status and never blocks dispatch.
+Once `launchWolfAgent` has actually started a session (a failed launch and the
+session-dedup no-op announce nothing) the daemon sends, asynchronously,
+`🐺 wolf is running for <work-stream>` with the blocked reason and failed tasks;
+the message id is recorded so a *reply* reaches that wolf's conversation. When
+the wolf session ends — the same `onEnd` that triggers `revisitProject` — it
+sends `🐺 wolf finished for <work-stream>: project now <status>` (status re-read
+from `.project.yaml`), but only if the start message went out. At most one start
+message goes out per work stream per `notify.wolf_start_interval` (default 10m),
+so a block → wolf → re-block loop cannot spam the chat. The existing macOS
+"Project blocked" notification is unchanged.
+
 `launchWolfAgent` reads back a durable `blocked-session.yaml` record
 (`project.BlockedSessionPath`, `internal/project/blocked_session.go`) if a
 prior wolf invocation left one, and folds its `Summary`/`Attempted` fields

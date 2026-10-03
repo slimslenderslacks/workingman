@@ -162,6 +162,69 @@ daemon ignores its own fsnotify events.
   published as JSON for external readers. See
   [docs/state-snapshot.md](docs/state-snapshot.md).
 
+## Channels / WhatsApp
+
+The daemon can reach you on WhatsApp, modelled on hermes-agent's WhatsApp
+gateway. It messages you the moment a wolf agent starts (`🐺 wolf is running for
+<project> … Reply to this message to talk to the wolf.`), relays your reply into
+that wolf's conversation, and routes any other message to the always-on
+**workingman agent**, a read-only assistant that answers questions about open
+projects, running tasks and the daemon state. Details, configuration reference,
+security model, troubleshooting and a manual smoke-test checklist:
+[docs/channels.md](docs/channels.md).
+
+```sh
+orch whatsapp setup     # Cloud API: credentials, owner allowlist, webhook (prints what to paste into Meta)
+orch whatsapp status    # masked config, Graph reachability, webhook listener
+orch whatsapp test      # send a test message to the owner
+orch whatsapp pair      # bridge mode: link a personal number by QR code
+orch --root ~/orch --acp-kit <kit>   # channels.yaml present ⇒ channels on, workingman agent on
+```
+
+Two backends, chosen per channel with `options.mode`:
+
+| | `cloud` (default, supported) | `bridge` (unofficial) |
+|---|---|---|
+| Transport | Meta WhatsApp Cloud API: signed webhook in, Graph API out | Baileys linked device, run as a supervised local Node process |
+| Needs | Meta app + phone-number id, public https URL (tunnel) | Node ≥ 18, a phone to scan a QR code; no public URL |
+| Number | a Meta (test or business) number | your personal number (`self-chat`) or a spare one (`bot`) |
+| Ban risk | none — official API | **real**: Baileys speaks the unofficial WhatsApp Web protocol; WhatsApp can disconnect or ban numbers that use it. Use a number you can afford to lose and keep traffic low |
+| Setup | `orch whatsapp setup` | `orch whatsapp pair` |
+
+Parity with hermes-agent's WhatsApp channel (✅ supported · ➖ partly · ❌ not supported):
+
+| Feature | hermes-agent | workingman cloud | workingman bridge |
+|---|---|---|---|
+| Cloud API backend (webhook + Graph) | ✅ | ✅ | n/a |
+| Baileys bridge backend | ✅ | n/a | ✅ (bridge vendored from hermes) |
+| Setup wizard / pairing | ✅ | ✅ `orch whatsapp setup` | ✅ `orch whatsapp pair` |
+| Bot mode (dedicated number) | ✅ | ✅ | ✅ |
+| Self-chat mode (personal number) | ✅ | ❌ (the API never delivers it) | ✅ |
+| Allowlist, default deny | ✅ | ✅ (no wildcard; `allow_all` is an explicit opt-in) | ✅ |
+| Reply to unauthorised senders | pairing code, or ignore | silent by default; optional `deny_reply` | same |
+| Webhook signature + verify handshake | ✅ | ✅ | n/a |
+| Group chats | ✅ | ❌ (direct chats only) | ✅ (`groups`, `group_allow_from`, mention gating) |
+| Text in / out | ✅ | ✅ | ✅ |
+| Markdown → WhatsApp formatting, 4096-char chunking | ✅ | ✅ | ✅ |
+| Quoted replies (reply-to) | ✅ | ✅ — also how a wolf message is answered | ✅ |
+| Typing indicator | ✅ | ✅ | ✅ |
+| Read receipts | ✅ | ❌ not sent | ➖ opt-in (`send_read_receipts`) |
+| Images, voice, documents | ✅ | ➖ captions kept, media not downloaded or sent | ➖ same |
+| Voice transcription | ✅ | ❌ | ❌ |
+| Polls, locations, interactive buttons | ✅ | ❌ (permission prompts are plain text: reply `yes`/`no`) | ❌ |
+| Message batching (debounce) | ✅ | ❌ one turn at a time per chat, bounded queue | ❌ |
+| Tool-progress messages | ✅ | ❌ only the agent's final text segment is sent | ❌ |
+| Template messages outside the 24 h window | n/a | ❌ typed error (`ErrOutsideServiceWindow`), audit-logged | n/a |
+| Session survives restarts | ✅ | n/a (stateless) | ✅ (`~/.workingman/whatsapp/session`) |
+
+What is specific to workingman: the **wolf channel** (topic `wolf`: start/end
+messages, reply-to routing, `/wolf`, relayed tool-permission requests), the
+**workingman agent** (an ACP session in its own sandbox; the orch roots, daemon
+snapshot, audit log and agent sessions are mounted read-only), the commands
+`/help /status /wolf /agent /who`, and the redaction of every outgoing reply.
+The WhatsApp numbers allowed to talk to the daemon are an allowlist — nothing
+else reaches an agent.
+
 ## Example `.project.yaml`
 
 ```yaml

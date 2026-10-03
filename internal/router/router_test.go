@@ -322,6 +322,69 @@ func TestDefaultRoutesToWorkingmanAgent(t *testing.T) {
 	}
 }
 
+// createdAgent is a fakeAgent whose conversation had to create the ACP session
+// (nobody else was driving it), so it has not been given its opening prompt.
+type createdAgent struct{ *fakeAgent }
+
+func (createdAgent) Created() bool { return true }
+
+// A workingman session nobody has started a conversation in (the daemon runs
+// without the TUI) is created by the router, which then gives it its opening
+// prompt before the first question. A wolf's session is never created here.
+func TestCreatedWorkingmanSessionIsPrimedBeforeTheFirstQuestion(t *testing.T) {
+	var opts []acpchat.Options
+	var optsMu sync.Mutex
+	var fake *fakeAgent
+	h := newHarness(t, func(c *Config) {
+		inner := c.Attach
+		c.Attach = func(ctx context.Context, ref string, o acpchat.Options) (Agent, error) {
+			ag, err := inner(ctx, ref, o)
+			if err != nil {
+				return nil, err
+			}
+			optsMu.Lock()
+			opts = append(opts, o)
+			fake = ag.(*fakeAgent)
+			optsMu.Unlock()
+			return createdAgent{fake}, nil
+		}
+	})
+	h.say("what projects are open?")
+	h.wait(1)
+	asks := h.agentFake().Asks()
+	if len(asks) != 2 || asks[0] != OpeningPrompt || asks[1] != "what projects are open?" {
+		t.Fatalf("asks = %q, want the opening prompt then the question", asks)
+	}
+	if got := h.sent(); len(got) != 1 || got[0] != "echo: what projects are open?" {
+		t.Fatalf("the opening prompt's reply leaked to the chat: %q", got)
+	}
+	optsMu.Lock()
+	defer optsMu.Unlock()
+	if len(opts) != 1 || !opts[0].CreateIfMissing {
+		t.Fatalf("workingman attach options = %+v, want CreateIfMissing", opts)
+	}
+
+	// An existing conversation is not primed again, and a wolf is never created.
+	h.say("and tasks?")
+	h.wait(2)
+	if asks := h.agentFake().Asks(); len(asks) != 3 {
+		t.Fatalf("asks = %q, want no second opening prompt", asks)
+	}
+}
+
+func TestWolfAttachDoesNotCreateTheSession(t *testing.T) {
+	h := newHarness(t, nil)
+	s, _ := h.addWolf("alpha")
+	h.say("/wolf alpha")
+	h.say("hello")
+	h.wait(2)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.opts[s.Ref].CreateIfMissing {
+		t.Fatal("a wolf's ACP session must be created by its TUI, not by the router")
+	}
+}
+
 func TestEmptyAndPathLikeMessages(t *testing.T) {
 	h := newHarness(t, nil)
 	h.say("   ")

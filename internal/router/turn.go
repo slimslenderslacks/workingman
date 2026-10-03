@@ -67,6 +67,10 @@ func (r *Router) conversation(ctx context.Context, tgt target) (*conv, error) {
 	defer cancel()
 	opts := r.cfg.AttachOptions
 	opts.PermissionTimeout = r.cfg.PermissionTimeout
+	// Nobody else drives the workingman agent's session when the daemon runs
+	// without the TUI, so the router creates the ACP session itself (and gives it
+	// its opening prompt, below). A wolf's session is always the TUI's to create.
+	opts.CreateIfMissing = opts.CreateIfMissing || !tgt.wolf
 	opts.OnPermission = func(pctx context.Context, req acpchat.PermissionRequest) acpchat.PermissionDecision {
 		return r.askPermission(pctx, tgt, req)
 	}
@@ -78,6 +82,9 @@ func (r *Router) conversation(ctx context.Context, tgt target) (*conv, error) {
 		return nil, err
 	}
 	cv.agent = a
+	if cr, ok := a.(interface{ Created() bool }); ok && cr.Created() {
+		r.prime(a)
+	}
 	var events <-chan acpchat.Event
 	if tgt.wolf {
 		// Subscribed before anyone can Ask: events are recorded only from the
@@ -90,6 +97,24 @@ func (r *Router) conversation(ctx context.Context, tgt target) (*conv, error) {
 	}
 	r.audit("attached", "kind", kindOf(tgt), "work_stream", tgt.WorkStream)
 	return cv, nil
+}
+
+// OpeningPrompt is the first turn of an agent session: the same one-liner the
+// TUI's watcher and the tmux path send, pointing the sandboxed agent at its
+// handoff files.
+const OpeningPrompt = "Read .orch/instructions.md and .orch/context.yaml, then follow the instructions."
+
+// prime sends OpeningPrompt to a session this router created, so the agent has
+// read its instructions before the first question reaches it. A failure is only
+// logged: the question that follows will surface a dead agent.
+func (r *Router) prime(a Agent) {
+	ctx, cancel := context.WithTimeout(r.ctx, r.cfg.TurnTimeout)
+	defer cancel()
+	if _, err := a.Ask(ctx, OpeningPrompt, acpchat.FinalSegmentOnly()); err != nil {
+		r.audit("prime_error", "err", audit.Redact(err.Error()))
+		return
+	}
+	r.audit("primed")
 }
 
 func (r *Router) audit(event string, kv ...string) {
