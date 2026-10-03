@@ -15,7 +15,6 @@ import (
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/daemon"
-	"github.com/slimslenderslacks/work/internal/notify"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
 	"github.com/slimslenderslacks/work/internal/session"
@@ -68,6 +67,7 @@ func runDaemon(args []string) {
 	wolfHost := fs.Bool("wolf-host", false, "escape hatch: run the wolf agent in a tmux window directly on the host (full host access, no sandbox, only reachable by attaching to tmux) instead of as a persistent ACP session in its own sandbox. Only matters when --acp-kit is set")
 	wolfUnblockGrace := fs.Duration("wolf-unblock-grace", 0, "how long an ACP wolf lingers after its project leaves status:blocked before its conversation is ended (0 = default 2m, negative = never end on unblock)")
 	wolfIdleTimeout := fs.Duration("wolf-idle-timeout", 0, "end an ACP wolf after this long with no ACP traffic (0 = default 24h, negative = never)")
+	channelsConfig := fs.String("channels-config", "", "messaging-channels config (default ~/.workingman/channels.yaml, or $WORKINGMAN_CHANNELS_CONFIG). A missing file disables channels and the daemon behaves exactly as without them")
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
 	if err := fs.Parse(args); err != nil {
@@ -171,11 +171,21 @@ func runDaemon(args []string) {
 		r.Sandbox = runner.DefaultSandboxCreator
 	}
 
+	stateDir, err := stateDirFor(*sessionsRoot)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ch, err := setupChannels(*channelsConfig, filepath.Dir(*auditPath), stateDir, a)
+	if err != nil {
+		log.Fatalf("channels: %v", err)
+	}
+	defer ch.stop(a)
+
 	dopts := []daemon.Option{
 		daemon.WithRunner(r),
-		daemon.WithNotifier(&notify.Osascript{}),
 		daemon.WithScheduler(scheduler.New()),
 	}
+	dopts = append(dopts, ch.options(a)...)
 	stateFilePath, err := resolveStateFile(*stateFile, *sessionsRoot)
 	if err != nil {
 		log.Fatal(err)
@@ -202,6 +212,8 @@ func runDaemon(args []string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	ch.start(ctx, a)
+
 	a.Log("daemon_start",
 		"pid", fmt.Sprintf("%d", os.Getpid()),
 		"workspace_manager", *workspaceMode,
@@ -216,9 +228,11 @@ func runDaemon(args []string) {
 
 	if *headless {
 		if err := d.Run(ctx); err != nil {
+			ch.stop(a)
 			a.Log("daemon_error", "err", err.Error())
 			log.Fatal(err)
 		}
+		ch.stop(a)
 		a.Log("daemon_stop")
 		return
 	}
@@ -266,6 +280,7 @@ func runDaemon(args []string) {
 	// return.
 	cancel()
 	daemonErr := <-daemonErrCh
+	ch.stop(a)
 
 	a.Log("daemon_stop")
 

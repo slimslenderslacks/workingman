@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -35,9 +36,39 @@ const WildcardTopic = "*"
 //	  - {topic: wolf,       channel: whatsapp, chat: "15551234567"}
 //	  - {topic: workingman, channel: whatsapp, chat: "15551234567"}
 //	  - {topic: "*",        channel: whatsapp, chat: "15551234567"}
+//	notify:
+//	  wolf_start_interval: 10m       # at most one wolf-start message per work stream per interval
 type Config struct {
 	Channels map[string]ChannelConfig `yaml:"channels"`
 	Routes   []Route                  `yaml:"routes"`
+	Notify   NotifyConfig             `yaml:"notify,omitempty"`
+}
+
+// DefaultWolfStartInterval is the default minimum gap between two "wolf is
+// running" messages for the same work stream.
+const DefaultWolfStartInterval = 10 * time.Minute
+
+// NotifyConfig tunes the daemon's own notifications over channels.
+type NotifyConfig struct {
+	// WolfStartInterval is a Go duration ("10m"). The daemon sends at most one
+	// wolf-start message per work stream per interval, so a wolf relaunched in
+	// a loop cannot spam the chat. Empty means DefaultWolfStartInterval; "0s"
+	// disables the limit.
+	WolfStartInterval string `yaml:"wolf_start_interval,omitempty"`
+}
+
+// WolfStartIntervalDuration returns the parsed interval, DefaultWolfStartInterval
+// when unset, or 0 when the limit is disabled. An invalid value (rejected by
+// Validate) also yields the default.
+func (n NotifyConfig) WolfStartIntervalDuration() time.Duration {
+	if strings.TrimSpace(n.WolfStartInterval) == "" {
+		return DefaultWolfStartInterval
+	}
+	d, err := time.ParseDuration(n.WolfStartInterval)
+	if err != nil || d < 0 {
+		return DefaultWolfStartInterval
+	}
+	return d
 }
 
 // ChannelConfig describes one channel instance.
@@ -116,6 +147,10 @@ func LoadOptional(path string) (*Config, error) {
 	return cfg, err
 }
 
+// ResolveConfigPath returns the config file path for a --channels-config style
+// value: "" means DefaultConfigPath, and a leading "~" expands to the home dir.
+func ResolveConfigPath(path string) (string, error) { return resolveConfigPath(path) }
+
 func resolveConfigPath(path string) (string, error) {
 	if path == "" {
 		return DefaultConfigPath()
@@ -163,6 +198,12 @@ func (c *Config) Validate() error {
 			if err := ch.Credentials[cn].validate(); err != nil {
 				add("%s.credentials.%s: %v", at, cn, err)
 			}
+		}
+	}
+
+	if v := strings.TrimSpace(c.Notify.WolfStartInterval); v != "" {
+		if d, err := time.ParseDuration(v); err != nil || d < 0 {
+			add("notify.wolf_start_interval: %q is not a valid non-negative duration (e.g. \"10m\")", v)
 		}
 	}
 

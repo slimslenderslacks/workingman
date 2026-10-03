@@ -30,6 +30,7 @@ type Daemon struct {
 	watcher   *fsnotify.Watcher
 	runner    *runner.Runner
 	notifier  notify.Sender
+	channels  *channelNotify // nil unless WithChannels; see channels_notify.go
 	scheduler *scheduler.Scheduler
 	ctx       context.Context // assigned at Run() entry; used by session goroutines
 

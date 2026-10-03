@@ -419,9 +419,18 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	// audit entry plus the notification we already sent are enough to
 	// surface the failure. onEnd revisits under the real project path (not the
 	// wolf key) so post-wolf re-evaluation reloads the actual .project.yaml.
-	_ = d.startSession(key, plan, func(error) {
+	//
+	// The wolf's start message goes out only once the session is really up —
+	// not on a failed launch, and not on the dedup no-op above — and is sent
+	// asynchronously so a slow or broken channel can never stall dispatch.
+	ann := newWolfAnnouncement()
+	started, _ := d.startSessionTracked(key, plan, func(error) {
+		d.announceWolfEnd(ann, projectPath)
 		d.revisitProject(projectPath)
 	})
+	if started {
+		d.announceWolfStart(ann, key, projectPath, d.sessionName(key), reason, plan.FailedTasks)
+	}
 }
 
 // launchArchiveAgent starts the archive (cleanup) agent for a project whose
