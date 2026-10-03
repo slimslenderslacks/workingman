@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -133,10 +134,39 @@ type Plan struct {
 	// process is already long-lived.
 	Persistent bool
 
+	// ReadOnlyMounts, for the workingman agent, are host paths bind-mounted into
+	// its sandbox READ-ONLY (sbx's `<path>:ro`) next to its writable scratch
+	// directory (WorkingDir): the orch roots, the snapshot dir, the audit-log dir
+	// and the ACP sessions root. Ignored for every other Kind. See
+	// workingmanWorkspaces.
+	ReadOnlyMounts []string
+
+	// Observe describes what the workingman agent observes, for its prompt and
+	// .orch/context.yaml. Ignored for every other Kind.
+	Observe Observe
+
 	// SessionName is the tmux session name. If empty, Runner derives one
 	// from Kind and Branch (or Kind and a short hash of WorkingDir).
 	SessionName string
 }
+
+// Observe is the description of the orch state a workingman agent may read:
+// everything in it is also mounted read-only (see Plan.ReadOnlyMounts), at the
+// same absolute host path the daemon uses.
+type Observe struct {
+	Roots        []string // orch roots (--root): <root>/<work-stream>/{.project.yaml,tasks/}
+	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
+	AuditLog     string   // the audit log file; empty when unknown
+	SessionsRoot string   // ACP sessions root: <root>/<id>/{session.json,stream.log}
+}
+
+// WorkingmanAgentSandbox is the sbx sandbox name — and WorkingmanAgentSession the
+// ACP session id — of the workingman agent. There is exactly one, independent of
+// any project path.
+const (
+	WorkingmanAgentSandbox = "workingman-agent"
+	WorkingmanAgentSession = "workingman-agent"
+)
 
 // CommandBuilder produces the argv that the launcher runs inside the
 // workspace. Production builds a claude invocation; tests can return
@@ -432,6 +462,23 @@ func projectNameFromPath(projectPath string) string {
 }
 
 func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
+	if p.Kind == agent.WorkingmanAgent {
+		// It only makes sense as a persistent ACP session in a sandbox of its
+		// own: the legacy tmux path has no read-only mounts, so refusing is the
+		// safe answer rather than silently launching it with write access.
+		if !r.UsesACP(p.Kind) {
+			return nil, fmt.Errorf("runner: the workingman agent needs an ACP launcher (--acp-kit)")
+		}
+		if p.SessionName == "" {
+			p.SessionName = WorkingmanAgentSession
+		}
+		p.Persistent = true
+		if p.WorkingDir != "" {
+			if err := os.MkdirAll(p.WorkingDir, 0o755); err != nil {
+				return nil, fmt.Errorf("runner: workingman scratch dir: %w", err)
+			}
+		}
+	}
 	workingDir, err := r.resolveWorkingDir(ctx, p)
 	if err != nil {
 		return nil, err
@@ -477,6 +524,10 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		Worktree:                planningWorktree,
 		PushBranch:              p.PushBranch,
 		Sandboxed:               useACP && p.Kind == agent.WolfAgent,
+		Roots:                   p.Observe.Roots,
+		SnapshotFile:            p.Observe.SnapshotFile,
+		AuditLog:                p.Observe.AuditLog,
+		SessionsRoot:            p.Observe.SessionsRoot,
 	}
 	instructions, err := prompts.Render(p.Kind, data)
 	if err != nil {
@@ -502,6 +553,10 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		Worktree:                planningWorktree,
 		PushBranch:              p.PushBranch,
 		Sandboxed:               useACP && p.Kind == agent.WolfAgent,
+		Roots:                   p.Observe.Roots,
+		SnapshotFile:            p.Observe.SnapshotFile,
+		AuditLog:                p.Observe.AuditLog,
+		SessionsRoot:            p.Observe.SessionsRoot,
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {
 		return nil, err
@@ -731,6 +786,9 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 	}
 	sessionID := acpSessionID(p)
 	workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
+	if p.Kind == agent.WorkingmanAgent {
+		workspaces = workingmanWorkspaces(workingDir, p.ReadOnlyMounts)
+	}
 
 	// Allocate the session id and write the initial session.json. acp-wrapper
 	// will overwrite this record with StatusRunning once its socket is live;
@@ -807,8 +865,12 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, project
 				args = append(args, "--unblock-grace", g.String())
 			}
 		}
-		if t := durationOrDefault(r.PersistentIdleTimeout, DefaultPersistentIdleTimeout); t > 0 {
-			args = append(args, "--idle-timeout", t.String())
+		// The workingman agent is always-on by design — it sits idle for as long as
+		// nobody asks it anything — so it never gets an idle end condition.
+		if kind != agent.WorkingmanAgent.String() {
+			if t := durationOrDefault(r.PersistentIdleTimeout, DefaultPersistentIdleTimeout); t > 0 {
+				args = append(args, "--idle-timeout", t.String())
+			}
 		}
 	} else {
 		// Orch's planning/task/commit are single-turn: when the TUI's watcher
@@ -1035,13 +1097,18 @@ func durationOrDefault(v, def time.Duration) time.Duration {
 }
 
 // ACPSandboxNameFor is SandboxNameFor for sessions that run under ACP. It
-// differs in exactly one kind: the ACP wolf gets "<work-stream>-wolf", a sandbox
+// differs in two kinds: the workingman agent gets the fixed, project-independent
+// name WorkingmanAgentSandbox, and the ACP wolf gets "<work-stream>-wolf", a sandbox
 // of its own (distinct from planning's, which may be live alongside it — the wolf
 // runs in tandem with the project's other agents). SandboxNameFor itself keeps
 // returning "" for the wolf because that is the host/tmux path's contract: no
 // sandbox. Use this one wherever the session is known to be ACP-backed (see
 // Runner.UsesACP).
 func ACPSandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
+	if kind == agent.WorkingmanAgent {
+		// Project-independent: there is one workingman agent for the whole daemon.
+		return WorkingmanAgentSandbox
+	}
 	if kind == agent.WolfAgent {
 		if projectPath == "" {
 			return ""
@@ -1114,6 +1181,77 @@ func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath, planningWorktre
 		return []string{workingDir, planningWorktree}
 	}
 	return []string{workingDir}
+}
+
+// ReadOnlySuffix is appended to a workspace path to ask sbx for a read-only
+// bind mount (`sbx create ... <path>:ro`). The same spelling is understood by
+// acp-wrapper's --workspace flag.
+const ReadOnlySuffix = ":ro"
+
+// workingmanWorkspaces returns the mounts of the workingman agent's sandbox: its
+// writable scratch directory first (the agent's cwd, holding .orch/), then every
+// observed path read-only. Read-only is enforced by the mount itself, which is
+// what actually stops the agent writing to .project.yaml, tasks/ or the audit
+// log — no prompt instruction or policy is needed for that guarantee.
+//
+// Paths are made absolute, de-duplicated, and a read-only mount that lies under
+// another read-only mount (or under/over the scratch dir) is dropped: the
+// ancestor already exposes it, and nesting mounts of different modes is exactly
+// the ambiguity this function exists to avoid. A read-only path that CONTAINS the
+// scratch dir is also dropped — it would otherwise place the writable dir inside
+// a read-only tree.
+func workingmanWorkspaces(scratch string, readOnly []string) []string {
+	scratch = absClean(scratch)
+	var ro []string
+	for _, p := range readOnly {
+		p = absClean(p)
+		if p == "" || pathWithin(scratch, p) || pathWithin(p, scratch) {
+			continue
+		}
+		ro = append(ro, p)
+	}
+	var keep []string
+	for i, p := range ro {
+		covered := false
+		for j, q := range ro {
+			if i == j {
+				continue
+			}
+			// p is covered by q when it lies under q; of two equal paths the
+			// earlier one wins.
+			if pathWithin(p, q) && (p != q || j < i) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			keep = append(keep, p)
+		}
+	}
+	out := []string{scratch}
+	for _, p := range keep {
+		out = append(out, p+ReadOnlySuffix)
+	}
+	return out
+}
+
+func absClean(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return filepath.Clean(p)
+}
+
+// pathWithin reports whether p is root or lies beneath it.
+func pathWithin(p, root string) bool {
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // shortID hashes a path to a short stable suffix. Used for session names when

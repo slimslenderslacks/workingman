@@ -151,6 +151,12 @@ daemon ignores its own fsnotify events.
   (or enter on a session row); the wolf's tab is interactive — press enter to
   type to it. `--wolf-host` runs the wolf on the host in tmux instead (full
   host access, but only reachable via tmux).
+- **Workingman agent** (`--workingman-agent`, needs `--acp-kit`): an always-on,
+  read-only assistant in its own sandbox that answers questions about the orch
+  state (projects, tasks, the wolf, the audit log) for a human on a messaging
+  channel. On automatically when `channels.yaml` has an inbound-capable channel;
+  it can read the roots, snapshot, audit log and every session's stream, and
+  change nothing. See [agents.md §8](agents.md#8-workingman-agent).
 - **State snapshot** (`--state-file`, `orch status`): the daemon's in-memory
   state (live sessions, wolf in flight, failure counters, review polls)
   published as JSON for external readers. See

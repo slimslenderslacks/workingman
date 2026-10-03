@@ -1,15 +1,18 @@
 # Agents
 
-The orchestrator launches seven kinds of `claude` sessions over a project's
-lifecycle: **project → planning → task → commit**, with **wolf**, **archive**,
-and **review** stepping in for blocks, cleanup, and PR watching respectively.
+The orchestrator launches eight kinds of `claude` sessions. Seven run over a
+project's lifecycle: **project → planning → task → commit**, with **wolf**,
+**archive**, and **review** stepping in for blocks, cleanup, and PR watching
+respectively. The eighth, the **workingman agent**, belongs to no project: it is
+a daemon-owned, always-on observer that answers questions about the orch state
+(§8).
 `design.md` has the original spec; this document describes the agents as
 implemented today, which has moved past that spec in places (most notably: an
 ACP/sandbox launch path superseding the tmux+`sbx exec` path for non-interactive
 agents, and a review agent design.md never mentions).
 
 Every agent's role is defined by `agent.Kind` (`internal/agent/agent.go`).
-`Kind.Interactive()` splits the seven into two families, but the *launch path*
+`Kind.Interactive()` splits the project-lifecycle seven into two families, but the *launch path*
 is no longer exactly that split (see the wolf):
 
 - **Autonomous** (project, planning, task, commit, review) — run under
@@ -559,3 +562,108 @@ couldn't be created) is tracked separately (`bumpReviewErrors`) and, after
 `maxReviewErrors` consecutive failures, blocks the project with a
 diagnostic pointing at `sbx mcp ls`/`sbx mcp auth` rather than silently
 retrying forever.
+
+---
+
+## 8. Workingman agent
+
+**Kind:** `agent.WorkingmanAgent` (`String()` = `"workingman"`, appended to the
+iota block so no existing value shifts). **Template:** `workingman.tmpl`.
+**Interactive:** no. *(Not in design.md. A different animal from the other
+seven: it is not part of any project's state machine, has no project and no
+task, and is started by the daemon rather than dispatched by a status change.)*
+
+**What it is.** A long-lived, always-on assistant that sits in a sandbox of its
+own and answers a human's questions — relayed over messaging channels, e.g.
+WhatsApp — about the orch state: which projects are open, which tasks are
+running/blocked/failed and why, what the wolf is doing, what happened recently
+in the audit log. It is autonomous-ACP (nobody drives its prompt by hand;
+`Interactive()` is false) but **persistent**, using the same
+`acp-wrapper --persistent` mode as the wolf, so its conversation outlives every
+client that attaches to it (the TUI, the message router). Unlike the wolf it
+has **no end condition**: no `--unblock-grace` (there is no project to watch)
+and no `--idle-timeout` (silence between questions is its normal state), and
+the stranded-session reaper exempts it (`strandedVerdict` in `reaper.go`).
+
+**Launch/identity.** `runner.Plan{Kind: WorkingmanAgent, WorkingDir: <scratch>,
+SessionName: "workingman-agent", Persistent: true, ReadOnlyMounts, Observe}`.
+Requires the ACP path (`Runner.Start` refuses otherwise — the tmux path has no
+read-only mounts, and silently launching it with write access would defeat the
+point). The ACP session id and the sbx sandbox are both the fixed name
+`workingman-agent` (`runner.WorkingmanAgentSession` / `WorkingmanAgentSandbox`,
+`ACPSandboxNameFor`), independent of any project path. The daemon tracks it
+under the session-map key `"workingman-agent"` — not a project path and not a
+`path#marker` key, so `ListSessions` labels its row `workingman` and the
+snapshot gives it no work stream / project path. `session.json` carries
+`kind: workingman`, no `project_path`, no `task_path`.
+
+**Mounts (read-only enforced by the mount).** The scratch dir is the one
+writable workspace and the agent's cwd; it holds the usual `.orch/` handoff
+files. Everything it observes is a separate `--workspace <path>:ro` (sbx's
+read-only bind-mount syntax, understood by `acp-wrapper --workspace`):
+
+- every orch `--root` — `.project.yaml`, `tasks/`, `blocked-session.yaml`,
+  `intake/` of every work stream;
+- the snapshot's directory (the file is replaced by rename, so the directory is
+  mounted, not the file) — the daemon's live in-memory view;
+- the audit log's directory;
+- the ACP sessions root — `session.json` and `stream.log` of **every** session,
+  including each wolf's, which is how it reads a wolf conversation.
+
+`runner.workingmanWorkspaces` makes them absolute, de-duplicates, and drops a
+read-only mount that lies under another one (or that would contain, or sit
+inside, the writable scratch dir). The scratch dir defaults to
+`<sessions-root>/../workingman-agent` and must lie outside every `--root`
+(`New` rejects an overlap — a write there would feed the daemon's own watcher,
+and a root has to stay read-only). Because enforcement is the mount, the agent
+has no write path to `.project.yaml` or `tasks/` at all, and gets no static MCP
+and no extra network policy: no GitHub or other secrets beyond what claude
+itself needs. `Plan.Policies` / `WorkingmanAgentConfig.Policies` are forwarded
+to `sbx policy` like any task's, for a filesystem rule limiting writes to the
+scratch dir where sbx supports it; none is applied by default, since the mounts
+already give the guarantee and the filesystem-policy semantics are sbx's.
+(`acp-wrapper` treats the first `--workspace` as cwd and rejects a read-only
+one; it compares existing sandboxes on host paths only, so a relaunch reuses
+the sandbox.) Note the audit-log directory also holds `channels.log`,
+`daemon.log` and `acp-wrapper.log` if the audit log lives beside them.
+
+**Prompt structure (`workingman.tmpl`).** It states the agent is a read-only
+observer/answerer; lists every observed path (from `prompts.Data.Roots`,
+`SnapshotFile`, `AuditLog`, `SessionsRoot`, mirrored into `.orch/context.yaml`);
+says to START by reading the snapshot (checking `generated_at` /
+`daemon.state` for a dead or stale daemon) and to re-read it for every
+question; summarises the snapshot schema; embeds a condensed project/task
+state machine (the semantics of `state-machine.md`); explains finding a wolf
+session in `sessions[]` and reading `<sessions-root>/<id>/stream.log`; sets
+the answer style (replies go out over WhatsApp: short, plain text, no wide
+tables, lead with the answer, cite `blocked_reason`/`failure_reason`); and
+forbids claiming to change state — to act, it names the TUI command (`:` →
+`stop`/`start`/`wolf`/`review`/`cleanup`/`archive`) or the YAML edit (project
+`status`, task `status`, an `intake/*.md` file) for the human to use.
+
+**Supervision (`internal/daemon/workingman_agent.go`).**
+`daemon.WithWorkingmanAgent(WorkingmanAgentConfig{...})` enables it; `Run`
+starts a supervisor goroutine right after `reconcileSessions` (so a live agent a
+prior daemon left behind is adopted, not duplicated), before the startup scan.
+The supervisor starts the agent, waits for it to end, and relaunches it with
+exponential backoff — 5s doubling to a 5-minute cap, restarting from the minimum
+once a launch survived 10 minutes — whether it exited or failed to launch. A
+failed launch is only audit-logged (`workingman_agent_start_error`,
+`workingman_agent_restart_scheduled`); it runs on its own goroutine, so it can
+never delay or block project dispatch. Unlike the other ACP agents it is **not
+detachable**: it stops with the daemon (`shutdown` closes it, the supervisor
+stops relaunching) and the next boot starts a fresh one — it is owned by this
+run's flags, not by any project. It appears in the TUI session list like any
+other session.
+
+**Flag.** `orch --workingman-agent[=auto|on|off]`. The default `auto` turns it
+on only when `--acp-kit` is set **and** `channels.yaml` has an enabled
+inbound-capable channel (`channels.Config.HasInboundChannel`) — until a human
+can message it there is nobody to answer. `--workingman-agent` / `=on` forces it
+on (and is a startup error without `--acp-kit`); `=off` disables it.
+
+**Attaching.** `Daemon.WorkingmanAgentSession()` returns the live session's
+`ID`, `Dir` (`<sessions-root>/workingman-agent`), `SocketPath`, `SandboxName` and
+`StartedAt`, or `false` when it isn't running (disabled, between restarts, launch
+failing). The inbound-message router attaches through it with `acpchat`; this
+package only provides the data.

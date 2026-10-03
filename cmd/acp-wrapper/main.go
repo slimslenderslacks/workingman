@@ -69,11 +69,13 @@ type workspacesFlag []string
 
 func (w *workspacesFlag) String() string { return strings.Join(*w, ",") }
 func (w *workspacesFlag) Set(s string) error {
-	abs, err := filepath.Abs(s)
+	// A trailing ":ro" asks for a read-only mount; resolve only the path part.
+	path, ro := acpwrapper.SplitMount(s)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	*w = append(*w, abs)
+	*w = append(*w, acpwrapper.JoinMount(abs, ro))
 	return nil
 }
 
@@ -129,7 +131,7 @@ func main() {
 	kind := fs.String("kind", "", "agent.Kind string (project, planning, task, commit) this session is running; recorded into session.json alongside --project-path")
 	saveSandbox := fs.Bool("save-sandbox", false, "keep the sandbox when the agent exits instead of removing it with `sbx rm --force` (the task's save_sandbox override)")
 	var workspaces workspacesFlag
-	fs.Var(&workspaces, "workspace", "host path to mount into the sandbox; the first is the ACP client cwd (repeatable, at least one required)")
+	fs.Var(&workspaces, "workspace", "host path to mount into the sandbox; the first is the ACP client cwd and must be writable; a trailing :ro mounts a path read-only (repeatable, at least one required)")
 	var staticMCPs staticMCPsFlag
 	fs.Var(&staticMCPs, "static-mcp", "static-MCP name to attach when creating the sandbox; passed verbatim to `sbx create --static-mcp` (repeatable)")
 	var policies policiesFlag

@@ -242,3 +242,29 @@ func TestDefaultConfigPath(t *testing.T) {
 		t.Errorf("Load(\"\") = %+v, %v", cfg, err)
 	}
 }
+
+func TestHasInboundChannel(t *testing.T) {
+	parse := func(y string) *Config {
+		t.Helper()
+		cfg, err := Parse([]byte(y))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		return cfg
+	}
+	if (*Config)(nil).HasInboundChannel() {
+		t.Error("nil config has no inbound channel")
+	}
+	if parse("channels: {}\n").HasInboundChannel() {
+		t.Error("empty config has no inbound channel")
+	}
+	if !parse("channels:\n  wa:\n    type: whatsapp\n").HasInboundChannel() {
+		t.Error("an enabled whatsapp channel can receive")
+	}
+	if parse("channels:\n  wa:\n    type: whatsapp\n    enabled: false\n").HasInboundChannel() {
+		t.Error("a disabled channel is not inbound-capable")
+	}
+	if parse("channels:\n  x:\n    type: sendonly\n").HasInboundChannel() {
+		t.Error("an unknown (send-only) type is not inbound-capable")
+	}
+}

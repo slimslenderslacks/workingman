@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/runner"
 )
 
@@ -25,7 +26,8 @@ const (
 // WatchSessions; callers never build this struct directly.
 type SessionInfo struct {
 	// ID is the daemon's stable key for the session — the absolute path of
-	// the .project.yaml driving it. Used by the TUI to diff snapshots and
+	// the .project.yaml driving it (the workingman agent, which has no
+	// project, uses the fixed key "workingman-agent"). Used by the TUI to diff snapshots and
 	// route clicks.
 	ID string
 	// AgentName is the agent.Kind string ("project", "planning", "task",
@@ -66,10 +68,16 @@ func (d *Daemon) ListSessions() []SessionInfo {
 	defer d.sessionsMu.Unlock()
 	out := make([]SessionInfo, 0, len(d.sessions))
 	for key, entry := range d.sessions {
+		project := filepath.Base(filepath.Dir(key))
+		if entry.kind == agent.WorkingmanAgent {
+			// Not a work stream: its key is not a project path, so Dir/Base of it
+			// would label the row ".". Show the agent's own name instead.
+			project = agent.WorkingmanAgent.String()
+		}
 		info := SessionInfo{
 			ID:          key,
 			AgentName:   entry.kind.String(),
-			Project:     filepath.Base(filepath.Dir(key)),
+			Project:     project,
 			TmuxTarget:  entry.sess.Name(),
 			Status:      SessionStatusRunning,
 			StartedAt:   entry.startedAt,

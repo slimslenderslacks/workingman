@@ -54,6 +54,13 @@ type Context struct {
 	// Sandboxed is true when a wolf agent runs inside an sbx sandbox rather
 	// than on the host. See prompts.Data.Sandboxed.
 	Sandboxed bool `yaml:"sandboxed,omitempty"`
+
+	// Roots/SnapshotFile/AuditLog/SessionsRoot describe the read-only orch
+	// state a workingman agent observes. See prompts.Data.
+	Roots        []string `yaml:"roots,omitempty"`
+	SnapshotFile string   `yaml:"snapshot_file,omitempty"`
+	AuditLog     string   `yaml:"audit_log,omitempty"`
+	SessionsRoot string   `yaml:"sessions_root,omitempty"`
 }
 
 // Skill is a directory of files copied verbatim into the workspace's

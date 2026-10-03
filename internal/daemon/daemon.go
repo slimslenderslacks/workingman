@@ -90,6 +90,10 @@ type Daemon struct {
 	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
 	// unless WithStateFile configured a path.
 	snapshot snapshotState
+
+	// workingman is the workingman-agent supervision state; nil unless
+	// WithWorkingmanAgent. See workingman_agent.go.
+	workingman *workingmanAgent
 }
 
 const (
@@ -200,6 +204,10 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 	for _, opt := range opts {
 		opt(d)
 	}
+	if err := d.resolveWorkingman(); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
 	if d.snapshot.path != "" {
 		if err := validateStateFile(d.snapshot.path, roots); err != nil {
 			w.Close()
@@ -232,6 +240,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// a duplicate agent for a project a prior orch process already has a
 	// live session for.
 	d.reconcileSessions()
+	// The workingman agent is supervised on its own goroutine, after the
+	// reconcile above so a still-live one a prior orch left behind is adopted
+	// rather than duplicated, and before the scan so a slow project dispatch
+	// can't delay it (nor it them).
+	d.beginWorkingmanAgent(ctx)
 	d.startupScan()
 	go d.reapLoop(ctx)
 	if d.snapshot.path != "" {
@@ -336,7 +349,15 @@ func (d *Daemon) shutdown() {
 // daemon does not need to keep alive to keep running. The archive agent, a
 // --wolf-host wolf and the legacy tmux path (no AcpLauncher configured) are
 // unaffected — those sessions are still closed on shutdown as before.
+//
+// The workingman agent is the exception among the ACP kinds: it is owned by the
+// daemon (supervised, relaunched, mounts derived from this run's flags) rather
+// than by any project, so it stops with the daemon and the next boot starts a
+// fresh one.
 func (d *Daemon) detachable(kind agent.Kind) bool {
+	if kind == agent.WorkingmanAgent {
+		return false
+	}
 	return d.runner != nil && d.runner.UsesACP(kind)
 }
 

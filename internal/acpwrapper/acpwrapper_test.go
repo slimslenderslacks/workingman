@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1119,4 +1120,87 @@ func TestServePersistentIdleEndsAgent(t *testing.T) {
 	}
 	ln.Close()
 	<-served
+}
+
+func TestSplitJoinMount(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		path string
+		ro   bool
+	}{
+		{"/orch", "/orch", false},
+		{"/orch:ro", "/orch", true},
+		{"/a:b/c", "/a:b/c", false}, // only a trailing :ro is a mode
+	} {
+		path, ro := SplitMount(tc.in)
+		if path != tc.path || ro != tc.ro {
+			t.Errorf("SplitMount(%q) = (%q, %v), want (%q, %v)", tc.in, path, ro, tc.path, tc.ro)
+		}
+		if got := JoinMount(path, ro); got != tc.in {
+			t.Errorf("JoinMount round trip of %q = %q", tc.in, got)
+		}
+	}
+}
+
+// A read-only mount keeps its :ro suffix through normalize (so sbx still gets
+// it) but never becomes the cwd, and the first mount may not be read-only: the
+// ACP client needs a writable cwd.
+func TestNormalizeKeepsReadOnlyMounts(t *testing.T) {
+	c := Config{SessionID: "s", KitPath: "k", Workspaces: []string{"scratch", "rel/orch:ro"}}
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if !filepath.IsAbs(c.Workspaces[0]) || strings.HasSuffix(c.Workspaces[0], ":ro") {
+		t.Errorf("primary workspace = %q, want absolute and writable", c.Workspaces[0])
+	}
+	if p, ro := SplitMount(c.Workspaces[1]); !ro || !filepath.IsAbs(p) {
+		t.Errorf("read-only workspace = %q, want absolute with :ro kept", c.Workspaces[1])
+	}
+	if got := c.execArgs(); got[2] != c.Workspaces[0] {
+		t.Errorf("cwd = %q, want the writable primary %q", got[2], c.Workspaces[0])
+	}
+
+	bad := Config{SessionID: "s", KitPath: "k", Workspaces: []string{"/orch:ro", "/scratch"}}
+	if err := bad.normalize(); err == nil || !strings.Contains(err.Error(), "must be writable") {
+		t.Errorf("read-only primary workspace: err = %v, want a 'must be writable' error", err)
+	}
+}
+
+func TestEnsureSandboxPassesReadOnlyMountsToSbx(t *testing.T) {
+	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
+	c := Config{
+		SandboxName: "workingman-agent",
+		KitPath:     "/kits/acp",
+		SbxPath:     "sbx",
+		Workspaces:  []string{"/scratch", "/orch:ro", "/sessions:ro"},
+	}
+	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
+		t.Fatalf("ensureSandbox: %v", err)
+	}
+	want := []string{"sbx", "create", "claude", "--name", "workingman-agent", "--kit", "/kits/acp", "/scratch", "/orch:ro", "/sessions:ro"}
+	if !reflect.DeepEqual(f.calls[1], want) {
+		t.Errorf("create call = %v, want %v", f.calls[1], want)
+	}
+}
+
+// Whether `sbx ls` reports a read-only mount with or without its :ro suffix, a
+// relaunch must find the existing sandbox and reuse it rather than recreate it.
+func TestSameWorkspaceSetIgnoresReadOnlySuffix(t *testing.T) {
+	if !sameWorkspaceSet([]string{"/scratch", "/orch"}, []string{"/scratch", "/orch:ro"}) {
+		t.Error("same host paths with and without :ro should match")
+	}
+	if sameWorkspaceSet([]string{"/scratch", "/orch"}, []string{"/scratch", "/other:ro"}) {
+		t.Error("different host paths must not match")
+	}
+}
+
+func TestGoModCacheDirSkipsReadOnlyMounts(t *testing.T) {
+	ro := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ro, ".gomodcache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{Workspaces: []string{t.TempDir(), ro + ":ro"}}
+	if got := c.goModCacheDir(); got != "" {
+		t.Errorf("goModCacheDir = %q; a read-only mount can't be a writable module cache", got)
+	}
 }

@@ -257,9 +257,33 @@ func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.T
 // sandbox. Empty when no workspaces are configured.
 func (c Config) primaryWorkspace() string {
 	if len(c.Workspaces) > 0 {
-		return c.Workspaces[0]
+		path, _ := SplitMount(c.Workspaces[0])
+		return path
 	}
 	return ""
+}
+
+// ReadOnlySuffix marks a workspace as a read-only bind mount: `<path>:ro`, the
+// spelling `sbx create` takes for extra workspaces. It is passed through to sbx
+// unchanged; everywhere the wrapper needs the host path itself (cwd, the module
+// cache probe, comparing against `sbx ls`) it goes through SplitMount.
+const ReadOnlySuffix = ":ro"
+
+// SplitMount separates a workspace argument into its host path and whether it
+// is a read-only mount.
+func SplitMount(w string) (path string, readOnly bool) {
+	if p, ok := strings.CutSuffix(w, ReadOnlySuffix); ok {
+		return p, true
+	}
+	return w, false
+}
+
+// JoinMount is the inverse of SplitMount.
+func JoinMount(path string, readOnly bool) string {
+	if readOnly {
+		return path + ReadOnlySuffix
+	}
+	return path
 }
 
 // goModCacheDir returns the path to a pre-populated, writable Go module cache
@@ -283,7 +307,11 @@ func (c Config) primaryWorkspace() string {
 // resolves modules over the network exactly as before — so the behavior is
 // opt-in per project and harmless to projects without a staged cache.
 func (c Config) goModCacheDir() string {
-	for _, ws := range c.Workspaces {
+	for _, w := range c.Workspaces {
+		ws, ro := SplitMount(w)
+		if ro {
+			continue // a read-only mount can't serve as a writable module cache
+		}
 		cache := filepath.Join(ws, ".gomodcache")
 		if info, err := os.Stat(cache); err == nil && info.IsDir() {
 			return cache
@@ -374,11 +402,15 @@ func (c *Config) normalize() error {
 		return errors.New("acpwrapper: at least one workspace is required")
 	}
 	for i, w := range c.Workspaces {
-		abs, err := filepath.Abs(w)
+		path, ro := SplitMount(w)
+		abs, err := filepath.Abs(path)
 		if err != nil {
 			return fmt.Errorf("acpwrapper: workspace %q: %w", w, err)
 		}
-		c.Workspaces[i] = abs
+		if ro && i == 0 {
+			return fmt.Errorf("acpwrapper: workspace %q: the primary (first) workspace is the agent's cwd and must be writable", w)
+		}
+		c.Workspaces[i] = JoinMount(abs, ro)
 	}
 
 	if c.SessionsRoot == "" {
@@ -524,12 +556,16 @@ func sameWorkspaceSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
+	// Compare host paths only: whether `sbx ls` reports a read-only mount with
+	// its `:ro` suffix is not something we rely on either way.
 	seen := make(map[string]bool, len(a))
 	for _, x := range a {
-		seen[x] = true
+		p, _ := SplitMount(x)
+		seen[p] = true
 	}
 	for _, x := range b {
-		if !seen[x] {
+		p, _ := SplitMount(x)
+		if !seen[p] {
 			return false
 		}
 	}

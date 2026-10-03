@@ -367,10 +367,15 @@ func (d *Daemon) liveSessionSnapshots() []SessionSnapshot {
 	out := make([]SessionSnapshot, 0, len(d.sessions))
 	for key, entry := range d.sessions {
 		projectPath, _ := splitSessionKey(key)
+		workStream := filepath.Base(filepath.Dir(projectPath))
+		if entry.kind == agent.WorkingmanAgent {
+			// Daemon-owned, not part of any project: no work stream, no project path.
+			projectPath, workStream = "", ""
+		}
 		s := SessionSnapshot{
 			Key:         key,
 			Kind:        entry.kind.String(),
-			WorkStream:  filepath.Base(filepath.Dir(projectPath)),
+			WorkStream:  workStream,
 			ProjectPath: projectPath,
 			Task:        entry.taskName,
 			StartedAt:   entry.startedAt.UTC(),

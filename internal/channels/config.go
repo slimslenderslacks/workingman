@@ -260,6 +260,30 @@ func (c *Config) ChannelNames() []string {
 	return names
 }
 
+// inboundTypes are the channel types that can receive messages from a human
+// (not just send): every transport's Channel.Start delivers inbound messages
+// to the handler. Anything not listed here is treated as send-only.
+var inboundTypes = map[string]bool{"whatsapp": true}
+
+// InboundCapable reports whether the channel is enabled and its transport can
+// receive messages.
+func (c ChannelConfig) InboundCapable() bool { return c.IsEnabled() && inboundTypes[c.Type] }
+
+// HasInboundChannel reports whether at least one enabled channel can receive
+// messages. The daemon uses it to decide whether a human can be asking
+// questions at all, and so whether the workingman agent has anyone to answer.
+func (c *Config) HasInboundChannel() bool {
+	if c == nil {
+		return false
+	}
+	for _, ch := range c.Channels {
+		if ch.InboundCapable() {
+			return true
+		}
+	}
+	return false
+}
+
 // ActiveRoutes returns the routes whose channel is enabled, in file order.
 func (c *Config) ActiveRoutes() []Route {
 	var out []Route

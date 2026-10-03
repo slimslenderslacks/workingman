@@ -68,6 +68,8 @@ func runDaemon(args []string) {
 	wolfUnblockGrace := fs.Duration("wolf-unblock-grace", 0, "how long an ACP wolf lingers after its project leaves status:blocked before its conversation is ended (0 = default 2m, negative = never end on unblock)")
 	wolfIdleTimeout := fs.Duration("wolf-idle-timeout", 0, "end an ACP wolf after this long with no ACP traffic (0 = default 24h, negative = never)")
 	channelsConfig := fs.String("channels-config", "", "messaging-channels config (default ~/.workingman/channels.yaml, or $WORKINGMAN_CHANNELS_CONFIG). A missing file disables channels and the daemon behaves exactly as without them")
+	var workingmanMode workingmanFlag
+	fs.Var(&workingmanMode, "workingman-agent", `run the workingman agent: a persistent, read-only observer in its own sandbox that answers questions about the orch state. "auto" (default) turns it on when --acp-kit is set and channels.yaml has an inbound-capable channel; --workingman-agent / =on forces it on (requires --acp-kit); =off disables it`)
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
 	if err := fs.Parse(args); err != nil {
@@ -203,6 +205,17 @@ func runDaemon(args []string) {
 				Headless:         *headless,
 			}),
 		)
+	}
+	if on, why := workingmanAgentEnabled(workingmanMode, ch, *acpKit); on {
+		dopts = append(dopts, daemon.WithWorkingmanAgent(daemon.WorkingmanAgentConfig{
+			AuditLog: absPath(*auditPath),
+		}))
+		a.Log("workingman_agent_flag", "enabled", "true", "why", why)
+	} else {
+		if workingmanMode == workingmanOn {
+			log.Fatalf("%s", why) // asked for explicitly: don't silently run without it
+		}
+		a.Log("workingman_agent_flag", "enabled", "false", "why", why)
 	}
 	d, err := daemon.New(roots, a, dopts...)
 	if err != nil {

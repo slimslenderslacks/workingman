@@ -70,6 +70,14 @@ type Data struct {
 	// tooling — sbx, the other agents' sandboxes, osascript — so its template
 	// drops the host-only advice and tells it so.
 	Sandboxed bool
+
+	// The fields below are for the WorkingmanAgent: the orch state it observes.
+	// All of these are mounted read-only into its sandbox at these same absolute
+	// paths. Workspace is its writable scratch directory.
+	Roots        []string // orch roots (--root)
+	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
+	AuditLog     string   // the audit log file; empty when unknown
+	SessionsRoot string   // ACP sessions root (<id>/session.json, <id>/stream.log)
 }
 
 // tmplFuncs are the helpers available to every template. `sub` lets the

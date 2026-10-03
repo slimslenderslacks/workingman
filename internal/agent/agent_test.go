@@ -17,6 +17,7 @@ func TestKindString(t *testing.T) {
 		{CommitAgent, "commit"},
 		{ArchiveAgent, "archive"},
 		{ReviewAgent, "review"},
+		{WorkingmanAgent, "workingman"},
 		{Kind(99), "unknown"},
 	}
 	for _, tc := range cases {
@@ -41,6 +42,7 @@ func TestKindOrdinals(t *testing.T) {
 		{CommitAgent, 4},
 		{ArchiveAgent, 5},
 		{ReviewAgent, 6},
+		{WorkingmanAgent, 7},
 	}
 	for _, tc := range cases {
 		if int(tc.kind) != tc.want {
@@ -53,7 +55,7 @@ func TestKindOrdinals(t *testing.T) {
 // the daemon recovers a session's Kind from the on-disk string it wrote, so a
 // missing case would silently drop that agent kind on restart reconciliation.
 func TestParseKindRoundTrip(t *testing.T) {
-	for _, k := range []Kind{ProjectAgent, PlanningAgent, TaskAgent, WolfAgent, CommitAgent, ArchiveAgent, ReviewAgent} {
+	for _, k := range []Kind{ProjectAgent, PlanningAgent, TaskAgent, WolfAgent, CommitAgent, ArchiveAgent, ReviewAgent, WorkingmanAgent} {
 		got, ok := ParseKind(k.String())
 		if !ok || got != k {
 			t.Errorf("ParseKind(%q) = (%v, %v), want (%v, true)", k.String(), got, ok, k)
@@ -82,6 +84,9 @@ func TestKindInteractive(t *testing.T) {
 		// The review agent is autonomous: it runs under ACP with `--print` so it
 		// can carry --static-mcp github, like planning.
 		{ReviewAgent, false},
+		// The workingman agent is autonomous-ACP too (no human drives its
+		// prompt; questions arrive over channels) — just persistent.
+		{WorkingmanAgent, false},
 	}
 	for _, tc := range cases {
 		if got := tc.kind.Interactive(); got != tc.want {
