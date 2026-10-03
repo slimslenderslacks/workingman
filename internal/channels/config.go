@@ -38,10 +38,16 @@ const WildcardTopic = "*"
 //	  - {topic: "*",        channel: whatsapp, chat: "15551234567"}
 //	notify:
 //	  wolf_start_interval: 10m       # at most one wolf-start message per work stream per interval
+//	router:                          # inbound-message router (all optional; see docs/channels.md)
+//	  permission_timeout: 2m         # unanswered agent permission requests are rejected after this
+//	  turn_timeout: 5m               # one chat turn is cancelled after this
+//	  thinking_after: 10s            # "…thinking" ack once a turn runs this long
+//	  queue_size: 5                  # messages queued per chat while a turn is running
 type Config struct {
 	Channels map[string]ChannelConfig `yaml:"channels"`
 	Routes   []Route                  `yaml:"routes"`
 	Notify   NotifyConfig             `yaml:"notify,omitempty"`
+	Router   RouterConfig             `yaml:"router,omitempty"`
 }
 
 // DefaultWolfStartInterval is the default minimum gap between two "wolf is
@@ -67,6 +73,35 @@ func (n NotifyConfig) WolfStartIntervalDuration() time.Duration {
 	d, err := time.ParseDuration(n.WolfStartInterval)
 	if err != nil || d < 0 {
 		return DefaultWolfStartInterval
+	}
+	return d
+}
+
+// RouterConfig tunes the inbound-message router. Durations are Go duration
+// strings; empty (or zero queue_size) keeps the router's default.
+type RouterConfig struct {
+	PermissionTimeout string `yaml:"permission_timeout,omitempty"`
+	TurnTimeout       string `yaml:"turn_timeout,omitempty"`
+	ThinkingAfter     string `yaml:"thinking_after,omitempty"`
+	QueueSize         int    `yaml:"queue_size,omitempty"`
+}
+
+// PermissionTimeoutDuration is the parsed permission_timeout, or 0 when unset
+// or invalid (the router then applies its default).
+func (r RouterConfig) PermissionTimeoutDuration() time.Duration {
+	return positiveDuration(r.PermissionTimeout)
+}
+
+// TurnTimeoutDuration is the parsed turn_timeout, or 0 when unset or invalid.
+func (r RouterConfig) TurnTimeoutDuration() time.Duration { return positiveDuration(r.TurnTimeout) }
+
+// ThinkingAfterDuration is the parsed thinking_after, or 0 when unset or invalid.
+func (r RouterConfig) ThinkingAfterDuration() time.Duration { return positiveDuration(r.ThinkingAfter) }
+
+func positiveDuration(s string) time.Duration {
+	d, err := time.ParseDuration(strings.TrimSpace(s))
+	if err != nil || d <= 0 {
+		return 0
 	}
 	return d
 }
@@ -205,6 +240,21 @@ func (c *Config) Validate() error {
 		if d, err := time.ParseDuration(v); err != nil || d < 0 {
 			add("notify.wolf_start_interval: %q is not a valid non-negative duration (e.g. \"10m\")", v)
 		}
+	}
+
+	for _, f := range []struct{ key, val string }{
+		{"permission_timeout", c.Router.PermissionTimeout},
+		{"turn_timeout", c.Router.TurnTimeout},
+		{"thinking_after", c.Router.ThinkingAfter},
+	} {
+		if v := strings.TrimSpace(f.val); v != "" {
+			if d, err := time.ParseDuration(v); err != nil || d <= 0 {
+				add("router.%s: %q is not a valid positive duration (e.g. \"2m\")", f.key, v)
+			}
+		}
+	}
+	if c.Router.QueueSize < 0 {
+		add("router.queue_size: must not be negative")
 	}
 
 	seen := map[Route]int{}

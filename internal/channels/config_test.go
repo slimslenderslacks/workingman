@@ -268,3 +268,34 @@ func TestHasInboundChannel(t *testing.T) {
 		t.Error("an unknown (send-only) type is not inbound-capable")
 	}
 }
+
+func TestRouterConfig(t *testing.T) {
+	cfg, err := Parse([]byte("router:\n  permission_timeout: 90s\n  turn_timeout: 10m\n  thinking_after: 5s\n  queue_size: 3\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	r := cfg.Router
+	if r.PermissionTimeoutDuration().Seconds() != 90 || r.TurnTimeoutDuration().Minutes() != 10 || r.ThinkingAfterDuration().Seconds() != 5 || r.QueueSize != 3 {
+		t.Errorf("router = %+v", r)
+	}
+
+	empty, err := Parse(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.Router.PermissionTimeoutDuration() != 0 || empty.Router.TurnTimeoutDuration() != 0 || empty.Router.ThinkingAfterDuration() != 0 {
+		t.Errorf("unset router durations must be 0 (use the router default): %+v", empty.Router)
+	}
+
+	for _, bad := range []string{
+		"router: {permission_timeout: soon}",
+		"router: {turn_timeout: -1m}",
+		"router: {thinking_after: 0s}",
+		"router: {queue_size: -2}",
+		"router: {nope: 1}",
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Errorf("Parse(%q) succeeded, want an error", bad)
+		}
+	}
+}

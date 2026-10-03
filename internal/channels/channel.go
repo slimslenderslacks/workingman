@@ -67,3 +67,17 @@ func FormatTopic(topic, text string) string {
 	}
 	return "[" + topic + "] " + text
 }
+
+// Chunker is implemented by channels that want long text split by the sender
+// rather than inside Send: the inbound-message router sends each returned piece
+// as its own message. Channels that already split inside Send (WhatsApp Cloud)
+// do not implement it and receive the whole reply.
+type Chunker interface {
+	ChunkMessage(text string) []string
+}
+
+// Typer is implemented by channels that can show a "typing…" indicator in a
+// chat. It is best effort; the router ignores errors.
+type Typer interface {
+	Typing(ctx context.Context, chatID string) error
+}

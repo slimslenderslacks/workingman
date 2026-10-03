@@ -665,5 +665,5 @@ on (and is a startup error without `--acp-kit`); `=off` disables it.
 **Attaching.** `Daemon.WorkingmanAgentSession()` returns the live session's
 `ID`, `Dir` (`<sessions-root>/workingman-agent`), `SocketPath`, `SandboxName` and
 `StartedAt`, or `false` when it isn't running (disabled, between restarts, launch
-failing). The inbound-message router attaches through it with `acpchat`; this
-package only provides the data.
+failing). The inbound-message router attaches through it with `acpchat` (see
+`docs/channels.md`; live wolves are listed by `Daemon.WolfSessions`).

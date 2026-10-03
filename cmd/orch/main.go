@@ -225,7 +225,7 @@ func runDaemon(args []string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	ch.start(ctx, a)
+	ch.start(ctx, a, d)
 
 	a.Log("daemon_start",
 		"pid", fmt.Sprintf("%d", os.Getpid()),

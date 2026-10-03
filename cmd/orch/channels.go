@@ -12,6 +12,8 @@ import (
 	"github.com/slimslenderslacks/work/internal/channels/whatsapp"
 	"github.com/slimslenderslacks/work/internal/daemon"
 	"github.com/slimslenderslacks/work/internal/notify"
+	"github.com/slimslenderslacks/work/internal/router"
+	"github.com/slimslenderslacks/work/internal/runner"
 )
 
 // conversationIndexFile is the wolf-notification correlation table, kept in
@@ -26,6 +28,9 @@ type daemonChannels struct {
 	index channels.ConversationIndex
 	cfg   *channels.Config
 	log   *os.File
+	// router is the inbound-message router, created by start once the daemon
+	// exists; nil until then and when channels are disabled.
+	router *router.Router
 }
 
 // enabled reports whether any channel is configured.
@@ -104,16 +109,77 @@ func (c *daemonChannels) options(a *audit.Logger) []daemon.Option {
 }
 
 // start brings the channels up under the daemon context; they stop when it is
-// cancelled. A channel that fails to start is skipped and audit-logged — the
+// cancelled. Inbound messages go to the router (see internal/router and
+// docs/channels.md), which talks to the workingman agent and the live wolves
+// through d. A channel that fails to start is skipped and audit-logged — the
 // daemon carries on, and sends to it fail soft.
-func (c *daemonChannels) start(ctx context.Context, a *audit.Logger) {
+func (c *daemonChannels) start(ctx context.Context, a *audit.Logger, d *daemon.Daemon) {
 	if !c.enabled() {
 		return
 	}
-	if err := c.reg.Start(ctx, nil); err != nil {
+	rt, err := router.New(ctx, c.routerConfig(a, d))
+	if err != nil {
+		a.Log("router_error", "err", err.Error())
+	}
+	var handler channels.InboundHandler
+	if rt != nil {
+		c.router = rt
+		handler = rt.Handler()
+	}
+	if err := c.reg.Start(ctx, handler); err != nil {
 		a.Log("channel_start_error", "err", err.Error())
 	}
 }
+
+// routerConfig is the inbound router's wiring: the daemon as its Source, the
+// channel registry as its Outbound, and the timeouts from channels.yaml.
+func (c *daemonChannels) routerConfig(a *audit.Logger, d *daemon.Daemon) router.Config {
+	rc := c.cfg.Router
+	return router.Config{
+		Source:            daemonSource{d},
+		Out:               c.reg,
+		Index:             c.index,
+		Audit:             a,
+		PermissionTimeout: rc.PermissionTimeoutDuration(),
+		TurnTimeout:       rc.TurnTimeoutDuration(),
+		ThinkingAfter:     rc.ThinkingAfterDuration(),
+		QueueSize:         rc.QueueSize,
+	}
+}
+
+// daemonSource adapts the daemon to router.Source.
+type daemonSource struct{ d *daemon.Daemon }
+
+func (s daemonSource) WorkingmanAgent() (router.Session, bool) {
+	ws, ok := s.d.WorkingmanAgentSession()
+	if !ok {
+		return router.Session{}, false
+	}
+	return router.Session{Key: runner.WorkingmanAgentSession, ID: ws.ID, Ref: sessionRef(ws.Dir, ws.ID)}, true
+}
+
+func (s daemonSource) WolfSessions() []router.Session {
+	var out []router.Session
+	for _, w := range s.d.WolfSessions() {
+		sess := router.Session{Key: w.Key, ID: w.ID, WorkStream: w.WorkStream}
+		if w.Attachable {
+			sess.Ref = sessionRef(w.Dir, w.ID)
+		}
+		out = append(out, sess)
+	}
+	return out
+}
+
+// sessionRef is what acpchat.Attach takes: the session directory, or the bare
+// session id (resolved under the sessions root) when the directory is unknown.
+func sessionRef(dir, id string) string {
+	if dir != "" {
+		return dir
+	}
+	return id
+}
+
+func (s daemonSource) Status() string { return s.d.StatusSummary() }
 
 // stop closes the channels (idempotent; they also close when the daemon
 // context is cancelled).
@@ -123,6 +189,9 @@ func (c *daemonChannels) stop(a *audit.Logger) {
 	}
 	if err := c.reg.Close(); err != nil {
 		a.Log("channel_close_error", "err", err.Error())
+	}
+	if c.router != nil {
+		c.router.Close()
 	}
 	if c.log != nil {
 		_ = c.log.Close()

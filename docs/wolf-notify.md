@@ -43,3 +43,6 @@ routes:
 Audit events: `channels_configured`, `channels_disabled`, `wolf_start_notified`,
 `wolf_start_suppressed`, `channel_send_error`, `channel_index_error`,
 `channel_start_error`.
+
+Replying to a start message talks to that wolf; see `docs/channels.md` for the
+inbound routing rules, commands and permission relay.
