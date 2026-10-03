@@ -34,17 +34,27 @@ const (
 const lastInboundCap = 1000
 
 // Channel is the WhatsApp Cloud API backend: a channels.Channel that sends
-// through a CloudClient. The webhook (inbound) half is not wired up yet;
-// Start only records the handler.
+// through a CloudClient and receives through a webhook server (see
+// WebhookConfig and cloud_webhook.go).
 //
 //	channels:
 //	  whatsapp:
 //	    type: whatsapp
 //	    credentials:
 //	      access_token: {env: WHATSAPP_ACCESS_TOKEN}
+//	      app_secret:   {env: WHATSAPP_APP_SECRET}
+//	      verify_token: {env: WHATSAPP_VERIFY_TOKEN}
 //	    options:
 //	      phone_number_id: "109876543210987"
 //	      # api_version: v20.0
+//	      access:
+//	        allow_from: ["+1 555 123 4567"]    # who may talk to the daemon
+//
+// Start binds the webhook (loopback:8090 by default) and refuses to run
+// without an app secret, because that is what authenticates Meta's POSTs;
+// every inbound message then goes through the AccessPolicy built from
+// options.access before it reaches the InboundHandler. A Channel built with
+// NewChannel and no WithWebhook is send-only.
 //
 // Remember the 24-hour customer-service window (ErrOutsideServiceWindow):
 // notifications to a chat that has not written in a day fail with a typed
@@ -54,9 +64,15 @@ type Channel struct {
 	client *CloudClient
 	log    *slog.Logger
 
+	// Inbound half; webhookCfg/policy are set by options before Start.
+	webhookCfg WebhookConfig
+	hasWebhook bool
+	policy     *AccessPolicy
+
 	mu      sync.Mutex
 	handler channels.InboundHandler
 	closed  bool
+	hook    *webhook // non-nil while the webhook server runs
 	// Latest inbound wamid per chat: Meta's typing and read-receipt calls need
 	// a message id to attach to. Fed by the webhook through NoteInbound.
 	inbound map[string]*list.Element // chat id -> element holding inboundEntry
@@ -67,18 +83,37 @@ type inboundEntry struct{ chat, wamid string }
 
 var _ channels.Channel = (*Channel)(nil)
 
-// NewChannel builds the Cloud channel named name around client.
-func NewChannel(name string, client *CloudClient, logger *slog.Logger) *Channel {
+// ChannelOption customizes a Channel.
+type ChannelOption func(*Channel)
+
+// WithWebhook makes Start run the inbound webhook server with cfg.
+func WithWebhook(cfg WebhookConfig) ChannelOption {
+	return func(c *Channel) { c.webhookCfg, c.hasWebhook = cfg, true }
+}
+
+// WithAccessPolicy sets the policy every inbound message must pass. The
+// webhook will not start without one.
+func WithAccessPolicy(p *AccessPolicy) ChannelOption {
+	return func(c *Channel) { c.policy = p }
+}
+
+// NewChannel builds the Cloud channel named name around client. Without
+// WithWebhook it can only send.
+func NewChannel(name string, client *CloudClient, logger *slog.Logger, opts ...ChannelOption) *Channel {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Channel{
+	c := &Channel{
 		name:    name,
 		client:  client,
 		log:     logger.With("channel", name),
 		inbound: map[string]*list.Element{},
 		order:   list.New(),
 	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 // CloudConfigFromSpec builds the CloudConfig for a channel spec: ids and
@@ -134,12 +169,29 @@ func CloudFactory(logger *slog.Logger, opts ...CloudOption) channels.Factory {
 		if err != nil {
 			return nil, err
 		}
+		hook, err := WebhookConfigFromSpec(spec.Options)
+		if err != nil {
+			return nil, err
+		}
+		access, err := ParseAccessOptions(spec.Options)
+		if err != nil {
+			return nil, err
+		}
+		if access.Mode == ModeSelfChat {
+			// Self-chat means "the owner messaging their own number", which only
+			// the Baileys bridge can see; the Cloud API never delivers it.
+			return nil, fmt.Errorf("whatsapp: options.access.mode %q is not available with mode: cloud; use mode: bridge", ModeSelfChat)
+		}
+		policy, err := NewAccessPolicy(access, WithLogger(logger))
+		if err != nil {
+			return nil, err
+		}
 		opts := append([]CloudOption{WithCloudLogger(logger)}, opts...)
 		client, err := NewCloudClient(cfg, opts...)
 		if err != nil {
 			return nil, err
 		}
-		return NewChannel(name, client, logger), nil
+		return NewChannel(name, client, logger, WithWebhook(hook), WithAccessPolicy(policy)), nil
 	}
 }
 
@@ -150,15 +202,34 @@ func (c *Channel) Name() string { return c.name }
 // tooling and the webhook half).
 func (c *Channel) Client() *CloudClient { return c.client }
 
-// Start implements channels.Channel. The inbound webhook is not implemented
-// yet, so it records the handler and returns nil; the channel can send.
-func (c *Channel) Start(_ context.Context, h channels.InboundHandler) error {
+// Policy is the AccessPolicy inbound messages pass through (nil for a
+// send-only channel).
+func (c *Channel) Policy() *AccessPolicy { return c.policy }
+
+// Start implements channels.Channel. With a webhook configured it binds the
+// listener (bind and configuration errors come back here), serves until ctx is
+// cancelled or Close is called, and delivers admitted messages to h from its
+// own goroutine. Without one it only records the handler. Start returns
+// promptly.
+func (c *Channel) Start(ctx context.Context, h channels.InboundHandler) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return channels.ErrNotRunning
 	}
+	if c.hook != nil {
+		return errors.New("whatsapp: channel already started")
+	}
 	c.handler = h
+	if !c.hasWebhook {
+		return nil
+	}
+	hook, err := c.startWebhook(ctx, h)
+	if err != nil {
+		c.handler = nil
+		return err
+	}
+	c.hook = hook
 	return nil
 }
 
@@ -246,11 +317,19 @@ func (c *Channel) isClosed() bool {
 	return c.closed
 }
 
-// Close implements channels.Channel. Idempotent.
+// Close implements channels.Channel. It stops the webhook gracefully (in-flight
+// requests finish, acknowledged messages are delivered) and waits for it.
+// Idempotent.
 func (c *Channel) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.closed = true
 	c.handler = nil
+	hook := c.hook
+	c.mu.Unlock()
+	// Not under c.mu: the worker takes it (NoteInbound) while draining.
+	if hook != nil {
+		hook.stop()
+		<-hook.done
+	}
 	return nil
 }
