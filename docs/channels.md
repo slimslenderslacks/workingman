@@ -28,7 +28,7 @@ flowchart LR
     phone([Owner's phone])
 
     subgraph meta["Meta (cloud mode)"]
-        graph[Graph API]
+        graphapi[Graph API]
         hook[Webhook delivery]
     end
     tunnel[[HTTPS tunnel<br/>cloudflared / ngrok / tailscale]]
@@ -49,7 +49,7 @@ flowchart LR
         wm["workingman agent<br/>read-only observer"]
     end
 
-    phone <--> graph
+    phone <--> graphapi
     hook --> tunnel --> chan
     chan -->|"signed POST, verified"| policy --> router
     router --> acpchat
@@ -61,7 +61,7 @@ flowchart LR
     notify --> index
     router -->|"reply-to lookup"| index
     daemon -. "snapshot.json, audit log,<br/>sessions (read-only mounts)" .-> wm
-    chan -->|"send"| graph
+    chan -->|"send"| graphapi
 ```
 
 Two things to keep in mind:
