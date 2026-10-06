@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Launches ./start-orch.sh in a tmux session. start-orch.sh runs a private
+# ssh-agent (key loaded from 1Password item "SSH github" in vault "Personal"
+# via non-interactive `op`; override with ORCH_SSH_KEY_REF) whose lifetime is
+# tied to that script, so keep this tmux window alive while orch runs.
 if tmux has-session -t orch 2>/dev/null; then
     # Session already exists — run orch in a new window in it rather than just
     # re-attaching to whatever is already there. -c "$PWD" keeps the relative

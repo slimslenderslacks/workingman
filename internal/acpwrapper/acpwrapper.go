@@ -193,8 +193,8 @@ type Config struct {
 	// not work — a macOS unix socket has no listener reachable across the Docker
 	// VM boundary (connect: connection refused) — and overriding SSH_AUTH_SOCK
 	// to that path would only clobber sbx's working socket. So signing relies on
-	// sandboxd being started with the signing agent in its environment (see
-	// start-orch.sh), and the wrapper leaves SSH_AUTH_SOCK alone.
+	// sandboxd being started with the private workingman ssh-agent (started by
+	// start-orch.sh, key loaded from 1Password) as its SSH_AUTH_SOCK, and the wrapper leaves SSH_AUTH_SOCK alone.
 	//
 	// IMPORTANT: SigningKey being non-empty means signing is *configured*, not
 	// that it will *work* — signingPreflight verifies the forwarded agent
@@ -646,8 +646,8 @@ func removeSandboxOnExit(ctx context.Context, run commandFunc, c Config, shuttin
 // forwards into it actually holds a key — the runtime precondition ssh-keygen
 // needs to sign. Config resolution (main's readGitSigningConfig) proves signing
 // is *configured*; this proves the key is *reachable*, which is a separate,
-// runtime-varying fact: 1Password can be locked, or sandboxd can have been
-// restarted since orch launched and lost the 1Password agent. Without this the
+// runtime-varying fact: the private ssh-agent can be empty, or sandboxd can have been
+// restarted since orch launched and lost the private workingman ssh-agent. Without this the
 // gap only surfaces at commit time as a signing failure.
 //
 // Returns checked=false when signing isn't configured (nothing to verify), and
@@ -662,8 +662,8 @@ func signingPreflight(ctx context.Context, run commandFunc, c Config) (checked, 
 // withSigningPreflightResult is the actual fix for the root cause this task
 // tracks down: execArgs previously forced commit.gpgsign=true whenever
 // c.SigningKey was set, with no guard on signingPreflight's result. When the
-// forwarded agent turned out to have no key (1Password locked, or sandboxd
-// restarted since orch launched and lost the 1Password agent — see
+// forwarded agent turned out to have no key (private agent empty, or sandboxd
+// restarted since orch launched and lost the private agent — see
 // signingPreflight), every `git commit` inside the sandbox hard-failed trying
 // to sign against an empty agent. That is the actual mechanism behind "the
 // commit agent is not working": not merely "commits land unsigned" but "the
@@ -727,7 +727,7 @@ func Run(ctx context.Context, c Config) error {
 	// property proxied live by sandboxd, not something baked into a sandbox at
 	// creation time. So a task retried against a reused sandbox (see
 	// keepForTaskStatus) still gets a live, current read of agent health, and if
-	// the underlying sandboxd/1Password issue was fixed between attempts, this
+	// the underlying sandboxd/ssh-agent issue was fixed between attempts, this
 	// preflight (and therefore signing) recovers on the very next retry without
 	// ensureSandbox needing to know or care about signing health itself.
 	//
@@ -743,8 +743,8 @@ func Run(ctx context.Context, c Config) error {
 	if checked && !ok {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING signing preflight FAILED — the SSH "+
 			"agent forwarded into sandbox %q has no key. Commit signing is DISABLED for this session "+
-			"so `git commit` still succeeds (UNSIGNED) instead of hard-failing. Likely 1Password is "+
-			"locked or sandboxd was restarted without it; run ./check-signing.sh to fix.\n",
+			"so `git commit` still succeeds (UNSIGNED) instead of hard-failing. Likely sandboxd was restarted without "+
+			"the private ssh-agent started by start-orch.sh; run ./check-signing.sh to fix.\n",
 			c.SessionID, c.SandboxName)
 	} else if checked {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: signing preflight OK — forwarded agent holds a key\n", c.SessionID)

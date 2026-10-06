@@ -712,7 +712,7 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 		// Teach the window to commit as the host user and, when the host signs,
 		// to SSH-sign — the same env the ACP commit agent injects. Signing is
 		// preflighted first: with commit.gpgsign forced on, a forwarded agent
-		// that holds no key (1Password locked, sandboxd restarted without it)
+		// that holds no key (private ssh-agent empty, sandboxd restarted without it)
 		// would make every `git commit` in this interactive window hard-fail, so
 		// a failed preflight degrades to unsigned (signingKey cleared) exactly
 		// like acpwrapper.Run does for the commit agent.
