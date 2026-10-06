@@ -76,29 +76,11 @@ type e2eEnv struct {
 
 func newE2EEnv(t *testing.T) *e2eEnv {
 	t.Helper()
-	// Unix socket paths are limited to ~104 bytes, which t.TempDir() can exceed.
-	base, err := os.MkdirTemp("", "wm-e2e")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
-
-	env := &e2eEnv{t: t, graph: newE2EGraph(t), audit: &lockedBuffer{}}
-	env.root = filepath.Join(base, "orch")
-	sessionsRoot := filepath.Join(base, "sessions")
-	env.state = filepath.Join(base, "state", "snapshot.json")
-	logDir := filepath.Join(base, "logs")
-	for _, dir := range []string{filepath.Join(env.root, "alpha"), sessionsRoot, filepath.Dir(env.state), logDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	t.Setenv("E2E_WA_TOKEN", "EAAGe2esupersecrettoken1234567890")
-	t.Setenv("E2E_WA_SECRET", e2eAppSecret)
-	t.Setenv("E2E_WA_VERIFY", "e2e-verify")
-	cfgPath := filepath.Join(base, "channels.yaml")
-	cfg := fmt.Sprintf(`
+	env := newE2EEnvWith(t, func(env *e2eEnv) string {
+		t.Setenv("E2E_WA_TOKEN", "EAAGe2esupersecrettoken1234567890")
+		t.Setenv("E2E_WA_SECRET", e2eAppSecret)
+		t.Setenv("E2E_WA_VERIFY", "e2e-verify")
+		return fmt.Sprintf(`
 channels:
   whatsapp:
     type: whatsapp
@@ -120,6 +102,44 @@ router:
   thinking_after: 1m
   turn_timeout: 30s
 `, e2ePhoneID, env.graph.srv.URL, e2eOwner, e2eOwner)
+	})
+	ch, ok := env.dc.reg.Get("whatsapp")
+	if !ok {
+		t.Fatal("no whatsapp channel registered")
+	}
+	addr := ch.(*whatsapp.Channel).WebhookAddr()
+	if addr == "" {
+		t.Fatalf("the webhook did not start; audit log:\n%s", env.audit.String())
+	}
+	env.hookURL = "http://" + addr + whatsapp.DefaultWebhookPath
+	return env
+}
+
+// newE2EEnvWith starts a daemon with channels from the channels.yaml text that
+// config returns (it runs after the fake Graph API exists, so it can point at
+// it). The fake wolf and workingman agents are the same for every transport.
+func newE2EEnvWith(t *testing.T, config func(env *e2eEnv) string) *e2eEnv {
+	t.Helper()
+	// Unix socket paths are limited to ~104 bytes, which t.TempDir() can exceed.
+	base, err := os.MkdirTemp("", "wm-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+
+	env := &e2eEnv{t: t, graph: newE2EGraph(t), audit: &lockedBuffer{}}
+	env.root = filepath.Join(base, "orch")
+	sessionsRoot := filepath.Join(base, "sessions")
+	env.state = filepath.Join(base, "state", "snapshot.json")
+	logDir := filepath.Join(base, "logs")
+	for _, dir := range []string{filepath.Join(env.root, "alpha"), sessionsRoot, filepath.Dir(env.state), logDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfgPath := filepath.Join(base, "channels.yaml")
+	cfg := config(env)
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -170,15 +190,6 @@ router:
 	}()
 	t.Cleanup(env.shutdown)
 
-	ch, ok := env.dc.reg.Get("whatsapp")
-	if !ok {
-		t.Fatal("no whatsapp channel registered")
-	}
-	addr := ch.(*whatsapp.Channel).WebhookAddr()
-	if addr == "" {
-		t.Fatalf("the webhook did not start; audit log:\n%s", env.audit.String())
-	}
-	env.hookURL = "http://" + addr + whatsapp.DefaultWebhookPath
 	return env
 }
 

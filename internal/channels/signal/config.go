@@ -178,3 +178,7 @@ func ParseOptions(options map[string]any, creds channels.Credentials) (Config, e
 	}
 	return cfg, nil
 }
+
+// NormalizeID returns the canonical form of a person id: an E.164 number or a
+// lowercase UUID, or false if s is neither.
+func NormalizeID(s string) (string, bool) { return normalizeID(s) }

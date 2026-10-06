@@ -180,6 +180,29 @@ Daemon flags that matter here: `--channels-config`, `--workingman-agent[=auto|on
 `--acp-kit`, `--sessions-root`, `--state-file`, `--wolf-host`,
 `--wolf-unblock-grace`, `--wolf-idle-timeout`, `--headless` (`orch --help`).
 
+## Signal
+
+Signal is a second transport behind the same registry, routes and router, so
+everything above (wolf-start messages, quote-replies routed through the
+ConversationIndex, the allowlist) works the same. It talks to a
+[signal-cli](https://github.com/AsamK/signal-cli) daemon (`signal-cli -a
++15551234567 daemon --http 127.0.0.1:8080`); see
+`internal/channels/signal/doc.go` for the options. WhatsApp and Signal can be
+configured at the same time: a topic routed to both is sent on both, and a
+reply is answered on the channel it arrived on.
+
+```
+orch signal setup    # signal-cli URL, account, owner allowlist, optional groups; writes the signal section and routes
+orch signal status   # masked config + signal-cli reachable / account registered
+orch signal test [--to <number>] [message]
+```
+
+`setup` is interactive, or driven by flags / `SIGNAL_HTTP_URL`, `SIGNAL_ACCOUNT`,
+`SIGNAL_ALLOW_FROM` with `--non-interactive`. It is idempotent, preserves the rest
+of `channels.yaml`, adds `wolf` and `workingman` routes to the first owner, and
+refuses to save when signal-cli is unreachable or the account is not registered
+unless `--skip-validate` is given.
+
 ## Routes and topics
 
 A *topic* is a free-form tag on an outbound message. A route says "messages with

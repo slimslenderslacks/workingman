@@ -41,12 +41,18 @@ const usageHeader = `usage: orch --root <dir> [flags]        run the daemon, wit
        orch tui --root <dir>            run only the TUI over a directory
        orch status [--json]             print the running daemon's state snapshot
        orch whatsapp <subcommand>       set up and check the WhatsApp channel (see docs/channels.md)
+       orch signal <subcommand>         set up and check the Signal channel (see docs/channels.md)
 
 whatsapp subcommands:
   setup    configure the Business Cloud API channel: credentials, owner allowlist, webhook
   status   show the (masked) config, Graph reachability and the webhook listener
   test     send a test message and print its id or the error
   pair     link a personal WhatsApp number to the bridge backend by QR code
+
+signal subcommands:
+  setup    configure signal-cli URL, account, owner allowlist, optional groups and routes
+  status   show the (masked) config and whether signal-cli is reachable and registered
+  test     send a test message and print its timestamp or the error
 
 Run "orch <subcommand> -h" for a subcommand's flags. Daemon flags:
 
@@ -67,6 +73,9 @@ func main() {
 	}
 	if len(args) > 0 && args[0] == "whatsapp" {
 		os.Exit(runWhatsApp(args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	if len(args) > 0 && args[0] == "signal" {
+		os.Exit(runSignal(args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	runDaemon(args)
 }
