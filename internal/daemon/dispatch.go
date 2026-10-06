@@ -52,7 +52,7 @@ func (d *Daemon) handle(ev fsnotify.Event) {
 //   - status: working  → dispatch first ready task
 //   - status: blocked  → wolf agent
 //   - status: idle     → pending tasks if any, else (re-)arm the PR watch if
-//                         the project is still watching one (Project.WatchingPR)
+//     the project is still watching one (Project.WatchingPR)
 func (d *Daemon) handleProject(path string) {
 	p, err := project.Load(path)
 	if err != nil {
@@ -207,7 +207,7 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 	// routes to the planning agent, which carries its own crash-loop circuit
 	// breaker. Guarded to idle so a seed/intake file observed mid-flight
 	// (working/ready/blocked) is left to that status's own handling.
-	if p.Status == project.StatusIdle && (d.hasPendingSeed(path) || hasPendingIntake(path)) {
+	if (p.Status == project.StatusIdle || p.Status == project.StatusMerged) && (d.hasPendingSeed(path) || hasPendingIntake(path)) {
 		d.audit.Log("seed_replan", "path", path, "from", string(p.Status))
 		updated := *p
 		updated.Status = project.StatusReady
@@ -236,6 +236,13 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 			reason = "project marked blocked by " + string(p.UpdatedBy)
 		}
 		d.launchWolfAgent(path, p, reason)
+	case project.StatusMerged:
+		// Resting: nothing to launch and nothing to watch. New intake/seed
+		// work was already re-armed to ready above; a human edit back to
+		// ready/working routes through those cases on the next observation.
+		if d.scheduler != nil {
+			d.scheduler.Unregister(reviewPollKey(path))
+		}
 	case project.StatusIdle:
 		// Idle is terminal for the automatic cycle, but a human can still
 		// append manual tasks — those still need to run. Dispatch any that
@@ -254,6 +261,11 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 		// so it is safe on every observation and is how a daemon restart or
 		// an agent's own idle write re-arms polling. The poll dispatches the
 		// review agent (see onReviewPoll).
+		// Every PR landed (e.g. merged between polls, or a human stamped
+		// them): settle into the explicit merged state instead of watching.
+		if d.maybeTransitionMerged(path, p) {
+			return
+		}
 		if p.WatchingPR() {
 			d.ensureReviewPoll(path)
 			// A `:review` kick on an already-watched project sets ReviewNow to

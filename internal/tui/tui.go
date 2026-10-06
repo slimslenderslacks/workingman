@@ -1165,6 +1165,8 @@ func renderStatus(s string) string {
 		return statusDone.Render(s)
 	case "stopped":
 		return statusStopped.Render(s)
+	case "merged":
+		return statusDone.Render(s)
 	default:
 		return s
 	}

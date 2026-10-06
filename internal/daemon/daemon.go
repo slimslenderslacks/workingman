@@ -73,6 +73,10 @@ type Daemon struct {
 	// by the change-detection gate. Nil in production (uses the real gh probe);
 	// tests set it to exercise the gate without a network/gh dependency.
 	reviewFingerprintFn func(projectPath string, p *project.Project) (string, bool)
+	// reposWithCommitsFn, when set, overrides the git probe that lists repos
+	// whose branch has commits ahead of base (see reposWithCommits). Nil in
+	// production; tests set it to avoid needing a real workspace.
+	reposWithCommitsFn func(projectPath string, p *project.Project) ([]string, bool)
 
 	// dispatchMu guards dispatchChains, which chains fsnotify events keyed by
 	// their containing directory (see dispatchEvent) so that events for the

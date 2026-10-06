@@ -41,11 +41,21 @@ const (
 	// Project.StoppedFrom) and lets the daemon's ordinary routing resume from
 	// there.
 	StatusStopped Status = "stopped"
+	// StatusMerged is the explicit terminal state for a project whose work has
+	// fully landed: every branch that carries commits was reviewed through an
+	// open pull request and every one of those PRs has been merged (see
+	// Project.AllBranchesMerged for the exact rule). The daemon moves a
+	// watched idle project here — as the daemon, so it doesn't retrigger
+	// dispatch — and from then on treats it as at rest: WatchingPR is false
+	// (the #review poll is dropped even when Review is set) and no agent is
+	// dispatched for it. It is not a dead end: new intake/seed work or a human
+	// edit back to ready/working leaves it through the normal routing.
+	StatusMerged Status = "merged"
 )
 
 func (s Status) Valid() bool {
 	switch s {
-	case StatusReady, StatusWorking, StatusBlocked, StatusIdle, StatusStopped:
+	case StatusReady, StatusWorking, StatusBlocked, StatusIdle, StatusStopped, StatusMerged:
 		return true
 	}
 	return false

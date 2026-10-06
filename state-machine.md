@@ -36,6 +36,9 @@ stateDiagram-v2
     idle --> working: unresolved review comment\nor failed check → new task\n(only when watching a PR)
     idle --> blocked: contested comment escalated\nto wolf\n(only when watching a PR)
     idle --> ready: cron fires, or a pending\nintake file / task seed re-arms
+    idle --> merged: every branch with commits has\na merged PR (none open/unresolved)
+    merged --> ready: new intake file / task seed,\nor a human edit
+    merged --> working: human edit
 
     blocked --> ready: wolf/human unblocks (replan)
     blocked --> working: wolf/human unblocks (resume tasks)
@@ -67,8 +70,8 @@ above — see [§4](#4-stopped-a-pause-not-a-normal-transition). `cleanup: true`
 ### The enum
 
 `internal/project/status.go` defines: `ready`, `working`, `blocked`, `idle`,
-`stopped`. There is also the "unpopulated" case: `Status("")`, which is
-**not** one of the five valid enum values but is accepted by
+`stopped`, `merged`. There is also the "unpopulated" case: `Status("")`, which is
+**not** one of the six valid enum values but is accepted by
 `UnmarshalYAML` as a sentinel — `Project.Unpopulated()` reports `Status ==
 ""`. A project.md-derived seed (description only, no status) and a legacy
 empty file both present this way.
@@ -84,6 +87,29 @@ project wake itself up on a timer" was already answered by whether `cron:` is
 set, rather than by a status value — `idle` is the one resting state, and
 what (if anything) is watching it is read from the project's own data, not
 chosen from an enum.
+
+### idle → merged (all PRs landed)
+
+`merged` is the explicit terminal state for a project whose work has fully
+landed. The daemon (`maybeTransitionMerged`, `internal/daemon/review.go`) moves
+an **idle** project there — writing it as the daemon, so it doesn't retrigger
+dispatch — when `Project.AllBranchesMerged` holds. It is checked when a review
+agent session ends and on every idle dispatch observation (so `review: true`
+can't leave a fully-merged project watching forever).
+
+"All branches with commits" is decided per repo: a repo counts if it has a
+recorded `pull_requests` entry (a PR implies commits) or if its branch is ahead
+of its base (`git rev-list --count origin/<base>..HEAD`, probed only for repos
+with no PR entry). Every counted repo must have a PR in state `merged`; any open
+or unknown-state PR, a `closed`-only repo, or a commit-bearing repo with no PR
+means unresolved work, and at least one PR must be merged. If the git probe
+fails the project stays idle.
+
+In `merged`, `WatchingPR()` is false even with `review: true`, the #review poll
+is unregistered, and `dispatchProject` launches no agent. It is not a dead end:
+a pending intake/seed file re-arms it to `ready` (same guard as idle), and a
+human edit to `ready`/`working` leaves it through the normal routing. `:cleanup`
+(§3) and `:stop` (§4) work from it like any other status.
 
 ### unpopulated → ready / blocked (project bootstrap)
 
