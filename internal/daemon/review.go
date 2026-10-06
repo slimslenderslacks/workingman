@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
@@ -283,6 +284,9 @@ func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
 		}
 		return
 	}
+	if d.maybeTransitionMerged(projectPath, p) {
+		return
+	}
 	switch {
 	case p.Status == project.StatusIdle && p.WatchingPR():
 		d.resetReviewFixCycles(projectPath)
@@ -493,4 +497,99 @@ func reviewNetworkPolicies() []policy.Rule {
 		{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.github.com"},
 		{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.githubcopilot.com"},
 	}
+}
+
+// maybeTransitionMerged moves an idle project to the explicit `merged` status
+// when every branch with commits has a merged PR (see
+// project.AllBranchesMerged for the rule). It reports whether it did. Only an
+// idle project qualifies: working/blocked/ready are still being driven by
+// something else. Checked on both the review agent's session end and the
+// idle dispatch path, because with `review: true` the project would otherwise
+// stay idle-and-watching forever after its PRs merge.
+func (d *Daemon) maybeTransitionMerged(projectPath string, p *project.Project) bool {
+	if p.Status != project.StatusIdle || len(p.PullRequests) == 0 {
+		return false
+	}
+	// Cheap pre-check before any git probing: nothing open, something merged.
+	if !p.AllBranchesMerged(nil) {
+		return false
+	}
+	// Repos with commits but no PR entry would block merged; probe for them.
+	// If the probe fails we can't prove the branches are all merged, so stay idle.
+	extra, ok := d.reposWithCommits(projectPath, p)
+	if !ok || !p.AllBranchesMerged(extra) {
+		return false
+	}
+	d.transitionProjectMerged(projectPath, p)
+	return true
+}
+
+// reposWithCommits returns the "org/name" of project repos whose branch has
+// commits ahead of its base and that have no recorded PR (repos with a PR are
+// already known to carry commits, so they are not probed). ok is false when
+// the workspace can't be inspected.
+func (d *Daemon) reposWithCommits(projectPath string, p *project.Project) ([]string, bool) {
+	if d.reposWithCommitsFn != nil {
+		return d.reposWithCommitsFn(projectPath, p)
+	}
+	hasPR := map[string]bool{}
+	for _, pr := range p.PullRequests {
+		hasPR[strings.ToLower(pr.Repo)] = true
+	}
+	var out []string
+	var dir string
+	for _, r := range append(append([]project.Repo{}, p.Repos...), p.NewRepos...) {
+		slug := r.Org + "/" + r.Name
+		if hasPR[strings.ToLower(slug)] {
+			continue
+		}
+		if dir == "" {
+			if d.runner == nil || d.runner.Workspaces == nil {
+				return nil, false
+			}
+			var err error
+			if dir, err = d.runner.Workspaces.Path(p.Branch); err != nil {
+				return nil, false
+			}
+		}
+		base := "origin/HEAD"
+		if r.BaseBranch != "" {
+			base = "origin/" + r.BaseBranch
+		}
+		ctx := d.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		cmd, err := exec.CommandContext(ctx, "git", "-C", filepath.Join(dir, r.Name),
+			"rev-list", "--count", base+"..HEAD").Output()
+		cancel()
+		if err != nil {
+			return nil, false
+		}
+		if n, _ := strconv.Atoi(strings.TrimSpace(string(cmd))); n > 0 {
+			out = append(out, slug)
+		}
+	}
+	return out, true
+}
+
+// transitionProjectMerged writes status:merged as the daemon (no fsnotify
+// retrigger) and stops the PR poll. Like transitionProjectIdle it keeps a live
+// recurring cron registration but otherwise drops the project's schedules.
+func (d *Daemon) transitionProjectMerged(projectPath string, p *project.Project) {
+	updated := *p
+	updated.Status = project.StatusMerged
+	if err := project.Save(projectPath, &updated); err != nil {
+		d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
+		return
+	}
+	if d.scheduler != nil {
+		if updated.Cron == "" || updated.CronExpired() {
+			d.scheduler.Unregister(projectPath)
+		}
+		d.scheduler.Unregister(reviewPollKey(projectPath))
+	}
+	d.clearReviewState(projectPath)
+	d.audit.Log("project_merged", "path", projectPath)
 }

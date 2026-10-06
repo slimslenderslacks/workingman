@@ -174,3 +174,54 @@ func TestReviewFieldsRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestMergedStatusRoundTripAndNotWatched(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	in := &Project{
+		Description: "p", Branch: "b", Status: StatusMerged, Review: true,
+		PullRequests: []PullRequest{{Repo: "docker/gateway", Number: 1, State: "merged"}},
+	}
+	if err := SaveAs(dst, in, WriterDaemon); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	got, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Status != StatusMerged || !got.Status.Valid() {
+		t.Errorf("Status = %q, want merged", got.Status)
+	}
+	if got.WatchingPR() {
+		t.Errorf("WatchingPR() = true for a merged project, want false even with review set")
+	}
+}
+
+func TestAllBranchesMerged(t *testing.T) {
+	m := func(repo, state string) PullRequest { return PullRequest{Repo: repo, Number: 1, State: state} }
+	cases := []struct {
+		name    string
+		prs     []PullRequest
+		commits []string
+		want    bool
+	}{
+		{"no PRs", nil, nil, false},
+		{"one merged", []PullRequest{m("a/x", "merged")}, nil, true},
+		{"open", []PullRequest{m("a/x", "open")}, nil, false},
+		{"unknown state", []PullRequest{m("a/x", "")}, nil, false},
+		{"all merged two repos", []PullRequest{m("a/x", "merged"), m("a/y", "merged")}, nil, true},
+		{"one open one merged", []PullRequest{m("a/x", "merged"), m("a/y", "open")}, nil, false},
+		{"closed only", []PullRequest{m("a/x", "closed")}, nil, false},
+		{"merged plus closed other repo", []PullRequest{m("a/x", "merged"), m("a/y", "closed")}, nil, false},
+		{"merged plus closed duplicate", []PullRequest{m("a/x", "merged"), m("a/x", "closed")}, nil, true},
+		{"commits without PR", []PullRequest{m("a/x", "merged")}, []string{"a/y"}, false},
+		{"commits repo covered by merged PR", []PullRequest{m("A/X", "merged")}, []string{"a/x"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Project{PullRequests: tc.prs}
+			if got := p.AllBranchesMerged(tc.commits); got != tc.want {
+				t.Errorf("AllBranchesMerged = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

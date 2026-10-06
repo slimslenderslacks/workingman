@@ -464,3 +464,43 @@ func TestReviewFixCyclesBlockAfterMax(t *testing.T) {
 		t.Errorf("blocked_reason = %q, want it to explain the non-convergence", got.BlockedReason)
 	}
 }
+
+func TestMergedTransition(t *testing.T) {
+	run := func(t *testing.T, status project.Status, prs []project.PullRequest, extra []string, probeOK bool) *project.Project {
+		root := t.TempDir()
+		d, _, _ := newReviewDaemon(t, root)
+		d.reposWithCommitsFn = func(string, *project.Project) ([]string, bool) { return extra, probeOK }
+		path := filepath.Join(root, ".project.yaml")
+		if err := project.SaveAs(path, &project.Project{
+			Description: "x", Branch: "b", Status: status, Review: true,
+			Repos:        []project.Repo{{Org: "docker", Name: "gateway"}},
+			PullRequests: prs,
+		}, project.WriterAgent); err != nil {
+			t.Fatal(err)
+		}
+		d.afterReviewSession(path, nil)
+		got, err := project.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	merged := []project.PullRequest{{Repo: "docker/gateway", Number: 1, State: "merged"}}
+	open := []project.PullRequest{{Repo: "docker/gateway", Number: 1, State: "open"}}
+
+	if got := run(t, project.StatusIdle, merged, nil, true); got.Status != project.StatusMerged || got.UpdatedBy != project.WriterDaemon {
+		t.Errorf("all merged: status=%q by=%q, want merged by daemon", got.Status, got.UpdatedBy)
+	}
+	if got := run(t, project.StatusIdle, open, nil, true); got.Status != project.StatusIdle {
+		t.Errorf("open PR: status=%q, want idle", got.Status)
+	}
+	if got := run(t, project.StatusIdle, merged, []string{"docker/other"}, true); got.Status != project.StatusIdle {
+		t.Errorf("unreviewed branch with commits: status=%q, want idle", got.Status)
+	}
+	if got := run(t, project.StatusIdle, merged, nil, false); got.Status != project.StatusIdle {
+		t.Errorf("probe failure: status=%q, want idle", got.Status)
+	}
+	if got := run(t, project.StatusBlocked, merged, nil, true); got.Status != project.StatusBlocked {
+		t.Errorf("blocked project must not move to merged, got %q", got.Status)
+	}
+}

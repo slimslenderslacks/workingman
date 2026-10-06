@@ -322,8 +322,55 @@ func (p *Project) CronUnbounded() bool {
 // needs to choose between two status values to signal "keep watching" vs
 // "done"; it just always leaves the project idle, and the daemon derives the
 // answer from PullRequests' own recorded state.
+//
+// A project in StatusMerged is never watched, even with Review set: merged is
+// the explicit "all PRs landed" resting state and must not keep the poll armed.
 func (p *Project) WatchingPR() bool {
+	if p.Status == StatusMerged {
+		return false
+	}
 	return p.Review || hasOpenPR(p.PullRequests)
+}
+
+// AllBranchesMerged reports whether the project has reached the `merged`
+// condition: every branch that has commits was reviewed through a pull request
+// and every one of those pull requests is merged.
+//
+// "Branches with commits" is decided per repo. A repo counts when it has a
+// recorded pull request (a PR can only exist for a branch with commits) or
+// when it is named in reposWithCommits — the daemon's list of repos whose
+// branch is ahead of its base, which catches a repo whose branch has commits
+// but was never put up for review. Repos with neither are ignored (the branch
+// carried no work). Every counted repo must then have a pull request in state
+// "merged". A "closed" (unmerged) or open/unknown-state PR, or a commit-bearing
+// repo with no PR at all, means unresolved work and the answer is false; a
+// closed duplicate is tolerated only when the same repo also has a merged PR.
+// At least one PR must be merged, so a project with no PRs is never merged.
+// Repo names are compared case-insensitively as "org/name".
+func (p *Project) AllBranchesMerged(reposWithCommits []string) bool {
+	merged := map[string]bool{}
+	counted := map[string]bool{}
+	for _, pr := range p.PullRequests {
+		k := strings.ToLower(pr.Repo)
+		counted[k] = true
+		if pr.State == "merged" {
+			merged[k] = true
+		}
+	}
+	for _, r := range reposWithCommits {
+		counted[strings.ToLower(r)] = true
+	}
+	if len(merged) == 0 {
+		return false
+	}
+	for k := range counted {
+		if !merged[k] {
+			return false
+		}
+	}
+	// A still-open PR for a repo that also has a merged one (e.g. a
+	// follow-up PR) is unresolved work too.
+	return !hasOpenPR(p.PullRequests)
 }
 
 // hasOpenPR reports whether any entry in prs is not yet merged or closed. An
