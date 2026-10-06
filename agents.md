@@ -597,7 +597,7 @@ task, and is started by the daemon rather than dispatched by a status change.)*
 
 **What it is.** A long-lived, always-on assistant that sits in a sandbox of its
 own and answers a human's questions — relayed over messaging channels, e.g.
-WhatsApp — about the orch state: which projects are open, which tasks are
+WhatsApp or Signal — about the orch state: which projects are open, which tasks are
 running/blocked/failed and why, what the wolf is doing, what happened recently
 in the audit log. It is autonomous-ACP (nobody drives its prompt by hand;
 `Interactive()` is false) but **persistent**, using the same
@@ -657,7 +657,7 @@ says to START by reading the snapshot (checking `generated_at` /
 question; summarises the snapshot schema; embeds a condensed project/task
 state machine (the semantics of `state-machine.md`); explains finding a wolf
 session in `sessions[]` and reading `<sessions-root>/<id>/stream.log`; sets
-the answer style (replies go out over WhatsApp: short, plain text, no wide
+the answer style (replies go out over WhatsApp or Signal: short, plain text, no wide
 tables, lead with the answer, cite `blocked_reason`/`failure_reason`); and
 forbids claiming to change state — to act, it names the TUI command (`:` →
 `stop`/`start`/`wolf`/`review`/`cleanup`/`archive`) or the YAML edit (project

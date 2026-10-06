@@ -246,6 +246,59 @@ snapshot, audit log and agent sessions are mounted read-only), the commands
 The WhatsApp numbers allowed to talk to the daemon are an allowlist — nothing
 else reaches an agent.
 
+## Channels / Signal
+
+Signal is the second channel type, with the same wolf messages, reply-to routing,
+router commands, allowlist and workingman agent as WhatsApp. It is modelled on
+hermes-agent's Signal adapter (`gateway/platforms/signal.py`) and needs one thing
+WhatsApp does not: a running [signal-cli](https://github.com/AsamK/signal-cli)
+daemon (`signal-cli -a +15551234567 daemon --http 127.0.0.1:8080`) that is
+registered or linked to a Signal account. Step-by-step binding of the workingman
+agent and the wolf, the configuration reference, security notes,
+troubleshooting and a smoke-test checklist: [docs/signal.md](docs/signal.md)
+(shared concepts: [docs/channels.md](docs/channels.md)).
+
+```sh
+orch signal setup       # signal-cli URL, account, owner allowlist; writes the channel and the wolf/workingman routes
+orch signal status      # masked config; signal-cli reachable, account registered (--offline skips the check)
+orch signal test        # send a test message to the owner
+orch --root ~/orch --acp-kit <kit>   # channels.yaml present ⇒ channels on, workingman agent on
+```
+
+Differences from WhatsApp (cloud):
+
+| | WhatsApp (cloud) | Signal |
+|---|---|---|
+| Needs | Meta app, phone-number id, public https URL (tunnel) | a signal-cli daemon on the host; nothing public |
+| Meta console / webhook / tunnel | yes | **none** |
+| 24-hour service window | yes (typed error outside it) | **none** |
+| Secrets | access token, app secret, verify token | none (the account number may be an env credential) |
+| Message to yourself | not delivered | **Note to Self** (`note_to_self: true`) |
+| Groups | no | opt-in per group |
+| Message length / formatting | 4096 chars, WhatsApp markup | 8000 chars, Markdown → native Signal styles |
+
+Parity with hermes-agent's Signal adapter (✅ supported · ➖ partly · ❌ not supported):
+
+| Feature | hermes-agent | workingman |
+|---|---|---|
+| signal-cli HTTP daemon: SSE in, JSON-RPC out | ✅ | ✅ |
+| Setup wizard | ✅ `hermes gateway setup` | ✅ `orch signal setup` (validates signal-cli and the account) |
+| Allowlist, default deny | ✅ | ✅ (no wildcard; `allow_all` is an explicit opt-in) |
+| Unknown sender → pairing code | ✅ | ❌ silent denial |
+| Group chats | ✅ (`*` allowed) | ➖ only listed groups, and the sender must be allowlisted |
+| Note to Self, echo protection | ✅ | ✅ (opt-in) |
+| Quoted replies | ✅ | ✅ in direct chats — also how a wolf message is answered |
+| Native formatting, 8000-char chunking | ✅ | ✅ |
+| Typing indicator | ✅ | ✅ |
+| Reconnect with backoff | ✅ | ✅ (2s → 60s) |
+| Phone-number redaction in logs | ✅ | ✅ (`***4321`) |
+| Attachments, voice, reactions | ✅ | ❌ text only |
+| Tool-progress messages | suppressed | ❌ only the agent's final text segment is sent |
+
+The security model matches WhatsApp: only allowlisted numbers reach an agent, and
+the signal-cli data directory (account keys, `~/.local/share/signal-cli/` by
+default) must be kept private. Both channels can be enabled at once.
+
 ## Example `.project.yaml`
 
 ```yaml

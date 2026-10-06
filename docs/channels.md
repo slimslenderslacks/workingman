@@ -1,4 +1,4 @@
-# Messaging channels (WhatsApp)
+# Messaging channels (WhatsApp and Signal)
 
 With a channel configured, the daemon talks to a human on their phone in both
 directions:
@@ -12,14 +12,18 @@ directions:
   the orch state ([agents.md §8](../agents.md#8-workingman-agent)).
 
 This mirrors hermes-agent's WhatsApp gateway (`gateway/platforms/whatsapp_cloud.py`,
-`whatsapp_common.py`, `scripts/whatsapp-bridge/`); see the parity table in the
-[README](../README.md#channels--whatsapp).
+`whatsapp_common.py`, `scripts/whatsapp-bridge/`) and Signal adapter
+(`gateway/platforms/signal.py`); see the parity tables in the
+[README](../README.md#channels--whatsapp) and
+[below](#signal). Signal has its own page: [signal.md](signal.md).
 
 Contents: [Architecture](#architecture) · [Quick start](#quick-start) ·
-[Configuration reference](#configuration-reference) · [Routes and topics](#routes-and-topics) ·
+[Configuration reference](#configuration-reference) · [Signal](#signal) ·
+[Routes and topics](#routes-and-topics) ·
 [Routing rules](#routing-rules) · [Security model](#security-model) ·
 [Tunnel setup](#exposing-the-webhook-tunnel-setup) · [Troubleshooting](#troubleshooting) ·
-[Manual smoke test](#manual-smoke-test-real-meta-test-number)
+[Manual smoke test](#manual-smoke-test-real-meta-test-number) ·
+[Signal smoke test](signal.md#manual-smoke-test)
 
 ## Architecture
 
@@ -27,17 +31,21 @@ Contents: [Architecture](#architecture) · [Quick start](#quick-start) ·
 flowchart LR
     phone([Owner's phone])
 
-    subgraph meta["Meta (cloud mode)"]
+    subgraph meta["Meta (WhatsApp cloud mode)"]
         graphapi[Graph API]
         hook[Webhook delivery]
     end
     tunnel[[HTTPS tunnel<br/>cloudflared / ngrok / tailscale]]
 
+    signalsvc[(Signal service)]
+    sigcli["signal-cli daemon<br/>--http 127.0.0.1:8080"]
+
     subgraph orch["orch daemon (host)"]
         direction TB
         chan["whatsapp channel<br/>webhook :8090 + Cloud client<br/>(or the Baileys bridge)"]
-        policy{"access policy<br/>allowlist, default deny"}
-        router["router<br/>commands · reply-to · binding"]
+        sigchan["signal channel<br/>SSE in, JSON-RPC out"]
+        policy{"access policy<br/>per channel, allowlist, default deny"}
+        router["router<br/>commands, reply-to, binding"]
         index[("conversation index<br/>channel-conversations.json")]
         notify["wolf start/end<br/>notifications"]
         daemon["daemon<br/>state machine + snapshot"]
@@ -50,14 +58,23 @@ flowchart LR
     end
 
     phone <--> graphapi
+    phone <--> signalsvc
+    signalsvc <--> sigcli
     hook --> tunnel --> chan
-    chan -->|"signed POST, verified"| policy --> router
+    sigcli -->|"SSE events"| sigchan
+    sigchan -->|"JSON-RPC send"| sigcli
+    chan -->|"signed POST, verified"| policy
+    sigchan --> policy
+    policy --> router
     router --> acpchat
     acpchat <-->|"unix socket agent.sock"| wolf
     acpchat <-->|"unix socket agent.sock"| wm
     router -->|"replies"| chan
+    router -->|"replies"| sigchan
     daemon -->|"project blocked: launch"| wolf
-    daemon --> notify -->|"send + register message id"| chan
+    daemon --> notify
+    notify -->|"send + register message id"| chan
+    notify -->|"send + register message id"| sigchan
     notify --> index
     router -->|"reply-to lookup"| index
     daemon -. "snapshot.json, audit log,<br/>sessions (read-only mounts)" .-> wm
@@ -73,6 +90,8 @@ Two things to keep in mind:
   conversation.
 - Only messages that pass the channel's access policy reach the router. The
   router does no authorisation of its own.
+- Channels are independent transports behind one registry: WhatsApp and Signal
+  can run at the same time.
 
 ## Quick start
 
@@ -88,6 +107,9 @@ orch --root ~/orch --acp-kit <kit> --headless
 `orch whatsapp setup` writes `~/.workingman/channels.yaml` (no secrets) and a
 0600 `~/.workingman/secrets.yaml`. For a personal number via the Baileys bridge
 use `orch whatsapp pair` instead ([whatsapp-bridge.md](whatsapp-bridge.md)).
+For Signal use `orch signal setup` / `status` / `test` instead (no tunnel, no
+console, no secrets file; it needs a running signal-cli daemon): see
+[Signal](#signal) and [signal.md](signal.md).
 
 Running with the TUI (no `--headless`) works the same way; the difference is who
 starts a conversation in a new agent session: the TUI's watcher normally sends a
@@ -158,7 +180,7 @@ whatsapp_verify_token: a-long-random-string
 
 | Key | Meaning |
 |---|---|
-| `channels.<name>.type` | selects the factory; `whatsapp` today |
+| `channels.<name>.type` | selects the factory: `whatsapp` or `signal` |
 | `channels.<name>.enabled` | default `true` |
 | `channels.<name>.credentials.<cred>` | `{env: NAME}` or `{file: PATH, key: KEY}`; a file must be mode 0600. WhatsApp cloud credentials: `access_token` (required), `app_secret` (required for the webhook), `verify_token` (the subscription handshake) |
 | `…options.mode` | `cloud` (default) or `bridge` |
@@ -172,6 +194,7 @@ whatsapp_verify_token: a-long-random-string
 | `…options.access.deny_reply`, `deny_reply_interval` | optional reply to a denied sender, rate-limited per sender |
 | `…options.access.self_ids`, `reply_prefix`, `forward_owner_messages` | self-chat / owner-message handling (bridge) |
 | `…options.bridge.*` | Baileys bridge supervision: see [whatsapp-bridge.md](whatsapp-bridge.md) |
+| Signal: `…options.http_url`, `account`, `plain_text`, `access.allow_from` / `note_to_self` / `groups` / `group_allow_from` / `allow_all`; `credentials.account` | see [signal.md](signal.md#configuration) |
 | `routes[]` | `{topic, channel, chat}`; see below |
 | `notify.wolf_start_interval` | rate limit for wolf-start messages |
 | `router.*` | inbound router timeouts and queue |
@@ -184,24 +207,72 @@ Daemon flags that matter here: `--channels-config`, `--workingman-agent[=auto|on
 
 Signal is a second transport behind the same registry, routes and router, so
 everything above (wolf-start messages, quote-replies routed through the
-ConversationIndex, the allowlist) works the same. It talks to a
+conversation index, the allowlist) works the same. It talks to a
 [signal-cli](https://github.com/AsamK/signal-cli) daemon (`signal-cli -a
-+15551234567 daemon --http 127.0.0.1:8080`); see
-`internal/channels/signal/doc.go` for the options. WhatsApp and Signal can be
-configured at the same time: a topic routed to both is sent on both, and a
-reply is answered on the channel it arrived on.
++15551234567 daemon --http 127.0.0.1:8080`): inbound over its SSE stream,
+outbound as JSON-RPC. Compared with WhatsApp cloud there is **no Meta console,
+no webhook, no tunnel and no 24-hour window**. The full guide, including the
+step-by-step "bind the workingman agent and the wolf to Signal", is
+[signal.md](signal.md); the short version:
 
-```
+```sh
 orch signal setup    # signal-cli URL, account, owner allowlist, optional groups; writes the signal section and routes
-orch signal status   # masked config + signal-cli reachable / account registered
-orch signal test [--to <number>] [message]
+orch signal status   # masked config + signal-cli reachable / account registered   (--offline skips the check)
+orch signal test [--to <number|uuid|group:ID>] [message]
 ```
 
-`setup` is interactive, or driven by flags / `SIGNAL_HTTP_URL`, `SIGNAL_ACCOUNT`,
+`setup` is interactive, or driven by flags (`--http-url`, `--account`,
+`--allow-from`, `--note-to-self`, `--groups`, `--group-allow-from`,
+`--route-topics`, `--no-routes`) / `SIGNAL_HTTP_URL`, `SIGNAL_ACCOUNT`,
 `SIGNAL_ALLOW_FROM` with `--non-interactive`. It is idempotent, preserves the rest
 of `channels.yaml`, adds `wolf` and `workingman` routes to the first owner, and
 refuses to save when signal-cli is unreachable or the account is not registered
 unless `--skip-validate` is given.
+
+### Worked example (Signal)
+
+```yaml
+# ~/.workingman/channels.yaml
+channels:
+  signal:
+    type: signal
+    options:
+      http_url: http://127.0.0.1:8080      # default
+      account: "+15551234567"              # the number signal-cli is registered or linked as
+      access:
+        allow_from: ["+15557654321"]       # the owner; E.164 numbers or UUIDs; empty = nobody
+        # note_to_self: true               # admit the account's own "Note to Self" chat
+        # groups: true
+        # group_allow_from: ["<group id>"] # groups need an explicit list
+
+routes:
+  - {topic: wolf,       channel: signal, chat: "+15557654321"}
+  - {topic: workingman, channel: signal, chat: "+15557654321"}
+```
+
+No credentials are required; the account number may instead be given as
+`credentials: {account: {env: SIGNAL_ACCOUNT}}`.
+
+### Signal alongside WhatsApp
+
+Define both channels (different instance names) in the same file. A topic routed
+to both is sent on both; a reply is answered on the channel the question arrived
+on; each chat keeps its own `/wolf` / `/agent` binding. Give the same topic one
+route per channel:
+
+```yaml
+routes:
+  - {topic: wolf, channel: whatsapp, chat: "15551234567"}
+  - {topic: wolf, channel: signal,   chat: "+15557654321"}
+```
+
+### Reply-to routing on Signal
+
+Signal's *Reply* sends a quote whose id is the quoted message's timestamp. The
+channel returns that timestamp as the id of every message it sends, so the
+conversation index maps a swipe-reply to a `🐺 wolf is running…` message back to
+that wolf, exactly as WhatsApp's `context.message_id` does. Outbound, the first
+chunk of a reply quotes the message it answers in direct chats (not in groups).
 
 ## Routes and topics
 
@@ -218,8 +289,9 @@ this topic go to this chat on this channel":
 
 A topic may have several routes; each receives the message, concurrently, and one
 channel failing never holds up the others. A topic with no route is not an error:
-nothing is sent. The topic is shown as a `[topic] ` prefix, since WhatsApp has no
-threads.
+nothing is sent. The topic is shown as a `[topic] ` prefix, since neither
+WhatsApp nor Signal has threads. A `chat` is a phone number for WhatsApp, and for
+Signal an E.164 number, a UUID or `group:<groupId>`.
 
 ## Routing rules
 
@@ -360,7 +432,7 @@ default is fail-closed.
   `.project.yaml` or `tasks/`; to act it names the TUI command or YAML edit for
   the human. The wolf is sandboxed too and can only write its project's control
   directory (+ its worktree). The workingman agent is told its replies go out
-  over WhatsApp (short, plain text, no secrets).
+  over a phone messenger (short, plain text, no secrets).
 - **Tool permissions are asked, not assumed.** When a wolf raises a permission
   request, the router puts it to the bound chat; no answer within
   `router.permission_timeout` (or nobody to ask) is a **rejection**.
@@ -374,7 +446,7 @@ default is fail-closed.
   **outside** the directories mounted into the workingman agent (the default
   `~/.workingman/secrets.yaml` is), and note that `channels.log` lives beside the
   audit log, which that agent can read.
-- **24-hour window.** Meta only lets a business message a user who wrote in the
+- **24-hour window (WhatsApp only).** Meta only lets a business message a user who wrote in the
   last 24 hours (templates excepted; the daemon sends none). A wolf-start message
   to a chat that has been silent for a day fails with a typed error
   (`channel_send_error` in the audit log) rather than being dropped silently.
@@ -425,7 +497,11 @@ Free tunnels change their URL on restart; re-register the callback when it does.
 | `/wolf` says the wolf cannot be attached | the wolf runs on the host under tmux (`--wolf-host`); only ACP wolves can be tuned into |
 | Wolf never starts working under `--headless` | nobody sends a wolf its opening prompt headless; run the TUI |
 | Reply says "I cancelled it" | the turn exceeded `router.turn_timeout` |
+| Signal: `orch signal status` / `test` fails, or no messages arrive | signal-cli daemon not running, `http_url` mismatch, account not registered, sender not on `allow_from`: see [signal.md troubleshooting](signal.md#troubleshooting) |
 | A bridge-mode channel stopped after "logged out" | WhatsApp unlinked the device (exit 78); run `orch whatsapp pair --reset` |
+
+Signal has no tunnel, webhook or 24-hour window to go wrong; its failures are
+signal-cli being down or unregistered and the allowlist.
 
 Logs: the audit log (`router_*`, `wolf_*`, `channel_*` events), `channels.log`
 beside it (webhook and send details, ids masked), `whatsapp-bridge.log` for the
@@ -443,6 +519,8 @@ not create is the one thing that needs a live smoke test (see the `acpchat`
 package comment, and steps 6 and 12 above).
 
 ## Manual smoke test (real Meta test number)
+
+For Signal see [signal.md](signal.md#manual-smoke-test).
 
 The automated end-to-end test (`cmd/orch/channels_e2e_test.go`) runs the whole
 pipeline against fakes. What it cannot prove — Meta's real delivery, signatures
