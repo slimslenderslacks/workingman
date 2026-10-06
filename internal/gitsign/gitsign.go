@@ -153,9 +153,9 @@ func ExecRun(ctx context.Context, name string, args ...string) ([]byte, error) {
 // Preflight verifies, once the sandbox exists, that the SSH agent sbx forwards
 // into it actually holds a key — the runtime precondition ssh-keygen needs to
 // sign. Config resolution proves signing is *configured*; this proves the key is
-// *reachable*, a separate, runtime-varying fact: 1Password can be locked, or
-// sandboxd can have been restarted since orch launched and lost the 1Password
-// agent. Without this the gap only surfaces at commit time as a signing failure
+// *reachable*, a separate, runtime-varying fact: the private ssh-agent can be empty, or
+// sandboxd can have been restarted since orch launched and lost the private
+// workingman ssh-agent. Without this the gap only surfaces at commit time as a signing failure
 // — and worse, with commit.gpgsign forced on, `git commit` hard-fails rather
 // than landing an unsigned commit.
 //

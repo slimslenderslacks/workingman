@@ -1,15 +1,19 @@
 # Agents
 
-The orchestrator launches seven kinds of `claude` sessions over a project's
-lifecycle: **project → planning → task → commit**, with **wolf**, **archive**,
-and **review** stepping in for blocks, cleanup, and PR watching respectively.
+The orchestrator launches eight kinds of `claude` sessions. Seven run over a
+project's lifecycle: **project → planning → task → commit**, with **wolf**,
+**archive**, and **review** stepping in for blocks, cleanup, and PR watching
+respectively. The eighth, the **workingman agent**, belongs to no project: it is
+a daemon-owned, always-on observer that answers questions about the orch state
+(§8).
 `design.md` has the original spec; this document describes the agents as
 implemented today, which has moved past that spec in places (most notably: an
 ACP/sandbox launch path superseding the tmux+`sbx exec` path for non-interactive
 agents, and a review agent design.md never mentions).
 
 Every agent's role is defined by `agent.Kind` (`internal/agent/agent.go`).
-`Kind.Interactive()` splits the seven into two launch families:
+`Kind.Interactive()` splits the project-lifecycle seven into two families, but the *launch path*
+is no longer exactly that split (see the wolf):
 
 - **Autonomous** (project, planning, task, commit, review) — run under
   `claude --print` (single turn, then exit) as an **ACP session** backed by a
@@ -17,12 +21,21 @@ Every agent's role is defined by `agent.Kind` (`internal/agent/agent.go`).
   Runner.startACP`), when the daemon is wired with an `AcpLauncher` (production
   always is). The wrapper creates the sandbox (with `acp-kit` layered on),
   execs the ACP client, and serves `<SessionsRoot>/<id>/agent.sock` for the TUI
-  to stream. There is no tmux window to attach to for these.
-- **Interactive** (wolf, archive) — always take the legacy path: a tmux window
-  inside the shared umbrella session `orch` (`internal/agent/tmux.go`), running
-  `claude --dangerously-skip-permissions` (no `--print`) inside `sbx exec -it
-  <sandbox>`, so a human can attach (`tmux attach -t orch`) and drive the
-  conversation or answer a macOS notification.
+  to stream. There is no tmux window to attach to for these. The wrapper is
+  launched `--exit-when-empty`: it ends when the TUI watcher that drove the one
+  prompt disconnects.
+- **Interactive** (wolf, archive) — a human is expected in the loop.
+  - The **archive** agent always takes the legacy path: a tmux window inside the
+    shared umbrella session `orch` (`internal/agent/tmux.go`), running `claude
+    --dangerously-skip-permissions` (no `--print`) inside `sbx exec -it
+    <sandbox>`, so a human can attach (`tmux attach -t orch`) and drive the
+    conversation or answer a macOS notification.
+  - The **wolf** is a *persistent* ACP session (conversational: no
+    exit-when-empty; it ends when its work is done, see §5) when an
+    `AcpLauncher` is configured, so the TUI, the daemon and messaging channels
+    can all tune in to one conversation. `orch --wolf-host` (`Runner.WolfOnHost`)
+    keeps the pre-ACP host/tmux wolf as an escape hatch. `Runner.UsesACP(kind)`
+    is the single place that answers "does this kind run under ACP?".
 
 Every launch, regardless of family, gets the same two-file handoff written
 into its working directory by `internal/setup/setup.go` before the process
@@ -253,17 +266,52 @@ stop condition, review-loop escalations, etc.) always ends by calling
 branch (covers a block set by a human, the project agent, or a daemon
 restart finding the file already blocked).
 
+**Two launch modes.** Which one runs is decided by `Runner.UsesACP`:
+
+| | ACP wolf (default with `--acp-kit`) | host wolf (`--wolf-host`, or no `--acp-kit`) |
+|---|---|---|
+| process | `acp-wrapper --persistent` host process → sandboxed `claude-acp-client` | tmux window running `claude --dangerously-skip-permissions` |
+| where it runs | sbx sandbox `<work-stream>-wolf` (`runner.ACPSandboxNameFor`) | directly on the host, no sandbox (`SandboxNameFor` returns `""`) |
+| who can talk to it | anything that can dial `<SessionsRoot>/<id>/agent.sock`: the TUI tab, the daemon, a messaging channel | a human attached to tmux |
+| survives an `orch` restart | yes (`detachable`; re-adopted under the wolf key by `reconcileSessions`) | no (closed on shutdown, like before) |
+| ends | see "Completion" below | when its tmux window closes |
+
 **Workspace/session.** `WorkingDir` = control dir (like project/planning), so
-no wsp provisioning of its own, but `Repos`/`Branch` are still forwarded in
-case the wolf needs to look at source — `SandboxNameFor` deliberately returns
-`""` for `WolfAgent`: the wolf runs **outside any sandbox**, directly on the
-host, so it can diagnose sandbox-related blocks too. It is tracked under a
-session key distinct from the project's main slot
-(`wolfSessionKey = projectPath + "#wolf"`), so it can run *in tandem* with a
-task/commit/planning session rather than waiting for that slot to free up.
-Being interactive, it takes the tmux path: a window inside the `orch` umbrella
-session, `claude --dangerously-skip-permissions` with no `--print`, so the
-process stays at the prompt for a human to drive.
+no wsp provisioning of its own; `Repos`/`Branch` are still forwarded in case
+the wolf needs to look at source. It is tracked under a session key distinct
+from the project's main slot (`wolfSessionKey = projectPath + "#wolf"`), so it
+can run *in tandem* with a task/commit/planning session rather than waiting
+for that slot to free up. `Plan.Persistent` is set for every wolf launch; it
+only has an effect on the ACP path.
+
+**Host access: what the ACP wolf gets and loses.** The decision (goal 3): the
+wolf runs sandboxed by default, because anything that must be reachable by the
+daemon, the TUI and a messaging channel has to be a long-lived ACP session, and
+ACP sessions are sandboxed (the wrapper owns sandbox creation). To keep it
+useful it is given:
+
+- **Mounts:** the control dir (primary/cwd — it holds `.project.yaml`,
+  `tasks/`, `blocked-session.yaml` and `.orch/`, i.e. everything the wolf
+  writes) and, when the project has `Repos`+`Branch`, the project's wsp
+  worktree as a second mount (provisioned idempotently by
+  `Runner.resolveWolfWorktree`, **best-effort**: a wsp failure is audited as
+  `wolf_worktree_unavailable` and the wolf launches without the source mount,
+  since a broken wsp is exactly the kind of thing it is summoned to look at).
+- **Prompt:** `prompts.Data.Sandboxed` / `.orch/context.yaml: sandboxed: true`
+  switch `wolf.tmpl` to the sandboxed wording: what it can see, what it can't
+  do, and to ask the user to perform host-only fixes.
+
+What it **loses** versus the host wolf: it cannot run `sbx`, so it cannot
+`sbx exec` into or inspect the sandbox a failed task/commit agent ran in (the
+wrapper deliberately keeps those for post-mortems); no `wsp`, no `osascript`,
+no host git credentials or SSH signing agent, no access to the daemon's audit
+log / sessions dir (outside the mounts), and sbx's default network policy. So
+**sandbox-, sbx-, wsp- and credential-related blocks are better diagnosed with
+`--wolf-host`.** Everything that is decided from files — task
+`failure_reason`s, the blocked-session record, the source, the project/task
+YAML it must edit — works unchanged. `--wolf-host` is a daemon-wide switch
+(`Runner.WolfOnHost`, logged as `wolf_host` at `daemon_start`); there is no
+per-project override yet.
 
 **Reads/writes.** Reads the project's `blocked_reason`, the failed/blocked
 tasks' `failure_reason`/`blocked_reason` (`FailedTasks`, paths gathered by
@@ -275,23 +323,143 @@ ultimately updates `.project.yaml`/task files to move the project out of
 project's `.project.yaml`.
 
 **Prompt structure (`wolf.tmpl`).** Opens with scope rules (only this
-project's files), the blocked reason and failed-task list, and any inherited
-prior summary/attempted list so a second wolf run doesn't re-derive
-diagnosis from scratch. Then: "investigate... you may need input from the
-user — send a macOS notification and wait for them to attach." Documents two
-special cases: (1) a project blocked before it was ever populated (fill in
-the missing fields the project agent couldn't infer, clear `blocked_reason`,
-set `ready`); (2) a project blocked out of the PR-review loop (four specific
+project's files; "you run on the host" vs "you run inside a sandbox …"), the
+blocked reason and failed-task list, and any inherited prior summary/attempted
+list so a second wolf run doesn't re-derive diagnosis from scratch. Sandboxed
+wolves then get an ENVIRONMENT paragraph (what they can't do). Then:
+"investigate…". When it needs the user, the *host* wolf is told to send a macOS
+notification and wait for them to attach to tmux; the *sandboxed* wolf is told
+to ask in the conversation and stop — the message appears in the TUI's wolf tab
+and is relayed to whatever messaging channel is configured (the template stays
+channel-agnostic), and the answer arrives as its next prompt — and to make the
+`blocked → …` status change its **last** write (see Completion). Documents two
+special cases: (1) a project blocked before it was ever populated (fill in the
+missing fields the project agent couldn't infer, clear `blocked_reason`, set
+`ready`); (2) a project blocked out of the PR-review loop (four specific
 `blocked_reason` shapes from the review agent, and the instruction that the
-"almost always" correct exit is back to `status: reviewing`, not `working` or
-`done`). Ends with the fixed status enums for both project and task.
+"almost always" correct exit is back to `status: idle` with the PR watch data
+intact). Ends with the fixed status enums for both project and task.
 
 **Completion signal / lifecycle.** No enforced schema — the wolf just edits
-whatever files resolve the block. When its tmux window closes,
-`launchWolfAgent`'s `onEnd` callback calls `revisitProject`, which re-reads
+whatever files resolve the block. Whatever ends the session, the daemon's
+`launchWolfAgent` `onEnd` callback calls `revisitProject`, which re-reads
 `.project.yaml` from scratch and re-routes based on whatever status the wolf
 left behind (bypassing the daemon-write filter, since wolf writes as
 `updated_by: agent`).
+
+How an **ACP wolf ends** (the wrapper owns all of this, so it works headless and
+across daemon restarts; the host wolf just lives until its window closes). The
+first turn finishing is *not* an end — the wolf typically finishes its first
+turn by asking the user something. It ends on the first of:
+
+1. **Project unblocked (the normal exit).** `acp-wrapper --unblock-grace D`
+   (default 2m, `Runner.PersistentUnblockGrace` / `orch --wolf-unblock-grace`,
+   negative disables) polls the project file and, once its `status` has been
+   anything but `blocked` *continuously* for D (a re-block inside the grace
+   resets the clock; a deleted file counts as unblocked), closes the ACP
+   client's stdin so the agent exits. The grace lets the wolf finish its closing
+   message after flipping the status — hence the template's "make the status
+   change your last write".
+2. **Idle timeout.** `acp-wrapper --idle-timeout D` (default 24h,
+   `Runner.PersistentIdleTimeout` / `orch --wolf-idle-timeout`, negative
+   disables) ends the session after D with no ACP frame in either direction.
+   Merely having a TUI open doesn't count as activity. It is the backstop for a
+   block nobody answered; the durable `blocked-session.yaml` means little is
+   lost, and a re-summon starts a fresh wolf from it. (The stranded-session
+   reaper still never reaps the wolf — it is `Interactive()` — so this is the
+   only timer.)
+3. **The agent exits / the wrapper is signalled / the daemon closes it**
+   (`:stop`, `session.Close()`): the usual paths.
+
+On a clean self-exit the wrapper removes the sandbox (no task file to retain it
+for); on a signal it keeps it (so a restart can resume), and it is reused
+because the sandbox name is stable per project.
+
+A second block arriving while a wolf is still inside its unblock grace dedups
+against the live session (`launchWolfAgent` → `session_skip_duplicate`): the
+old conversation continues (its wrapper sees `blocked` again and does not end),
+so the user keeps talking to the same wolf — which has the *old* block's context
+in its prompt; it re-reads `.project.yaml`/the blocked-session record if asked.
+
+**TUI.** An ACP wolf appears in the sessions pane with its sandbox name, and
+**enter/click on that row opens the ACP tab view on the wolf's tab**
+(`attachSelected`; there is no tmux window to `tmux attach` to). The wolf's tab
+is marked *interactive* (`session.json: persistent` → `acpTabEvent.interactive`):
+the watcher (`internal/tui/acpwatch.go`) drives the opening prompt once and then
+**stays connected**, relaying messages typed in the tab (`acpInputs`,
+`servePersistentInput`) as successive turns. In the tab: **enter** starts
+composing, **enter** sends, **esc** stops composing (keeps the draft), **ctrl+u**
+clears, ⌥j/⌥k switch tabs; the usual single-letter commands (q, z, h, l) are
+disabled only while composing. The host wolf (`--wolf-host`) is unchanged: enter
+on its row `tmux attach`es.
+
+**Messaging channels: start/end notifications and conversation.** With
+`channels.yaml` configured (`docs/channels.md`) the wolf is also reachable from
+a phone. `launchWolfAgent` creates a `wolfAnnouncement` and, once the session is
+really up (not on a failed launch, not on the dedup no-op above), sends on topic
+`wolf` — asynchronously, under a timeout, so a slow channel never stalls
+dispatch — `🐺 wolf is running for <work-stream>`, the (truncated) blocked reason,
+the failed tasks and "Reply to this message to talk to the wolf." The returned
+message id is recorded in the conversation index (`ConversationTarget` = project
+path, `#wolf` key, session id). When the session ends, `🐺 wolf finished for
+<work-stream>: project now <status>` follows — only if the start message went
+out. At most one start message per work stream per `notify.wolf_start_interval`
+(default 10m; `wolf_start_suppressed`). A *reply* to the start message is
+routed by the router to that wolf's session (`acpchat.Attach`) and the wolf's
+answer comes back labelled `[wolf <work-stream>]`; `/wolf` binds a whole chat to
+the wolf, and anything the TUI user types into the wolf is relayed to the bound
+chat (observe mode), as are its tool-permission requests (rejected on timeout).
+The wolf prompt stays channel-agnostic: it just asks in the conversation and
+stops. Code: `internal/daemon/channels_notify.go`, `internal/router`.
+
+**Known limits.** (a) The opening prompt, like every ACP agent's, is delivered
+by a TUI watcher, so a `--headless` daemon with nobody watching never prompts an
+ACP wolf (the same is already true of planning/task/commit; use `--wolf-host` for
+a TUI-less setup). The one exception is the workingman agent (§8): the router
+creates and primes its session itself, because nothing else would. (b) `acpclient.Connect`
+issues `session/new`, so a TUI that restarts mid-conversation reconnects to the
+same `claude-acp-client` process but starts a fresh ACP session (the replayed
+transcript is only history; the agent's context for new turns is new). Binding
+to the existing session id is what `acpchat` (below) does for a *second*
+client; the TUI's own reconnect still re-runs `session/new`. (c) The hub fans
+every frame out to every client, but JSON-RPC ids are per-client, so two
+simultaneous *prompting* clients can see each other's responses; use the
+daemon-side attach primitive (`internal/acpchat`, below), not a second raw
+client, for that.
+
+**Tuning in from the daemon (`internal/acpchat`).** `acpchat.Attach(ctx, idOrDir,
+opts)` joins a *running* session's conversation while the TUI stays attached:
+
+- It adopts the existing ACP session id (`acpclient.Client.Adopt`) instead of
+  running `session/new` (a second, empty conversation) or `session/load` (the
+  agent would replay the whole history to every client, duplicating the TUI's
+  scrollback). The id comes from the newest `sessionId` in the session's
+  `stream.log`, else from the first frame on the live socket (`DiscoverTimeout`;
+  `CreateIfMissing` runs the full handshake for a TUI-less daemon, and
+`Conversation.Created()` tells the caller it did, so the session still needs its
+opening prompt — the router sends it for the workingman agent). If another
+  client later runs `session/new`, the conversation follows it
+  (`EventSessionChanged`).
+- Its request ids live in a private range (`acpclient.Options.DistinctIDs`), so
+  the hub's response fan-out can't cross-complete the two clients' calls.
+- `Ask(ctx, text, OnProgress(..), FinalSegmentOnly())` sends one prompt and
+  returns the assistant text with reasoning/tool noise stripped; a second
+  concurrent `Ask` gets `ErrBusy`; a cancelled `ctx` sends `session/cancel`.
+- `Events()` is the observe-only stream: assistant text from turns *other*
+  clients started (`Own == false`), closed by an `EventTurnEnd` carrying the full
+  reply — what a channel relays when the human types into the wolf.
+- Agent permission requests go to `Options.OnPermission` (default: reject) and
+  are also surfaced as `EventPermission`.
+- A dropped socket (the hub evicts slow clients) is reconnected on the same
+  session id; `ErrSessionGone` when the session directory is gone, its status is
+  exited/failed, or the socket stays unreachable for `ConnectTimeout`.
+
+Limits: if two clients start turns at the same instant their chunks can't be told
+apart (the hub doesn't echo one client's requests to the other), so the tail of a
+turn that began *before* our `Ask` is attributed correctly but a truly
+simultaneous one is not. Adoption is verified against an in-process fake agent;
+confirm it once against a live `claude-acp-client` (a `session/prompt` to a
+session id this connection never created).
 
 ---
 
@@ -416,3 +584,119 @@ couldn't be created) is tracked separately (`bumpReviewErrors`) and, after
 `maxReviewErrors` consecutive failures, blocks the project with a
 diagnostic pointing at `sbx mcp ls`/`sbx mcp auth` rather than silently
 retrying forever.
+
+---
+
+## 8. Workingman agent
+
+**Kind:** `agent.WorkingmanAgent` (`String()` = `"workingman"`, appended to the
+iota block so no existing value shifts). **Template:** `workingman.tmpl`.
+**Interactive:** no. *(Not in design.md. A different animal from the other
+seven: it is not part of any project's state machine, has no project and no
+task, and is started by the daemon rather than dispatched by a status change.)*
+
+**What it is.** A long-lived, always-on assistant that sits in a sandbox of its
+own and answers a human's questions — relayed over messaging channels, e.g.
+WhatsApp or Signal — about the orch state: which projects are open, which tasks are
+running/blocked/failed and why, what the wolf is doing, what happened recently
+in the audit log. It is autonomous-ACP (nobody drives its prompt by hand;
+`Interactive()` is false) but **persistent**, using the same
+`acp-wrapper --persistent` mode as the wolf, so its conversation outlives every
+client that attaches to it (the TUI, the message router). Unlike the wolf it
+has **no end condition**: no `--unblock-grace` (there is no project to watch)
+and no `--idle-timeout` (silence between questions is its normal state), and
+the stranded-session reaper exempts it (`strandedVerdict` in `reaper.go`).
+
+**Launch/identity.** `runner.Plan{Kind: WorkingmanAgent, WorkingDir: <scratch>,
+SessionName: "workingman-agent", Persistent: true, ReadOnlyMounts, Observe}`.
+Requires the ACP path (`Runner.Start` refuses otherwise — the tmux path has no
+read-only mounts, and silently launching it with write access would defeat the
+point). The ACP session id and the sbx sandbox are both the fixed name
+`workingman-agent` (`runner.WorkingmanAgentSession` / `WorkingmanAgentSandbox`,
+`ACPSandboxNameFor`), independent of any project path. The daemon tracks it
+under the session-map key `"workingman-agent"` — not a project path and not a
+`path#marker` key, so `ListSessions` labels its row `workingman` and the
+snapshot gives it no work stream / project path. `session.json` carries
+`kind: workingman`, no `project_path`, no `task_path`.
+
+**Mounts (read-only enforced by the mount).** The scratch dir is the one
+writable workspace and the agent's cwd; it holds the usual `.orch/` handoff
+files. Everything it observes is a separate `--workspace <path>:ro` (sbx's
+read-only bind-mount syntax, understood by `acp-wrapper --workspace`):
+
+- every orch `--root` — `.project.yaml`, `tasks/`, `blocked-session.yaml`,
+  `intake/` of every work stream;
+- the snapshot's directory (the file is replaced by rename, so the directory is
+  mounted, not the file) — the daemon's live in-memory view;
+- the audit log's directory;
+- the ACP sessions root — `session.json` and `stream.log` of **every** session,
+  including each wolf's, which is how it reads a wolf conversation.
+
+`runner.workingmanWorkspaces` makes them absolute, de-duplicates, and drops a
+read-only mount that lies under another one (or that would contain, or sit
+inside, the writable scratch dir). The scratch dir defaults to
+`<sessions-root>/../workingman-agent` and must lie outside every `--root`
+(`New` rejects an overlap — a write there would feed the daemon's own watcher,
+and a root has to stay read-only). Because enforcement is the mount, the agent
+has no write path to `.project.yaml` or `tasks/` at all, and gets no static MCP
+and no extra network policy: no GitHub or other secrets beyond what claude
+itself needs. `Plan.Policies` / `WorkingmanAgentConfig.Policies` are forwarded
+to `sbx policy` like any task's, for a filesystem rule limiting writes to the
+scratch dir where sbx supports it; none is applied by default, since the mounts
+already give the guarantee and the filesystem-policy semantics are sbx's.
+(`acp-wrapper` treats the first `--workspace` as cwd and rejects a read-only
+one; it compares existing sandboxes on host paths only, so a relaunch reuses
+the sandbox.) Note the audit-log directory also holds `channels.log`,
+`daemon.log` and `acp-wrapper.log` if the audit log lives beside them.
+
+**Prompt structure (`workingman.tmpl`).** It states the agent is a read-only
+observer/answerer; lists every observed path (from `prompts.Data.Roots`,
+`SnapshotFile`, `AuditLog`, `SessionsRoot`, mirrored into `.orch/context.yaml`);
+says to START by reading the snapshot (checking `generated_at` /
+`daemon.state` for a dead or stale daemon) and to re-read it for every
+question; summarises the snapshot schema; embeds a condensed project/task
+state machine (the semantics of `state-machine.md`); explains finding a wolf
+session in `sessions[]` and reading `<sessions-root>/<id>/stream.log`; sets
+the answer style (replies go out over WhatsApp or Signal: short, plain text, no wide
+tables, lead with the answer, cite `blocked_reason`/`failure_reason`); and
+forbids claiming to change state — to act, it names the TUI command (`:` →
+`stop`/`start`/`wolf`/`review`/`cleanup`/`archive`) or the YAML edit (project
+`status`, task `status`, an `intake/*.md` file) for the human to use.
+
+**Supervision (`internal/daemon/workingman_agent.go`).**
+`daemon.WithWorkingmanAgent(WorkingmanAgentConfig{...})` enables it; `Run`
+starts a supervisor goroutine right after `reconcileSessions` (so a live agent a
+prior daemon left behind is adopted, not duplicated), before the startup scan.
+The supervisor starts the agent, waits for it to end, and relaunches it with
+exponential backoff — 5s doubling to a 5-minute cap, restarting from the minimum
+once a launch survived 10 minutes — whether it exited or failed to launch. A
+failed launch is only audit-logged (`workingman_agent_start_error`,
+`workingman_agent_restart_scheduled`); it runs on its own goroutine, so it can
+never delay or block project dispatch. Unlike the other ACP agents it is **not
+detachable**: it stops with the daemon (`shutdown` closes it, the supervisor
+stops relaunching) and the next boot starts a fresh one — it is owned by this
+run's flags, not by any project. It appears in the TUI session list like any
+other session.
+
+**Flag.** `orch --workingman-agent[=auto|on|off]`. The default `auto` turns it
+on only when `--acp-kit` is set **and** `channels.yaml` has an enabled
+inbound-capable channel (`channels.Config.HasInboundChannel`) — until a human
+can message it there is nobody to answer. `--workingman-agent` / `=on` forces it
+on (and is a startup error without `--acp-kit`); `=off` disables it.
+
+**Attaching.** `Daemon.WorkingmanAgentSession()` returns the live session's
+`ID`, `Dir` (`<sessions-root>/workingman-agent`), `SocketPath`, `SandboxName` and
+`StartedAt`, or `false` when it isn't running (disabled, between restarts, launch
+failing). The inbound-message router attaches through it with `acpchat` (see
+`docs/channels.md`; live wolves are listed by `Daemon.WolfSessions`).
+
+**Who starts its conversation.** In a TUI session the watcher discovers the
+persistent session, runs `session/new` and sends the usual opening prompt. Under
+`--headless` nobody does, so the router attaches with `CreateIfMissing`, and when
+`Conversation.Created()` reports it had to create the ACP session it first sends
+`router.OpeningPrompt` ("Read .orch/instructions.md and .orch/context.yaml, then
+follow the instructions.") and discards the reply, so the agent has read
+`workingman.tmpl` before the first question reaches it. A question that arrives
+while the agent is still booting gets *"The workingman agent is starting up, try
+again in a minute."* rather than a hang. Replies go back to the asking chat
+(a `workingman` topic route is optional); every reply passes `audit.Redact`.

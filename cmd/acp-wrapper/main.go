@@ -69,11 +69,13 @@ type workspacesFlag []string
 
 func (w *workspacesFlag) String() string { return strings.Join(*w, ",") }
 func (w *workspacesFlag) Set(s string) error {
-	abs, err := filepath.Abs(s)
+	// A trailing ":ro" asks for a read-only mount; resolve only the path part.
+	path, ro := acpwrapper.SplitMount(s)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	*w = append(*w, abs)
+	*w = append(*w, acpwrapper.JoinMount(abs, ro))
 	return nil
 }
 
@@ -121,12 +123,15 @@ func main() {
 	kitPath := fs.String("kit", "", "acp-kit reference to layer onto the claude sandbox: a local kit dir or published ref (required)")
 	sbxPath := fs.String("sbx", "", "path to the sbx binary (default: sbx on PATH)")
 	exitWhenEmpty := fs.Bool("exit-when-empty", false, "shut down once the last connected TUI disconnects (after at least one has connected); used by orch's autonomous single-turn flow")
+	persistent := fs.Bool("persistent", false, "conversational session (the wolf): keep the agent running when clients disconnect; end only when the agent exits, --unblock-grace / --idle-timeout fire, or the wrapper is signalled. Mutually exclusive with --exit-when-empty")
+	unblockGrace := fs.Duration("unblock-grace", 0, "with --persistent and --project-path: end the session once the project has not been status:blocked for this long (0 disables)")
+	idleTimeout := fs.Duration("idle-timeout", 0, "with --persistent: end the session after this long with no ACP traffic in either direction (0 disables)")
 	taskPath := fs.String("task-path", "", "path to the task's YAML file; when set, its final status is re-read on exit to decide whether to keep the sandbox for debugging")
 	projectPath := fs.String("project-path", "", "path to the .project.yaml driving this session; recorded into session.json so a restarting daemon can reconcile session tracking")
 	kind := fs.String("kind", "", "agent.Kind string (project, planning, task, commit) this session is running; recorded into session.json alongside --project-path")
 	saveSandbox := fs.Bool("save-sandbox", false, "keep the sandbox when the agent exits instead of removing it with `sbx rm --force` (the task's save_sandbox override)")
 	var workspaces workspacesFlag
-	fs.Var(&workspaces, "workspace", "host path to mount into the sandbox; the first is the ACP client cwd (repeatable, at least one required)")
+	fs.Var(&workspaces, "workspace", "host path to mount into the sandbox; the first is the ACP client cwd and must be writable; a trailing :ro mounts a path read-only (repeatable, at least one required)")
 	var staticMCPs staticMCPsFlag
 	fs.Var(&staticMCPs, "static-mcp", "static-MCP name to attach when creating the sandbox; passed verbatim to `sbx create --static-mcp` (repeatable)")
 	var policies policiesFlag
@@ -146,6 +151,9 @@ func main() {
 		SbxPath:       *sbxPath,
 		Workspaces:    workspaces,
 		ExitWhenEmpty: *exitWhenEmpty,
+		Persistent:    *persistent,
+		UnblockGrace:  *unblockGrace,
+		IdleTimeout:   *idleTimeout,
 		TaskPath:      *taskPath,
 		ProjectPath:   *projectPath,
 		Kind:          *kind,

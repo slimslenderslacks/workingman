@@ -28,6 +28,15 @@
 // a single *driving* client per session — additional clients should watch
 // (consume Events) rather than issue their own requests, since the shared agent
 // stdout would deliver every client's responses to every client.
+//
+// A second driver (the daemon "tuning in" to a session a TUI also watches) is
+// supported through DialWith + Adopt: Options.DistinctIDs moves the client's
+// request ids into a private range so the TUI's responses never complete the
+// daemon's calls (or vice versa), Adopt binds to the session id the first
+// client created instead of running session/new, and Options.OnRequest /
+// ObserveResponses expose the agent→client requests and the other clients'
+// response frames that the shared fan-out also delivers here. See
+// internal/acpchat for the consumer.
 package acpclient
 
 import (
@@ -37,6 +46,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"strings"
 	"sync"
@@ -102,6 +112,12 @@ const (
 	// EventPlan is the agent's current task list; Plan holds the full list, sent
 	// fresh on every change.
 	EventPlan
+	// EventResponse is another client's response frame, fanned out by the bridge
+	// to this one (only emitted with Options.ObserveResponses). Result holds the
+	// raw JSON result — a session/new answer carries sessionId, a session/prompt
+	// answer carries stopReason — and Err an agent error. It arrives in stream
+	// order relative to the session/update chunks around it.
+	EventResponse
 )
 
 // PlanEntry is one task in an EventPlan's Plan.
@@ -135,6 +151,12 @@ type Event struct {
 	// an assistant message chunk.
 	Kind EventKind
 
+	// SessionID is the ACP session a session/update belongs to (empty on
+	// lifecycle Events). A session shared through the bridge can carry updates
+	// for more than one ACP session — e.g. after a TUI restart re-ran
+	// session/new — so a client that cares filters on it.
+	SessionID string
+
 	State      State
 	Text       string
 	StopReason string
@@ -148,6 +170,9 @@ type Event struct {
 
 	// Plan is the agent's task list, set when Kind == EventPlan.
 	Plan []PlanEntry
+
+	// Result is the raw response result, set when Kind == EventResponse.
+	Result json.RawMessage
 }
 
 // Client is one TUI-side ACP connection to a session's agent.sock. Construct it
@@ -171,12 +196,59 @@ type Client struct {
 
 	// events carries lifecycle/stream Events to the caller. The read loop is the
 	// only sender and the only closer; closeOnce guards the close.
-	events    chan Event
-	closeOnce sync.Once
+	events       chan Event
+	closeOnce    sync.Once
+	emitMu       sync.RWMutex // see emit
+	eventsClosed bool
 
 	// done is closed when the read loop exits (connection gone). Pending calls
 	// select on it to fail fast with ErrConnectionClosed.
 	done chan struct{}
+
+	// ctx is cancelled when the connection goes away; it bounds request handlers
+	// (Options.OnRequest) so one blocked on a human never outlives the socket.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// onRequest and observe are the optional Options hooks; immutable after
+	// newClient.
+	onRequest RequestHandler
+	observe   bool
+}
+
+// ErrMethodNotFound is what an Options.OnRequest handler returns for a method it
+// does not serve; the client answers the agent with JSON-RPC -32601, exactly as a
+// Client without a handler does.
+var ErrMethodNotFound = errors.New("acpclient: method not found")
+
+// RequestHandler answers one agent→client request (e.g. session/request_permission).
+// A nil error replies to the agent with result; ErrMethodNotFound replies
+// "method not found"; any other error replies with a JSON-RPC internal error. It
+// runs on its own goroutine, so it may block (waiting on a human) without
+// stalling the read loop; ctx is cancelled when the connection closes.
+type RequestHandler func(ctx context.Context, method string, params json.RawMessage) (result any, err error)
+
+// Options tunes a Client for use as an additional participant in a session other
+// clients already drive. The zero value is the historical Dial behaviour.
+type Options struct {
+	// DistinctIDs starts this client's JSON-RPC request ids at a random point far
+	// above where an ordinary client (ids from 1) will ever reach. The bridge
+	// broadcasts every response to every client, so two clients both counting
+	// from 1 would each receive — and wrongly accept — the other's response to
+	// "their" id 3. A client sharing a session with a TUI should set this.
+	DistinctIDs bool
+
+	// OnRequest, when set, serves agent→client requests instead of the default
+	// blanket method-not-found.
+	OnRequest RequestHandler
+
+	// ObserveResponses emits an EventResponse for every response frame that no
+	// local call is waiting for — i.e. another client's reply to its own request,
+	// which the bridge fans out to everyone. It is how an observer learns of a
+	// session/new (result.sessionId) or turn end (result.stopReason) it did not
+	// issue. Off by default: the TUI's tab model would not know what to do with
+	// the extra Events.
+	ObserveResponses bool
 }
 
 // response is the read loop's delivery to a blocked caller: a decoded result or
@@ -199,23 +271,38 @@ const eventBuffer = 256
 // the caller can distinguish "couldn't connect at all" from "connected then
 // dropped" (the latter arrives as a StateDisconnected Event).
 func Dial(ctx context.Context, socketPath string) (*Client, error) {
+	return DialWith(ctx, socketPath, Options{})
+}
+
+// DialWith is Dial with Options; see Options for when each knob matters.
+func DialWith(ctx context.Context, socketPath string, opts Options) (*Client, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("acpclient: dial %s: %w", socketPath, err)
 	}
-	return newClient(conn), nil
+	return newClient(conn, opts), nil
 }
 
 // newClient wraps an established connection and launches its read loop. Split out
 // from Dial so tests can drive a Client over an in-memory pipe.
-func newClient(conn net.Conn) *Client {
+func newClient(conn net.Conn, opts Options) *Client {
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Client{
-		conn:    conn,
-		pending: make(map[int]chan response),
-		state:   StateConnecting,
-		events:  make(chan Event, eventBuffer),
-		done:    make(chan struct{}),
+		conn:      conn,
+		pending:   make(map[int]chan response),
+		state:     StateConnecting,
+		events:    make(chan Event, eventBuffer),
+		done:      make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
+		onRequest: opts.OnRequest,
+		observe:   opts.ObserveResponses,
+	}
+	if opts.DistinctIDs {
+		// 2^20 blocks of 2^20 ids: two such clients collide with probability
+		// ~1e-6 and only if one issues over a million requests.
+		c.nextID = int(1+rand.Int64N(1<<20)) << 20
 	}
 	go c.readLoop()
 	return c
@@ -288,6 +375,62 @@ func (c *Client) Connect(ctx context.Context, cwd string) error {
 	return nil
 }
 
+// Adopt binds the client to an ACP session another client already created —
+// the "tune in" half of sharing a session through the bridge — without any wire
+// traffic: no initialize, no session/new, no session/set_mode. The agent process
+// behind agent.sock is already initialized and holds the session (and its
+// permission mode) in memory; Prompt then addresses it by id.
+//
+// session/load is deliberately NOT used. ACP requires the agent to replay the
+// whole prior conversation as session/update notifications before answering a
+// load, and the bridge fans those out to every connected client — the TUI would
+// render the history a second time. (hermes-agent's server.py behaves this way;
+// its session/prompt on an id it does not know answers stopReason "refusal".)
+//
+// A StateConnected Event is emitted on the first adoption, mirroring Connect;
+// calling Adopt again just re-points the client at another session id.
+func (c *Client) Adopt(sessionID string) error {
+	if sessionID == "" {
+		return errors.New("acpclient: Adopt requires a session id")
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrConnectionClosed
+	}
+	rebind := c.sessionID != ""
+	c.sessionID = sessionID
+	c.mu.Unlock()
+	if rebind {
+		// Re-pointing an adopted client at a newer session (see acpchat) must not
+		// emit: it is called from the goroutine that consumes Events, which would
+		// deadlock against a full buffer.
+		return nil
+	}
+	c.setState(StateConnected)
+	c.emit(Event{State: StateConnected})
+	return nil
+}
+
+// Cancel asks the agent to stop the session's in-flight turn (the ACP
+// session/cancel notification — no response). The in-flight Prompt then returns
+// with stopReason "cancelled". Use it when the caller abandons a turn (its
+// context was cancelled) so the agent doesn't keep working, and so the next
+// prompt isn't queued behind it.
+func (c *Client) Cancel() error {
+	c.mu.Lock()
+	sessionID := c.sessionID
+	c.mu.Unlock()
+	if sessionID == "" {
+		return errors.New("acpclient: Cancel before Connect/Adopt (no session id)")
+	}
+	raw, err := json.Marshal(cancelParams{SessionID: sessionID})
+	if err != nil {
+		return err
+	}
+	return c.writeFrame(notification{JSONRPC: jsonrpcVersion, Method: methodCancel, Params: raw})
+}
+
 // Prompt sends one user turn (a single text block) to the agent and blocks until
 // the turn completes, returning the stop reason (e.g. "end_turn"). While the turn
 // is in flight the read loop emits StateStreaming Events carrying assistant text
@@ -358,8 +501,7 @@ func (c *Client) call(ctx context.Context, method string, params any, out any) e
 		return fmt.Errorf("write %s: %w", method, err)
 	}
 
-	select {
-	case resp := <-ch:
+	finish := func(resp response) error {
 		if resp.err != nil {
 			return resp.err
 		}
@@ -369,10 +511,22 @@ func (c *Client) call(ctx context.Context, method string, params any, out any) e
 			}
 		}
 		return nil
+	}
+	select {
+	case resp := <-ch:
+		return finish(resp)
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.done:
-		return ErrConnectionClosed
+		// A response delivered just before the connection closed (the agent
+		// answered and hung up) is ready too, and select picks at random: prefer
+		// the real answer over the generic "connection closed".
+		select {
+		case resp := <-ch:
+			return finish(resp)
+		default:
+			return ErrConnectionClosed
+		}
 	}
 }
 
@@ -430,10 +584,15 @@ func (c *Client) dispatch(line []byte) {
 		// Response to one of our requests.
 		c.deliver(*f.ID, f.Result, f.Error)
 	case f.ID != nil && f.Method != "":
-		// An agent→client request. We advertise no client capabilities, so the
-		// agent shouldn't call us; reply with method-not-found so a stray call
-		// never leaves the agent blocked waiting on us.
-		c.rejectRequest(*f.ID, f.Method)
+		// An agent→client request. By default we advertise no client
+		// capabilities, so the agent shouldn't call us; reply with
+		// method-not-found so a stray call never leaves the agent blocked
+		// waiting on us. A client built with Options.OnRequest serves it instead.
+		if c.onRequest != nil {
+			go c.serveRequest(*f.ID, f.Method, f.Params)
+		} else {
+			c.rejectRequest(*f.ID, f.Method)
+		}
 	case f.Method == methodUpdate:
 		c.handleUpdate(f.Params)
 	default:
@@ -453,15 +612,32 @@ func (c *Client) deliver(id int, result json.RawMessage, rpcErr *rpcError) {
 		delete(c.pending, id)
 	}
 	c.mu.Unlock()
-	if !ok {
-		return
-	}
-
 	var err error
 	if rpcErr != nil {
 		err = rpcErr
 	}
+	if !ok {
+		if c.observe {
+			c.emit(Event{Kind: EventResponse, State: c.State(), Result: result, Err: err})
+		}
+		return
+	}
 	ch <- response{result: result, err: err}
+}
+
+// serveRequest runs Options.OnRequest for one agent→client request and writes the
+// reply. It owns the whole exchange on its own goroutine so a handler blocked on a
+// human never stalls the read loop.
+func (c *Client) serveRequest(id int, method string, params json.RawMessage) {
+	result, err := c.onRequest(c.ctx, method, params)
+	switch {
+	case errors.Is(err, ErrMethodNotFound):
+		c.rejectRequest(id, method)
+	case err != nil:
+		_ = c.writeFrame(errorResponse{JSONRPC: jsonrpcVersion, ID: id, Error: rpcError{Code: -32603, Message: err.Error()}})
+	default:
+		_ = c.writeFrame(resultResponse{JSONRPC: jsonrpcVersion, ID: id, Result: result})
+	}
 }
 
 // rejectRequest answers an unexpected agent→client request with a JSON-RPC
@@ -469,16 +645,11 @@ func (c *Client) deliver(id int, result json.RawMessage, rpcErr *rpcError) {
 // effort: a write failure here means the connection is already going away, which
 // the read loop will observe on its own.
 func (c *Client) rejectRequest(id int, method string) {
-	resp := struct {
-		JSONRPC string   `json:"jsonrpc"`
-		ID      int      `json:"id"`
-		Error   rpcError `json:"error"`
-	}{
+	_ = c.writeFrame(errorResponse{
 		JSONRPC: jsonrpcVersion,
 		ID:      id,
 		Error:   rpcError{Code: -32601, Message: fmt.Sprintf("method not found: %s", method)},
-	}
-	_ = c.writeFrame(resp)
+	})
 }
 
 // handleUpdate decodes a session/update notification and emits the display
@@ -520,7 +691,7 @@ func eventFromUpdateParams(params json.RawMessage) (Event, bool) {
 		if k.SessionUpdate == updateAgentThoughtChunk {
 			kind = EventThought
 		}
-		return Event{Kind: kind, State: StateStreaming, Text: m.Content.Text}, true
+		return Event{Kind: kind, SessionID: p.SessionID, State: StateStreaming, Text: m.Content.Text}, true
 
 	case updateToolCall, updateToolCallUpdate:
 		var tc toolCallUpdate
@@ -529,6 +700,7 @@ func eventFromUpdateParams(params json.RawMessage) (Event, bool) {
 		}
 		return Event{
 			Kind:       EventToolCall,
+			SessionID:  p.SessionID,
 			State:      StateStreaming,
 			ToolCallID: tc.ToolCallID,
 			ToolTitle:  tc.Title,
@@ -546,7 +718,7 @@ func eventFromUpdateParams(params json.RawMessage) (Event, bool) {
 		for _, e := range pl.Entries {
 			entries = append(entries, PlanEntry{Content: e.Content, Status: e.Status})
 		}
-		return Event{Kind: EventPlan, State: StateStreaming, Plan: entries}, true
+		return Event{Kind: EventPlan, SessionID: p.SessionID, State: StateStreaming, Plan: entries}, true
 	}
 
 	return Event{}, false
@@ -616,9 +788,15 @@ func (c *Client) shutdown(readErr error) {
 		ch <- response{err: ErrConnectionClosed}
 	}
 	close(c.done)
+	c.cancel()
 
 	c.emit(Event{State: state, Err: readErr})
-	c.closeOnce.Do(func() { close(c.events) })
+	c.closeOnce.Do(func() {
+		c.emitMu.Lock()
+		c.eventsClosed = true
+		close(c.events)
+		c.emitMu.Unlock()
+	})
 }
 
 // setState records a non-terminal state transition. Terminal states are set only
@@ -642,6 +820,16 @@ func (c *Client) emit(ev Event) {
 	// means the channel is closing and the Event is dropped.
 	if ev.State.IsTerminal() {
 		c.events <- ev
+		return
+	}
+	// emitMu makes "channel not yet closed" and the send one step: shutdown takes
+	// the write lock to close the channel, so a send can never land on a closed
+	// channel (a select that picks the send case there panics even when done is
+	// also ready). done is closed before that, so a blocked sender here always
+	// wakes and releases the lock.
+	c.emitMu.RLock()
+	defer c.emitMu.RUnlock()
+	if c.eventsClosed {
 		return
 	}
 	select {

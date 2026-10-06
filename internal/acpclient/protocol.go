@@ -29,6 +29,10 @@ const (
 	methodSessionSetMode = "session/set_mode"
 	methodPrompt         = "session/prompt"
 	methodUpdate         = "session/update"
+	methodCancel         = "session/cancel"
+	// MethodRequestPermission is the agent→client request asking the client to
+	// approve a tool call; see Options.OnRequest.
+	MethodRequestPermission = "session/request_permission"
 )
 
 // ModeBypassPermissions is the ACP mode id that disables tool-call permission
@@ -46,6 +50,33 @@ type request struct {
 	ID      int             `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+// notification is an outgoing JSON-RPC notification: no id, so the agent sends no
+// response. (request's ID has no omitempty — id 0 is a legal request id.)
+type notification struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+// errorResponse / resultResponse are this client's replies to an agent→client
+// request, echoing the request's id.
+type errorResponse struct {
+	JSONRPC string   `json:"jsonrpc"`
+	ID      int      `json:"id"`
+	Error   rpcError `json:"error"`
+}
+
+type resultResponse struct {
+	JSONRPC string `json:"jsonrpc"`
+	ID      int    `json:"id"`
+	Result  any    `json:"result"`
+}
+
+// cancelParams is the session/cancel notification payload.
+type cancelParams struct {
+	SessionID string `json:"sessionId"`
 }
 
 // frame is the permissive shape every inbound line is first decoded into so the

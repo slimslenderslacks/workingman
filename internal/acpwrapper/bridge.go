@@ -2,9 +2,12 @@ package acpwrapper
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // The agent.sock bridge multiplexes a single sandboxed ACP client's stdio
@@ -74,6 +77,12 @@ type hub struct {
 	stdinCloser   io.Closer
 	everConnected bool
 	stdinShutdown sync.Once
+
+	// lastActivity is the unix-nano time of the most recent frame in either
+	// direction (agent output or client input). It drives persistent mode's
+	// idle timeout (watchIdle); it is updated lock-free from the stdout
+	// reader and every client reader.
+	lastActivity atomic.Int64
 }
 
 // client is one connected TUI. Frames bound for it are queued on out and
@@ -89,7 +98,47 @@ type client struct {
 }
 
 func newHub(stdin, log io.Writer) *hub {
-	return &hub{stdin: stdin, log: log, clients: make(map[*client]struct{})}
+	h := &hub{stdin: stdin, log: log, clients: make(map[*client]struct{})}
+	h.touch()
+	return h
+}
+
+// touch records ACP traffic "now" for the idle timeout.
+func (h *hub) touch() { h.lastActivity.Store(time.Now().UnixNano()) }
+
+// idleFor reports how long it has been since the last frame in either direction
+// (or since the hub was created, if none has flowed yet).
+func (h *hub) idleFor() time.Duration {
+	return time.Since(time.Unix(0, h.lastActivity.Load()))
+}
+
+// watchIdle is persistent mode's backstop against a session lingering forever:
+// when no frame has crossed the hub in either direction for timeout, it calls
+// end (which closes the ACP client's stdin so the agent and the wrapper unwind,
+// exactly like the exit-when-empty path) and returns. It also returns when ctx
+// is done. Connected clients do NOT count as activity — a TUI left open on a
+// finished conversation must not keep it alive — only real ACP traffic does.
+func (h *hub) watchIdle(ctx context.Context, timeout time.Duration, end func()) {
+	interval := timeout / 4
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if h.idleFor() >= timeout {
+				end()
+				return
+			}
+		}
+	}
 }
 
 // enableExitWhenEmpty turns on one-shot mode: the hub will close stdinCloser
@@ -113,6 +162,7 @@ func (h *hub) run(stdout io.Reader) {
 		// Persist before broadcasting so a frame is never shown to a live client
 		// without also being recorded for a later reconnect to replay. A log write
 		// error is non-fatal: the live fan-out must not stall on a bad log.
+		h.touch()
 		if h.log != nil {
 			_, _ = h.log.Write(frame)
 		}
@@ -164,6 +214,7 @@ func (h *hub) broadcast(frame []byte) {
 // write fails (the agent is gone), retiring the client either way.
 func (h *hub) clientReader(c *client) {
 	scanFrames(c.conn, func(frame []byte) bool {
+		h.touch()
 		h.writeMu.Lock()
 		_, err := h.stdin.Write(frame)
 		h.writeMu.Unlock()

@@ -419,9 +419,126 @@ func TestRenderAllKinds(t *testing.T) {
 		agent.CommitAgent,
 		agent.ArchiveAgent,
 		agent.ReviewAgent,
+		agent.WorkingmanAgent,
 	} {
 		if _, err := Render(k, Data{Workspace: "/ws"}); err != nil {
 			t.Errorf("Render(%s): %v", k, err)
 		}
+	}
+}
+
+// TestRenderWolfHostVsSandboxed: the wolf's instructions differ by where it
+// runs. A host wolf keeps the macOS-notification-and-attach guidance; a
+// sandboxed (ACP) wolf is told what it can't do and to ask in the conversation,
+// which is shown in the TUI and relayed to any configured channel (named
+// generically — no channel-specific wording).
+func TestRenderWolfHostVsSandboxed(t *testing.T) {
+	base := Data{ProjectPath: "/ws/.project.yaml", Workspace: "/ws", BlockedSessionPath: "/ws/blocked-session.yaml"}
+
+	host, err := Render(agent.WolfAgent, base)
+	if err != nil {
+		t.Fatalf("Render host: %v", err)
+	}
+	for _, want := range []string{"you run on the host", "send a macOS notification", "attach to this session"} {
+		if !strings.Contains(host, want) {
+			t.Errorf("host wolf missing %q in:\n%s", want, host)
+		}
+	}
+	for _, bad := range []string{"you are sandboxed", "messaging", "channel"} {
+		if strings.Contains(host, bad) {
+			t.Errorf("host wolf should not mention %q:\n%s", bad, host)
+		}
+	}
+
+	sb := base
+	sb.Sandboxed = true
+	sb.Worktree = "/wsp/feat-x"
+	boxed, err := Render(agent.WolfAgent, sb)
+	if err != nil {
+		t.Fatalf("Render sandboxed: %v", err)
+	}
+	for _, want := range []string{
+		"you run inside a sandbox",
+		"you are sandboxed",
+		"/wsp/feat-x", // the source mount
+		"no `sbx`, `wsp`, or `osascript`",
+		"ask your question as a normal",
+		"messaging",
+		"channel",
+		"ends it shortly after the project leaves `blocked`",
+		"make the status change\nyour last write",
+	} {
+		if !strings.Contains(boxed, want) {
+			t.Errorf("sandboxed wolf missing %q in:\n%s", want, boxed)
+		}
+	}
+	for _, bad := range []string{"you run on the host", "send a macOS notification", "attach to this session", "WhatsApp"} {
+		if strings.Contains(boxed, bad) {
+			t.Errorf("sandboxed wolf should not say %q:\n%s", bad, boxed)
+		}
+	}
+	// The durable-record instructions are common to both.
+	for _, out := range []string{host, boxed} {
+		if !strings.Contains(out, "/ws/blocked-session.yaml") {
+			t.Errorf("missing durable record path in:\n%s", out)
+		}
+	}
+}
+
+// TestRenderWorkingman: the workingman agent's instructions must carry its
+// read-only contract, point it at the snapshot first, name every path it
+// observes, and tell it to answer for a phone (WhatsApp) — and must never tell
+// it it can change state.
+func TestRenderWorkingman(t *testing.T) {
+	out, err := Render(agent.WorkingmanAgent, Data{
+		Workspace:    "/home/.workingman/workingman-agent",
+		Roots:        []string{"/orch", "/orch2"},
+		SnapshotFile: "/home/.workingman/state/snapshot.json",
+		AuditLog:     "/orch/logs/audit.log",
+		SessionsRoot: "/home/.workingman/sessions",
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"READ-ONLY observer",
+		"START by reading the snapshot (/home/.workingman/state/snapshot.json)",
+		"generated_at",
+		"/orch\n", "/orch2\n",
+		"/orch/logs/audit.log",
+		"/home/.workingman/sessions/<session-id>/stream.log",
+		"<sessions-root>/<id>/stream.log",
+		"WhatsApp",
+		"SHORT, plain text",
+		"no tables",
+		"NEVER change orch state",
+		"TUI's `:` menu",
+		"`blocked` → the WOLF agent",
+		"attempts` reaches\n  3",
+		"/home/.workingman/workingman-agent", // scratch dir
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("workingman prompt missing %q in:\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{"<no value>", "{{"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("workingman prompt has template debris %q:\n%s", bad, out)
+		}
+	}
+}
+
+// TestRenderWorkingmanWithoutSnapshot: with publishing off the prompt says so
+// instead of naming an empty path.
+func TestRenderWorkingmanWithoutSnapshot(t *testing.T) {
+	out, err := Render(agent.WorkingmanAgent, Data{Workspace: "/scratch", Roots: []string{"/orch"}})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(out, "not published") {
+		t.Errorf("expected a no-snapshot note in:\n%s", out)
+	}
+	if strings.Contains(out, "START by reading the snapshot (") {
+		t.Errorf("must not name a snapshot path when there is none:\n%s", out)
 	}
 }

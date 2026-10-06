@@ -32,6 +32,16 @@ const (
 	// like planning) so it can carry `--static-mcp github`. Appended so the iota
 	// values of the existing kinds don't shift.
 	ReviewAgent
+	// WorkingmanAgent is the long-lived, always-on observer the daemon starts at
+	// boot and keeps running in a sandbox of its own: it answers a human's
+	// questions (relayed over messaging channels) about the orch state — which
+	// projects are open, which tasks are running/blocked/failed and why, what the
+	// wolf is doing, recent audit events. It is autonomous-ACP (no human drives
+	// its prompt) but PERSISTENT (its wrapper outlives client disconnects), has no
+	// project and no task, and is not part of any project's state machine; it
+	// mounts the orch state read-only and cannot change it. Appended so the iota
+	// values of the existing kinds don't shift.
+	WorkingmanAgent
 )
 
 func (k Kind) String() string {
@@ -50,6 +60,8 @@ func (k Kind) String() string {
 		return "archive"
 	case ReviewAgent:
 		return "review"
+	case WorkingmanAgent:
+		return "workingman"
 	}
 	return "unknown"
 }
@@ -74,6 +86,8 @@ func ParseKind(s string) (Kind, bool) {
 		return ArchiveAgent, true
 	case "review":
 		return ReviewAgent, true
+	case "workingman":
+		return WorkingmanAgent, true
 	}
 	return 0, false
 }
@@ -89,7 +103,10 @@ func ParseKind(s string) (Kind, bool) {
 // user itself.
 //
 // The runner uses this to pick the right claude flags; the TUI uses it to
-// highlight sessions that won't make progress until someone attaches.
+// highlight sessions that won't make progress until someone attaches. It does
+// NOT decide the launch path: the archive agent runs in tmux, while the wolf is
+// interactive but runs as a persistent ACP session when an ACP launcher is
+// configured (see runner.Runner.UsesACP).
 func (k Kind) Interactive() bool {
 	return k == WolfAgent || k == ArchiveAgent
 }

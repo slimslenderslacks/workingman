@@ -62,19 +62,39 @@ func (d *Daemon) reconcileSessions() {
 		if rec.Status != session.StatusRunning && rec.Status != session.StatusStarting {
 			continue
 		}
-		if rec.ProjectPath == "" {
-			continue
-		}
 		kind, ok := agent.ParseKind(rec.Kind)
 		if !ok {
+			continue
+		}
+		if kind == agent.WorkingmanAgent {
+			// Project-independent: adopt it only if this daemon supervises one, and
+			// under its own key. The supervisor is told when it ends, like a launch.
+			if d.workingman == nil {
+				continue
+			}
+			sess := newReconciledSession(rec.ID, store, nil)
+			if d.trackSession(workingmanSessionKey, sess, kind, "", func(error) { d.workingman.signalEnded() }) {
+				d.audit.Log("session_reconciled", "key", workingmanSessionKey, "kind", rec.Kind, "id", rec.ID)
+			}
+			continue
+		}
+		if rec.ProjectPath == "" {
 			continue
 		}
 
 		projectPath := rec.ProjectPath
 		sess := newReconciledSession(rec.ID, store, nil)
 		onEnd := func(error) { d.revisitProject(projectPath) }
-		if d.trackSession(projectPath, sess, kind, taskNameFor(rec.TaskPath), onEnd) {
-			d.audit.Log("session_reconciled", "key", projectPath, "kind", rec.Kind, "id", rec.ID)
+		// A wolf lives in its own slot (see launchWolfAgent) so it can run in
+		// tandem with the project's main agent; adopting it under the bare
+		// project path would both occupy that main slot and let a second
+		// wolf launch alongside it.
+		key := projectPath
+		if kind == agent.WolfAgent {
+			key = wolfSessionKey(projectPath)
+		}
+		if d.trackSession(key, sess, kind, taskNameFor(rec.TaskPath), onEnd) {
+			d.audit.Log("session_reconciled", "key", key, "kind", rec.Kind, "id", rec.ID)
 		}
 	}
 }

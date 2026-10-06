@@ -15,7 +15,6 @@ import (
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/daemon"
-	"github.com/slimslenderslacks/work/internal/notify"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
 	"github.com/slimslenderslacks/work/internal/session"
@@ -35,11 +34,48 @@ func (r *rootsFlag) Set(s string) error {
 	return nil
 }
 
+// usageHeader is the top of `orch --help`: the daemon is the default command,
+// the subcommands are dispatched by main before flag parsing, so the flag
+// package's own listing (which follows) would not mention them.
+const usageHeader = `usage: orch --root <dir> [flags]        run the daemon, with the TUI unless --headless
+       orch tui --root <dir>            run only the TUI over a directory
+       orch status [--json]             print the running daemon's state snapshot
+       orch whatsapp <subcommand>       set up and check the WhatsApp channel (see docs/channels.md)
+       orch signal <subcommand>         set up and check the Signal channel (see docs/channels.md)
+
+whatsapp subcommands:
+  setup    configure the Business Cloud API channel: credentials, owner allowlist, webhook
+  status   show the (masked) config, Graph reachability and the webhook listener
+  test     send a test message and print its id or the error
+  pair     link a personal WhatsApp number to the bridge backend by QR code
+
+signal subcommands:
+  setup    configure signal-cli URL, account, owner allowlist, optional groups and routes
+  status   show the (masked) config and whether signal-cli is reachable and registered
+  test     send a test message and print its timestamp or the error
+
+Run "orch <subcommand> -h" for a subcommand's flags. Daemon flags:
+
+`
+
 func main() {
 	args := os.Args[1:]
 	if len(args) > 0 && args[0] == "tui" {
 		runTUI(args[1:])
 		return
+	}
+	if len(args) > 0 && args[0] == "status" {
+		os.Exit(runStatus(args[1:], os.Stdout, os.Stderr))
+	}
+	if len(args) > 0 && args[0] == "help" {
+		fmt.Fprint(os.Stdout, usageHeader)
+		return
+	}
+	if len(args) > 0 && args[0] == "whatsapp" {
+		os.Exit(runWhatsApp(args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	if len(args) > 0 && args[0] == "signal" {
+		os.Exit(runSignal(args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	runDaemon(args)
 }
@@ -50,16 +86,27 @@ func main() {
 // keeps the pre-TUI behaviour: pure daemon loop, no terminal UI.
 func runDaemon(args []string) {
 	fs := flag.NewFlagSet("orch", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), usageHeader)
+		fs.PrintDefaults()
+	}
 	var roots rootsFlag
 	fs.Var(&roots, "root", "directory to watch (repeatable)")
 	auditPath := fs.String("audit-log", "logs/audit.log", "path to the audit log")
 	workspaceMode := fs.String("workspace-manager", "wsp", `workspace manager: "wsp" (real) or "stub" (test/dev)`)
 	stubRoot := fs.String("stub-workspace-root", "", `when --workspace-manager=stub, directory where workspaces are created (default: $TMPDIR/orch-workspaces)`)
 	tmuxSession := fs.String("tmux-session", agent.DefaultUmbrellaSession, "name of the umbrella tmux session every agent's window lives in")
-	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, planning/task/commit agents launch as acp-wrapper-backed ACP sessions instead of tmux+`sbx exec claude -p`")
+	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, the planning/task/commit agents, the wolf and the workingman agent launch as acp-wrapper-backed ACP sessions instead of tmux+'sbx exec claude -p'")
 	acpWrapper := fs.String("acp-wrapper", "", "path to the acp-wrapper binary (default: acp-wrapper on PATH)")
 	sessionsRoot := fs.String("sessions-root", "", "root dir holding per-session dirs for ACP agents (default ~/.workingman/sessions)")
+	wolfHost := fs.Bool("wolf-host", false, "escape hatch: run the wolf agent in a tmux window directly on the host (full host access, no sandbox, only reachable by attaching to tmux) instead of as a persistent ACP session in its own sandbox. Only matters when --acp-kit is set")
+	wolfUnblockGrace := fs.Duration("wolf-unblock-grace", 0, "how long an ACP wolf lingers after its project leaves status:blocked before its conversation is ended (0 = default 2m, negative = never end on unblock)")
+	wolfIdleTimeout := fs.Duration("wolf-idle-timeout", 0, "end an ACP wolf after this long with no ACP traffic (0 = default 24h, negative = never)")
+	channelsConfig := fs.String("channels-config", "", "messaging-channels config (default ~/.workingman/channels.yaml, or $WORKINGMAN_CHANNELS_CONFIG). A missing file disables channels and the daemon behaves exactly as without them")
+	var workingmanMode workingmanFlag
+	fs.Var(&workingmanMode, "workingman-agent", `run the workingman agent: a persistent, read-only observer in its own sandbox that answers questions about the orch state. "auto" (default) turns it on when --acp-kit is set and channels.yaml has an inbound-capable channel; --workingman-agent / =on forces it on (requires --acp-kit); =off disables it`)
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
+	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -79,31 +126,19 @@ func runDaemon(args []string) {
 	}
 	defer f.Close()
 	a := audit.New(f)
+	// Pre-load the in-memory audit tail from what earlier runs wrote so the
+	// state snapshot's recent-events list is useful immediately after a restart.
+	if lines, err := audit.TailFile(*auditPath, 500); err == nil {
+		a.Seed(lines)
+	}
 
-	// Point the SSH agent at 1Password when the inherited one can't sign.
-	// A GUI/login-shell SSH_AUTH_SOCK is the macOS system (launchd) agent,
-	// which does not hold the user's 1Password SSH signing key. The acp-wrapper
-	// forwards whatever SSH_AUTH_SOCK the daemon runs with into each agent's
-	// sandbox, so unless we redirect it here the commit agent's ssh-keygen has
-	// no key to sign with and commits land unsigned. A user who deliberately
-	// points SSH_AUTH_SOCK at a non-system agent is left untouched.
-	wantsOnePassword := shouldDefaultSSHAgent(os.Getenv("SSH_AUTH_SOCK"))
-	if sock := onePasswordAgentSock(); sock != "" && wantsOnePassword {
-		if err := os.Setenv("SSH_AUTH_SOCK", sock); err != nil {
-			a.Log("ssh_auth_sock_set_error", "path", sock, "err", err.Error())
-		} else {
-			a.Log("ssh_auth_sock_defaulted", "path", sock)
-		}
-	} else if wantsOnePassword {
-		// We wanted to redirect but found no live 1Password agent socket.
-		// onePasswordAgentSock() hardcodes team id 2BUA8C4S2C — the id 1Password 8
-		// uses for its unified direct-download and Mac App Store builds — under
-		// the fixed path Library/Group Containers/<id>.com.1password/t/agent.sock.
-		// If some other 1Password build/version uses a different container id (or
-		// it's simply not installed/running), this silently fails to find it with
-		// nothing but unsigned commits days later as the symptom. Log which case
-		// we're in so it's diagnosable from the audit log instead of guessed at.
-		logOnePasswordAgentMissing(a)
+	// Commit signing relies on the private ssh-agent that start-orch.sh starts
+	// and exports as SSH_AUTH_SOCK. We never redirect it: if it is unset or is
+	// the macOS launchd agent (no signing key), warn loudly instead.
+	if sshAgentUnusable(os.Getenv("SSH_AUTH_SOCK")) {
+		a.Log("ssh_auth_sock_unusable",
+			"path", os.Getenv("SSH_AUTH_SOCK"),
+			"detail", "SSH_AUTH_SOCK is unset or the macOS launchd agent; commit signing will fail — start orch via start-orch.sh so it runs with the private ssh-agent")
 	}
 
 	wsMgr, err := buildWorkspaceManager(*workspaceMode, *stubRoot)
@@ -134,7 +169,8 @@ func runDaemon(args []string) {
 	// launched as acp-wrapper-backed ACP sessions rather than tmux windows
 	// running `sbx exec claude -p`. The wrapper is a host process: its stderr
 	// (diagnostics) goes to a log file so it never corrupts the TUI alt-screen.
-	// Interactive agents (project/wolf) keep the tmux launcher above.
+	// The wolf also runs as a (persistent) ACP session unless --wolf-host is set;
+	// the archive agent keeps the tmux launcher above.
 	if *acpKit != "" {
 		acpLogPath := filepath.Join(filepath.Dir(*auditPath), "acp-wrapper.log")
 		acpLog, err := os.OpenFile(acpLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -146,23 +182,68 @@ func runDaemon(args []string) {
 		r.Kit = *acpKit
 		r.AcpWrapperPath = *acpWrapper
 		r.SessionsRoot = *sessionsRoot
+		r.WolfOnHost = *wolfHost
+		r.PersistentUnblockGrace = *wolfUnblockGrace
+		r.PersistentIdleTimeout = *wolfIdleTimeout
 	} else {
 		// No ACP kit configured: keep the legacy sandboxed tmux path for
 		// non-interactive agents so the daemon still functions standalone.
 		r.Sandbox = runner.DefaultSandboxCreator
 	}
 
-	d, err := daemon.New(roots, a,
+	stateDir, err := stateDirFor(*sessionsRoot)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ch, err := setupChannels(*channelsConfig, filepath.Dir(*auditPath), stateDir, a)
+	if err != nil {
+		log.Fatalf("channels: %v", err)
+	}
+	defer ch.stop(a)
+
+	dopts := []daemon.Option{
 		daemon.WithRunner(r),
-		daemon.WithNotifier(&notify.Osascript{}),
 		daemon.WithScheduler(scheduler.New()),
-	)
+	}
+	dopts = append(dopts, ch.options(a)...)
+	stateFilePath, err := resolveStateFile(*stateFile, *sessionsRoot)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if stateFilePath != "" {
+		dopts = append(dopts,
+			daemon.WithStateFile(stateFilePath, 0),
+			daemon.WithRuntimeInfo(daemon.RuntimeInfo{
+				WorkspaceManager: *workspaceMode,
+				AcpKit:           *acpKit,
+				AcpWrapper:       *acpWrapper,
+				SessionsRoot:     *sessionsRoot,
+				TmuxSession:      *tmuxSession,
+				AuditLog:         absPath(*auditPath),
+				Headless:         *headless,
+			}),
+		)
+	}
+	if on, why := workingmanAgentEnabled(workingmanMode, ch, *acpKit); on {
+		dopts = append(dopts, daemon.WithWorkingmanAgent(daemon.WorkingmanAgentConfig{
+			AuditLog: absPath(*auditPath),
+		}))
+		a.Log("workingman_agent_flag", "enabled", "true", "why", why)
+	} else {
+		if workingmanMode == workingmanOn {
+			log.Fatalf("%s", why) // asked for explicitly: don't silently run without it
+		}
+		a.Log("workingman_agent_flag", "enabled", "false", "why", why)
+	}
+	d, err := daemon.New(roots, a, dopts...)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	ch.start(ctx, a, d)
 
 	a.Log("daemon_start",
 		"pid", fmt.Sprintf("%d", os.Getpid()),
@@ -172,13 +253,17 @@ func runDaemon(args []string) {
 		"tmux", tmuxBin,
 		"tmux_session", *tmuxSession,
 		"acp_kit", *acpKit,
+		"wolf_host", fmt.Sprintf("%t", *wolfHost),
+		"state_file", stateFilePath,
 	)
 
 	if *headless {
 		if err := d.Run(ctx); err != nil {
+			ch.stop(a)
 			a.Log("daemon_error", "err", err.Error())
 			log.Fatal(err)
 		}
+		ch.stop(a)
 		a.Log("daemon_stop")
 		return
 	}
@@ -226,6 +311,7 @@ func runDaemon(args []string) {
 	// return.
 	cancel()
 	daemonErr := <-daemonErrCh
+	ch.stop(a)
 
 	a.Log("daemon_stop")
 
@@ -342,69 +428,10 @@ func (l interactiveLauncher) OpenSession(ctx context.Context, projectPath string
 	return l.d.OpenInteractiveSession(ctx, projectPath)
 }
 
-// onePasswordContainerID is 1Password's macOS sandbox container id, fixed
-// since 1Password 8 unified its direct-download and Mac App Store builds onto
-// one code signature. Older 1Password 7 MAS builds used a different,
-// undocumented container id; we deliberately don't guess at it here (see
-// logOnePasswordAgentMissing) rather than hardcode a second unverified path.
-const onePasswordContainerID = "2BUA8C4S2C.com.1password"
-
-// onePasswordContainerDir is the Group Containers directory 1Password's app
-// data (including its SSH agent socket) lives under, when installed.
-func onePasswordContainerDir(home string) string {
-	return filepath.Join(home, "Library", "Group Containers", onePasswordContainerID)
-}
-
-// onePasswordAgentSock returns the path to 1Password's SSH agent socket when
-// it exists as a socket on this host, or "" otherwise (1Password not
-// installed, agent disabled, or a non-macOS layout). The path is 1Password's
-// fixed macOS location; gating on os.ModeSocket keeps non-1Password machines
-// unaffected.
-func onePasswordAgentSock() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	p := filepath.Join(onePasswordContainerDir(home), "t", "agent.sock")
-	if fi, err := os.Stat(p); err == nil && fi.Mode()&os.ModeSocket != 0 {
-		return p
-	}
-	return ""
-}
-
-// logOnePasswordAgentMissing records, when we wanted to redirect SSH_AUTH_SOCK
-// at 1Password but onePasswordAgentSock found nothing, which of two distinct
-// causes it looks like — so a silent miss here doesn't surface days later as
-// unexplained unsigned commits:
-//   - the container directory exists (1Password is installed under the
-//     expected id) but no live agent socket — most likely the SSH agent
-//     integration is off in 1Password's Settings > Developer, or 1Password
-//     isn't running/unlocked.
-//   - the container directory doesn't exist at all — either 1Password isn't
-//     installed, or it's a build using a different container id than
-//     onePasswordContainerID (see that constant's doc), which this detector
-//     cannot see. We log this distinction rather than guess at an unverified
-//     second path.
-func logOnePasswordAgentMissing(a *audit.Logger) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		a.Log("onepassword_agent_sock_missing", "detail", "could not resolve home dir: "+err.Error())
-		return
-	}
-	if _, err := os.Stat(onePasswordContainerDir(home)); err == nil {
-		a.Log("onepassword_agent_sock_missing",
-			"detail", "1Password app data found but no live SSH agent socket — check 1Password is running/unlocked and Settings > Developer > \"Use the SSH Agent\" is on")
-		return
-	}
-	a.Log("onepassword_agent_sock_missing",
-		"detail", "no 1Password app data found under the expected container id ("+onePasswordContainerID+") — 1Password may not be installed, or this build uses a different container id we don't know to check")
-}
-
-// shouldDefaultSSHAgent reports whether we should redirect SSH_AUTH_SOCK to the
-// 1Password agent. True when it is unset or points at the macOS system (launchd)
-// agent — the value a GUI/login shell inherits, which lacks the 1Password
-// signing key. A value the user deliberately set elsewhere is respected.
-func shouldDefaultSSHAgent(current string) bool {
+// sshAgentUnusable reports whether current is an SSH_AUTH_SOCK that cannot
+// hold the signing key: unset, or the macOS system (launchd) agent a GUI/login
+// shell inherits. Any other value is assumed to be the private agent.
+func sshAgentUnusable(current string) bool {
 	return current == "" || strings.Contains(current, "com.apple.launchd")
 }
 

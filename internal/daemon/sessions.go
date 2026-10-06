@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/runner"
 )
 
@@ -25,7 +26,8 @@ const (
 // WatchSessions; callers never build this struct directly.
 type SessionInfo struct {
 	// ID is the daemon's stable key for the session — the absolute path of
-	// the .project.yaml driving it. Used by the TUI to diff snapshots and
+	// the .project.yaml driving it (the workingman agent, which has no
+	// project, uses the fixed key "workingman-agent"). Used by the TUI to diff snapshots and
 	// route clicks.
 	ID string
 	// AgentName is the agent.Kind string ("project", "planning", "task",
@@ -50,7 +52,8 @@ type SessionInfo struct {
 	Interactive bool
 	// SandboxName is the sbx sandbox the agent is running inside. Populated
 	// only for ACP-routed sessions (the daemon's runner has an AcpLauncher
-	// and the agent kind is non-interactive); empty otherwise, because the
+	// and Runner.UsesACP(kind) — every kind but archive, and the wolf unless
+	// it runs on the host); empty otherwise, because the
 	// legacy tmux + `sbx exec` path treats the sandbox as an implementation
 	// detail. Matches the name visible in `sbx ls` — underscores already
 	// normalized to hyphens.
@@ -65,10 +68,16 @@ func (d *Daemon) ListSessions() []SessionInfo {
 	defer d.sessionsMu.Unlock()
 	out := make([]SessionInfo, 0, len(d.sessions))
 	for key, entry := range d.sessions {
+		project := filepath.Base(filepath.Dir(key))
+		if entry.kind == agent.WorkingmanAgent {
+			// Not a work stream: its key is not a project path, so Dir/Base of it
+			// would label the row ".". Show the agent's own name instead.
+			project = agent.WorkingmanAgent.String()
+		}
 		info := SessionInfo{
 			ID:          key,
 			AgentName:   entry.kind.String(),
-			Project:     filepath.Base(filepath.Dir(key)),
+			Project:     project,
 			TmuxTarget:  entry.sess.Name(),
 			Status:      SessionStatusRunning,
 			StartedAt:   entry.startedAt,
@@ -76,7 +85,7 @@ func (d *Daemon) ListSessions() []SessionInfo {
 			Interactive: entry.kind.Interactive(),
 		}
 		if d.runner != nil && d.runner.UsesACP(entry.kind) {
-			info.SandboxName = runner.SandboxNameFor(entry.kind, key, entry.taskName)
+			info.SandboxName = runner.ACPSandboxNameFor(entry.kind, key, entry.taskName)
 		}
 		out = append(out, info)
 	}

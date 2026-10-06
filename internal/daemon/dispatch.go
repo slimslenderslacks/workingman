@@ -37,6 +37,9 @@ func (d *Daemon) handle(ev fsnotify.Event) {
 		return
 	}
 	h(ev.Name)
+	// A project/task/intake file changed: refresh the state snapshot (a no-op
+	// when publishing is off).
+	d.markSnapshotDirty()
 }
 
 // handleProject reads the .project.yaml file, drops the event if the daemon
@@ -520,6 +523,14 @@ func (d *Daemon) backoffPlanning(attempt int) bool {
 // agent launch only logs (the file is empty, there is no project state to
 // block).
 func (d *Daemon) startSession(key string, plan runner.Plan, onEnd func(error)) error {
+	_, err := d.startSessionTracked(key, plan, onEnd)
+	return err
+}
+
+// startSessionTracked is startSession that also reports whether the new
+// session was actually tracked. It is false (with a nil error) when another
+// session claimed key first and the freshly started one was closed again.
+func (d *Daemon) startSessionTracked(key string, plan runner.Plan, onEnd func(error)) (bool, error) {
 	sess, err := d.runner.Start(d.ctx, plan)
 	if err != nil {
 		d.audit.Log("session_start_error",
@@ -527,12 +538,13 @@ func (d *Daemon) startSession(key string, plan runner.Plan, onEnd func(error)) e
 			"key", key,
 			"err", err.Error(),
 		)
-		return err
+		return false, err
 	}
 	if !d.trackSession(key, sess, plan.Kind, plan.TaskName, onEnd) {
 		_ = sess.Close()
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 // handleTask logs every task-file change as a `task_file_updated` audit

@@ -3,6 +3,8 @@ package tui
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -46,6 +48,9 @@ type acpTabEvent struct {
 	title string
 	text  string          // acpTabPrompt: the prompt text
 	ev    acpclient.Event // acpTabStream: the lifecycle/stream event
+	// interactive (acpTabAdded): the session is persistent/conversational, so
+	// the tab accepts typed messages (see acpInputs).
+	interactive bool
 }
 
 // acpConn is the subset of *acpclient.Client the watcher drives. It is an
@@ -132,6 +137,62 @@ const acpStartingGracePeriod = acpHandshakeTimeout
 // (a big build, a slow test suite) streams no intermediate frames, so the bound
 // must exceed the longest such call to avoid cutting off live work.
 const acpTurnIdleTimeout = 20 * time.Minute
+
+// acpInputQueue bounds how many typed-but-not-yet-sent messages a session's
+// inbox holds. Messages queue while a turn is streaming and are sent in order
+// once it ends; a full inbox rejects the keystroke with an error rather than
+// blocking the UI.
+const acpInputQueue = 8
+
+// acpInputRouter carries messages a human types in the TUI to the watcher
+// goroutine that owns that session's ACP connection. Only persistent
+// (conversational) sessions register an inbox; one-shot agents have none, so
+// sending to them fails. It is the TUI→agent half of "type into the wolf": the
+// connection (and its ACP session) belongs to the watcher, so typed text must
+// be handed to it rather than written to the socket from the UI goroutine.
+type acpInputRouter struct {
+	mu    sync.Mutex
+	boxes map[string]chan string
+}
+
+// acpInputs is the process-wide router: the watcher registers inboxes here and
+// the model sends through it (model.acpSend). Keys are session ids.
+var acpInputs = &acpInputRouter{boxes: map[string]chan string{}}
+
+// register creates (replacing any stale one) the inbox for session id.
+func (r *acpInputRouter) register(id string) chan string {
+	ch := make(chan string, acpInputQueue)
+	r.mu.Lock()
+	r.boxes[id] = ch
+	r.mu.Unlock()
+	return ch
+}
+
+// unregister drops the inbox for id, but only if it is still ch — a recycled
+// session id's new watcher may already have replaced it.
+func (r *acpInputRouter) unregister(id string, ch chan string) {
+	r.mu.Lock()
+	if r.boxes[id] == ch {
+		delete(r.boxes, id)
+	}
+	r.mu.Unlock()
+}
+
+// Send queues text for session id's watcher. It never blocks.
+func (r *acpInputRouter) Send(id, text string) error {
+	r.mu.Lock()
+	ch := r.boxes[id]
+	r.mu.Unlock()
+	if ch == nil {
+		return fmt.Errorf("session %s is not accepting input (not connected, or not a conversational session)", id)
+	}
+	select {
+	case ch <- text:
+		return nil
+	default:
+		return fmt.Errorf("session %s: too many unsent messages queued; wait for the agent to finish its turn", id)
+	}
+}
 
 // WatchACPSessions starts a background watcher over the session store rooted at
 // root and returns a channel of tab mutations for the TUI to consume. The
@@ -299,7 +360,7 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 // third needs none — acpclient already emits the terminal event over Events(),
 // which the pump forwards.
 func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDialer, probe sandboxProbe, store session.Store, s session.Session, prompt string, handshakeTimeout, turnIdleTimeout time.Duration) {
-	emitACP(ctx, out, acpTabEvent{kind: acpTabAdded, id: s.ID, title: acpTabTitle(s)})
+	emitACP(ctx, out, acpTabEvent{kind: acpTabAdded, id: s.ID, title: acpTabTitle(s), interactive: s.Persistent})
 
 	// Verify the backing sandbox still exists before trusting the socket. We only
 	// reach here for StatusRunning sessions, whose sandbox provably existed when
@@ -382,65 +443,113 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 		return // terminal event forwarded by the pump on conn.Close()
 	}
 
+	// A persistent (conversational) session — the wolf — is typed into, so accept
+	// input from the moment the handshake is done: anything typed during the
+	// opening turn queues and goes out in order after it.
+	var inbox chan string
+	if s.Persistent {
+		inbox = acpInputs.register(s.ID)
+		defer acpInputs.unregister(s.ID, inbox)
+	}
+
 	// Drive the opening prompt only for a brand-new session. A reconnected session
 	// (PromptCount>0) was prompted in a prior TUI run; we already replayed it and
 	// re-sending would restart the agent.
 	if prompt != "" && s.PromptCount == 0 {
 		emitACP(ctx, out, acpTabEvent{kind: acpTabPrompt, id: s.ID, text: prompt})
 
-		// conn.Prompt blocks until the turn completes; its chunks arrive via the
-		// pump. The turn is bounded by IDLE time, not total time: a healthy turn
-		// streams frames (assistant text, tool calls/updates) continuously, so we
-		// abort only after turnIdleTimeout elapses with no frames at all. That
-		// silence is the signature of an agent that finished (or wedged) without
-		// ending its turn — the task file may already say success, but conn.Prompt
-		// never returns, so the wrapper never exits and the daemon stalls before
-		// the commit step. A long-but-active turn keeps pulsing activity and is
-		// never cut off. The watchdog resets on each frame and cancels promptCtx
-		// when the gap is exceeded.
-		promptCtx, cancelPrompt := context.WithCancel(ctx)
-		watchdogDone := make(chan struct{})
-		go func() {
-			defer close(watchdogDone)
-			timer := time.NewTimer(turnIdleTimeout)
-			defer timer.Stop()
-			for {
-				select {
-				case <-promptCtx.Done():
-					return
-				case <-activity:
-					if !timer.Stop() {
-						<-timer.C
-					}
-					timer.Reset(turnIdleTimeout)
-				case <-timer.C:
-					cancelPrompt() // turn went silent past the idle bound — abort it
-					return
-				}
-			}
-		}()
-
-		_, err = conn.Prompt(promptCtx, prompt)
-		cancelPrompt()
-		<-watchdogDone
+		err = promptWithIdleWatchdog(ctx, conn, activity, prompt, turnIdleTimeout)
 
 		if err == nil {
 			// Record that the opening prompt was sent so a future restart reconnects
 			// (replays) instead of re-prompting.
 			markPrompted(store, s.ID)
 		}
-		// Orch's non-interactive agents (planning/task/commit) are single-turn:
-		// the turn finishing IS the agent's exit signal. Return — whether the turn
-		// ended cleanly or the watchdog aborted it — so the deferred conn.Close()
-		// fires, the sandboxed claude-acp-client sees EOF on stdio and exits,
-		// acp-wrapper returns, and the daemon's session_ended callback dispatches
-		// the next stage (commit-after-task, etc.) or re-evaluates the task file
-		// (retry vs. block). The pump forwards the trailing StateDisconnected
-		// before pumpDone closes, so the tab still transitions completed → dead.
+		if !s.Persistent {
+			// Orch's non-interactive agents (planning/task/commit) are single-turn:
+			// the turn finishing IS the agent's exit signal. Return — whether the
+			// turn ended cleanly or the watchdog aborted it — so the deferred
+			// conn.Close() fires, the sandboxed claude-acp-client sees EOF on stdio
+			// and exits, acp-wrapper returns, and the daemon's session_ended callback
+			// dispatches the next stage (commit-after-task, etc.) or re-evaluates the
+			// task file (retry vs. block). The pump forwards the trailing
+			// StateDisconnected before pumpDone closes, so the tab still transitions
+			// completed → dead.
+			return
+		}
+		// A persistent session's first turn is not its end: the wolf typically
+		// finishes it by asking the human a question. Stay connected and relay what
+		// the human types; the wrapper ends the session on its own terms (agent
+		// exit, project unblocked, idle).
+	}
+
+	if s.Persistent {
+		servePersistentInput(ctx, out, conn, activity, pumpDone, s.ID, inbox, turnIdleTimeout)
 		return
 	}
 
 	<-ctx.Done()
+}
+
+// promptWithIdleWatchdog runs one prompt turn on conn, bounded by IDLE time
+// rather than total time: a healthy turn streams frames (assistant text, tool
+// calls/updates) continuously, so it is aborted only after idle elapses with no
+// frames at all. That silence is the signature of an agent that finished (or
+// wedged) without ending its turn — the task file may already say success, but
+// conn.Prompt never returns, so the wrapper never exits and the daemon stalls
+// before the commit step. A long-but-active turn keeps pulsing activity and is
+// never cut off. The watchdog resets on each frame and cancels the turn's
+// context when the gap is exceeded.
+func promptWithIdleWatchdog(ctx context.Context, conn acpConn, activity <-chan struct{}, text string, idle time.Duration) error {
+	promptCtx, cancelPrompt := context.WithCancel(ctx)
+	watchdogDone := make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		timer := time.NewTimer(idle)
+		defer timer.Stop()
+		for {
+			select {
+			case <-promptCtx.Done():
+				return
+			case <-activity:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				timer.Reset(idle)
+			case <-timer.C:
+				cancelPrompt() // turn went silent past the idle bound — abort it
+				return
+			}
+		}
+	}()
+
+	_, err := conn.Prompt(promptCtx, text)
+	cancelPrompt()
+	<-watchdogDone
+	return err
+}
+
+// servePersistentInput relays messages a human types (via acpInputs) to a
+// persistent session as successive prompt turns, until the watcher is cancelled
+// (the session's directory is gone), the connection closes (pumpDone: the agent
+// or wrapper exited), or a turn fails because the connection dropped. Each typed
+// message is echoed into the tab as a prompt block before its turn starts. A
+// turn that merely goes idle is aborted but does not end the loop — the
+// conversation is still usable.
+func servePersistentInput(ctx context.Context, out chan<- acpTabEvent, conn acpConn, activity <-chan struct{}, pumpDone <-chan struct{}, id string, inbox <-chan string, idle time.Duration) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-pumpDone:
+			return
+		case text := <-inbox:
+			emitACP(ctx, out, acpTabEvent{kind: acpTabPrompt, id: id, text: text})
+			if err := promptWithIdleWatchdog(ctx, conn, activity, text, idle); err != nil && errors.Is(err, acpclient.ErrConnectionClosed) {
+				return
+			}
+		}
+	}
 }
 
 // replayPriorContext rebuilds a reconnected session's transcript from on-disk

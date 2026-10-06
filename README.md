@@ -34,6 +34,27 @@ charged against it.
 - `wsp` — multi-repo workspace manager. Repos must be registered (`wsp registry add ...`) before the planning step finishes. If you don't have wsp set up, run with `--workspace-manager=stub` instead.
 - macOS for `osascript` notifications (optional; wolf still launches without them)
 
+## Commit signing (private ssh-agent)
+
+`./start-orch.sh` starts a **private `ssh-agent`** for the daemon, loads the
+signing key into it straight from 1Password (never written to disk), and
+exports its `SSH_AUTH_SOCK` so sbx forwards it into every sandbox. 1Password's
+own agent is not used: it needs a human to approve each signing operation, so
+unattended runs would hang.
+
+- The key comes from the 1Password item **"SSH github"** in vault
+  **"Personal"** via `op read`. Override the location with `ORCH_SSH_KEY_REF`
+  (an `op://` reference to an openssh-format private key).
+- `op` must authenticate **non-interactively** (`OP_SERVICE_ACCOUNT_TOKEN`, or
+  an already-unlocked CLI session); otherwise start-orch fails at startup.
+- The agent's lifetime is tied to `start-orch.sh`: it is killed (and its
+  socket dir removed) when the script exits.
+- If orch is started without it (`SSH_AUTH_SOCK` unset or the macOS launchd
+  agent) the daemon logs an `ssh_auth_sock_unusable` audit event: commit
+  signing will fail. orch never falls back to 1Password's agent.
+- `./check-signing.sh` diagnoses sandboxd forwarding an empty agent and can
+  restart sandboxd with the private agent's socket.
+
 ## Build
 
 ```sh
@@ -143,9 +164,140 @@ daemon ignores its own fsnotify events.
 ## Observability
 
 - **Audit log** (`--audit-log`): one line per event. `tail -f` it.
-- **Tmux sessions**: `tmux list-sessions` shows every live agent. Attach
-  with `tmux attach -t <name>` to watch claude work or drive an interactive
-  agent (project / wolf).
+- **Tmux sessions**: `tmux list-sessions` shows the agents that still run in
+  tmux (archive, and the wolf with `--wolf-host` or without `--acp-kit`).
+  Attach with `tmux attach -t <name>` to drive one.
+- **ACP sessions** (`--acp-kit`): planning/task/commit/review agents and, by
+  default, the wolf run as ACP sessions. Press `a` in the TUI for the tab view
+  (or enter on a session row); the wolf's tab is interactive — press enter to
+  type to it. `--wolf-host` runs the wolf on the host in tmux instead (full
+  host access, but only reachable via tmux).
+- **Workingman agent** (`--workingman-agent`, needs `--acp-kit`): an always-on,
+  read-only assistant in its own sandbox that answers questions about the orch
+  state (projects, tasks, the wolf, the audit log) for a human on a messaging
+  channel. On automatically when `channels.yaml` has an inbound-capable channel;
+  it can read the roots, snapshot, audit log and every session's stream, and
+  change nothing. See [agents.md §8](agents.md#8-workingman-agent).
+- **State snapshot** (`--state-file`, `orch status`): the daemon's in-memory
+  state (live sessions, wolf in flight, failure counters, review polls)
+  published as JSON for external readers. See
+  [docs/state-snapshot.md](docs/state-snapshot.md).
+
+## Channels / WhatsApp
+
+The daemon can reach you on WhatsApp, modelled on hermes-agent's WhatsApp
+gateway. It messages you the moment a wolf agent starts (`🐺 wolf is running for
+<project> … Reply to this message to talk to the wolf.`), relays your reply into
+that wolf's conversation, and routes any other message to the always-on
+**workingman agent**, a read-only assistant that answers questions about open
+projects, running tasks and the daemon state. Details, configuration reference,
+security model, troubleshooting and a manual smoke-test checklist:
+[docs/channels.md](docs/channels.md).
+
+```sh
+orch whatsapp setup     # Cloud API: credentials, owner allowlist, webhook (prints what to paste into Meta)
+orch whatsapp status    # masked config, Graph reachability, webhook listener
+orch whatsapp test      # send a test message to the owner
+orch whatsapp pair      # bridge mode: link a personal number by QR code
+orch --root ~/orch --acp-kit <kit>   # channels.yaml present ⇒ channels on, workingman agent on
+```
+
+Two backends, chosen per channel with `options.mode`:
+
+| | `cloud` (default, supported) | `bridge` (unofficial) |
+|---|---|---|
+| Transport | Meta WhatsApp Cloud API: signed webhook in, Graph API out | Baileys linked device, run as a supervised local Node process |
+| Needs | Meta app + phone-number id, public https URL (tunnel) | Node ≥ 18, a phone to scan a QR code; no public URL |
+| Number | a Meta (test or business) number | your personal number (`self-chat`) or a spare one (`bot`) |
+| Ban risk | none — official API | **real**: Baileys speaks the unofficial WhatsApp Web protocol; WhatsApp can disconnect or ban numbers that use it. Use a number you can afford to lose and keep traffic low |
+| Setup | `orch whatsapp setup` | `orch whatsapp pair` |
+
+Parity with hermes-agent's WhatsApp channel (✅ supported · ➖ partly · ❌ not supported):
+
+| Feature | hermes-agent | workingman cloud | workingman bridge |
+|---|---|---|---|
+| Cloud API backend (webhook + Graph) | ✅ | ✅ | n/a |
+| Baileys bridge backend | ✅ | n/a | ✅ (bridge vendored from hermes) |
+| Setup wizard / pairing | ✅ | ✅ `orch whatsapp setup` | ✅ `orch whatsapp pair` |
+| Bot mode (dedicated number) | ✅ | ✅ | ✅ |
+| Self-chat mode (personal number) | ✅ | ❌ (the API never delivers it) | ✅ |
+| Allowlist, default deny | ✅ | ✅ (no wildcard; `allow_all` is an explicit opt-in) | ✅ |
+| Reply to unauthorised senders | pairing code, or ignore | silent by default; optional `deny_reply` | same |
+| Webhook signature + verify handshake | ✅ | ✅ | n/a |
+| Group chats | ✅ | ❌ (direct chats only) | ✅ (`groups`, `group_allow_from`, mention gating) |
+| Text in / out | ✅ | ✅ | ✅ |
+| Markdown → WhatsApp formatting, 4096-char chunking | ✅ | ✅ | ✅ |
+| Quoted replies (reply-to) | ✅ | ✅ — also how a wolf message is answered | ✅ |
+| Typing indicator | ✅ | ✅ | ✅ |
+| Read receipts | ✅ | ❌ not sent | ➖ opt-in (`send_read_receipts`) |
+| Images, voice, documents | ✅ | ➖ captions kept, media not downloaded or sent | ➖ same |
+| Voice transcription | ✅ | ❌ | ❌ |
+| Polls, locations, interactive buttons | ✅ | ❌ (permission prompts are plain text: reply `yes`/`no`) | ❌ |
+| Message batching (debounce) | ✅ | ❌ one turn at a time per chat, bounded queue | ❌ |
+| Tool-progress messages | ✅ | ❌ only the agent's final text segment is sent | ❌ |
+| Template messages outside the 24 h window | n/a | ❌ typed error (`ErrOutsideServiceWindow`), audit-logged | n/a |
+| Session survives restarts | ✅ | n/a (stateless) | ✅ (`~/.workingman/whatsapp/session`) |
+
+What is specific to workingman: the **wolf channel** (topic `wolf`: start/end
+messages, reply-to routing, `/wolf`, relayed tool-permission requests), the
+**workingman agent** (an ACP session in its own sandbox; the orch roots, daemon
+snapshot, audit log and agent sessions are mounted read-only), the commands
+`/help /status /wolf /agent /who`, and the redaction of every outgoing reply.
+The WhatsApp numbers allowed to talk to the daemon are an allowlist — nothing
+else reaches an agent.
+
+## Channels / Signal
+
+Signal is the second channel type, with the same wolf messages, reply-to routing,
+router commands, allowlist and workingman agent as WhatsApp. It is modelled on
+hermes-agent's Signal adapter (`gateway/platforms/signal.py`) and needs one thing
+WhatsApp does not: a running [signal-cli](https://github.com/AsamK/signal-cli)
+daemon (`signal-cli -a +15551234567 daemon --http 127.0.0.1:8080`) that is
+registered or linked to a Signal account. Step-by-step binding of the workingman
+agent and the wolf, the configuration reference, security notes,
+troubleshooting and a smoke-test checklist: [docs/signal.md](docs/signal.md)
+(shared concepts: [docs/channels.md](docs/channels.md)).
+
+```sh
+orch signal setup       # signal-cli URL, account, owner allowlist; writes the channel and the wolf/workingman routes
+orch signal status      # masked config; signal-cli reachable, account registered (--offline skips the check)
+orch signal test        # send a test message to the owner
+orch --root ~/orch --acp-kit <kit>   # channels.yaml present ⇒ channels on, workingman agent on
+```
+
+Differences from WhatsApp (cloud):
+
+| | WhatsApp (cloud) | Signal |
+|---|---|---|
+| Needs | Meta app, phone-number id, public https URL (tunnel) | a signal-cli daemon on the host; nothing public |
+| Meta console / webhook / tunnel | yes | **none** |
+| 24-hour service window | yes (typed error outside it) | **none** |
+| Secrets | access token, app secret, verify token | none (the account number may be an env credential) |
+| Message to yourself | not delivered | **Note to Self** (`note_to_self: true`) |
+| Groups | no | opt-in per group |
+| Message length / formatting | 4096 chars, WhatsApp markup | 8000 chars, Markdown → native Signal styles |
+
+Parity with hermes-agent's Signal adapter (✅ supported · ➖ partly · ❌ not supported):
+
+| Feature | hermes-agent | workingman |
+|---|---|---|
+| signal-cli HTTP daemon: SSE in, JSON-RPC out | ✅ | ✅ |
+| Setup wizard | ✅ `hermes gateway setup` | ✅ `orch signal setup` (validates signal-cli and the account) |
+| Allowlist, default deny | ✅ | ✅ (no wildcard; `allow_all` is an explicit opt-in) |
+| Unknown sender → pairing code | ✅ | ❌ silent denial |
+| Group chats | ✅ (`*` allowed) | ➖ only listed groups, and the sender must be allowlisted |
+| Note to Self, echo protection | ✅ | ✅ (opt-in) |
+| Quoted replies | ✅ | ✅ in direct chats — also how a wolf message is answered |
+| Native formatting, 8000-char chunking | ✅ | ✅ |
+| Typing indicator | ✅ | ✅ |
+| Reconnect with backoff | ✅ | ✅ (2s → 60s) |
+| Phone-number redaction in logs | ✅ | ✅ (`***4321`) |
+| Attachments, voice, reactions | ✅ | ❌ text only |
+| Tool-progress messages | suppressed | ❌ only the agent's final text segment is sent |
+
+The security model matches WhatsApp: only allowlisted numbers reach an agent, and
+the signal-cli data directory (account keys, `~/.local/share/signal-cli/` by
+default) must be kept private. Both channels can be enabled at once.
 
 ## Example `.project.yaml`
 

@@ -27,10 +27,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/policy"
+	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
 )
@@ -95,6 +97,32 @@ type Config struct {
 	// Leave false for interactive/long-lived sessions that should survive
 	// transient TUI disconnects.
 	ExitWhenEmpty bool
+
+	// Persistent makes this a conversational session (the wolf): the opposite
+	// of ExitWhenEmpty's one-shot lifecycle. The wrapper does NOT shut the ACP
+	// client down when the last connected client leaves — the human (TUI) and
+	// other processes (the daemon, a messaging channel) may come and go while
+	// the agent keeps its conversation. The session instead ends when the
+	// agent itself exits, the wrapper is signalled, or one of the opt-in end
+	// conditions below fires. Mutually exclusive with ExitWhenEmpty. Recorded
+	// in session.json so watchers know the first completed turn is not the end.
+	Persistent bool
+
+	// UnblockGrace, in persistent mode with a ProjectPath, ends the session once
+	// the project file has not been `status: blocked` for this long (continuously
+	// — a re-block inside the grace resets the clock). It is how an ACP wolf
+	// "finishes": the wolf resolves the block by editing .project.yaml, then the
+	// wrapper closes the conversation after a short grace that lets the wolf
+	// finish its closing message. Living in the wrapper (not the daemon) means it
+	// still works after a daemon restart, which cannot signal an adopted session.
+	// Zero disables.
+	UnblockGrace time.Duration
+
+	// IdleTimeout, in persistent mode, ends the session after this long with no
+	// ACP traffic in either direction — the backstop for a conversation nobody
+	// finished (or for a wrapper whose project file could not be watched). Zero
+	// disables.
+	IdleTimeout time.Duration
 
 	// TaskPath, when set, is the host path to the task's YAML file. On exit the
 	// wrapper re-reads it to decide whether to keep the sandbox: a task left in
@@ -165,8 +193,8 @@ type Config struct {
 	// not work — a macOS unix socket has no listener reachable across the Docker
 	// VM boundary (connect: connection refused) — and overriding SSH_AUTH_SOCK
 	// to that path would only clobber sbx's working socket. So signing relies on
-	// sandboxd being started with the signing agent in its environment (see
-	// start-orch.sh), and the wrapper leaves SSH_AUTH_SOCK alone.
+	// sandboxd being started with the private workingman ssh-agent (started by
+	// start-orch.sh, key loaded from 1Password) as its SSH_AUTH_SOCK, and the wrapper leaves SSH_AUTH_SOCK alone.
 	//
 	// IMPORTANT: SigningKey being non-empty means signing is *configured*, not
 	// that it will *work* — signingPreflight verifies the forwarded agent
@@ -220,6 +248,7 @@ func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.T
 		ProjectPath:   c.ProjectPath,
 		TaskPath:      c.TaskPath,
 		Kind:          c.Kind,
+		Persistent:    c.Persistent,
 		SigningBroken: c.signingPreflightFailed,
 	}
 }
@@ -228,9 +257,33 @@ func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.T
 // sandbox. Empty when no workspaces are configured.
 func (c Config) primaryWorkspace() string {
 	if len(c.Workspaces) > 0 {
-		return c.Workspaces[0]
+		path, _ := SplitMount(c.Workspaces[0])
+		return path
 	}
 	return ""
+}
+
+// ReadOnlySuffix marks a workspace as a read-only bind mount: `<path>:ro`, the
+// spelling `sbx create` takes for extra workspaces. It is passed through to sbx
+// unchanged; everywhere the wrapper needs the host path itself (cwd, the module
+// cache probe, comparing against `sbx ls`) it goes through SplitMount.
+const ReadOnlySuffix = ":ro"
+
+// SplitMount separates a workspace argument into its host path and whether it
+// is a read-only mount.
+func SplitMount(w string) (path string, readOnly bool) {
+	if p, ok := strings.CutSuffix(w, ReadOnlySuffix); ok {
+		return p, true
+	}
+	return w, false
+}
+
+// JoinMount is the inverse of SplitMount.
+func JoinMount(path string, readOnly bool) string {
+	if readOnly {
+		return path + ReadOnlySuffix
+	}
+	return path
 }
 
 // goModCacheDir returns the path to a pre-populated, writable Go module cache
@@ -254,7 +307,11 @@ func (c Config) primaryWorkspace() string {
 // resolves modules over the network exactly as before — so the behavior is
 // opt-in per project and harmless to projects without a staged cache.
 func (c Config) goModCacheDir() string {
-	for _, ws := range c.Workspaces {
+	for _, w := range c.Workspaces {
+		ws, ro := SplitMount(w)
+		if ro {
+			continue // a read-only mount can't serve as a writable module cache
+		}
 		cache := filepath.Join(ws, ".gomodcache")
 		if info, err := os.Stat(cache); err == nil && info.IsDir() {
 			return cache
@@ -324,6 +381,19 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("acpwrapper: invalid session id %q: must be a single path segment", c.SessionID)
 	}
 
+	if c.Persistent && c.ExitWhenEmpty {
+		return errors.New("acpwrapper: persistent and exit-when-empty are mutually exclusive (a session is either conversational or one-shot)")
+	}
+	if c.UnblockGrace < 0 || c.IdleTimeout < 0 {
+		return errors.New("acpwrapper: unblock grace and idle timeout must not be negative")
+	}
+	if (c.UnblockGrace > 0 || c.IdleTimeout > 0) && !c.Persistent {
+		return errors.New("acpwrapper: unblock grace / idle timeout only apply to a persistent session")
+	}
+	if c.UnblockGrace > 0 && strings.TrimSpace(c.ProjectPath) == "" {
+		return errors.New("acpwrapper: unblock grace needs the project path to watch")
+	}
+
 	if strings.TrimSpace(c.KitPath) == "" {
 		return errors.New("acpwrapper: kit path is required (the acp-kit reference to install into the sandbox)")
 	}
@@ -332,11 +402,15 @@ func (c *Config) normalize() error {
 		return errors.New("acpwrapper: at least one workspace is required")
 	}
 	for i, w := range c.Workspaces {
-		abs, err := filepath.Abs(w)
+		path, ro := SplitMount(w)
+		abs, err := filepath.Abs(path)
 		if err != nil {
 			return fmt.Errorf("acpwrapper: workspace %q: %w", w, err)
 		}
-		c.Workspaces[i] = abs
+		if ro && i == 0 {
+			return fmt.Errorf("acpwrapper: workspace %q: the primary (first) workspace is the agent's cwd and must be writable", w)
+		}
+		c.Workspaces[i] = JoinMount(abs, ro)
 	}
 
 	if c.SessionsRoot == "" {
@@ -482,12 +556,16 @@ func sameWorkspaceSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
+	// Compare host paths only: whether `sbx ls` reports a read-only mount with
+	// its `:ro` suffix is not something we rely on either way.
 	seen := make(map[string]bool, len(a))
 	for _, x := range a {
-		seen[x] = true
+		p, _ := SplitMount(x)
+		seen[p] = true
 	}
 	for _, x := range b {
-		if !seen[x] {
+		p, _ := SplitMount(x)
+		if !seen[p] {
 			return false
 		}
 	}
@@ -568,8 +646,8 @@ func removeSandboxOnExit(ctx context.Context, run commandFunc, c Config, shuttin
 // forwards into it actually holds a key — the runtime precondition ssh-keygen
 // needs to sign. Config resolution (main's readGitSigningConfig) proves signing
 // is *configured*; this proves the key is *reachable*, which is a separate,
-// runtime-varying fact: 1Password can be locked, or sandboxd can have been
-// restarted since orch launched and lost the 1Password agent. Without this the
+// runtime-varying fact: the private ssh-agent can be empty, or sandboxd can have been
+// restarted since orch launched and lost the private workingman ssh-agent. Without this the
 // gap only surfaces at commit time as a signing failure.
 //
 // Returns checked=false when signing isn't configured (nothing to verify), and
@@ -584,8 +662,8 @@ func signingPreflight(ctx context.Context, run commandFunc, c Config) (checked, 
 // withSigningPreflightResult is the actual fix for the root cause this task
 // tracks down: execArgs previously forced commit.gpgsign=true whenever
 // c.SigningKey was set, with no guard on signingPreflight's result. When the
-// forwarded agent turned out to have no key (1Password locked, or sandboxd
-// restarted since orch launched and lost the 1Password agent — see
+// forwarded agent turned out to have no key (private agent empty, or sandboxd
+// restarted since orch launched and lost the private agent — see
 // signingPreflight), every `git commit` inside the sandbox hard-failed trying
 // to sign against an empty agent. That is the actual mechanism behind "the
 // commit agent is not working": not merely "commits land unsigned" but "the
@@ -649,7 +727,7 @@ func Run(ctx context.Context, c Config) error {
 	// property proxied live by sandboxd, not something baked into a sandbox at
 	// creation time. So a task retried against a reused sandbox (see
 	// keepForTaskStatus) still gets a live, current read of agent health, and if
-	// the underlying sandboxd/1Password issue was fixed between attempts, this
+	// the underlying sandboxd/ssh-agent issue was fixed between attempts, this
 	// preflight (and therefore signing) recovers on the very next retry without
 	// ensureSandbox needing to know or care about signing health itself.
 	//
@@ -665,8 +743,8 @@ func Run(ctx context.Context, c Config) error {
 	if checked && !ok {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING signing preflight FAILED — the SSH "+
 			"agent forwarded into sandbox %q has no key. Commit signing is DISABLED for this session "+
-			"so `git commit` still succeeds (UNSIGNED) instead of hard-failing. Likely 1Password is "+
-			"locked or sandboxd was restarted without it; run ./check-signing.sh to fix.\n",
+			"so `git commit` still succeeds (UNSIGNED) instead of hard-failing. Likely sandboxd was restarted without "+
+			"the private ssh-agent started by start-orch.sh; run ./check-signing.sh to fix.\n",
 			c.SessionID, c.SandboxName)
 	} else if checked {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: signing preflight OK — forwarded agent holds a key\n", c.SessionID)
@@ -748,7 +826,25 @@ func Run(ctx context.Context, c Config) error {
 		ln.Close()
 	}()
 
-	serve(ctx, ln, procStdin, procStdout, logW, c.ExitWhenEmpty)
+	// Persistent sessions end on conditions other than "last client left".
+	// endSession closes the ACP client's stdin — the same EOF the exit-when-empty
+	// path uses — so the agent exits, proc.Wait cancels ctx, and serve unwinds.
+	// The unblock watcher is stopped with ctx; both are idempotent via sync.Once.
+	var endOnce sync.Once
+	endSession := func(reason string) {
+		endOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ending persistent session (%s)\n", c.SessionID, reason)
+			_ = procStdin.Close()
+		})
+	}
+	if c.Persistent && c.UnblockGrace > 0 {
+		go watchUnblocked(ctx, c.ProjectPath, c.UnblockGrace, unblockPollInterval, func() { endSession("project no longer blocked") })
+	}
+	serve(ctx, ln, procStdin, procStdout, logW, serveOptions{
+		exitWhenEmpty: c.ExitWhenEmpty,
+		idleTimeout:   c.IdleTimeout,
+		endIdle:       func() { endSession("idle timeout") },
+	})
 
 	// The agent has exited: tear the sandbox down so per-task sandboxes don't
 	// accumulate across a project's run — unless we're shutting down on a
@@ -778,6 +874,18 @@ func Run(ctx context.Context, c Config) error {
 	return nil
 }
 
+// serveOptions selects how a session ends. The zero value is persistent with no
+// automatic end: the hub just bridges until the agent exits or ctx is cancelled.
+type serveOptions struct {
+	// exitWhenEmpty is orch's one-shot mode: shut the agent down when the last
+	// client leaves (see hub.enableExitWhenEmpty).
+	exitWhenEmpty bool
+	// idleTimeout, when > 0 (persistent sessions), calls endIdle after that long
+	// with no ACP traffic (see hub.watchIdle).
+	idleTimeout time.Duration
+	endIdle     func()
+}
+
 // serve bridges TUI connections on ln to the one sandboxed ACP client's stdio
 // until the listener is closed. A single hub fans the ACP client's stdout out
 // to every connected client and serializes each client's framed input into the
@@ -789,10 +897,13 @@ func Run(ctx context.Context, c Config) error {
 // connection with the hub. When ln is closed (ctx cancelled or ACP client
 // exited) the hub is torn down and serve returns. logW, when non-nil, receives a
 // copy of every agent frame for reconnect replay (see hub.log).
-func serve(ctx context.Context, ln net.Listener, procStdin io.WriteCloser, procStdout io.Reader, logW io.Writer, exitWhenEmpty bool) {
+func serve(ctx context.Context, ln net.Listener, procStdin io.WriteCloser, procStdout io.Reader, logW io.Writer, opts serveOptions) {
 	h := newHub(procStdin, logW)
-	if exitWhenEmpty {
+	if opts.exitWhenEmpty {
 		h.enableExitWhenEmpty(procStdin)
+	}
+	if opts.idleTimeout > 0 && opts.endIdle != nil {
+		go h.watchIdle(ctx, opts.idleTimeout, opts.endIdle)
 	}
 	// One reader drains the ACP client's stdout and broadcasts whole frames to
 	// every connected client. It also tears the hub down on stdout EOF.
@@ -804,5 +915,66 @@ func serve(ctx context.Context, ln net.Listener, procStdin io.WriteCloser, procS
 			return
 		}
 		h.add(conn)
+	}
+}
+
+// unblockPollInterval is how often a persistent session re-reads its project
+// file to see whether the block it was summoned for has been resolved. A var so
+// tests can shorten it.
+var unblockPollInterval = 2 * time.Second
+
+// unblockTracker turns a stream of "is the project blocked right now?"
+// observations into "has it been unblocked for the whole grace period?". The
+// clock starts at the first unblocked observation and resets whenever the
+// project is blocked again, so a quick re-block (a second failure while the wolf
+// is still wrapping up) keeps the conversation alive.
+type unblockTracker struct {
+	grace time.Duration
+	since time.Time // zero while blocked
+}
+
+// observe records one observation at now and reports whether the grace period
+// has fully elapsed with the project continuously unblocked.
+func (t *unblockTracker) observe(now time.Time, blocked bool) bool {
+	if blocked {
+		t.since = time.Time{}
+		return false
+	}
+	if t.since.IsZero() {
+		t.since = now
+	}
+	return now.Sub(t.since) >= t.grace
+}
+
+// watchUnblocked polls the project file at path every interval and calls end
+// once the project has been out of status:blocked for grace (see Config.
+// UnblockGrace). A file that exists but can't be read or parsed right now — most
+// likely caught mid-write by the very agent we're watching — is skipped without
+// advancing or resetting the clock; a file that is gone counts as unblocked
+// (there is nothing left for the wolf to unblock). Returns after calling end, or
+// when ctx is done.
+func watchUnblocked(ctx context.Context, path string, grace, interval time.Duration, end func()) {
+	tr := unblockTracker{grace: grace}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			p, err := project.Load(path)
+			switch {
+			case err == nil:
+				if tr.observe(now, p.Status == project.StatusBlocked) {
+					end()
+					return
+				}
+			case errors.Is(err, fs.ErrNotExist):
+				if tr.observe(now, false) {
+					end()
+					return
+				}
+			}
+		}
 	}
 }

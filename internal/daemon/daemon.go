@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ type Daemon struct {
 	watcher   *fsnotify.Watcher
 	runner    *runner.Runner
 	notifier  notify.Sender
+	channels  *channelNotify // nil unless WithChannels; see channels_notify.go
 	scheduler *scheduler.Scheduler
 	ctx       context.Context // assigned at Run() entry; used by session goroutines
 
@@ -84,6 +86,14 @@ type Daemon struct {
 	// ACP stream activity before the stranded-session reaper terminates it.
 	// See reaper.go.
 	sessionIdleTimeout time.Duration
+
+	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
+	// unless WithStateFile configured a path.
+	snapshot snapshotState
+
+	// workingman is the workingman-agent supervision state; nil unless
+	// WithWorkingmanAgent. See workingman_agent.go.
+	workingman *workingmanAgent
 }
 
 const (
@@ -187,8 +197,25 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		dispatchChains:     map[string]chan struct{}{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 	}
+	d.snapshot.startedAt = time.Now()
+	d.snapshot.pid = os.Getpid()
+	d.snapshot.collector = newSnapshotCollector()
+	d.snapshot.kick = make(chan struct{}, 1)
 	for _, opt := range opts {
 		opt(d)
+	}
+	if err := d.resolveWorkingman(); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
+	if d.snapshot.path != "" {
+		if err := validateStateFile(d.snapshot.path, roots); err != nil {
+			w.Close()
+			return nil, fmt.Errorf("daemon: %w", err)
+		}
+		// Any audit line is a hint that state moved (session start/stop,
+		// project/task transitions, failures); the loop debounces the burst.
+		a.OnLog(d.markSnapshotDirty)
 	}
 	return d, nil
 }
@@ -213,8 +240,21 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// a duplicate agent for a project a prior orch process already has a
 	// live session for.
 	d.reconcileSessions()
+	// The workingman agent is supervised on its own goroutine, after the
+	// reconcile above so a still-live one a prior orch left behind is adopted
+	// rather than duplicated, and before the scan so a slow project dispatch
+	// can't delay it (nor it them).
+	d.beginWorkingmanAgent(ctx)
 	d.startupScan()
 	go d.reapLoop(ctx)
+	if d.snapshot.path != "" {
+		// Publish immediately so a reader never sees a stale file from a
+		// previous run once we're up, then keep it fresh.
+		if err := d.writeSnapshot(true); err != nil {
+			d.logSnapshotError(err)
+		}
+		go d.snapshotLoop(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -280,6 +320,7 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 // project/wolf agents) are actually closed here — detachable ones are simply
 // dropped from local tracking, exactly like a deliberate detach.
 func (d *Daemon) shutdown() {
+	defer d.writeFinalSnapshot()
 	d.watcher.Close()
 	if d.scheduler != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -302,13 +343,21 @@ func (d *Daemon) shutdown() {
 }
 
 // detachable reports whether a session of this kind should survive an orch
-// shutdown/restart rather than being closed: exactly the ACP-backed,
-// non-interactive kinds (project, planning, task, commit), which run as a
-// standalone acp-wrapper host process the daemon does not need to keep alive
-// to keep running. Interactive kinds (wolf, archive) and the legacy tmux path
-// (no AcpLauncher configured) are unaffected — those sessions are still
-// closed on shutdown as before.
+// shutdown/restart rather than being closed: exactly the ACP-backed kinds
+// (project, planning, task, commit, review, and the wolf unless it runs on the
+// host via WolfOnHost), which run as a standalone acp-wrapper host process the
+// daemon does not need to keep alive to keep running. The archive agent, a
+// --wolf-host wolf and the legacy tmux path (no AcpLauncher configured) are
+// unaffected — those sessions are still closed on shutdown as before.
+//
+// The workingman agent is the exception among the ACP kinds: it is owned by the
+// daemon (supervised, relaunched, mounts derived from this run's flags) rather
+// than by any project, so it stops with the daemon and the next boot starts a
+// fresh one.
 func (d *Daemon) detachable(kind agent.Kind) bool {
+	if kind == agent.WorkingmanAgent {
+		return false
+	}
 	return d.runner != nil && d.runner.UsesACP(kind)
 }
 
@@ -341,6 +390,7 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, t
 		taskName:  taskName,
 	}
 	d.sessionsMu.Unlock()
+	d.markSnapshotDirty()
 
 	// Detachable (ACP-backed) sessions must not be waited on under d.ctx:
 	// processSession.Wait itself closes the session (SIGTERM) the moment its
@@ -365,6 +415,7 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, t
 			fields = append(fields, "err", waitErr.Error())
 		}
 		d.audit.Log("session_ended", fields...)
+		d.markSnapshotDirty()
 		if onEnd == nil {
 			return
 		}

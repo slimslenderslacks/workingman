@@ -243,9 +243,36 @@ func TestListSessionsPopulatesSandboxNameForACPSessions(t *testing.T) {
 	if got := byID[taskKey].SandboxName; got != "alpha-scaffold" {
 		t.Errorf("ACP task session SandboxName = %q, want %q", got, "alpha-scaffold")
 	}
-	// Wolf is interactive — ACP routing skips it, so SandboxName stays empty.
-	if got := byID[wolfKey].SandboxName; got != "" {
-		t.Errorf("interactive (wolf) session SandboxName = %q, want empty", got)
+	// The wolf runs under ACP too (persistent, in its own sandbox), so it
+	// surfaces "<work-stream>-wolf" like any other ACP session.
+	if got := byID[wolfKey].SandboxName; got != "bravo-wolf" {
+		t.Errorf("ACP wolf session SandboxName = %q, want %q", got, "bravo-wolf")
+	}
+}
+
+// TestListSessionsLeavesWolfSandboxEmptyOnHost covers the --wolf-host escape
+// hatch: with WolfOnHost the wolf is a host tmux window with no sandbox, so no
+// sandbox name is surfaced even though the runner has an AcpLauncher. The archive
+// agent never uses ACP and likewise has none.
+func TestListSessionsLeavesWolfSandboxEmptyOnHost(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	d.runner = &runner.Runner{AcpLauncher: stubLauncher{}, WolfOnHost: true}
+
+	wolfKey := filepath.Join(t.TempDir(), "bravo", ".project.yaml")
+	archiveKey := filepath.Join(t.TempDir(), "charlie", ".project.yaml")
+	wolfSess := newStubSession("wolf-bravo")
+	archiveSess := newStubSession("archive-charlie")
+	if !d.trackSession(wolfKey, wolfSess, agent.WolfAgent, "", nil) ||
+		!d.trackSession(archiveKey, archiveSess, agent.ArchiveAgent, "", nil) {
+		t.Fatal("trackSession returned false")
+	}
+	defer wolfSess.Close()
+	defer archiveSess.Close()
+
+	for _, info := range d.ListSessions() {
+		if info.SandboxName != "" {
+			t.Errorf("%s session SandboxName = %q, want empty", info.AgentName, info.SandboxName)
+		}
 	}
 }
 

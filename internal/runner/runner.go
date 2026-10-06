@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -125,10 +126,47 @@ type Plan struct {
 	// `source:`). Ignored for other kinds. See prompts.Data.PushBranch.
 	PushBranch bool
 
+	// Persistent asks for a conversational ACP session instead of a one-shot
+	// one: the acp-wrapper is launched with --persistent (not --exit-when-empty)
+	// so the agent keeps running across client disconnects and ends only when it
+	// exits, its project leaves `blocked` (wolf), or it goes idle. Set by the
+	// daemon for the wolf. Ignored on the legacy tmux path, where the claude
+	// process is already long-lived.
+	Persistent bool
+
+	// ReadOnlyMounts, for the workingman agent, are host paths bind-mounted into
+	// its sandbox READ-ONLY (sbx's `<path>:ro`) next to its writable scratch
+	// directory (WorkingDir): the orch roots, the snapshot dir, the audit-log dir
+	// and the ACP sessions root. Ignored for every other Kind. See
+	// workingmanWorkspaces.
+	ReadOnlyMounts []string
+
+	// Observe describes what the workingman agent observes, for its prompt and
+	// .orch/context.yaml. Ignored for every other Kind.
+	Observe Observe
+
 	// SessionName is the tmux session name. If empty, Runner derives one
 	// from Kind and Branch (or Kind and a short hash of WorkingDir).
 	SessionName string
 }
+
+// Observe is the description of the orch state a workingman agent may read:
+// everything in it is also mounted read-only (see Plan.ReadOnlyMounts), at the
+// same absolute host path the daemon uses.
+type Observe struct {
+	Roots        []string // orch roots (--root): <root>/<work-stream>/{.project.yaml,tasks/}
+	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
+	AuditLog     string   // the audit log file; empty when unknown
+	SessionsRoot string   // ACP sessions root: <root>/<id>/{session.json,stream.log}
+}
+
+// WorkingmanAgentSandbox is the sbx sandbox name — and WorkingmanAgentSession the
+// ACP session id — of the workingman agent. There is exactly one, independent of
+// any project path.
+const (
+	WorkingmanAgentSandbox = "workingman-agent"
+	WorkingmanAgentSession = "workingman-agent"
+)
 
 // CommandBuilder produces the argv that the launcher runs inside the
 // workspace. Production builds a claude invocation; tests can return
@@ -291,6 +329,18 @@ func sameWorkspaceSet(a, b []string) bool {
 	return true
 }
 
+const (
+	// DefaultUnblockGrace is how long an ACP wolf lingers after its project
+	// leaves `blocked` (see Runner.PersistentUnblockGrace).
+	DefaultUnblockGrace = 2 * time.Minute
+	// DefaultPersistentIdleTimeout is how long a persistent ACP session may sit
+	// with no traffic before its wrapper ends it (see Runner.PersistentIdleTimeout).
+	// Long on purpose: a wolf waiting on a human who stepped away overnight is
+	// working as designed, and its durable diagnosis lives in the blocked-session
+	// record, so even a timed-out wolf loses little.
+	DefaultPersistentIdleTimeout = 24 * time.Hour
+)
+
 type Runner struct {
 	Workspaces workspace.Manager
 	Launcher   agent.Launcher
@@ -316,10 +366,36 @@ type Runner struct {
 	// per-session acp-wrapper host process that backs an ACP claude session.
 	// The wrapper creates the sandbox (with acp-kit layered on), execs the ACP
 	// client, and serves <SessionsRoot>/<id>/agent.sock; the TUI watches the
-	// stream over that socket. Interactive agents (project/wolf) are never
-	// routed here — they keep the tmux path. Leave nil to fall back to the
-	// legacy launcher for every kind (dev/tests).
+	// stream over that socket. The wolf is routed here too, as a persistent
+	// (conversational) session, unless WolfOnHost is set; the archive agent
+	// always keeps the tmux path. Leave nil to fall back to the legacy launcher
+	// for every kind (dev/tests).
 	AcpLauncher agent.Launcher
+
+	// WolfOnHost is the escape hatch for the ACP-backed wolf. By default, with an
+	// AcpLauncher configured, the wolf runs as a persistent ACP session in its own
+	// sandbox (so the daemon, the TUI and messaging channels can all tune in to
+	// its conversation). Setting this keeps the pre-ACP behavior instead: the wolf
+	// runs in a tmux window directly on the host, outside any sandbox, with full
+	// host access (sbx, the failed agents' sandboxes, osascript, host credentials)
+	// but no way for anything but a human attached to tmux to talk to it. Use it
+	// when diagnosing a block needs the host — typically a sandbox/sbx/wsp
+	// problem the sandboxed wolf cannot see. Ignored when AcpLauncher is nil (the
+	// wolf is then always a host tmux window).
+	WolfOnHost bool
+
+	// PersistentUnblockGrace is how long the project must stay out of
+	// status:blocked before an ACP wolf's wrapper ends the conversation (passed
+	// as `acp-wrapper --unblock-grace`). It exists so the wolf can finish its
+	// closing message after it flips the project. Zero uses DefaultUnblockGrace;
+	// negative disables the unblock end condition.
+	PersistentUnblockGrace time.Duration
+
+	// PersistentIdleTimeout ends a persistent ACP session after this long with no
+	// ACP traffic (passed as `acp-wrapper --idle-timeout`) — the backstop for a
+	// wolf nobody ever answered. Zero uses DefaultPersistentIdleTimeout; negative
+	// disables it.
+	PersistentIdleTimeout time.Duration
 
 	// Kit is the acp-kit reference passed to `acp-wrapper --kit` (a local kit
 	// dir or a published ref). Required when AcpLauncher is set.
@@ -358,8 +434,19 @@ func (r *Runner) signingPreflightRun() gitsign.RunFunc {
 // decide whether to surface a session's sandbox name to the TUI: only ACP
 // sessions own a stable, user-visible sandbox; the legacy tmux path's sandbox
 // is an implementation detail.
+//
+// The wolf is interactive but conversational, so it is the one interactive kind
+// that also runs under ACP (a persistent session other processes can tune in
+// to) — unless WolfOnHost selects the host/tmux escape hatch. The archive agent
+// stays on tmux.
 func (r *Runner) UsesACP(kind agent.Kind) bool {
-	return r.AcpLauncher != nil && !kind.Interactive()
+	if r.AcpLauncher == nil {
+		return false
+	}
+	if kind == agent.WolfAgent {
+		return !r.WolfOnHost
+	}
+	return !kind.Interactive()
 }
 
 // Start is non-blocking: it returns the Session once the launcher accepts it.
@@ -375,6 +462,23 @@ func projectNameFromPath(projectPath string) string {
 }
 
 func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
+	if p.Kind == agent.WorkingmanAgent {
+		// It only makes sense as a persistent ACP session in a sandbox of its
+		// own: the legacy tmux path has no read-only mounts, so refusing is the
+		// safe answer rather than silently launching it with write access.
+		if !r.UsesACP(p.Kind) {
+			return nil, fmt.Errorf("runner: the workingman agent needs an ACP launcher (--acp-kit)")
+		}
+		if p.SessionName == "" {
+			p.SessionName = WorkingmanAgentSession
+		}
+		p.Persistent = true
+		if p.WorkingDir != "" {
+			if err := os.MkdirAll(p.WorkingDir, 0o755); err != nil {
+				return nil, fmt.Errorf("runner: workingman scratch dir: %w", err)
+			}
+		}
+	}
 	workingDir, err := r.resolveWorkingDir(ctx, p)
 	if err != nil {
 		return nil, err
@@ -390,6 +494,15 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A sandboxed (ACP) wolf gets the same worktree mount so it can read the
+	// source behind a block it can no longer reach via the host. Best-effort:
+	// the wolf exists to diagnose broken projects, and a broken wsp setup is one
+	// of the things that breaks them — failing the wolf launch because its
+	// optional source mount couldn't be provisioned would defeat the point.
+	if wolfWorktree := r.resolveWolfWorktree(ctx, p); wolfWorktree != "" {
+		planningWorktree = wolfWorktree
+	}
+	useACP := r.UsesACP(p.Kind)
 
 	data := prompts.Data{
 		Kind:                    p.Kind,
@@ -410,6 +523,11 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
 		PushBranch:              p.PushBranch,
+		Sandboxed:               useACP && p.Kind == agent.WolfAgent,
+		Roots:                   p.Observe.Roots,
+		SnapshotFile:            p.Observe.SnapshotFile,
+		AuditLog:                p.Observe.AuditLog,
+		SessionsRoot:            p.Observe.SessionsRoot,
 	}
 	instructions, err := prompts.Render(p.Kind, data)
 	if err != nil {
@@ -434,6 +552,11 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
 		PushBranch:              p.PushBranch,
+		Sandboxed:               useACP && p.Kind == agent.WolfAgent,
+		Roots:                   p.Observe.Roots,
+		SnapshotFile:            p.Observe.SnapshotFile,
+		AuditLog:                p.Observe.AuditLog,
+		SessionsRoot:            p.Observe.SessionsRoot,
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {
 		return nil, err
@@ -444,9 +567,9 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	// written above are read by the sandboxed ACP client from the mounted
 	// workspace exactly as before; only the launch mechanism changes — an
 	// acp-wrapper host process instead of a tmux window running
-	// `sbx exec claude -p`. Interactive agents (project/wolf) always take the
-	// legacy tmux path below.
-	if !p.Kind.Interactive() && r.AcpLauncher != nil {
+	// `sbx exec claude -p`. The archive agent always takes the legacy tmux path
+	// below; so does the wolf when WolfOnHost is set (see UsesACP).
+	if useACP {
 		return r.startACP(ctx, p, workingDir, planningWorktree)
 	}
 
@@ -589,7 +712,7 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 		// Teach the window to commit as the host user and, when the host signs,
 		// to SSH-sign — the same env the ACP commit agent injects. Signing is
 		// preflighted first: with commit.gpgsign forced on, a forwarded agent
-		// that holds no key (1Password locked, sandboxd restarted without it)
+		// that holds no key (private ssh-agent empty, sandboxd restarted without it)
 		// would make every `git commit` in this interactive window hard-fail, so
 		// a failed preflight degrades to unsigned (signingKey cleared) exactly
 		// like acpwrapper.Run does for the commit agent.
@@ -649,7 +772,7 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 // Unlike the tmux path, this does NOT call r.Sandbox or wrap the command in
 // `sbx exec` — the wrapper owns sandbox creation end-to-end.
 func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorktree string) (agent.Session, error) {
-	sandboxName := SandboxNameFor(p.Kind, p.ProjectPath, p.TaskName)
+	sandboxName := ACPSandboxNameFor(p.Kind, p.ProjectPath, p.TaskName)
 	if sandboxName == "" {
 		return nil, fmt.Errorf("runner: acp launch for kind %s needs a ProjectPath to derive a sandbox name", p.Kind)
 	}
@@ -663,6 +786,9 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 	}
 	sessionID := acpSessionID(p)
 	workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
+	if p.Kind == agent.WorkingmanAgent {
+		workspaces = workingmanWorkspaces(workingDir, p.ReadOnlyMounts)
+	}
 
 	// Allocate the session id and write the initial session.json. acp-wrapper
 	// will overwrite this record with StatusRunning once its socket is live;
@@ -682,12 +808,13 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		ProjectPath: p.ProjectPath,
 		TaskPath:    p.TaskPath,
 		Kind:        p.Kind.String(),
+		Persistent:  p.Persistent,
 	}
 	if err := store.Write(rec); err != nil {
 		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
 	}
 
-	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, p.StaticMCPs, p.Policies, p.TaskPath, p.SaveSandbox)
+	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, p.StaticMCPs, p.Policies, p.TaskPath, p.SaveSandbox, p.Persistent)
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionID,
@@ -715,7 +842,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 // acpWrapperCommand builds the argv that launches one acp-wrapper host process
 // for an ACP session. The wrapper resolves --workspace paths to absolute itself,
 // but they already are (workspace.Manager and the orch dir both yield abs paths).
-func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, staticMCPs []string, policies []policy.Rule, taskPath string, saveSandbox bool) []string {
+func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, staticMCPs []string, policies []policy.Rule, taskPath string, saveSandbox, persistent bool) []string {
 	bin := r.AcpWrapperPath
 	if bin == "" {
 		bin = "acp-wrapper"
@@ -726,13 +853,33 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, project
 		"--kit", r.Kit,
 		"--sandbox", sandboxName,
 		"--sessions-root", sessionsRoot,
+	}
+	if persistent {
+		// Conversational session (the wolf): survive client disconnects — the TUI
+		// and channels come and go — and end on the conditions below instead.
+		args = append(args, "--persistent")
+		// The unblock end condition is blocked-project specific, so only the wolf
+		// gets it (and only with a project file to watch).
+		if kind == agent.WolfAgent.String() && projectPath != "" {
+			if g := durationOrDefault(r.PersistentUnblockGrace, DefaultUnblockGrace); g > 0 {
+				args = append(args, "--unblock-grace", g.String())
+			}
+		}
+		// The workingman agent is always-on by design — it sits idle for as long as
+		// nobody asks it anything — so it never gets an idle end condition.
+		if kind != agent.WorkingmanAgent.String() {
+			if t := durationOrDefault(r.PersistentIdleTimeout, DefaultPersistentIdleTimeout); t > 0 {
+				args = append(args, "--idle-timeout", t.String())
+			}
+		}
+	} else {
 		// Orch's planning/task/commit are single-turn: when the TUI's watcher
 		// drives its one prompt and disconnects, the wrapper should exit so
 		// the daemon's session_ended callback fires and the next stage
 		// dispatches. Without this the wrapper would survive the disconnect
 		// (designed for long-lived interactive sessions) and the project
 		// would stall in `working`.
-		"--exit-when-empty",
+		args = append(args, "--exit-when-empty")
 	}
 	if r.SbxPath != "" {
 		args = append(args, "--sbx", r.SbxPath)
@@ -881,8 +1028,9 @@ func sessionName(p Plan) string {
 //     in the control dir. It gets its OWN sandbox — distinct from planning's —
 //     so the two agents, which run back-to-back on the same control dir, don't
 //     collide on one sandbox with different mounts.
-//   - Wolf agent → "" (runs outside the sandbox so it can advise on the
-//     project from the host, including for sandbox-related blocks).
+//   - Wolf agent → "" (the host/tmux path: runs outside any sandbox so it can
+//     advise on the project from the host, including for sandbox-related
+//     blocks). The ACP-backed wolf does get a sandbox — see ACPSandboxNameFor.
 //   - Planning → basename of the project's control dir (the dir holding
 //     .project.yaml). Workspace = control dir.
 //   - Task / commit → "<work-stream>-<task-name>" where work-stream is the
@@ -935,6 +1083,64 @@ func SandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 	return strings.ReplaceAll(name, "_", "-")
 }
 
+// durationOrDefault resolves a Runner duration knob: zero means "use def",
+// negative means "disabled" (returned as 0 for the caller to skip), anything
+// positive is used as given.
+func durationOrDefault(v, def time.Duration) time.Duration {
+	switch {
+	case v == 0:
+		return def
+	case v < 0:
+		return 0
+	}
+	return v
+}
+
+// ACPSandboxNameFor is SandboxNameFor for sessions that run under ACP. It
+// differs in two kinds: the workingman agent gets the fixed, project-independent
+// name WorkingmanAgentSandbox, and the ACP wolf gets "<work-stream>-wolf", a sandbox
+// of its own (distinct from planning's, which may be live alongside it — the wolf
+// runs in tandem with the project's other agents). SandboxNameFor itself keeps
+// returning "" for the wolf because that is the host/tmux path's contract: no
+// sandbox. Use this one wherever the session is known to be ACP-backed (see
+// Runner.UsesACP).
+func ACPSandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
+	if kind == agent.WorkingmanAgent {
+		// Project-independent: there is one workingman agent for the whole daemon.
+		return WorkingmanAgentSandbox
+	}
+	if kind == agent.WolfAgent {
+		if projectPath == "" {
+			return ""
+		}
+		name := filepath.Base(filepath.Dir(projectPath)) + "-wolf"
+		return strings.ReplaceAll(name, "_", "-")
+	}
+	return SandboxNameFor(kind, projectPath, taskName)
+}
+
+// resolveWolfWorktree provisions (idempotently) the wsp worktree an ACP wolf
+// mounts as its second workspace, mirroring resolvePlanningWorktree but
+// best-effort: any problem returns "" and is audited rather than failing the
+// launch. Returns "" for any other kind, for a host wolf (it can see the
+// worktree anyway), or when there is no workspace manager / Branch / Repos.
+func (r *Runner) resolveWolfWorktree(ctx context.Context, p Plan) string {
+	if p.Kind != agent.WolfAgent || !r.UsesACP(p.Kind) {
+		return ""
+	}
+	if r.Workspaces == nil || p.Branch == "" || len(p.Repos) == 0 {
+		return ""
+	}
+	dir, err := r.Workspaces.Create(ctx, p.Branch, p.Repos)
+	if err != nil {
+		if r.Audit != nil {
+			r.Audit.Log("wolf_worktree_unavailable", "branch", p.Branch, "err", err.Error())
+		}
+		return ""
+	}
+	return dir
+}
+
 // sandboxWorkspaces returns the host paths to mount into the sandbox. The
 // first element is the primary workspace claude `cd`s into; the rest are
 // extra mounts.
@@ -964,13 +1170,88 @@ func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath, planningWorktre
 			return []string{workingDir}
 		}
 		return []string{workingDir, orchDir}
-	case agent.PlanningAgent:
+	case agent.PlanningAgent, agent.WolfAgent:
+		// The wolf, like planning, runs in the control dir and optionally mounts
+		// the project's source worktree as a second workspace (see
+		// resolveWolfWorktree). The control dir already holds .project.yaml,
+		// tasks/ and the blocked-session record, so it needs no extra orch mount.
 		if planningWorktree == "" || planningWorktree == workingDir {
 			return []string{workingDir}
 		}
 		return []string{workingDir, planningWorktree}
 	}
 	return []string{workingDir}
+}
+
+// ReadOnlySuffix is appended to a workspace path to ask sbx for a read-only
+// bind mount (`sbx create ... <path>:ro`). The same spelling is understood by
+// acp-wrapper's --workspace flag.
+const ReadOnlySuffix = ":ro"
+
+// workingmanWorkspaces returns the mounts of the workingman agent's sandbox: its
+// writable scratch directory first (the agent's cwd, holding .orch/), then every
+// observed path read-only. Read-only is enforced by the mount itself, which is
+// what actually stops the agent writing to .project.yaml, tasks/ or the audit
+// log — no prompt instruction or policy is needed for that guarantee.
+//
+// Paths are made absolute, de-duplicated, and a read-only mount that lies under
+// another read-only mount (or under/over the scratch dir) is dropped: the
+// ancestor already exposes it, and nesting mounts of different modes is exactly
+// the ambiguity this function exists to avoid. A read-only path that CONTAINS the
+// scratch dir is also dropped — it would otherwise place the writable dir inside
+// a read-only tree.
+func workingmanWorkspaces(scratch string, readOnly []string) []string {
+	scratch = absClean(scratch)
+	var ro []string
+	for _, p := range readOnly {
+		p = absClean(p)
+		if p == "" || pathWithin(scratch, p) || pathWithin(p, scratch) {
+			continue
+		}
+		ro = append(ro, p)
+	}
+	var keep []string
+	for i, p := range ro {
+		covered := false
+		for j, q := range ro {
+			if i == j {
+				continue
+			}
+			// p is covered by q when it lies under q; of two equal paths the
+			// earlier one wins.
+			if pathWithin(p, q) && (p != q || j < i) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			keep = append(keep, p)
+		}
+	}
+	out := []string{scratch}
+	for _, p := range keep {
+		out = append(out, p+ReadOnlySuffix)
+	}
+	return out
+}
+
+func absClean(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return filepath.Clean(p)
+}
+
+// pathWithin reports whether p is root or lies beneath it.
+func pathWithin(p, root string) bool {
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // shortID hashes a path to a short stable suffix. Used for session names when
