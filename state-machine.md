@@ -619,6 +619,13 @@ of** status routing (right after the cron registration check, before the
 short-circuits: the normal status agent must not run at the same time the
 archive agent is trying to leave the very same workspace clean and pushed.
 
+`:cleanup` is *intended* for projects in the `merged` state: every PR has
+landed, so the project is ready to be archived. The TUI renders `merged` in its
+own colour, and when a `merged` project is selected the `:` menu highlights
+`cleanup` and labels it "merged — ready to :cleanup/archive". Behaviour is
+unchanged for every other status — the command is still accepted anywhere, and
+the archive agent itself is unaffected.
+
 The contract, end to end:
 
 1. The TUI's `:cleanup` sets `Cleanup = true` and saves as `WriterAgent` (a

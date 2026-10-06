@@ -408,6 +408,11 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeCommandPicker
 		m.cmdPickerIdx = 0
 		m.statusMsg = ""
+		// A merged project's natural next step is :cleanup, so start the
+		// highlight there.
+		if m.selectedProjectMerged() {
+			m.cmdPickerIdx = projectCommandIndex("cleanup")
+		}
 	case "a":
 		// Open the full-window ACP session tab view. Only meaningful when an
 		// ACP source is wired in (daemon mode); a no-op in standalone tui mode.
@@ -1045,6 +1050,9 @@ var (
 	// var backed a project status literally called "done".
 	statusDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))
 	statusStopped = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	// statusMerged is the terminal "all PRs landed, ready to :cleanup" state;
+	// a distinct purple so it doesn't read as plain idle.
+	statusMerged  = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
 	statusRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	cardNameStyle = lipgloss.NewStyle().Bold(true)
@@ -1166,7 +1174,7 @@ func renderStatus(s string) string {
 	case "stopped":
 		return statusStopped.Render(s)
 	case "merged":
-		return statusDone.Render(s)
+		return statusMerged.Render(s)
 	default:
 		return s
 	}

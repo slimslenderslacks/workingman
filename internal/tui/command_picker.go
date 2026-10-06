@@ -5,6 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/slimslenderslacks/work/internal/project"
 )
 
 // projectCommand is one row of the `:` command-picker menu. key is the
@@ -34,6 +36,28 @@ var projectCommands = []projectCommand{
 	{"archive", "archive", "archive this work stream"},
 	{"stop", "stop", "pause this work stream and kill its running agents"},
 	{"start", "start", "resume a stopped work stream"},
+}
+
+// projectCommandIndex returns the menu row of the command with the given key,
+// or 0 if there is none.
+func projectCommandIndex(key string) int {
+	for i, c := range projectCommands {
+		if c.key == key {
+			return i
+		}
+	}
+	return 0
+}
+
+// selectedProjectMerged reports whether the selected work stream is in the
+// `merged` state — the point at which `:cleanup` is the recommended command.
+func (m model) selectedProjectMerged() bool {
+	for _, p := range m.projects {
+		if p.Path == m.projSel {
+			return p.Status == project.StatusMerged
+		}
+	}
+	return false
 }
 
 // handleCommandPickerKey drives the `:` command menu: j/k (or arrows) move the
@@ -190,12 +214,17 @@ func (m model) renderCommandPickerModal() string {
 	var b strings.Builder
 	b.WriteString(paneTitleStyle.Render("Commands"))
 	b.WriteString("\n\n")
+	merged := m.selectedProjectMerged()
 	for i, c := range projectCommands {
 		marker := "  "
-		line := c.label + "  —  " + dimStyle.Render(c.desc)
+		desc := c.desc
+		if merged && c.key == "cleanup" {
+			desc = "merged — ready to :cleanup/archive"
+		}
+		line := c.label + "  —  " + dimStyle.Render(desc)
 		if i == m.cmdPickerIdx {
 			marker = "▸ "
-			line = sessionRowSelectedStyle.Render(c.label) + "  —  " + dimStyle.Render(c.desc)
+			line = sessionRowSelectedStyle.Render(c.label) + "  —  " + dimStyle.Render(desc)
 		}
 		b.WriteString(marker + line)
 		b.WriteString("\n")
