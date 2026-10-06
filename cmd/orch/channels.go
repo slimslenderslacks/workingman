@@ -9,6 +9,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/channels"
+	"github.com/slimslenderslacks/work/internal/channels/signal"
 	"github.com/slimslenderslacks/work/internal/channels/whatsapp"
 	"github.com/slimslenderslacks/work/internal/daemon"
 	"github.com/slimslenderslacks/work/internal/notify"
@@ -65,6 +66,7 @@ func setupChannels(configPath, logDir, stateDir string, a *audit.Logger) (*daemo
 			Logger: logger,
 			Cloud:  whatsapp.CloudFactory(logger),
 		}),
+		signal.Type: signal.Factory(logger),
 	}
 	reg, err := channels.Build(cfg, filepath.Dir(resolved), factories)
 	if err != nil {

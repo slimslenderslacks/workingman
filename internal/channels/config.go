@@ -313,7 +313,7 @@ func (c *Config) ChannelNames() []string {
 // inboundTypes are the channel types that can receive messages from a human
 // (not just send): every transport's Channel.Start delivers inbound messages
 // to the handler. Anything not listed here is treated as send-only.
-var inboundTypes = map[string]bool{"whatsapp": true}
+var inboundTypes = map[string]bool{"whatsapp": true, "signal": true}
 
 // InboundCapable reports whether the channel is enabled and its transport can
 // receive messages.
