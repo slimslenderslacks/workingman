@@ -106,9 +106,24 @@ fi
 # keys and signing fails. Restart it so it adopts the private agent we just
 # exported. This stops running sandboxes; they are recreated on demand, so
 # it's safe at orchestrator startup.
+# Failures are no longer swallowed: a sandboxd that did not restart (or came up
+# without our SSH_AUTH_SOCK) makes every ssh push/sign fail later, so abort here
+# with an actionable message instead.
 if command -v sbx >/dev/null 2>&1; then
-  sbx daemon stop  >/dev/null 2>&1 || true
-  sbx daemon start -d >/dev/null 2>&1 || true
+  sbx daemon stop >/dev/null 2>&1 || true
+  if ! sbx daemon start -d >/dev/null 2>&1; then
+    echo "start-orch: error: 'sbx daemon start -d' failed; sandboxd is not bound to the private ssh-agent ($SSH_AUTH_SOCK). Fix sbx and re-run." >&2
+    exit 1
+  fi
+  # Verify sandboxd is bound to the private agent (probes via a throwaway
+  # sandbox) and, if sandboxd runs without our SSH_AUTH_SOCK, restarts it bound
+  # to the private agent (--yes). Skip with ORCH_SKIP_AGENT_CHECK=1.
+  if [ "${ORCH_SKIP_AGENT_CHECK:-0}" != 1 ] && [ -x "$HERE/check-signing.sh" ]; then
+    if ! "$HERE/check-signing.sh" --yes; then
+      echo "start-orch: error: sandboxd does not forward the private ssh-agent; ssh push/signing would fail. Run ./check-signing.sh --yes, or set ORCH_SKIP_AGENT_CHECK=1 to ignore." >&2
+      exit 1
+    fi
+  fi
 fi
 
 # The orch binary moved into this workspace, so the old $HERE/../acp-kit default

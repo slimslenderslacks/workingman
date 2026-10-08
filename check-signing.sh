@@ -124,13 +124,32 @@ probe_forwarded() {
   if printf '%s' "$out" | grep -q "SHA256:"; then echo ok; else echo empty; fi
 }
 
+# Push needs more than a key: github must accept it. github answers `ssh -T`
+# with exit 1 even on success, so judge by the text. Runs in the probe sandbox.
+probe_push() {
+  local out
+  out="$(sbx exec "$PROBE" -- sh -c 'ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 git@github.com 2>&1' 2>&1 || true)"
+  if printf '%s' "$out" | grep -qi "successfully authenticated"; then
+    echo ok
+  elif printf '%s' "$out" | grep -qi "permission denied"; then
+    echo denied
+  else
+    echo unreachable
+  fi
+}
+
 log "probing the agent forwarded into sandboxes (creating a throwaway sandbox)..."
 result="$(probe_forwarded)"
 
 case "$result" in
   ok)
-    log "sandbox agent: OK — signing key is reachable inside sandboxes. Nothing to fix."
-    exit 0
+    log "sandbox agent: OK — signing key is reachable inside sandboxes."
+    push="$(probe_push)"
+    case "$push" in
+      ok) log "ssh push: OK — github.com accepts the forwarded key. Nothing to fix."; exit 0 ;;
+      denied) fail "ssh push: github.com rejected the forwarded key (Permission denied). The key from ORCH_SSH_KEY_REF is not authorised for push; a sandboxd restart will not help." ;;
+      *) fail "ssh push: could not reach github.com:22 from the sandbox (firewall? try 'sbx policy log'); a sandboxd restart will not help." ;;
+    esac
     ;;
   empty)
     log "sandbox agent: BROKEN — the private agent has the key, but sandboxes see an EMPTY agent."

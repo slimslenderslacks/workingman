@@ -212,6 +212,10 @@ type Config struct {
 	// state, not just a stderr line that's easy to miss when the daemon runs
 	// headless.
 	signingPreflightFailed bool
+
+	// pushPreflightFailed is set internally when the commit agent's ssh push
+	// preflight fails (see pushPreflightError); recorded in session.json.
+	pushPreflightFailed bool
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -250,6 +254,7 @@ func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.T
 		Kind:          c.Kind,
 		Persistent:    c.Persistent,
 		SigningBroken: c.signingPreflightFailed,
+		PushBroken:    c.pushPreflightFailed,
 	}
 }
 
@@ -659,6 +664,21 @@ func signingPreflight(ctx context.Context, run commandFunc, c Config) (checked, 
 	return gitsign.Preflight(ctx, gitsign.RunFunc(run), c.SbxPath, c.SandboxName, c.SigningKey)
 }
 
+// pushPreflightError verifies the forwarded agent can authenticate a git push.
+// It only applies to the commit agent (the only kind that pushes); other kinds
+// return nil without running anything. A non-nil error carries an actionable
+// message and makes Run abort instead of failing silently at `git push`.
+func pushPreflightError(ctx context.Context, run commandFunc, c Config) error {
+	if c.Kind != "commit" {
+		return nil
+	}
+	res := gitsign.PushPreflight(ctx, gitsign.RunFunc(run), c.SbxPath, c.SandboxName)
+	if res.OK {
+		return nil
+	}
+	return fmt.Errorf("acpwrapper: push preflight FAILED for sandbox %q: %s", c.SandboxName, res.Reason)
+}
+
 // withSigningPreflightResult is the actual fix for the root cause this task
 // tracks down: execArgs previously forced commit.gpgsign=true whenever
 // c.SigningKey was set, with no guard on signingPreflight's result. When the
@@ -750,6 +770,18 @@ func Run(ctx context.Context, c Config) error {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: signing preflight OK — forwarded agent holds a key\n", c.SessionID)
 	}
 	c = withSigningPreflightResult(c, checked, ok)
+
+	// Push preflight: the commit agent's last step is `git push` over ssh, which
+	// depends on the same forwarded agent but is NOT covered by the signing
+	// check (it only runs when signing is configured, and only proves a key
+	// exists). Fail loudly and early with an actionable message rather than
+	// letting the agent do its work and block at push time.
+	if err := pushPreflightError(ctx, execCommand, c); err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ERROR %v\n", c.SessionID, err)
+		c.pushPreflightFailed = true
+		_ = store.Write(c.sessionRecord(session.StatusFailed, createdAt, time.Now()))
+		return err
+	}
 
 	// Cancelling this child context tears down the ACP client process when the
 	// listener stops (and vice versa), so neither outlives the other. Keep a

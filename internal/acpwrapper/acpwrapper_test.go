@@ -1204,3 +1204,40 @@ func TestGoModCacheDirSkipsReadOnlyMounts(t *testing.T) {
 		t.Errorf("goModCacheDir = %q; a read-only mount can't be a writable module cache", got)
 	}
 }
+
+func TestPushPreflightError(t *testing.T) {
+	fail := func(context.Context, string, ...string) ([]byte, error) {
+		return nil, errors.New("exit status 1")
+	}
+	// Non-commit kinds never push: no command runs, no error.
+	task := Config{Kind: "task", SandboxName: "acp-s", SbxPath: "sbx"}
+	if err := pushPreflightError(context.Background(), func(context.Context, string, ...string) ([]byte, error) {
+		t.Fatal("run must not be called for non-commit kinds")
+		return nil, nil
+	}, task); err != nil {
+		t.Errorf("task kind: err = %v, want nil", err)
+	}
+	// Commit agent with a dead agent fails loudly with an actionable message.
+	commit := Config{Kind: "commit", SandboxName: "acp-s", SbxPath: "sbx"}
+	err := pushPreflightError(context.Background(), fail, commit)
+	if err == nil || !strings.Contains(err.Error(), "check-signing.sh") {
+		t.Errorf("commit kind with dead agent: err = %v, want actionable error", err)
+	}
+	// Commit agent with a working push passes.
+	good := func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if args[len(args)-1] == "-l" {
+			return []byte("SHA256:x"), nil
+		}
+		return []byte("successfully authenticated"), errors.New("exit status 1")
+	}
+	if err := pushPreflightError(context.Background(), good, commit); err != nil {
+		t.Errorf("commit kind with good agent: err = %v", err)
+	}
+}
+
+func TestSessionRecordReflectsPushBroken(t *testing.T) {
+	c := Config{pushPreflightFailed: true}
+	if !c.sessionRecord(session.StatusFailed, time.Now(), time.Now()).PushBroken {
+		t.Errorf("PushBroken = false, want true")
+	}
+}
