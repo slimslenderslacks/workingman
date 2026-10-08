@@ -651,7 +651,10 @@ the sandbox.) Note the audit-log directory also holds `channels.log`,
 `daemon.log` and `acp-wrapper.log` if the audit log lives beside them.
 
 **Prompt structure (`workingman.tmpl`).** It states the agent is a read-only
-observer/answerer; lists every observed path (from `prompts.Data.Roots`,
+observer/answerer whose only write exception is creating new
+`<root>/<project>/project.md` and `<root>/<project>/intake/<task>.md` files
+(kebab-case names, human confirmation first, never overwriting, never touching
+`.project.yaml`, `tasks/*.yaml`, `blocked-session.yaml` or other files); lists every observed path (from `prompts.Data.Roots`,
 `SnapshotFile`, `AuditLog`, `SessionsRoot`, mirrored into `.orch/context.yaml`);
 says to START by reading the snapshot (checking `generated_at` /
 `daemon.state` for a dead or stale daemon) and to re-read it for every
@@ -660,7 +663,7 @@ state machine (the semantics of `state-machine.md`); explains finding a wolf
 session in `sessions[]` and reading `<sessions-root>/<id>/stream.log`; sets
 the answer style (replies go out over WhatsApp or Signal: short, plain text, no wide
 tables, lead with the answer, cite `blocked_reason`/`failure_reason`); and
-forbids claiming to change state — to act, it names the TUI command (`:` →
+otherwise forbids claiming to change state — to act, it names the TUI command (`:` →
 `stop`/`start`/`wolf`/`review`/`cleanup`/`archive`) or the YAML edit (project
 `status`, task `status`, an `intake/*.md` file) for the human to use.
 
