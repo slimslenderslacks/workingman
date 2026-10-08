@@ -608,7 +608,7 @@ and no `--idle-timeout` (silence between questions is its normal state), and
 the stranded-session reaper exempts it (`strandedVerdict` in `reaper.go`).
 
 **Launch/identity.** `runner.Plan{Kind: WorkingmanAgent, WorkingDir: <scratch>,
-SessionName: "workingman-agent", Persistent: true, ReadOnlyMounts, Observe}`.
+SessionName: "workingman-agent", Persistent: true, WritableMounts, ReadOnlyMounts, Observe}`.
 Requires the ACP path (`Runner.Start` refuses otherwise — the tmux path has no
 read-only mounts, and silently launching it with write access would defeat the
 point). The ACP session id and the sbx sandbox are both the fixed name
@@ -619,13 +619,14 @@ under the session-map key `"workingman-agent"` — not a project path and not a
 snapshot gives it no work stream / project path. `session.json` carries
 `kind: workingman`, no `project_path`, no `task_path`.
 
-**Mounts (read-only enforced by the mount).** The scratch dir is the one
-writable workspace and the agent's cwd; it holds the usual `.orch/` handoff
-files. Everything it observes is a separate `--workspace <path>:ro` (sbx's
-read-only bind-mount syntax, understood by `acp-wrapper --workspace`):
+**Mounts (read-only enforced by the mount).** The scratch dir is the agent's
+cwd and holds the usual `.orch/` handoff files. Every orch `--root` is a
+second, **writable** workspace (`Plan.WritableMounts`), so the agent can create
+`<root>/<project>/project.md` and `<root>/<project>/intake/<task>.md`; the
+prompt limits it to creating new files, never editing existing state. All other
+observed paths are a separate `--workspace <path>:ro` (sbx's read-only
+bind-mount syntax, understood by `acp-wrapper --workspace`):
 
-- every orch `--root` — `.project.yaml`, `tasks/`, `blocked-session.yaml`,
-  `intake/` of every work stream;
 - the snapshot's directory (the file is replaced by rename, so the directory is
   mounted, not the file) — the daemon's live in-memory view;
 - the audit log's directory;
@@ -634,11 +635,11 @@ read-only bind-mount syntax, understood by `acp-wrapper --workspace`):
 
 `runner.workingmanWorkspaces` makes them absolute, de-duplicates, and drops a
 read-only mount that lies under another one (or that would contain, or sit
-inside, the writable scratch dir). The scratch dir defaults to
+inside, the scratch dir or a writable root). The scratch dir defaults to
 `<sessions-root>/../workingman-agent` and must lie outside every `--root`
 (`New` rejects an overlap — a write there would feed the daemon's own watcher,
-and a root has to stay read-only). Because enforcement is the mount, the agent
-has no write path to `.project.yaml` or `tasks/` at all, and gets no static MCP
+). Because the snapshot, audit log and sessions are mounted read-only, the
+agent has no write path to them, and gets no static MCP
 and no extra network policy: no GitHub or other secrets beyond what claude
 itself needs. `Plan.Policies` / `WorkingmanAgentConfig.Policies` are forwarded
 to `sbx policy` like any task's, for a filesystem rule limiting writes to the

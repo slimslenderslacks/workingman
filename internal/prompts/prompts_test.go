@@ -512,6 +512,8 @@ func TestRenderWorkingman(t *testing.T) {
 		"SHORT, plain text",
 		"no tables",
 		"NEVER change orch state",
+		"project.md",
+		"intake/<task-description>.md",
 		"TUI's `:` menu",
 		"`blocked` → the WOLF agent",
 		"attempts` reaches\n  3",

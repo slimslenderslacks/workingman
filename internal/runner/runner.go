@@ -134,11 +134,17 @@ type Plan struct {
 	// process is already long-lived.
 	Persistent bool
 
-	// ReadOnlyMounts, for the workingman agent, are host paths bind-mounted into
-	// its sandbox READ-ONLY (sbx's `<path>:ro`) next to its writable scratch
-	// directory (WorkingDir): the orch roots, the snapshot dir, the audit-log dir
-	// and the ACP sessions root. Ignored for every other Kind. See
+	// WritableMounts, for the workingman agent, are host paths bind-mounted into
+	// its sandbox READ-WRITE next to its scratch directory (WorkingDir): the orch
+	// roots, so it can create <root>/<project>/project.md and
+	// <root>/<project>/intake/*.md. Ignored for every other Kind. See
 	// workingmanWorkspaces.
+	WritableMounts []string
+
+	// ReadOnlyMounts, for the workingman agent, are host paths bind-mounted into
+	// its sandbox READ-ONLY (sbx's `<path>:ro`) next to its writable mounts: the
+	// snapshot dir, the audit-log dir and the ACP sessions root. Ignored for
+	// every other Kind. See workingmanWorkspaces.
 	ReadOnlyMounts []string
 
 	// Observe describes what the workingman agent observes, for its prompt and
@@ -151,8 +157,9 @@ type Plan struct {
 }
 
 // Observe is the description of the orch state a workingman agent may read:
-// everything in it is also mounted read-only (see Plan.ReadOnlyMounts), at the
-// same absolute host path the daemon uses.
+// everything in it is also mounted (the roots read-write, see
+// Plan.WritableMounts; the rest read-only, see Plan.ReadOnlyMounts), at the same
+// absolute host path the daemon uses.
 type Observe struct {
 	Roots        []string // orch roots (--root): <root>/<work-stream>/{.project.yaml,tasks/}
 	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
@@ -787,7 +794,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 	sessionID := acpSessionID(p)
 	workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
 	if p.Kind == agent.WorkingmanAgent {
-		workspaces = workingmanWorkspaces(workingDir, p.ReadOnlyMounts)
+		workspaces = workingmanWorkspaces(workingDir, p.WritableMounts, p.ReadOnlyMounts)
 	}
 
 	// Allocate the session id and write the initial session.json. acp-wrapper
@@ -1189,37 +1196,62 @@ func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath, planningWorktre
 const ReadOnlySuffix = ":ro"
 
 // workingmanWorkspaces returns the mounts of the workingman agent's sandbox: its
-// writable scratch directory first (the agent's cwd, holding .orch/), then every
-// observed path read-only. Read-only is enforced by the mount itself, which is
-// what actually stops the agent writing to .project.yaml, tasks/ or the audit
-// log — no prompt instruction or policy is needed for that guarantee.
+// writable scratch directory first (the agent's cwd, holding .orch/), then the
+// other writable mounts (the orch roots), then every observed path read-only.
+// Read-only is enforced by the mount itself, which is what actually stops the
+// agent writing to the snapshot, the audit log or the sessions — no prompt
+// instruction or policy is needed for that guarantee.
 //
-// Paths are made absolute, de-duplicated, and a read-only mount that lies under
-// another read-only mount (or under/over the scratch dir) is dropped: the
-// ancestor already exposes it, and nesting mounts of different modes is exactly
-// the ambiguity this function exists to avoid. A read-only path that CONTAINS the
-// scratch dir is also dropped — it would otherwise place the writable dir inside
-// a read-only tree.
-func workingmanWorkspaces(scratch string, readOnly []string) []string {
+// Paths are made absolute and de-duplicated. A writable mount that overlaps the
+// scratch dir is dropped (the scratch dir wins), as is one under another writable
+// mount. A read-only mount that lies under any other mount, or that CONTAINS the
+// scratch dir or a writable mount, is dropped: nesting mounts of different modes
+// is exactly the ambiguity this function exists to avoid, and a read-only
+// ancestor must not shadow a writable path.
+func workingmanWorkspaces(scratch string, writable, readOnly []string) []string {
 	scratch = absClean(scratch)
+	var rw []string
+	for _, p := range writable {
+		p = absClean(p)
+		if p == "" || pathWithin(scratch, p) || pathWithin(p, scratch) {
+			continue
+		}
+		rw = append(rw, p)
+	}
+	rw = dropCovered(rw)
 	var ro []string
 	for _, p := range readOnly {
 		p = absClean(p)
 		if p == "" || pathWithin(scratch, p) || pathWithin(p, scratch) {
 			continue
 		}
-		ro = append(ro, p)
-	}
-	var keep []string
-	for i, p := range ro {
-		covered := false
-		for j, q := range ro {
-			if i == j {
-				continue
+		shadowed := false
+		for _, w := range rw {
+			if pathWithin(p, w) || pathWithin(w, p) {
+				shadowed = true
+				break
 			}
-			// p is covered by q when it lies under q; of two equal paths the
-			// earlier one wins.
-			if pathWithin(p, q) && (p != q || j < i) {
+		}
+		if !shadowed {
+			ro = append(ro, p)
+		}
+	}
+	out := []string{scratch}
+	out = append(out, rw...)
+	for _, p := range dropCovered(ro) {
+		out = append(out, p+ReadOnlySuffix)
+	}
+	return out
+}
+
+// dropCovered removes every path that lies under another path of the list; of
+// two equal paths the earlier one is kept.
+func dropCovered(paths []string) []string {
+	var keep []string
+	for i, p := range paths {
+		covered := false
+		for j, q := range paths {
+			if i != j && pathWithin(p, q) && (p != q || j < i) {
 				covered = true
 				break
 			}
@@ -1228,11 +1260,7 @@ func workingmanWorkspaces(scratch string, readOnly []string) []string {
 			keep = append(keep, p)
 		}
 	}
-	out := []string{scratch}
-	for _, p := range keep {
-		out = append(out, p+ReadOnlySuffix)
-	}
-	return out
+	return keep
 }
 
 func absClean(p string) string {
