@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -108,5 +109,35 @@ func TestPreflight(t *testing.T) {
 	}
 	if checked, ok := Preflight(context.Background(), emptyRun, "sbx", "s", "k"); !checked || ok {
 		t.Errorf("empty agent: checked=%v ok=%v, want true false", checked, ok)
+	}
+}
+
+func TestPushPreflight(t *testing.T) {
+	const keyOut = "256 SHA256:abc123 key (ED25519)\n"
+	mk := func(agentOut string, agentErr error, probeOut string) RunFunc {
+		return func(_ context.Context, _ string, args ...string) ([]byte, error) {
+			if args[len(args)-1] == "-l" {
+				return []byte(agentOut), agentErr
+			}
+			return []byte(probeOut), errors.New("exit status 1") // github exits 1 even on success
+		}
+	}
+	tests := []struct {
+		name   string
+		run    RunFunc
+		ok     bool
+		reason string
+	}{
+		{"authenticated", mk(keyOut, nil, "Hi u! You've successfully authenticated, but GitHub does not provide shell access."), true, ""},
+		{"empty agent", mk("The agent has no identities.", errors.New("exit status 1"), ""), false, "check-signing.sh"},
+		{"denied", mk(keyOut, nil, "git@github.com: Permission denied (publickey)."), false, "not authorised"},
+		{"hostkey", mk(keyOut, nil, "Host key verification failed."), false, "host key"},
+		{"unreachable", mk(keyOut, nil, "ssh: connect to host github.com port 22: Connection timed out"), false, "sbx policy"},
+	}
+	for _, tt := range tests {
+		got := PushPreflight(context.Background(), tt.run, "sbx", "s")
+		if got.OK != tt.ok || (tt.reason != "" && !strings.Contains(got.Reason, tt.reason)) {
+			t.Errorf("%s: got %+v, want ok=%v reason containing %q", tt.name, got, tt.ok, tt.reason)
+		}
 	}
 }

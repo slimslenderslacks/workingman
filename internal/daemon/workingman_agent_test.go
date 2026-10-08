@@ -166,7 +166,7 @@ func TestWorkingmanAgentStartsAtBootAndIsObservable(t *testing.T) {
 	for _, want := range []string{
 		"--persistent", "--kind workingman", "--sandbox workingman-agent", "--session-id workingman-agent",
 		"--workspace " + scratch + " ", // writable scratch, first
-		"--workspace " + h.root + ":ro",
+		"--workspace " + h.root,
 		"--workspace " + filepath.Join(h.base, "state") + ":ro",
 		"--workspace " + filepath.Join(h.base, "logs") + ":ro",
 		"--workspace " + filepath.Join(h.base, "sessions") + ":ro",

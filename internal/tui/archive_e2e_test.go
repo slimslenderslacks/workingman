@@ -167,6 +167,13 @@ func newCleanupHarness(t *testing.T, name, branch string) *cleanupHarness {
 	}, project.WriterAgent); err != nil {
 		t.Fatalf("save project: %v", err)
 	}
+	// Let the daemon finish its first look at the file — it stamps created_at
+	// (as `daemon`) on a populated project it has never seen. Without this the
+	// stamp races the test's own read-modify-write of the file in `:cleanup`,
+	// which can clobber the request's `updated_by: agent` marker.
+	if err := waitForString(h.audit, "project_created_stamped", 3*time.Second); err != nil {
+		t.Fatalf("daemon never observed the new project:\n%s", h.audit.String())
+	}
 
 	h.model = newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	h.model.projectRoot = h.root

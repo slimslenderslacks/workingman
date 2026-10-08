@@ -54,7 +54,7 @@ flowchart LR
 
     subgraph sandboxes["sbx sandboxes (one ACP session each)"]
         wolf["wolf agent<br/>per blocked project"]
-        wm["workingman agent<br/>read-only observer"]
+        wm["workingman agent<br/>read-only observer<br/>(+ creates new project/intake files)"]
     end
 
     phone <--> graphapi
@@ -425,11 +425,12 @@ default is fail-closed.
   token in constant time. The listener binds loopback by default and warns when
   bound elsewhere.
 - **Read-only agent sandbox.** The workingman agent runs in its own sbx sandbox
-  whose only writable mount is a scratch directory; the orch roots, the
+  whose writable mounts are a scratch directory and the orch roots (the
+  prompt limits it to creating new `project.md` / `intake/*.md` files); the
   state-snapshot directory, the audit-log directory and the ACP sessions root
   are mounted `:ro` (the mount enforces it — the prompt does not). It has no
-  GitHub or other secrets and no extra network policy, and it cannot change
-  `.project.yaml` or `tasks/`; to act it names the TUI command or YAML edit for
+  GitHub or other secrets and no extra network policy, and it is told not to change
+  `.project.yaml` or `tasks/` (the roots are writable, so the prompt is the guard there); to act it names the TUI command or YAML edit for
   the human. The wolf is sandboxed too and can only write its project's control
   directory (+ its worktree). The workingman agent is told its replies go out
   over a phone messenger (short, plain text, no secrets).

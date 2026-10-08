@@ -72,8 +72,9 @@ type Data struct {
 	Sandboxed bool
 
 	// The fields below are for the WorkingmanAgent: the orch state it observes.
-	// All of these are mounted read-only into its sandbox at these same absolute
-	// paths. Workspace is its writable scratch directory.
+	// All of these are mounted into its sandbox at these same absolute paths:
+	// Roots read-write (it may create project.md and intake files), the rest
+	// read-only. Workspace is its writable scratch directory.
 	Roots        []string // orch roots (--root)
 	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
 	AuditLog     string   // the audit log file; empty when unknown

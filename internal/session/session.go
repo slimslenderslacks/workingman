@@ -141,6 +141,10 @@ type Session struct {
 	// degradation for a human or the daemon to surface, rather than relying on
 	// whoever happened to be tailing acp-wrapper's stderr at the time.
 	SigningBroken bool `json:"signing_broken,omitempty"`
+
+	// PushBroken is true when the commit agent's ssh push preflight failed
+	// (agent empty, key not authorised, host unreachable); the wrapper aborted.
+	PushBroken bool `json:"push_broken,omitempty"`
 }
 
 // validID reports whether id is usable as a single-segment directory name.

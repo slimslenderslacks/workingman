@@ -628,3 +628,42 @@ func TestEmptyIgnoresNewReposPresence(t *testing.T) {
 		t.Errorf("project with new_repos should not be Empty()")
 	}
 }
+
+// TestSaveAsNeverExposesPartialFile guards the atomic-replace behaviour: a
+// concurrent reader (the daemon's fsnotify handler) must never see the project
+// file truncated, because an empty file reads as "unpopulated" and dispatches a
+// project agent.
+func TestSaveAsNeverExposesPartialFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".project.yaml")
+	p := &Project{Description: "d", Branch: "b", Status: StatusIdle}
+	if err := SaveAs(path, p, WriterAgent); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if data, err := os.ReadFile(path); err != nil || len(data) == 0 {
+				t.Errorf("observed missing/empty project file (err=%v, len=%d)", err, len(data))
+				return
+			}
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		if err := SaveAs(path, p, WriterAgent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	<-done
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	if len(entries) != 1 {
+		t.Errorf("temp files left behind: %v", entries)
+	}
+}

@@ -17,6 +17,7 @@ func TestWorkingmanWorkspaces(t *testing.T) {
 	cases := []struct {
 		name    string
 		scratch string
+		rw      []string
 		ro      []string
 		want    []string
 	}{
@@ -51,6 +52,26 @@ func TestWorkingmanWorkspaces(t *testing.T) {
 			want:    []string{"/s/w", "/orch:ro"},
 		},
 		{
+			name:    "writable mounts follow the scratch dir, unsuffixed, before the read-only ones",
+			scratch: "/s/w",
+			rw:      []string{"/orch", "/orch2"},
+			ro:      []string{"/s/state"},
+			want:    []string{"/s/w", "/orch", "/orch2", "/s/state:ro"},
+		},
+		{
+			name:    "a read-only mount under or over a writable one is dropped",
+			scratch: "/s/w",
+			rw:      []string{"/orch"},
+			ro:      []string{"/orch/logs", "/", "/other"},
+			want:    []string{"/s/w", "/orch", "/other:ro"},
+		},
+		{
+			name:    "a writable mount overlapping scratch or nested in another is dropped",
+			scratch: "/s/w",
+			rw:      []string{"/s", "/s/w/x", "/orch/sub", "/orch"},
+			want:    []string{"/s/w", "/orch"},
+		},
+		{
 			name:    "blank entries ignored",
 			scratch: "/s/w",
 			ro:      []string{"", "  ", "/orch"},
@@ -59,7 +80,7 @@ func TestWorkingmanWorkspaces(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workingmanWorkspaces(tc.scratch, tc.ro)
+			got := workingmanWorkspaces(tc.scratch, tc.rw, tc.ro)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("workingmanWorkspaces = %v, want %v", got, tc.want)
 			}
@@ -113,7 +134,8 @@ func TestStartWorkingmanAgent(t *testing.T) {
 	_, err := r.Start(context.Background(), Plan{
 		Kind:           agent.WorkingmanAgent,
 		WorkingDir:     scratch,
-		ReadOnlyMounts: []string{orch, stateDir, auditDir, sessionsRoot},
+		WritableMounts: []string{orch},
+		ReadOnlyMounts: []string{stateDir, auditDir, sessionsRoot},
 		Observe: Observe{
 			Roots:        []string{orch},
 			SnapshotFile: filepath.Join(stateDir, "snapshot.json"),
@@ -149,8 +171,8 @@ func TestStartWorkingmanAgent(t *testing.T) {
 			t.Errorf("workingman agent must not carry %s: %v", f, cmd)
 		}
 	}
-	// Mounts: scratch writable and FIRST (the ACP client's cwd); the rest :ro.
-	want := []string{scratch, orch + ":ro", stateDir + ":ro", auditDir + ":ro", sessionsRoot + ":ro"}
+	// Mounts: scratch writable and FIRST (the ACP client's cwd); the orch root writable; the rest :ro.
+	want := []string{scratch, orch, stateDir + ":ro", auditDir + ":ro", sessionsRoot + ":ro"}
 	if got := argValues(cmd, "--workspace"); !reflect.DeepEqual(got, want) {
 		t.Errorf("--workspace = %v, want %v", got, want)
 	}

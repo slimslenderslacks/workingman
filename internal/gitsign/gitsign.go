@@ -174,3 +174,54 @@ func Preflight(ctx context.Context, run RunFunc, sbxPath, sandbox, signingKey st
 	out, err := run(ctx, sbxPath, "exec", sandbox, "--", "ssh-add", "-l")
 	return true, err == nil && strings.Contains(string(out), "SHA256:")
 }
+
+// PushHost is the git host the push preflight authenticates against.
+const PushHost = "github.com"
+
+// PushResult is the outcome of PushPreflight. Reason is a short, actionable
+// explanation, empty when OK.
+type PushResult struct {
+	OK     bool
+	Reason string
+}
+
+// PushPreflight verifies that `git push` over ssh can work from the sandbox:
+// the forwarded agent (/run/ssh-agent.sock, proxied by sandboxd) must hold a
+// key AND the git host must accept it. Preflight alone only proves the former
+// and only when signing is configured; a key that signs but is not authorised
+// for the host, a blocked port 22, or an unknown host key all look fine there
+// and surface later as a bare `git push` failure.
+//
+// The ssh probe runs through `sh -c ... 2>&1` because ssh writes its verdict to
+// stderr and ExecRun only captures stdout. github.com answers `ssh -T` with exit
+// status 1 even on success, so the verdict is read from the text, not the exit
+// code. StrictHostKeyChecking=accept-new matches what an unattended push needs.
+func PushPreflight(ctx context.Context, run RunFunc, sbxPath, sandbox string) PushResult {
+	if sbxPath == "" {
+		sbxPath = "sbx"
+	}
+	out, err := run(ctx, sbxPath, "exec", sandbox, "--", "ssh-add", "-l")
+	if err != nil || !strings.Contains(string(out), "SHA256:") {
+		return PushResult{Reason: "the SSH agent forwarded into the sandbox has no key (or is unreachable). " +
+			"sandboxd was probably restarted without the private ssh-agent from start-orch.sh; run ./check-signing.sh --yes on the host."}
+	}
+	probe := "ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 git@" + PushHost + " 2>&1"
+	out, _ = run(ctx, sbxPath, "exec", sandbox, "--", "sh", "-c", probe)
+	return classifyPushProbe(string(out))
+}
+
+func classifyPushProbe(out string) PushResult {
+	lower := strings.ToLower(out)
+	switch {
+	case strings.Contains(lower, "successfully authenticated"):
+		return PushResult{OK: true}
+	case strings.Contains(lower, "permission denied"):
+		return PushResult{Reason: "the forwarded SSH key is not authorised by " + PushHost + " (Permission denied (publickey)). " +
+			"Load a key with push access via ORCH_SSH_KEY_REF in start-orch.sh (check SSO authorisation)."}
+	case strings.Contains(lower, "host key verification failed"):
+		return PushResult{Reason: "host key verification failed for " + PushHost + " inside the sandbox; seed known_hosts or allow StrictHostKeyChecking=accept-new."}
+	default:
+		return PushResult{Reason: "could not reach " + PushHost + ":22 from the sandbox (blocked by the sbx firewall or offline?). " +
+			"Check `sbx policy log` and allow it with `sbx policy allow network " + PushHost + "`. ssh output: " + strings.TrimSpace(out)}
+	}
+}

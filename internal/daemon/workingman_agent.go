@@ -37,14 +37,14 @@ const (
 // WorkingmanAgentConfig tunes WithWorkingmanAgent. The zero value is the
 // production configuration.
 type WorkingmanAgentConfig struct {
-	// Dir is the agent's writable scratch directory — the one writable mount of
-	// its sandbox, holding its .orch/ handoff files. Default:
+	// Dir is the agent's writable scratch directory, holding its .orch/ handoff
+	// files (the orch roots are its only other writable mounts). Default:
 	// <sessions-root>/../workingman-agent. It must lie outside every watched
 	// root (New rejects it otherwise).
 	Dir string
 	// ExtraReadOnlyMounts are additional host paths mounted read-only next to
-	// the orch roots, the state snapshot dir, the audit-log dir and the ACP
-	// sessions root, which are always mounted.
+	// the state snapshot dir, the audit-log dir and the ACP sessions root, which
+	// are always mounted (the orch roots are mounted read-write).
 	ExtraReadOnlyMounts []string
 	// AuditLog is the audit log file the agent may read; its directory is
 	// mounted read-only. Defaults to the audit log recorded by WithRuntimeInfo.
@@ -179,15 +179,17 @@ func (d *Daemon) resolveWorkingman() error {
 			continue
 		}
 		if within(abs, rabs) || within(rabs, abs) {
-			return fmt.Errorf("workingman agent dir %s overlaps watched root %s: the agent's scratch writes would feed the daemon's own file watcher (and a root must stay read-only); pick a dir outside every --root", abs, rabs)
+			return fmt.Errorf("workingman agent dir %s overlaps watched root %s: the agent's scratch writes would feed the daemon's own file watcher; pick a dir outside every --root", abs, rabs)
 		}
 	}
 	w.dir = abs
 	return nil
 }
 
-// workingmanPlan builds the launch Plan: the scratch dir as the one writable
-// mount, and everything the agent observes mounted read-only.
+// workingmanPlan builds the launch Plan: the scratch dir and the orch roots
+// writable (so the agent can create <root>/<project>/project.md and intake
+// files), and everything else it observes — snapshot, audit log, sessions —
+// mounted read-only.
 func (d *Daemon) workingmanPlan() (runner.Plan, error) {
 	w := d.workingman
 	sessionsRoot, err := d.runner.ResolveSessionsRoot()
@@ -204,7 +206,6 @@ func (d *Daemon) workingmanPlan() (runner.Plan, error) {
 		obs.AuditLog = d.snapshot.info.AuditLog
 	}
 	var ro []string
-	ro = append(ro, obs.Roots...)
 	if obs.SnapshotFile != "" {
 		// The snapshot is replaced by rename, so the whole directory is mounted:
 		// a file bind-mount would keep pointing at the replaced inode.
@@ -220,6 +221,7 @@ func (d *Daemon) workingmanPlan() (runner.Plan, error) {
 		WorkingDir:     w.dir,
 		SessionName:    runner.WorkingmanAgentSession,
 		Persistent:     true,
+		WritableMounts: obs.Roots,
 		ReadOnlyMounts: ro,
 		Observe:        obs,
 		Policies:       w.cfg.Policies,

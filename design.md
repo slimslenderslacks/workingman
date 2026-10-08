@@ -86,3 +86,11 @@ The TUI's work-stream (project) commands live behind `:` on the work streams pan
 The gallery renders a project with `archive: true` inside a blue border, so a work stream that is cleaned up and waiting to be archived is visible at a glance. Selection takes precedence over the blue: selection is transient state that has to stay visible wherever the cursor lands, while the archive flag is durable and becomes legible again as soon as the cursor moves on.
 
 
+
+# workingman agent
+
+The workingman agent is an always-on assistant, reachable over a messaging channel, that answers questions about orch state. It is read-only except that, after confirming with the human, it may create new `<root>/<project>/project.md` and `<root>/<project>/intake/<task>.md` files in the orch roots (never overwriting or editing existing files, and never touching `.project.yaml` or `tasks/`).
+
+# ssh agent
+
+Agents run in sandboxes whose ssh agent is whatever agent sandboxd was started with. The daemon therefore needs a usable, non-interactive `SSH_AUTH_SOCK` (the private agent started by `start-orch.sh`) both for commit signing and for the commit agent's `git push` to ssh remotes. If sandboxd is restarted without it, new sandboxes get an empty agent and push fails.

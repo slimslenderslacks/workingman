@@ -34,11 +34,16 @@ charged against it.
 - `wsp` — multi-repo workspace manager. Repos must be registered (`wsp registry add ...`) before the planning step finishes. If you don't have wsp set up, run with `--workspace-manager=stub` instead.
 - macOS for `osascript` notifications (optional; wolf still launches without them)
 
-## Commit signing (private ssh-agent)
+## SSH agent: commit signing and push (private ssh-agent)
 
 `./start-orch.sh` starts a **private `ssh-agent`** for the daemon, loads the
 signing key into it straight from 1Password (never written to disk), and
-exports its `SSH_AUTH_SOCK` so sbx forwards it into every sandbox. 1Password's
+exports its `SSH_AUTH_SOCK` so sbx forwards it into every sandbox. The same
+agent serves both commit signing and `git push` over ssh remotes (wsp repos use
+`git@host:org/repo.git`), so the commit agent's push depends on it too. sandboxd
+must be (re)started with that `SSH_AUTH_SOCK` in its environment — a sandboxd
+restarted without it creates sandboxes whose agent is empty and pushes fail.
+See [docs/ssh-agent.md](docs/ssh-agent.md). 1Password's
 own agent is not used: it needs a human to approve each signing operation, so
 unattended runs would hang.
 
@@ -51,7 +56,7 @@ unattended runs would hang.
   socket dir removed) when the script exits.
 - If orch is started without it (`SSH_AUTH_SOCK` unset or the macOS launchd
   agent) the daemon logs an `ssh_auth_sock_unusable` audit event: commit
-  signing will fail. orch never falls back to 1Password's agent.
+  signing and ssh push will fail. orch never falls back to 1Password's agent.
 - `./check-signing.sh` diagnoses sandboxd forwarding an empty agent and can
   restart sandboxd with the private agent's socket.
 
@@ -173,11 +178,13 @@ daemon ignores its own fsnotify events.
   type to it. `--wolf-host` runs the wolf on the host in tmux instead (full
   host access, but only reachable via tmux).
 - **Workingman agent** (`--workingman-agent`, needs `--acp-kit`): an always-on,
-  read-only assistant in its own sandbox that answers questions about the orch
-  state (projects, tasks, the wolf, the audit log) for a human on a messaging
-  channel. On automatically when `channels.yaml` has an inbound-capable channel;
-  it can read the roots, snapshot, audit log and every session's stream, and
-  change nothing. See [agents.md §8](agents.md#8-workingman-agent).
+  mostly read-only assistant in its own sandbox that answers questions about the
+  orch state (projects, tasks, the wolf, the audit log) for a human on a
+  messaging channel. On automatically when `channels.yaml` has an
+  inbound-capable channel; it can read the roots, snapshot, audit log and every
+  session's stream, and change nothing — except that, after confirming with the
+  human, it may create new `<root>/<project>/project.md` and
+  `<root>/<project>/intake/*.md` files (never overwriting or editing). See [agents.md §8](agents.md#8-workingman-agent).
 - **State snapshot** (`--state-file`, `orch status`): the daemon's in-memory
   state (live sessions, wolf in flight, failure counters, review polls)
   published as JSON for external readers. See
@@ -189,8 +196,9 @@ The daemon can reach you on WhatsApp, modelled on hermes-agent's WhatsApp
 gateway. It messages you the moment a wolf agent starts (`🐺 wolf is running for
 <project> … Reply to this message to talk to the wolf.`), relays your reply into
 that wolf's conversation, and routes any other message to the always-on
-**workingman agent**, a read-only assistant that answers questions about open
-projects, running tasks and the daemon state. Details, configuration reference,
+**workingman agent**, a mostly read-only assistant that answers questions about
+open projects, running tasks and the daemon state, and can create new
+`project.md` / intake files on request. Details, configuration reference,
 security model, troubleshooting and a manual smoke-test checklist:
 [docs/channels.md](docs/channels.md).
 
@@ -241,7 +249,7 @@ Parity with hermes-agent's WhatsApp channel (✅ supported · ➖ partly · ❌ 
 What is specific to workingman: the **wolf channel** (topic `wolf`: start/end
 messages, reply-to routing, `/wolf`, relayed tool-permission requests), the
 **workingman agent** (an ACP session in its own sandbox; the orch roots, daemon
-snapshot, audit log and agent sessions are mounted read-only), the commands
+snapshot, audit log and agent sessions are mounted read-only, except the roots, which are writable only for creating new `project.md` / intake files), the commands
 `/help /status /wolf /agent /who`, and the redaction of every outgoing reply.
 The WhatsApp numbers allowed to talk to the daemon are an allowlist — nothing
 else reaches an agent.
