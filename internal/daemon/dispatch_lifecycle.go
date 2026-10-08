@@ -455,6 +455,16 @@ func (d *Daemon) launchArchiveAgent(projectPath string, p *project.Project) {
 		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.ArchiveAgent.String())
 		return
 	}
+	// p may be stale: the event that carried it can have been read before a
+	// previous archive run finished, and handled only after that run cleared the
+	// request flag and released the reservation above. Re-read now that we hold
+	// the slot — a clear always lands on disk before endCleanup, so a request
+	// that has already been served can't be mistaken for a fresh one.
+	if cur, err := project.Load(projectPath); err == nil && !cur.Cleanup {
+		d.audit.Log("archive_skip_stale", "path", projectPath)
+		d.endCleanup(projectPath)
+		return
+	}
 	root := filepath.Dir(projectPath)
 	plan := runner.Plan{
 		Kind: agent.ArchiveAgent,
