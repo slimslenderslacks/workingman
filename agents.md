@@ -637,8 +637,8 @@ bind-mount syntax, understood by `acp-wrapper --workspace`):
 read-only mount that lies under another one (or that would contain, or sit
 inside, the scratch dir or a writable root). The scratch dir defaults to
 `<sessions-root>/../workingman-agent` and must lie outside every `--root`
-(`New` rejects an overlap — a write there would feed the daemon's own watcher,
-). Because the snapshot, audit log and sessions are mounted read-only, the
+(`New` rejects an overlap — a write there would feed the daemon's own watcher).
+Because the snapshot, audit log and sessions are mounted read-only, the
 agent has no write path to them, and gets no static MCP
 and no extra network policy: no GitHub or other secrets beyond what claude
 itself needs. `Plan.Policies` / `WorkingmanAgentConfig.Policies` are forwarded

@@ -34,11 +34,16 @@ charged against it.
 - `wsp` — multi-repo workspace manager. Repos must be registered (`wsp registry add ...`) before the planning step finishes. If you don't have wsp set up, run with `--workspace-manager=stub` instead.
 - macOS for `osascript` notifications (optional; wolf still launches without them)
 
-## Commit signing (private ssh-agent)
+## SSH agent: commit signing and push (private ssh-agent)
 
 `./start-orch.sh` starts a **private `ssh-agent`** for the daemon, loads the
 signing key into it straight from 1Password (never written to disk), and
-exports its `SSH_AUTH_SOCK` so sbx forwards it into every sandbox. 1Password's
+exports its `SSH_AUTH_SOCK` so sbx forwards it into every sandbox. The same
+agent serves both commit signing and `git push` over ssh remotes (wsp repos use
+`git@host:org/repo.git`), so the commit agent's push depends on it too. sandboxd
+must be (re)started with that `SSH_AUTH_SOCK` in its environment — a sandboxd
+restarted without it creates sandboxes whose agent is empty and pushes fail.
+See [docs/ssh-agent.md](docs/ssh-agent.md). 1Password's
 own agent is not used: it needs a human to approve each signing operation, so
 unattended runs would hang.
 
@@ -51,7 +56,7 @@ unattended runs would hang.
   socket dir removed) when the script exits.
 - If orch is started without it (`SSH_AUTH_SOCK` unset or the macOS launchd
   agent) the daemon logs an `ssh_auth_sock_unusable` audit event: commit
-  signing will fail. orch never falls back to 1Password's agent.
+  signing and ssh push will fail. orch never falls back to 1Password's agent.
 - `./check-signing.sh` diagnoses sandboxd forwarding an empty agent and can
   restart sandboxd with the private agent's socket.
 
