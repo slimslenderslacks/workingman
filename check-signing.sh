@@ -126,8 +126,19 @@ probe_forwarded() {
 
 # Push needs more than a key: github must accept it. github answers `ssh -T`
 # with exit 1 even on success, so judge by the text. Runs in the probe sandbox.
+#
+# The probe sandbox is a bare `sbx create claude` with no task policies, and
+# sbx's network default is deny — so github.com:22 is blocked and the probe
+# would report "unreachable" on a perfectly healthy agent. Real pushing tasks
+# allow it in their own `policies:` (`resource: github.com`); grant the probe
+# the same rule so this measures whether github accepts the forwarded key,
+# not the default egress policy. The rule is scoped to the probe sandbox and
+# goes away with it in cleanup().
 probe_push() {
   local out
+  if ! sbx policy allow network --sandbox "$PROBE" github.com >/dev/null 2>&1; then
+    echo policyfail; return
+  fi
   out="$(sbx exec "$PROBE" -- sh -c 'ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 git@github.com 2>&1' 2>&1 || true)"
   if printf '%s' "$out" | grep -qi "successfully authenticated"; then
     echo ok
@@ -148,6 +159,7 @@ case "$result" in
     case "$push" in
       ok) log "ssh push: OK — github.com accepts the forwarded key. Nothing to fix."; exit 0 ;;
       denied) fail "ssh push: github.com rejected the forwarded key (Permission denied). The key from ORCH_SSH_KEY_REF is not authorised for push; a sandboxd restart will not help." ;;
+      policyfail) fail "ssh push: could not add the github.com network rule to the probe sandbox ('sbx policy allow network --sandbox $PROBE github.com'); cannot test push." ;;
       *) fail "ssh push: could not reach github.com:22 from the sandbox (firewall? try 'sbx policy log'); a sandboxd restart will not help." ;;
     esac
     ;;
