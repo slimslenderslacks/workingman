@@ -69,7 +69,7 @@ type auditMsg struct {
 }
 
 // chordTimeoutMsg fires chordTimeoutDelay after a "t" keypress if no
-// completing key ("l"/"r") arrives first, clearing the pending chord since
+// completing key ("l"/"r"/"p") arrives first, clearing the pending chord since
 // there's no standalone "t" action left to fall back to. seq must match
 // model.pendingSeq for the Update handler to act on it — otherwise it's a
 // stale timer left over from a chord that already resolved (or was replaced
@@ -77,7 +77,7 @@ type auditMsg struct {
 type chordTimeoutMsg struct{ seq int }
 
 // chordTimeoutDelay is how long handleNormalKey waits after "t" for a
-// completing "l"/"r" before giving up on the chord. Short enough that typing
+// completing "l"/"r"/"p" before giving up on the chord. Short enough that typing
 // a bare "t" for some other purpose doesn't feel like it's hanging, long
 // enough to comfortably type the second key of the "tl"/"tr" chord.
 const chordTimeoutDelay = 300 * time.Millisecond
@@ -184,6 +184,14 @@ type model struct {
 	leftVisible  bool
 	rightVisible bool
 
+	// showHidden brings work streams marked `hide: true` back into the gallery,
+	// flipped by the "tp" chord. Off by default — that's the whole point of
+	// hiding one — and deliberately not persisted: it's a "let me see
+	// everything for a moment" toggle (to `:show` something again, or to check
+	// what's parked), not a saved preference. m.projects always holds the
+	// unfiltered scan; see visibleProjects.
+	showHidden bool
+
 	// lastCenterFocus remembers which center-column pane (Projects, Tasks, or
 	// Audit) last held focus, so alt-h/alt-l can return focus there when the
 	// user leaves a side column back to the center column. Set in newModel
@@ -195,7 +203,8 @@ type model struct {
 	// pendingKey holds a chord's first keystroke while handleNormalKey waits
 	// to see whether the next key completes it. Currently only "t" starts a
 	// chord: "l"/"r" resolve it to toggle-left/toggle-right (see leftVisible/
-	// rightVisible above); any other key means the user wasn't typing a
+	// rightVisible above) and "p" to toggle hidden work streams (showHidden);
+	// any other key means the user wasn't typing a
 	// chord at all, so it falls through and is handled normally instead.
 	// pendingSeq tags each pending chord so a stale chordTimeoutMsg from an
 	// already-resolved (or since-replaced) chord is ignored — see
@@ -291,7 +300,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case projectsMsg:
 		m.projects = msg.views
 		m.loaded = true
-		m.projSel = reconcileProjectSelection(m.projects, m.projSel)
+		m.projSel = reconcileProjectSelection(m.visibleProjects(), m.projSel)
 		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, waitForProjects(m.projCh)
@@ -378,7 +387,8 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
 	// Resolve a pending "t" chord first. "l"/"r" complete it as a
-	// toggle-left/toggle-right column command; any other key means the user
+	// toggle-left/toggle-right column command and "p" as the hidden-work-stream
+	// toggle; any other key means the user
 	// wasn't typing a "t?" chord at all, so `key` falls through to be
 	// handled normally below, exactly as if no chord had been pending.
 	if m.pendingKey == "t" {
@@ -392,6 +402,8 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.rightVisible = !m.rightVisible
 			m.statusMsg = ""
 			return m, nil
+		case "p":
+			return m.toggleHiddenProjects(), nil
 		}
 	}
 
@@ -433,7 +445,8 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 	case "t":
 		// Might be the start of a "tl"/"tr" chord (toggle the sessions/detail
-		// column) — deferred until the next key, or chordTimeoutDelay,
+		// column) or "tp" (toggle hidden work streams) — deferred until the
+		// next key, or chordTimeoutDelay,
 		// resolves it one way or the other (see the pendingKey check above
 		// and the chordTimeoutMsg case in Update).
 		m.pendingKey = "t"
@@ -493,6 +506,41 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// visibleProjects is the gallery's view of the project list: the full scan
+// with hidden work streams filtered out, unless the `tp` toggle is on. Every
+// place the UI treats the project list as a *list* — rendering the grid,
+// moving or reconciling the selection, mapping a click to a card, sizing the
+// pane — goes through this, so a hidden stream can never be selected or
+// counted while it isn't on screen. Lookups *by path* (selectedProject,
+// selectedProjectTasks) still scan m.projects directly: they're resolving a
+// selection that the filter already vetted, and going through it again would
+// only cost another allocation.
+func (m model) visibleProjects() []ProjectView {
+	return visibleProjectViews(m.projects, m.showHidden)
+}
+
+// toggleHiddenProjects flips the `tp` toggle and re-reconciles the dependent
+// selections. Turning it off can pull the selected card out from under the
+// cursor (it was a hidden one), so the project selection has to be re-resolved
+// against the new list immediately rather than waiting for the next scan —
+// and the task selection along with it, since it hangs off whichever project
+// ends up selected.
+func (m model) toggleHiddenProjects() model {
+	m.showHidden = !m.showHidden
+	m.projSel = reconcileProjectSelection(m.visibleProjects(), m.projSel)
+	m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
+	if m.showHidden {
+		if n := hiddenProjectCount(m.projects); n > 0 {
+			m.statusMsg = fmt.Sprintf("showing %d hidden work stream(s)", n)
+			return m
+		}
+		m.statusMsg = "no work streams are hidden"
+		return m
+	}
+	m.statusMsg = ""
+	return m
+}
+
 // moveSelectionInPane moves the selection (or scroll position) by delta within
 // the currently focused pane: project in Work Streams, task in Tasks, session
 // in Agent Sessions, or the cursor line in Audit. delta is -1 for the
@@ -506,7 +554,7 @@ func (m model) moveSelectionInPane(delta int) model {
 	case paneSessions:
 		m.sessSel = moveSelection(m.sessions, m.sessSel, delta)
 	case paneProjects:
-		m.projSel = moveProjectSelection(m.projects, m.projSel, delta)
+		m.projSel = moveProjectSelection(m.visibleProjects(), m.projSel, delta)
 		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 	case paneTasks:
@@ -763,14 +811,15 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 		if innerW < 0 {
 			innerW = 0
 		}
-		idx := projectCardAtPoint(xRel, y, innerW, len(m.projects))
+		visible := m.visibleProjects()
+		idx := projectCardAtPoint(xRel, y, innerW, len(visible))
 		m.focus = paneProjects
 		m.lastCenterFocus = paneProjects
 		m.statusMsg = ""
-		if idx < 0 || idx >= len(m.projects) {
+		if idx < 0 || idx >= len(visible) {
 			return m, nil
 		}
-		m.projSel = m.projects[idx].Path
+		m.projSel = visible[idx].Path
 		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, nil
@@ -1506,8 +1555,16 @@ func (m model) renderProjects(width, height int) string {
 		b.WriteString(dimStyle.Render("(loading…)"))
 		return style.Render(clampLines(b.String(), innerHeight))
 	}
-	if len(m.projects) == 0 {
-		b.WriteString(dimStyle.Render("(none)"))
+	visible := m.visibleProjects()
+	if len(visible) == 0 {
+		// An empty pane that's empty only because everything in it is hidden
+		// would read as "all my work streams are gone", so say so and name the
+		// key that brings them back.
+		msg := "(none)"
+		if n := hiddenProjectCount(m.projects); n > 0 {
+			msg = fmt.Sprintf("(none visible — %d hidden; tp to show)", n)
+		}
+		b.WriteString(dimStyle.Render(msg))
 		return style.Render(clampLines(b.String(), innerHeight))
 	}
 
@@ -1516,7 +1573,7 @@ func (m model) renderProjects(width, height int) string {
 	if cardsBudget < 0 {
 		cardsBudget = 0
 	}
-	b.WriteString(renderProjectGrid(m.projects, m.projSel, innerWidth, cardsBudget))
+	b.WriteString(renderProjectGrid(visible, m.projSel, innerWidth, cardsBudget))
 	return style.Render(clampLines(b.String(), innerHeight))
 }
 
@@ -1641,7 +1698,15 @@ func renderProjectCardBody(v ProjectView, width int) string {
 		inner = 1
 	}
 
-	name := cardNameStyle.Render(truncate(v.Name, inner))
+	// A hidden work stream only ever reaches here with the `tp` toggle on, so
+	// the marker doesn't need to know about the toggle: any hidden card on
+	// screen is one the user asked to see, and the glyph is what tells it
+	// apart from the streams that are always there.
+	label := v.Name
+	if v.Hidden {
+		label = "⊘ " + label
+	}
+	name := cardNameStyle.Render(truncate(label, inner))
 
 	// A project whose .project.yaml failed to parse gets an error card instead
 	// of a normal status/branch/task line: a red badge plus the parse message,
@@ -1875,7 +1940,9 @@ func (m model) computeLayout() uiLayout {
 		centerW = 0
 	}
 
-	projH, tasksH, auditH := splitCenterColumn(bodyH, centerW, len(m.projects), m.auditCh != nil)
+	// Sized off the cards actually drawn, not the whole scan — hidden work
+	// streams take no rows, so they must not claim any of the column's height.
+	projH, tasksH, auditH := splitCenterColumn(bodyH, centerW, len(m.visibleProjects()), m.auditCh != nil)
 
 	leftH, yamlH := 0, 0
 	if leftW > 0 {
@@ -2756,7 +2823,11 @@ func (m model) renderFooter() string {
 		if m.zoomed {
 			zoomHint = "z: restore panes"
 		}
-		base := "⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  tl/tr: toggle sessions/detail column  •  enter/click: attach  •  q: quit"
+		hiddenHint := "tp: show hidden"
+		if m.showHidden {
+			hiddenHint = "tp: hide hidden"
+		}
+		base := "⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  tl/tr: toggle sessions/detail column  •  " + hiddenHint + "  •  enter/click: attach  •  q: quit"
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}

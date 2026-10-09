@@ -77,6 +77,14 @@ cleanup: false
 # else writes it.
 archive: false
 
+# Keep this work stream out of the TUI's gallery. Display only: the daemon
+# still dispatches it, its agents still run, its cron still fires — the card
+# just isn't drawn. Set by the TUI's `:hide`, cleared by `:show`, and both
+# write as updated_by: daemon so hiding a card never re-routes the project.
+# The TUI's `tp` key brings hidden work streams back on screen (marked `⊘`)
+# for as long as that session is running. Defaults to false.
+hide: false
+
 # Who last wrote this file. Daemon ignores fsnotify events where this is "daemon".
 # Values: agent | daemon
 updated_by: agent

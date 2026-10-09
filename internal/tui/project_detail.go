@@ -139,12 +139,16 @@ func repoNames(repos []project.Repo) []string {
 }
 
 // renderProjectDetailBadges surfaces the "interesting things" about a
-// project that aren't obvious from its bare status: it's cleaned up and
+// project that aren't obvious from its bare status: it's hidden from the
+// gallery, it's cleaned up and
 // archivable, it wakes itself up on a schedule, it's watching a pull
 // request, or it's blocked and why. Any, all, or none may apply, so the
 // caller only inserts this section when it isn't empty.
 func renderProjectDetailBadges(v ProjectView, width int) []string {
 	var lines []string
+	if v.Hidden {
+		lines = append(lines, dimStyle.Render(truncate("⊘ hidden from the gallery — :show to restore", width)))
+	}
 	if v.Archive {
 		lines = append(lines, dimStyle.Render(truncate("✓ cleaned up — ready for :archive", width)))
 	}

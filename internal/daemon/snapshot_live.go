@@ -35,6 +35,7 @@ const (
 type RuntimeInfo struct {
 	WorkspaceManager string
 	AcpKit           string
+	AcpImage         string
 	AcpWrapper       string
 	SessionsRoot     string
 	TmuxSession      string
@@ -337,6 +338,7 @@ func (d *Daemon) daemonInfo() *DaemonInfo {
 		StartedAt:        d.snapshot.startedAt.UTC(),
 		WorkspaceManager: info.WorkspaceManager,
 		AcpKit:           info.AcpKit,
+		AcpImage:         info.AcpImage,
 		AcpWrapper:       info.AcpWrapper,
 		SessionsRoot:     root,
 		TmuxSession:      info.TmuxSession,

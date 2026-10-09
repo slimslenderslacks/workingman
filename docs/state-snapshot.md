@@ -100,7 +100,7 @@ Optional fields are omitted when empty.
 | `state` | `"running"` or `"stopped"` |
 | `pid`, `started_at` | the daemon process |
 | `workspace_manager` | `--workspace-manager` (`wsp`/`stub`) |
-| `acp_kit`, `acp_wrapper`, `sessions_root`, `tmux_session` | the matching flags (resolved sessions root) |
+| `acp_kit`, `acp_image`, `acp_wrapper`, `sessions_root`, `tmux_session` | the matching flags (resolved sessions root) |
 | `audit_log`, `state_file` | absolute paths |
 | `headless` | `--headless` |
 | `roots` | the `--root` list |
@@ -116,6 +116,7 @@ Optional fields are omitted when empty.
 | `branch`, `description` | description truncated to 400 chars |
 | `load_error` | set when `.project.yaml` can't be parsed; most other fields are then empty |
 | `review`, `review_now`, `cleanup`, `archive`, `replan` | the project-file flags |
+| `hidden` | `hide: true` — filtered out of the TUI gallery; display only, dispatch is unaffected |
 | `watching_pr` | idle **and** still watched for PR review |
 | `cron`, `cron_active` | schedule and whether its stop condition hasn't tripped |
 | `pull_requests[]` | `{repo, number, url, state}` — `state` is `open`/`merged`/`closed` |
@@ -176,7 +177,7 @@ becomes `{"time": "2026-…", "event": "session_ended", "fields": {"key": "/x",
     "work_stream": "my-feature", "path": "/Users/me/orch/my-feature/.project.yaml",
     "status": "working", "branch": "my-feature",
     "review": false, "review_now": false, "cleanup": false, "archive": false,
-    "replan": false, "watching_pr": false, "cron_active": false,
+    "replan": false, "hidden": false, "watching_pr": false, "cron_active": false,
     "pull_requests": [],
     "task_counts": {"ready": 1, "running": 1, "success": 0, "failed": 0, "blocked": 0, "committed": 2},
     "task_total": 4,

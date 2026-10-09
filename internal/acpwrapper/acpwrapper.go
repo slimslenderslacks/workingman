@@ -80,6 +80,27 @@ type Config struct {
 	// Required — without it the sandbox has no claude-acp-client to exec.
 	KitPath string
 
+	// TemplateImage, when set, is passed as `sbx create -t <image>` to build the
+	// sandbox from a prebuilt image instead of the agent's stock template
+	// (docker/sandbox-templates:claude-code-docker). It is the create-time
+	// latency fix: acp-kit is a mixin, and a user `--kit` mixin is never
+	// embedded into a base image, so its install step — a ~540MB
+	// `npm install -g @agentclientprotocol/claude-agent-acp`, almost all of it
+	// the claude-agent-sdk's native binaries — otherwise runs on EVERY create.
+	// Pointing this at acp-kit's own prebuilt image (its Dockerfile bakes that
+	// same install) moves the cost to image-build time.
+	//
+	// KitPath is still passed alongside it, deliberately: the mixin also carries
+	// the network allowedDomains, the IS_SANDBOX env and the claude-acp-client
+	// entrypoint contract, and its install step short-circuits on a prebuilt
+	// image because acp-kit skips the Node/npm work when claude-agent-acp is
+	// already on PATH. A kit older than that guard would redo the install and
+	// waste the prebake — the image is the optimization, the guard is what makes
+	// it land.
+	//
+	// Empty (the default) leaves `sbx create` on the stock template, unchanged.
+	TemplateImage string
+
 	// Workspaces are host paths bind-mounted into the sandbox. The first is the
 	// primary one: the ACP client's working directory (`sbx exec -w`). At least
 	// one is required.
@@ -461,6 +482,22 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 // caller is responsible for `sbx rm --force`-ing name first in that case).
 func createSandbox(ctx context.Context, run commandFunc, c Config, name string) (string, error) {
 	args := []string{"create", "claude", "--name", name, "--kit", c.KitPath}
+	// A prebuilt template also needs a pull policy. sbx defaults to
+	// `--pull always`, which reaches for a registry on every create — and the
+	// sandbox runtime keeps its OWN image store, separate from the host
+	// docker's, so an image built locally with `docker build` is NOT visible
+	// here until it is loaded in (`docker save` | `sbx template load`). Without
+	// this, `sbx create -t <locally-built>` fails at PREPARE IMAGE with a
+	// registry 403 for an image sitting right there in `docker images`.
+	// `never` is sbx's own documented pairing for a loaded template and is the
+	// right semantics besides: the image is local, so never pull it. A
+	// registry-hosted image must likewise be pulled into the sandbox store
+	// once, up front — which is the point, since the whole purpose here is to
+	// keep the network off the per-create path. The stock-template path keeps
+	// sbx's own default untouched.
+	if img := strings.TrimSpace(c.TemplateImage); img != "" {
+		args = append(args, "-t", img, "--pull", "never")
+	}
 	for _, m := range c.StaticMCPs {
 		args = append(args, "--static-mcp", m)
 	}

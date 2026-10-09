@@ -23,10 +23,10 @@ type projectCommand struct {
 // selected work stream report "no work stream selected" when run without one
 // (dispatchProjectCommand enforces that), so the menu stays complete rather
 // than shifting rows as selection changes. Each key has a unique first letter,
-// so typing that letter runs the command directly — except stop/start, which
-// both share `session`'s "s" and so are only reachable via j/k + enter; "stop"
-// and "start" were the names asked for, and shadowing the far more common
-// `session` shortcut for them isn't worth it.
+// so typing that letter runs the command directly — except stop/start/show,
+// which all share `session`'s "s" and so are only reachable via j/k + enter;
+// those were the names asked for, and shadowing the far more common `session`
+// shortcut for them isn't worth it.
 var projectCommands = []projectCommand{
 	{"dir", "dir", "open a shell in the workspace sandbox"},
 	{"session", "session", "open/resume an interactive claude session"},
@@ -36,6 +36,8 @@ var projectCommands = []projectCommand{
 	{"archive", "archive", "archive this work stream"},
 	{"stop", "stop", "pause this work stream and kill its running agents"},
 	{"start", "start", "resume a stopped work stream"},
+	{"hide", "hide", "hide this work stream from the gallery (tp shows hidden)"},
+	{"show", "show", "unhide a hidden work stream"},
 }
 
 // projectCommandIndex returns the menu row of the command with the given key,
@@ -196,6 +198,37 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.statusMsg = "resumed " + name
+	case "hide":
+		// `hide` takes the work stream out of the gallery. Display only — the
+		// daemon keeps running it exactly as before (see project.Project.Hide).
+		// Immediate — no modal.
+		if m.projSel == "" {
+			m.statusMsg = "no work stream selected"
+			return m, nil
+		}
+		name, err := requestHide(m.projSel)
+		if err != nil {
+			m.statusMsg = "hide: " + err.Error()
+			return m, nil
+		}
+		// No selection fix-up here: the card goes away on the next scan (unless
+		// `tp` is showing hidden streams), and that snapshot's reconcile moves
+		// the cursor to a stream that's still visible.
+		m.statusMsg = "hid " + name + " (tp: show hidden)"
+	case "show":
+		// `show` is `hide`'s inverse. Reaching a hidden work stream to run it
+		// on means turning the `tp` toggle on first — that's what puts its card
+		// back in the gallery to be selected.
+		if m.projSel == "" {
+			m.statusMsg = "no work stream selected"
+			return m, nil
+		}
+		name, err := requestShow(m.projSel)
+		if err != nil {
+			m.statusMsg = "show: " + err.Error()
+			return m, nil
+		}
+		m.statusMsg = "showing " + name
 	case "dir":
 		return m.openInteractive("shell")
 	case "session":

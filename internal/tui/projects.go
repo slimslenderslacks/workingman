@@ -84,6 +84,12 @@ type ProjectView struct {
 	// gallery renders the card with an error badge instead of dropping it —
 	// so a bad file is visible and debuggable rather than silently missing.
 	LoadErr string
+	// Hidden mirrors the project file's `hide` flag. The gallery leaves hidden
+	// work streams out entirely unless the `tp` toggle is on (see
+	// model.showHidden), in which case their cards are drawn with a "hidden"
+	// marker so the one to `:show` can be picked out. Purely a display filter —
+	// the daemon runs a hidden work stream exactly as it runs any other.
+	Hidden bool
 	// BlockedReason mirrors the project file's `blocked_reason` field — why a
 	// blocked project is stuck, for the detail pane to surface without the
 	// user having to open the raw file. Empty whenever the project isn't
@@ -186,6 +192,41 @@ func ScanProjects(roots []string) ([]ProjectView, error) {
 	return views, nil
 }
 
+// visibleProjectViews is the gallery's display filter: every view when
+// showHidden is on, otherwise only the ones not marked `hide: true`. Order is
+// preserved, so the filtered list is still in ScanProjects' sort order.
+//
+// The filter lives here rather than in ScanProjects on purpose — the scan stays
+// the complete picture of what's on disk, and the model keeps that, so flipping
+// the `tp` toggle is a pure render change with no rescan and no window where
+// hidden streams are simply unknown to the UI.
+func visibleProjectViews(views []ProjectView, showHidden bool) []ProjectView {
+	if showHidden {
+		return views
+	}
+	out := make([]ProjectView, 0, len(views))
+	for _, v := range views {
+		if v.Hidden {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// hiddenProjectCount counts the work streams the filter above would drop —
+// what the gallery reports when hiding has emptied it out, so an apparently
+// blank pane never looks like lost work.
+func hiddenProjectCount(views []ProjectView) int {
+	n := 0
+	for _, v := range views {
+		if v.Hidden {
+			n++
+		}
+	}
+	return n
+}
+
 func loadProjectView(path string) (ProjectView, bool) {
 	var mtime time.Time
 	if info, err := os.Stat(path); err == nil {
@@ -210,22 +251,23 @@ func loadProjectView(path string) (ProjectView, bool) {
 		createdAt = *pr.CreatedAt
 	}
 	return ProjectView{
-		Name:         filepath.Base(filepath.Dir(path)),
-		Path:         path,
-		Description:  pr.Description,
-		Branch:       pr.Branch,
-		Status:       pr.Status,
-		Repos:        append([]project.Repo(nil), pr.Repos...),
-		NewRepos:     append([]project.Repo(nil), pr.NewRepos...),
-		TaskCounts:   counts,
-		Tasks:        tasks,
-		LastUpdate:   mtime,
-		CreatedAt:    createdAt,
-		Archive:      pr.Archive,
-		CronActive:   pr.Cron != "" && !pr.CronExpired(),
-		Cron:         pr.Cron,
+		Name:          filepath.Base(filepath.Dir(path)),
+		Path:          path,
+		Description:   pr.Description,
+		Branch:        pr.Branch,
+		Status:        pr.Status,
+		Repos:         append([]project.Repo(nil), pr.Repos...),
+		NewRepos:      append([]project.Repo(nil), pr.NewRepos...),
+		TaskCounts:    counts,
+		Tasks:         tasks,
+		LastUpdate:    mtime,
+		CreatedAt:     createdAt,
+		Archive:       pr.Archive,
+		CronActive:    pr.Cron != "" && !pr.CronExpired(),
+		Cron:          pr.Cron,
 		WatchingPR:    pr.Status == project.StatusIdle && pr.WatchingPR(),
 		PullRequests:  append([]project.PullRequest(nil), pr.PullRequests...),
+		Hidden:        pr.Hide,
 		BlockedReason: pr.BlockedReason,
 	}, true
 }
@@ -483,7 +525,7 @@ func projectViewEqual(a, b ProjectView) bool {
 		a.Status != b.Status || a.LoadErr != b.LoadErr ||
 		a.Archive != b.Archive || a.CronActive != b.CronActive ||
 		a.Cron != b.Cron || a.WatchingPR != b.WatchingPR ||
-		a.BlockedReason != b.BlockedReason ||
+		a.Hidden != b.Hidden || a.BlockedReason != b.BlockedReason ||
 		!a.LastUpdate.Equal(b.LastUpdate) {
 		return false
 	}

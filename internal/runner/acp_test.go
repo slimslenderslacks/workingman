@@ -290,6 +290,67 @@ func TestACPLaunchTaskAgentForwardsStaticMCPs(t *testing.T) {
 	}
 }
 
+// Runner.Image reaches acp-wrapper as --template for EVERY ACP kind: task and
+// commit share one Kit and one sandbox shape, so a prebuilt image that removes
+// the kit's per-create npm install must not be kind-conditional. Unset, the
+// flag is absent entirely so hosts without a prebuilt image keep sbx's stock
+// template.
+func TestACPLaunchForwardsTemplateImageForEveryKind(t *testing.T) {
+	const image = "slimslenderslacks/claude-code-acp:0.88.0"
+	for _, kind := range []agent.Kind{agent.TaskAgent, agent.CommitAgent} {
+		t.Run(kind.String(), func(t *testing.T) {
+			orchDir := t.TempDir()
+			projectPath := filepath.Join(orchDir, ".project.yaml")
+			if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			plan := Plan{
+				Kind:        kind,
+				Branch:      "feat-x",
+				ProjectPath: projectPath,
+				TaskPath:    filepath.Join(orchDir, "tasks", "first.yaml"),
+				TaskName:    "first",
+			}
+
+			acp := &fakeLauncher{}
+			r := &Runner{
+				Workspaces:   workspace.NewStub(t.TempDir()),
+				Launcher:     &fakeLauncher{},
+				AcpLauncher:  acp,
+				Kit:          "kit-ref",
+				Image:        image,
+				SessionsRoot: t.TempDir(),
+			}
+			if _, err := r.Start(context.Background(), plan); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got := argValue(acp.last.Command, "--template"); got != image {
+				t.Errorf("--template = %q, want %q", got, image)
+			}
+			// The kit is still layered on: the image removes the install cost,
+			// it does not replace the mixin.
+			if got := argValue(acp.last.Command, "--kit"); got != "kit-ref" {
+				t.Errorf("--kit = %q, want kit-ref", got)
+			}
+
+			bare := &fakeLauncher{}
+			rNoImage := &Runner{
+				Workspaces:   workspace.NewStub(t.TempDir()),
+				Launcher:     &fakeLauncher{},
+				AcpLauncher:  bare,
+				Kit:          "kit-ref",
+				SessionsRoot: t.TempDir(),
+			}
+			if _, err := rNoImage.Start(context.Background(), plan); err != nil {
+				t.Fatalf("Start (no image): %v", err)
+			}
+			if hasFlag(bare.last.Command, "--template") {
+				t.Errorf("--template present with no Runner.Image: %v", bare.last.Command)
+			}
+		})
+	}
+}
+
 func TestACPLaunchTaskAgentForwardsPolicies(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()

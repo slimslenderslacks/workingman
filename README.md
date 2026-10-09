@@ -328,6 +328,7 @@ cron_runs: 12          # daemon-owned cycle counter
 replan: true           # optional; daemon-owned "re-plan the existing tasks" request
 cleanup: true          # optional; "please run the archive agent" (set by :cleanup)
 archive: true          # optional; "the cleanup finished" (set by the archive agent)
+hide: true             # optional; display only — keep this project out of the TUI gallery
 updated_by: agent
 ```
 
@@ -380,6 +381,44 @@ moved the project off `ready`. Agents should not write it.
 
 See `examples/.project.yaml` and `examples/tasks/*.yaml` for the full
 schemas.
+
+## Hiding work streams
+
+The gallery is only so many cards wide, and a project that is parked — but not
+finished enough to clean up and archive — crowds out the ones you're actually
+watching. `hide: true` takes a work stream out of the gallery and nothing else:
+
+```yaml
+hide: true   # defaults to false
+```
+
+It is **display only**. The daemon still dispatches a hidden work stream, its
+agents still run, its `cron:` still fires, and it still shows up in the state
+snapshot (flagged `hidden`). Nothing about the project's lifecycle changes.
+
+| Command / key | Effect |
+|---------------|--------|
+| `:hide` | sets `hide: true` on the selected work stream — its card disappears on the gallery's next refresh |
+| `:show` | clears `hide:` — the work stream is back in the gallery for good |
+| `tp` | toggles hidden work streams on and off **in this TUI session** |
+
+`tp` is how you get at a hidden work stream again: with the toggle on, hidden
+cards come back into the gallery marked with a `⊘`, so you can select one and
+run `:show` on it. The toggle isn't persisted — it's "let me see everything for
+a moment", not a saved preference — and the footer hint tracks which way it's
+currently set. A gallery that is empty only because everything in it is hidden
+says so (`(none visible — 3 hidden; tp to show)`) rather than looking like the
+work streams vanished.
+
+Unlike `:cleanup` and `:review`, `:hide`/`:show` write `.project.yaml` as
+`updated_by: daemon`. The request flags are written as the agent *so that* the
+daemon's fsnotify handler acts on them; hiding must do the opposite — written
+as the agent it would be routed like any other project change, which on a
+`blocked` work stream would re-summon the wolf just for hiding a card.
+
+`:show` is one of the three commands (with `:stop` and `:start`) that has no
+first-letter shortcut in the `:` menu — `session` owns the `s` — so pick it
+with `j`/`k` and `enter`.
 
 ## Cleanup and archiving
 

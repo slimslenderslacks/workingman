@@ -227,6 +227,49 @@ func TestEnsureSandboxMountsOnlyWorkspacesWhenSigning(t *testing.T) {
 	}
 }
 
+// A prebuilt TemplateImage must reach `sbx create` as `-t <image>` with an
+// explicit `--pull never`: sbx defaults to --pull always, and the sandbox
+// runtime's image store is separate from the host docker's, so a locally built
+// image would otherwise fail at PREPARE IMAGE with a registry 403. The kit
+// stays on the command line alongside it — the image removes the kit's install
+// cost, it does not replace the mixin.
+func TestEnsureSandboxCreatesFromTemplateImage(t *testing.T) {
+	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
+	c := Config{
+		SandboxName:   "acp-s",
+		KitPath:       "/kits/acp",
+		TemplateImage: "slimslenderslacks/claude-code-acp:0.88.0",
+		SbxPath:       "sbx",
+		Workspaces:    []string{"/repo"},
+	}
+	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
+		t.Fatalf("ensureSandbox: %v", err)
+	}
+	create := f.calls[1]
+	want := []string{
+		"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp",
+		"-t", "slimslenderslacks/claude-code-acp:0.88.0", "--pull", "never", "/repo",
+	}
+	if !reflect.DeepEqual(create, want) {
+		t.Errorf("create call = %v, want %v", create, want)
+	}
+}
+
+// The no-image path must stay byte-identical to the pre-change argv so hosts
+// without a prebuilt image keep sbx's own template and pull defaults.
+func TestEnsureSandboxOmitsTemplateFlagsWhenUnset(t *testing.T) {
+	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
+	c := Config{SandboxName: "acp-s", KitPath: "/kits/acp", SbxPath: "sbx", Workspaces: []string{"/repo"}}
+	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
+		t.Fatalf("ensureSandbox: %v", err)
+	}
+	for _, arg := range f.calls[1] {
+		if arg == "-t" || arg == "--pull" {
+			t.Errorf("create call carries %q with no TemplateImage: %v", arg, f.calls[1])
+		}
+	}
+}
+
 func TestExecArgsOmitsGitIdentityWhenIncomplete(t *testing.T) {
 	// A half-set identity (name but no email) must NOT inject env — that would
 	// produce commits with a blank email. Fall back to the sandbox default.

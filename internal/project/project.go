@@ -232,6 +232,25 @@ type Project struct {
 	// *consecutive fix cycles that never converge* with an in-memory counter that
 	// resets whenever a poll finds the PRs clean (see reviewFixCycles).
 	PullRequests []PullRequest `yaml:"pull_requests,omitempty"`
+	// Hide takes the work stream out of the TUI's gallery without changing
+	// anything about how it runs: the daemon still dispatches it, its agents
+	// still work, its cron still fires. It is purely a display filter, for the
+	// long tail of projects that are parked or uninteresting but not worth
+	// archiving — the gallery is a fixed number of cards wide, and a dozen such
+	// streams crowd out the ones being watched.
+	//
+	// Set by the TUI's `:hide`, cleared by `:show`. Both write as
+	// `updated_by: daemon` — the opposite of the request flags (Cleanup,
+	// ReviewNow), and deliberately so: those need the daemon to *see* the write,
+	// while this one must not perturb dispatch at all. A `hide` written as the
+	// agent would be routed like any other project change, which on a `blocked`
+	// project would re-summon the wolf just for hiding a card.
+	//
+	// Hidden streams are still reachable in the TUI: the `tp` toggle brings them
+	// back into the gallery (marked as hidden) so one can be selected and
+	// `:show`n again. Defaults to false; `omitempty` keeps the key out of files
+	// that have never been hidden.
+	Hide bool `yaml:"hide,omitempty"`
 	// StoppedFrom records the status the project was in the moment `:stop` set
 	// Status to StatusStopped, so `:start` knows what to restore it to — the
 	// stop overwrites Status itself, so without this the prior state (working

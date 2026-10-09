@@ -121,6 +121,7 @@ func main() {
 	sessionsRoot := fs.String("sessions-root", "", "root dir holding per-session dirs (default ~/.workingman/sessions)")
 	sandboxName := fs.String("sandbox", "", "sbx sandbox name (default acp-<session-id>)")
 	kitPath := fs.String("kit", "", "acp-kit reference to layer onto the claude sandbox: a local kit dir or published ref (required)")
+	templateImage := fs.String("template", "", "prebuilt container image to create the sandbox from, passed as `sbx create -t` (default: the stock claude template). Use acp-kit's prebuilt image to skip the kit's per-create npm install; --kit is still applied on top")
 	sbxPath := fs.String("sbx", "", "path to the sbx binary (default: sbx on PATH)")
 	exitWhenEmpty := fs.Bool("exit-when-empty", false, "shut down once the last connected TUI disconnects (after at least one has connected); used by orch's autonomous single-turn flow")
 	persistent := fs.Bool("persistent", false, "conversational session (the wolf): keep the agent running when clients disconnect; end only when the agent exits, --unblock-grace / --idle-timeout fire, or the wrapper is signalled. Mutually exclusive with --exit-when-empty")
@@ -148,6 +149,7 @@ func main() {
 		SessionsRoot:  *sessionsRoot,
 		SandboxName:   *sandboxName,
 		KitPath:       *kitPath,
+		TemplateImage: *templateImage,
 		SbxPath:       *sbxPath,
 		Workspaces:    workspaces,
 		ExitWhenEmpty: *exitWhenEmpty,

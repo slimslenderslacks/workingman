@@ -97,6 +97,7 @@ func runDaemon(args []string) {
 	stubRoot := fs.String("stub-workspace-root", "", `when --workspace-manager=stub, directory where workspaces are created (default: $TMPDIR/orch-workspaces)`)
 	tmuxSession := fs.String("tmux-session", agent.DefaultUmbrellaSession, "name of the umbrella tmux session every agent's window lives in")
 	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, the planning/task/commit agents, the wolf and the workingman agent launch as acp-wrapper-backed ACP sessions instead of tmux+'sbx exec claude -p'")
+	acpImage := fs.String("acp-image", "", "prebuilt container image every ACP sandbox is created from, passed to `sbx create -t` (default: the stock claude template). Point it at acp-kit's prebuilt image (`make image-build`) so the kit's ~540MB npm install is paid once at image-build time instead of on every sandbox create. --acp-kit is still layered on top; only matters when --acp-kit is set")
 	acpWrapper := fs.String("acp-wrapper", "", "path to the acp-wrapper binary (default: acp-wrapper on PATH)")
 	sessionsRoot := fs.String("sessions-root", "", "root dir holding per-session dirs for ACP agents (default ~/.workingman/sessions)")
 	wolfHost := fs.Bool("wolf-host", false, "escape hatch: run the wolf agent in a tmux window directly on the host (full host access, no sandbox, only reachable by attaching to tmux) instead of as a persistent ACP session in its own sandbox. Only matters when --acp-kit is set")
@@ -180,6 +181,7 @@ func runDaemon(args []string) {
 		defer acpLog.Close()
 		r.AcpLauncher = &agent.ProcessLauncher{Stderr: acpLog}
 		r.Kit = *acpKit
+		r.Image = *acpImage
 		r.AcpWrapperPath = *acpWrapper
 		r.SessionsRoot = *sessionsRoot
 		r.WolfOnHost = *wolfHost
@@ -216,6 +218,7 @@ func runDaemon(args []string) {
 			daemon.WithRuntimeInfo(daemon.RuntimeInfo{
 				WorkspaceManager: *workspaceMode,
 				AcpKit:           *acpKit,
+				AcpImage:         *acpImage,
 				AcpWrapper:       *acpWrapper,
 				SessionsRoot:     *sessionsRoot,
 				TmuxSession:      *tmuxSession,
@@ -253,6 +256,7 @@ func runDaemon(args []string) {
 		"tmux", tmuxBin,
 		"tmux_session", *tmuxSession,
 		"acp_kit", *acpKit,
+		"acp_image", *acpImage,
 		"wolf_host", fmt.Sprintf("%t", *wolfHost),
 		"state_file", stateFilePath,
 	)

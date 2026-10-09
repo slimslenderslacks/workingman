@@ -408,6 +408,15 @@ type Runner struct {
 	// dir or a published ref). Required when AcpLauncher is set.
 	Kit string
 
+	// Image, when set, is the prebuilt container image every ACP sandbox is
+	// created from, passed through as `acp-wrapper --template` (and on to
+	// `sbx create -t`). It applies to every ACP kind alike — task, commit,
+	// planning, wolf, workingman — because they all share one Kit and one
+	// sandbox shape; see acpwrapper.Config.TemplateImage for why a prebuilt
+	// image is what removes the kit's per-create npm install. Empty leaves
+	// every sandbox on the stock claude template.
+	Image string
+
 	// SessionsRoot is where per-session directories live; passed to
 	// `acp-wrapper --sessions-root` and used to write the initial session.json.
 	// Defaults to ~/.workingman/sessions when empty.
@@ -860,6 +869,13 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, project
 		"--kit", r.Kit,
 		"--sandbox", sandboxName,
 		"--sessions-root", sessionsRoot,
+	}
+	// The prebuilt image is kind-independent: every ACP session shares one Kit
+	// and one sandbox shape, so there is nothing to branch on here (see
+	// Runner.Image). Omitted entirely when unset so the argv — and the stock
+	// `sbx create` behaviour — are byte-identical to before.
+	if img := strings.TrimSpace(r.Image); img != "" {
+		args = append(args, "--template", img)
 	}
 	if persistent {
 		// Conversational session (the wolf): survive client disconnects — the TUI

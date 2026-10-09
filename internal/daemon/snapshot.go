@@ -82,6 +82,7 @@ type DaemonInfo struct {
 	StartedAt        time.Time `json:"started_at"`
 	WorkspaceManager string    `json:"workspace_manager,omitempty"`
 	AcpKit           string    `json:"acp_kit,omitempty"`
+	AcpImage         string    `json:"acp_image,omitempty"`
 	AcpWrapper       string    `json:"acp_wrapper,omitempty"`
 	SessionsRoot     string    `json:"sessions_root,omitempty"`
 	TmuxSession      string    `json:"tmux_session,omitempty"`
@@ -111,6 +112,11 @@ type ProjectSnapshot struct {
 	Archive    bool `json:"archive"`
 	Replan     bool `json:"replan"`
 	WatchingPR bool `json:"watching_pr"`
+	// Hidden mirrors `hide:` — the work stream is filtered out of the TUI's
+	// gallery. Display only; it changes nothing about dispatch, and it is
+	// reported here so a snapshot reader doesn't conclude a stream is missing
+	// when it is merely not on screen.
+	Hidden bool `json:"hidden"`
 
 	Cron       string `json:"cron,omitempty"`
 	CronActive bool   `json:"cron_active"`
@@ -362,6 +368,7 @@ func loadProjectSnapshot(path, tasksDir string) ProjectSnapshot {
 	snap.Cleanup = p.Cleanup
 	snap.Archive = p.Archive
 	snap.Replan = p.Replan
+	snap.Hidden = p.Hide
 	snap.WatchingPR = p.Status == project.StatusIdle && p.WatchingPR()
 	snap.Cron = p.Cron
 	snap.CronActive = p.Cron != "" && !p.CronExpired()

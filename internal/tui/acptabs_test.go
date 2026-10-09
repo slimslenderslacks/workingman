@@ -224,6 +224,29 @@ func TestApplyTerminalPreservesTranscript(t *testing.T) {
 	}
 }
 
+// A tab appearing because some other agent started a session must never pull
+// the view off the tab the user is reading — not on its own, and not via the
+// index shift a concurrent removal would otherwise cause.
+func TestNewTabDoesNotStealFocus(t *testing.T) {
+	var a acpTabs
+	a.upsert("a", "a")
+	a.upsert("wolf", "wolf")
+	a.sel = 1 // reading "wolf"
+
+	a.upsert("new-task", "new-task")
+	a.upsertPlaceholder("starting-task", "starting-task")
+	if cur, _ := a.selected(); cur.id != "wolf" {
+		t.Errorf("selected after new tabs = %q, want wolf", cur.id)
+	}
+
+	// "a" sits before the selection: dropping it must slide the selection with
+	// it, not leave the index pointing at the freshly-added tab.
+	a.remove("a")
+	if cur, _ := a.selected(); cur.id != "wolf" {
+		t.Errorf("selected after removing an earlier tab = %q, want wolf", cur.id)
+	}
+}
+
 func TestNextPrevWrapAround(t *testing.T) {
 	var a acpTabs
 	a.upsert("a", "a")

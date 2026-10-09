@@ -51,7 +51,7 @@ func (s *Snapshot) WriteText(w io.Writer) error {
 			up = ", up " + s.GeneratedAt.Sub(d.StartedAt).Round(time.Second).String()
 		}
 		p("daemon: %s pid=%d started=%s%s\n", d.State, d.PID, d.StartedAt.Format(time.RFC3339), up)
-		p("  workspace-manager=%s acp-kit=%s headless=%t\n", orDash(d.WorkspaceManager), orDash(d.AcpKit), d.Headless)
+		p("  workspace-manager=%s acp-kit=%s acp-image=%s headless=%t\n", orDash(d.WorkspaceManager), orDash(d.AcpKit), orDash(d.AcpImage), d.Headless)
 		p("  sessions-root=%s state-file=%s\n", orDash(d.SessionsRoot), orDash(d.StateFile))
 	}
 	p("roots: %s\n", strings.Join(s.Roots, ", "))
@@ -97,7 +97,7 @@ func (s *Snapshot) WriteText(w io.Writer) error {
 		for _, f := range []struct {
 			on   bool
 			name string
-		}{{pr.Review, "review"}, {pr.ReviewNow, "review_now"}, {pr.Cleanup, "cleanup"}, {pr.Archive, "archive"}, {pr.Replan, "replan"}, {pr.WatchingPR, "watching_pr"}, {pr.CronActive, "cron:" + pr.Cron}} {
+		}{{pr.Review, "review"}, {pr.ReviewNow, "review_now"}, {pr.Cleanup, "cleanup"}, {pr.Archive, "archive"}, {pr.Replan, "replan"}, {pr.Hidden, "hidden"}, {pr.WatchingPR, "watching_pr"}, {pr.CronActive, "cron:" + pr.Cron}} {
 			if f.on {
 				flags = append(flags, f.name)
 			}

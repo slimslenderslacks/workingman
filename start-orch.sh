@@ -132,12 +132,35 @@ fi
 # real kit checkout; still overridable from the environment.
 export ACP_KIT="${ACP_KIT:-/Users/slim/dev/repos_docker/slimslenderslacks/acp-kit}"
 
+# Create every ACP sandbox from acp-kit's prebuilt image rather than the stock
+# claude template. acp-kit is a mixin, and a user --kit mixin is never embedded
+# into a base image, so its install step — a ~540MB `npm install -g` of the ACP
+# bridge and the claude-agent-sdk's native binaries — otherwise runs on EVERY
+# `sbx create`. This image bakes that same install (acp-kit's own Dockerfile),
+# and the kit's install step short-circuits on it because acp-kit skips the
+# Node/npm work when claude-agent-acp is already on PATH.
+#
+# The image must live in the SANDBOX RUNTIME's image store, which is separate
+# from the host docker's — `docker build` alone is not enough, and `sbx create`
+# fails at PREPARE IMAGE with a registry 403 for an image sitting right there in
+# `docker images`. From the acp-kit checkout:
+#
+#   make image-build
+#   docker save slimslenderslacks/claude-code-acp:<tag> -o /tmp/acp.tar
+#   sbx template load /tmp/acp.tar
+#
+# Confirm with `sbx template ls`. Keep the tag in step with the bridge version
+# that acp-kit's Dockerfile pins. Set ACP_IMAGE="" to fall back to the stock
+# template (and pay the ~31s per-create install again).
+export ACP_IMAGE="${ACP_IMAGE-slimslenderslacks/claude-code-acp:0.88.0}"
+
 # Run orch as a child (not exec) so the EXIT trap can stop the private agent.
 # Forward INT/TERM to it for a clean shutdown and preserve its exit status.
 "$HERE/orch" \
   --root ~/orch \
   --audit-log ~/orch/audit.log \
   --acp-kit "${ACP_KIT:-$HERE/../acp-kit}" \
+  --acp-image "$ACP_IMAGE" \
   --acp-wrapper "$HERE/acp-wrapper" <&0 &
 ORCH_PID=$!
 trap 'kill -TERM "$ORCH_PID" 2>/dev/null || true' INT TERM

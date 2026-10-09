@@ -91,7 +91,10 @@ func (a *acpTabs) indexOf(id string) int {
 	return -1
 }
 
-// appendTab adds t to the collection, selecting it if it's the first tab.
+// appendTab adds t to the end of the collection. It never steals focus: a tab
+// appearing because some agent elsewhere just started a session must not yank
+// the user off the tab they are reading. The sole exception is the first tab,
+// where there is no existing focus to preserve.
 func (a *acpTabs) appendTab(t acpTab) {
 	a.tabs = append(a.tabs, t)
 	if len(a.tabs) == 1 {
@@ -145,14 +148,29 @@ func (a *acpTabs) upsertPlaceholder(id, title string) {
 	a.appendTab(acpTab{id: id, title: title, status: acpclient.StateConnecting, curMsg: -1, placeholder: true})
 }
 
-// remove drops the tab for id (a session whose resources were cleaned up) and
-// clamps the selection so it still points at a real tab.
+// remove drops the tab for id (a session whose resources were cleaned up),
+// keeping the focus on whatever tab the user was reading. Because sel is an
+// index, dropping a tab that sits BEFORE it would otherwise slide a different
+// session under the selection — often a tab that had just been appended, which
+// reads as the view spontaneously jumping to a new tab. So the selected tab is
+// re-found by id after the deletion; only when the removed tab was itself the
+// selected one does the index clamp into the gap it left.
 func (a *acpTabs) remove(id string) {
 	i := a.indexOf(id)
 	if i < 0 {
 		return
 	}
+	selID := ""
+	if t, ok := a.selected(); ok {
+		selID = t.id
+	}
 	a.tabs = append(a.tabs[:i], a.tabs[i+1:]...)
+	if selID != "" && selID != id {
+		if j := a.indexOf(selID); j >= 0 {
+			a.sel = j
+			return
+		}
+	}
 	if a.sel >= len(a.tabs) {
 		a.sel = len(a.tabs) - 1
 	}
