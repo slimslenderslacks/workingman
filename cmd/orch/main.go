@@ -166,12 +166,12 @@ func runDaemon(args []string) {
 		// Command defaults to claude-code via runner.DefaultCommandBuilder.
 	}
 
-	// When --acp-kit is set, non-interactive agents (planning/task/commit) are
-	// launched as acp-wrapper-backed ACP sessions rather than tmux windows
-	// running `sbx exec claude -p`. The wrapper is a host process: its stderr
-	// (diagnostics) goes to a log file so it never corrupts the TUI alt-screen.
-	// The wolf also runs as a (persistent) ACP session unless --wolf-host is set;
-	// the archive agent keeps the tmux launcher above.
+	// When --acp-kit is set, non-interactive agents (planning/task/commit/
+	// archive) are launched as acp-wrapper-backed ACP sessions rather than tmux
+	// windows running `sbx exec claude -p`. The wrapper is a host process: its
+	// stderr (diagnostics) goes to a log file so it never corrupts the TUI
+	// alt-screen. The wolf also runs as a (persistent) ACP session unless
+	// --wolf-host is set, in which case it keeps the tmux launcher above.
 	if *acpKit != "" {
 		acpLogPath := filepath.Join(filepath.Dir(*auditPath), "acp-wrapper.log")
 		acpLog, err := os.OpenFile(acpLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)

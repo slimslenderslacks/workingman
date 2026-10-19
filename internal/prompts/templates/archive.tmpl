@@ -31,21 +31,20 @@ repo at its root. Do the following in EVERY repo it contains.
      - local caches and tool state directories
 
    When you find such paths, do NOT commit them and do NOT delete them, and do
-   NOT edit `.gitignore` on your own authority. Instead PROPOSE the exact
-   `.gitignore` edit — which file, which lines added — and WAIT for a human to
-   approve it. Approval comes through this interactive session: send a macOS
-   notification with the proposal (the same notify-and-wait mechanism the wolf
-   agent uses), then wait for the user to attach to this session and reply.
-   Apply the edit only after they say yes. If they say no, or never reply, do
-   not apply it and do not commit those paths — go to step 5 and report that
-   you could not finish.
+   NOT edit `.gitignore` on your own authority. There is no human attached to
+   this session — you run autonomously and nobody can answer you — so do not
+   notify, do not ask, and do not wait. Instead stop work on that repo and go
+   to step 5, where you report the exact `.gitignore` edit you would have made
+   (which file, which lines added) as the outstanding item for a human. A repo
+   with leftovers you cannot commit is a repo you could NOT finish.
 
-3. Commit ONLY if there is something to commit. Once the tree holds only
-   changes that belong in the repo (either it always did, or the approved
-   `.gitignore` edit took the rest out of the way), make ONE final commit with a
-   short message describing what is being wrapped up. Stage with
-   `git -C <repo> add -A` after the ignore rules are in place, so the artifacts
-   above stay out.
+   If, apart from those paths, the repo's tree is otherwise clean, it is still
+   not finished: staging with `git add -A` would sweep the artifacts in. Leave
+   the repo alone and report it.
+
+3. Commit ONLY if there is something to commit. If the tree holds only changes
+   that belong in the repo, make ONE final commit with a short message
+   describing what is being wrapped up, staging with `git -C <repo> add -A`.
 
    If `git -C <repo> status --porcelain` is empty there is nothing to record:
    do NOT commit, and never reach for `--allow-empty`. An empty commit is not
@@ -120,12 +119,15 @@ job.
        exactly as you found it — the daemon owns that field, and `archive` is
        an independent flag, not a status.
 
-     - If you could NOT finish — a push was rejected, approval for a
-       `.gitignore` change never came, or the working tree holds changes you
-       cannot confidently classify — leave `archive` unset (do not set it to
-       false, and do not remove an existing value you did not set), and say
-       clearly in your final message what is still outstanding and what a human
-       needs to do about it. Never mark the project clean just to exit.
+     - If you could NOT finish — a push was rejected, a repo holds build
+       artifacts that need a `.gitignore` rule (step 2), or the working tree
+       holds changes you cannot confidently classify — leave `archive` unset
+       (do not set it to false, and do not remove an existing value you did not
+       set), and say clearly in your final message what is still outstanding
+       and what a human needs to do about it: name the repo, the paths, and the
+       exact `.gitignore` lines you would have added. Your final message is the
+       only channel you have — nobody is watching this session live — so make
+       it complete enough to act on. Never mark the project clean just to exit.
 
 Nothing else in the project's control directory is yours to change — the task
 files{{if .TasksDir}} under `{{.TasksDir}}`{{end}} stay as they are.

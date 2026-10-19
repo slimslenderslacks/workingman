@@ -170,10 +170,10 @@ daemon ignores its own fsnotify events.
 
 - **Audit log** (`--audit-log`): one line per event. `tail -f` it.
 - **Tmux sessions**: `tmux list-sessions` shows the agents that still run in
-  tmux (archive, and the wolf with `--wolf-host` or without `--acp-kit`).
+  tmux (the wolf with `--wolf-host` or without `--acp-kit`).
   Attach with `tmux attach -t <name>` to drive one.
-- **ACP sessions** (`--acp-kit`): planning/task/commit/review agents and, by
-  default, the wolf run as ACP sessions. Press `a` in the TUI for the tab view
+- **ACP sessions** (`--acp-kit`): planning/task/commit/review/archive agents
+  and, by default, the wolf run as ACP sessions. Press `a` in the TUI for the tab view
   (or enter on a session row); the wolf's tab is interactive — press enter to
   type to it. `--wolf-host` runs the wolf on the host in tmux instead (full
   host access, but only reachable via tmux).
@@ -439,15 +439,16 @@ it already had):
 
 `:cleanup` sets `cleanup: true` and returns immediately; the daemon notices the
 flag ahead of its normal status routing and launches the **archive agent** in
-the project's wsp workspace. It's an interactive agent, so it may need you to
-attach. In every repo of the workspace it:
+the project's wsp workspace. It runs autonomously, as a one-shot ACP session in
+its own `<work-stream>-archive` sandbox — nothing to attach to; watch it in the
+TUI's tab view like any other ACP agent. In every repo of the workspace it:
 
 1. Checks for uncommitted work (`git status --porcelain`).
 2. Classifies what's there. Anything that plainly doesn't belong in the repo
    (build artifacts, editor scratch, local caches) is **not** committed and
-   **not** deleted — the agent *proposes* a `.gitignore` edit, notifies you, and
-   waits for approval before applying it. If approval never comes, it stops and
-   reports instead of committing.
+   **not** deleted, and it never edits `.gitignore` itself. Since nobody is
+   there to answer, it doesn't ask: it leaves that repo alone and reports the
+   exact `.gitignore` edit it would have made as outstanding work for you.
 3. Makes one final commit — only if there is something to commit.
 4. Pushes to the branch **actually checked out in that workspace**
    (`git rev-parse --abbrev-ref HEAD`) — not a hardcoded branch name, and never
@@ -464,7 +465,14 @@ There are no other pre-commit steps: no tests, no lint, no formatting, no
 scratch-file cleanup. A repo that needed neither a commit nor a push is a
 success. On success the agent sets `archive: true` on
 `.project.yaml` and leaves `status:` untouched. If it can't finish, it leaves
-`archive` unset and says what's outstanding.
+`archive` unset and says what's outstanding — its final message is the whole
+report, so read the session tab when a cleanup doesn't flip the flag.
+
+Because it pushes, the daemon grants its sandbox egress to `github.com` on
+dispatch (sbx denies network by default, and the archive agent has no task file
+to declare the rule itself), and the acp-wrapper runs the same push preflight it
+runs for the commit agent — a forwarded SSH agent holding no usable key fails
+the launch loudly rather than mid-push. See `./check-signing.sh`.
 
 The daemon clears `cleanup:` when the session ends either way (an unfinished run
 is logged as `archive_incomplete`), so a cleanup is never retried behind your

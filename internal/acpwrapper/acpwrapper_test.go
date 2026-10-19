@@ -1252,13 +1252,20 @@ func TestPushPreflightError(t *testing.T) {
 	fail := func(context.Context, string, ...string) ([]byte, error) {
 		return nil, errors.New("exit status 1")
 	}
-	// Non-commit kinds never push: no command runs, no error.
+	// Non-pushing kinds never push: no command runs, no error.
 	task := Config{Kind: "task", SandboxName: "acp-s", SbxPath: "sbx"}
 	if err := pushPreflightError(context.Background(), func(context.Context, string, ...string) ([]byte, error) {
-		t.Fatal("run must not be called for non-commit kinds")
+		t.Fatal("run must not be called for non-pushing kinds")
 		return nil, nil
 	}, task); err != nil {
 		t.Errorf("task kind: err = %v, want nil", err)
+	}
+	// The archive agent pushes too — it is what publishes a finished work
+	// stream at cleanup — so it gets the same preflight as the commit agent.
+	archive := Config{Kind: "archive", SandboxName: "acp-s", SbxPath: "sbx"}
+	if err := pushPreflightError(context.Background(), fail, archive); err == nil ||
+		!strings.Contains(err.Error(), "check-signing.sh") {
+		t.Errorf("archive kind with dead agent: err = %v, want actionable error", err)
 	}
 	// Commit agent with a dead agent fails loudly with an actionable message.
 	commit := Config{Kind: "commit", SandboxName: "acp-s", SbxPath: "sbx"}

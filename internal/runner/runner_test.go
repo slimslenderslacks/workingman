@@ -48,10 +48,10 @@ func (s *fakeSession) Close() error {
 }
 
 func TestDefaultCommandBuilderModes(t *testing.T) {
-	// Autonomous kinds (project/planning/task/commit) run with --print so
-	// claude executes one turn and exits, closing the tmux window and letting
-	// the daemon advance project state. The interactive kinds (wolf, archive)
-	// omit --print so the human can drive the conversation. Every kind carries
+	// Autonomous kinds (project/planning/task/commit/archive) run with --print
+	// so claude executes one turn and exits, closing the tmux window and letting
+	// the daemon advance project state. The wolf, the one interactive kind,
+	// omits --print so the human can drive the conversation. Every kind carries
 	// --dangerously-skip-permissions and the initial prompt on argv.
 	cases := []struct {
 		kind        agent.Kind
@@ -63,7 +63,7 @@ func TestDefaultCommandBuilderModes(t *testing.T) {
 		{agent.PlanningAgent, true, "planning agent runs one autonomous turn"},
 		{agent.TaskAgent, true, "task agent runs one autonomous turn"},
 		{agent.CommitAgent, true, "commit agent runs one autonomous turn"},
-		{agent.ArchiveAgent, false, "archive agent may need a .gitignore change approved"},
+		{agent.ArchiveAgent, true, "archive agent runs one autonomous turn"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.kind.String(), func(t *testing.T) {
@@ -334,16 +334,21 @@ func TestArchiveAgentResolvesWorkspaceAndMountsOrchDir(t *testing.T) {
 	}
 }
 
-// The archive agent is interactive, so even with an ACP launcher configured it
-// must take the legacy tmux path — a human has to be able to attach and approve
-// the .gitignore proposal.
-func TestArchiveAgentTakesTmuxPathNotACP(t *testing.T) {
+// The archive agent is autonomous, so with an ACP launcher configured it takes
+// the ACP path like the commit agent it most resembles — it does the same git
+// work, in the same wsp workspace, and nobody attaches to it.
+func TestArchiveAgentTakesACPPath(t *testing.T) {
 	r := &Runner{AcpLauncher: &fakeLauncher{}}
-	if r.UsesACP(agent.ArchiveAgent) {
-		t.Error("archive agent must not use the ACP path")
+	if !r.UsesACP(agent.ArchiveAgent) {
+		t.Error("archive agent should use the ACP path")
 	}
 	if !r.UsesACP(agent.CommitAgent) {
 		t.Error("commit agent should still use the ACP path")
+	}
+	// Without an ACP launcher it falls back to the legacy tmux path, like
+	// every other kind.
+	if (&Runner{}).UsesACP(agent.ArchiveAgent) {
+		t.Error("archive agent must not claim ACP without an AcpLauncher")
 	}
 }
 

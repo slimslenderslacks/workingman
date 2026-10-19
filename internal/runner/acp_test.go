@@ -447,32 +447,87 @@ func TestACPLaunchTaskAgentForwardsSandboxCleanupFlags(t *testing.T) {
 	}
 }
 
-// TestArchiveAgentNeverUsesACP: the archive agent is interactive and has no
-// persistent-ACP mode, so even a fully ACP-wired runner keeps it on tmux.
-func TestArchiveAgentNeverUsesACP(t *testing.T) {
-	workingDir := t.TempDir()
-	projectPath := filepath.Join(workingDir, ".project.yaml")
+// TestACPLaunchArchiveAgent: the archive agent is autonomous, so an ACP-wired
+// runner launches it through acp-wrapper — one-shot (--exit-when-empty, not
+// --persistent), in its own "<work-stream>-archive" sandbox, with both the wsp
+// worktree (where its git work happens) and the orch dir (where it writes
+// `archive: true`) mounted. The tmux launcher must not be touched.
+func TestACPLaunchArchiveAgent(t *testing.T) {
+	wsRoot := t.TempDir()
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	sessionsRoot := t.TempDir()
 
+	acp := &fakeLauncher{}
 	tmux := &fakeLauncher{}
 	r := &Runner{
+		Workspaces:   workspace.NewStub(wsRoot),
 		Launcher:     tmux,
-		AcpLauncher:  &failLauncher{t: t},
-		Kit:          "kit",
-		SessionsRoot: t.TempDir(),
-		Command:      func(_ agent.Kind, _ string) []string { return []string{"claude", "hi"} },
+		AcpLauncher:  acp,
+		Kit:          "kit-ref",
+		SessionsRoot: sessionsRoot,
 	}
+
+	netRule := policy.Rule{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "github.com"}
 	if _, err := r.Start(context.Background(), Plan{
 		Kind:        agent.ArchiveAgent,
-		WorkingDir:  workingDir,
+		Branch:      "feat-x",
 		ProjectPath: projectPath,
+		TasksDir:    filepath.Join(orchDir, "tasks"),
+		Policies:    []policy.Rule{netRule},
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if tmux.last.Command[0] != "claude" {
-		t.Errorf("archive agent should use the tmux launcher with the built command, got %v", tmux.last.Command)
+
+	if tmux.last.Name != "" {
+		t.Errorf("tmux launcher was used for the archive agent: %+v", tmux.last)
+	}
+	cmd := acp.last.Command
+	if len(cmd) == 0 || cmd[0] != "acp-wrapper" {
+		t.Fatalf("command = %v, want an acp-wrapper invocation", cmd)
+	}
+	wantWorktree := filepath.Join(wsRoot, "feat-x")
+	if ws := argValues(cmd, "--workspace"); len(ws) != 2 || ws[0] != wantWorktree || ws[1] != orchDir {
+		t.Errorf("--workspace = %v, want [%q %q]", ws, wantWorktree, orchDir)
+	}
+	wantSandbox := filepath.Base(orchDir) + "-archive"
+	if got := argValue(cmd, "--sandbox"); got != wantSandbox {
+		t.Errorf("--sandbox = %q, want %q", got, wantSandbox)
+	}
+	if got := argValue(cmd, "--session-id"); got != "archive-feat-x" {
+		t.Errorf("--session-id = %q, want archive-feat-x", got)
+	}
+	if got := argValue(cmd, "--kind"); got != "archive" {
+		t.Errorf("--kind = %q, want archive — the wrapper keys its push preflight off it", got)
+	}
+	// One-shot: the turn ending is the agent's exit signal, exactly like the
+	// commit agent. A --persistent archive agent would hold the cleanup
+	// reservation open with nobody to talk to.
+	if !hasFlag(cmd, "--exit-when-empty") {
+		t.Errorf("expected --exit-when-empty in argv, got %v", cmd)
+	}
+	if hasFlag(cmd, "--persistent") {
+		t.Errorf("archive agent must not be persistent, got %v", cmd)
+	}
+	// Its egress rule has to reach the sandbox, or the push it exists to make
+	// is blocked by sbx's deny-by-default network policy.
+	if got := argValues(cmd, "--policy"); len(got) != 1 || got[0] != netRule.Encode() {
+		t.Errorf("--policy = %v, want [%q]", got, netRule.Encode())
+	}
+
+	store := session.Store{Root: sessionsRoot}
+	rec, err := store.Read("archive-feat-x")
+	if err != nil {
+		t.Fatalf("read session.json: %v", err)
+	}
+	if rec.Kind != "archive" || rec.ProjectPath != projectPath {
+		t.Errorf("session record kind/project = %q/%q, want archive/%q", rec.Kind, rec.ProjectPath, projectPath)
+	}
+	if rec.Persistent {
+		t.Error("session record marked persistent")
 	}
 }
 
@@ -524,7 +579,8 @@ func TestUsesACPWolf(t *testing.T) {
 		{"wolf under ACP", Runner{AcpLauncher: &fakeLauncher{}}, agent.WolfAgent, true},
 		{"wolf on host", Runner{AcpLauncher: &fakeLauncher{}, WolfOnHost: true}, agent.WolfAgent, false},
 		{"wolf without ACP", Runner{}, agent.WolfAgent, false},
-		{"archive stays on tmux", Runner{AcpLauncher: &fakeLauncher{}}, agent.ArchiveAgent, false},
+		{"archive under ACP", Runner{AcpLauncher: &fakeLauncher{}}, agent.ArchiveAgent, true},
+		{"archive without ACP", Runner{}, agent.ArchiveAgent, false},
 		{"planning under ACP unaffected by WolfOnHost", Runner{AcpLauncher: &fakeLauncher{}, WolfOnHost: true}, agent.PlanningAgent, true},
 	}
 	for _, tc := range cases {

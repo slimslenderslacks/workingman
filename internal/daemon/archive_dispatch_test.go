@@ -11,6 +11,8 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
+	"github.com/slimslenderslacks/work/internal/gitsign"
+	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/setup"
@@ -427,5 +429,111 @@ func TestSingleCleanupProducesOneArchiveSession(t *testing.T) {
 	}
 	if !reloaded.Archive {
 		t.Errorf("archive flag lost: %+v", reloaded)
+	}
+}
+
+// TestCleanupDispatchesArchiveAgentUnderACP pins the sandboxed launch shape.
+// With an AcpLauncher wired up the archive agent goes through acp-wrapper like
+// the other autonomous kinds, and the daemon has to supply on its behalf the
+// one thing a task would have declared for itself: egress to the git host. sbx
+// denies network by default, so without that rule the push the agent exists to
+// make cannot leave the sandbox.
+func TestCleanupDispatchesArchiveAgentUnderACP(t *testing.T) {
+	buf := &safeBuf{}
+	a := audit.New(buf)
+	stubRoot := t.TempDir()
+	lch := &recordingLauncher{}
+	acp := &recordingLauncher{}
+	d, err := New([]string{t.TempDir()}, a, WithRunner(&runner.Runner{
+		Workspaces:   workspace.NewStub(stubRoot),
+		Launcher:     lch,
+		AcpLauncher:  acp,
+		Audit:        a,
+		Kit:          "kit-ref",
+		SessionsRoot: t.TempDir(),
+	}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.ctx = ctx
+	t.Cleanup(func() { cancel(); acp.closeAll(); lch.closeAll(); _ = d.watcher.Close() })
+
+	dir := t.TempDir()
+	p := cleanupTestProject()
+	projectPath := seedCleanupProject(t, dir, p)
+	d.dispatchProject(projectPath, p)
+
+	if n := len(lch.launched()); n != 0 {
+		t.Errorf("tmux launcher used %d times for an ACP archive launch, want 0", n)
+	}
+	specs := acp.launched()
+	if len(specs) != 1 || specs[0].Kind != agent.ArchiveAgent {
+		t.Fatalf("acp launches = %+v, want exactly one archive launch.\naudit:\n%s", specs, buf.String())
+	}
+	cmd := specs[0].Command
+	want := policy.Rule{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: gitsign.PushHost}.Encode()
+	if !argvHas(cmd, "--policy", want) {
+		t.Errorf("archive argv missing --policy %q: %v", want, cmd)
+	}
+	if !argvHas(cmd, "--kind", "archive") {
+		t.Errorf("archive argv missing --kind archive (the wrapper's push preflight keys off it): %v", cmd)
+	}
+	// The daemon surfaces the sandbox to the TUI only for ACP sessions, so this
+	// doubles as the check that the archive key resolves to the right name.
+	key := archiveSessionKey(projectPath)
+	for _, info := range d.ListSessions() {
+		if info.ID != key {
+			continue
+		}
+		if want := filepath.Base(dir) + "-archive"; info.SandboxName != want {
+			t.Errorf("archive SandboxName = %q, want %q", info.SandboxName, want)
+		}
+	}
+}
+
+// argvHas reports whether flag appears in argv immediately followed by value.
+func argvHas(argv []string, flag, value string) bool {
+	for i, a := range argv {
+		if a == flag && i+1 < len(argv) && argv[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+// TestStrandedArchiveSessionReapedOnceArchiveSet covers the reaper's new
+// archive case: an archive agent that wrote `archive: true` has finished, so a
+// wrapper still running past the done-grace is stranded and gets closed. Its
+// session key carries the "#archive" marker, which the verdict has to strip to
+// find the project file at all.
+func TestStrandedArchiveSessionReapedOnceArchiveSet(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	dir := t.TempDir()
+	p := cleanupTestProject()
+	projectPath := seedCleanupProject(t, dir, p)
+	key := archiveSessionKey(projectPath)
+
+	sess := newStubSession("archive-feat-cleanup")
+	defer sess.Close()
+	if !d.trackSession(key, sess, agent.ArchiveAgent, "", nil) {
+		t.Fatal("trackSession returned false")
+	}
+	entry := sessionEntry{sess: sess, kind: agent.ArchiveAgent, startedAt: time.Now().Add(-2 * sessionDoneGrace)}
+
+	// Still working: archive unset, so no stage-complete signal and (within the
+	// idle bound) no reap.
+	if v := d.strandedVerdict(key, entry); v.reap {
+		t.Errorf("archive agent without archive:true was reaped: %+v", v)
+	}
+
+	done := *p
+	done.Archive = true
+	if err := project.SaveAs(projectPath, &done, project.WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	v := d.strandedVerdict(key, entry)
+	if !v.reap || v.cause != reapCauseStageComplete {
+		t.Errorf("verdict after archive:true = %+v, want a stage_complete reap", v)
 	}
 }

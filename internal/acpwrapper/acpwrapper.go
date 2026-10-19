@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
@@ -160,10 +161,12 @@ type Config struct {
 
 	// ProjectPath is the host path to the .project.yaml driving this session,
 	// and Kind is the agent.Kind string ("project", "planning", "task",
-	// "commit") running it. Neither affects the sandbox or the ACP client —
-	// they are recorded into session.json purely so a restarting daemon can
-	// tell which project (and how) to resume dispatching for a session it
-	// did not itself launch. See the daemon package's startup reconciliation.
+	// "commit", "archive", …) running it. ProjectPath affects nothing about the
+	// sandbox or the ACP client; both are recorded into session.json so a
+	// restarting daemon can tell which project (and how) to resume dispatching
+	// for a session it did not itself launch (see the daemon package's startup
+	// reconciliation). Kind additionally selects the push preflight, which only
+	// the pushing kinds run — see pushingKind.
 	ProjectPath string
 	Kind        string
 
@@ -702,11 +705,13 @@ func signingPreflight(ctx context.Context, run commandFunc, c Config) (checked, 
 }
 
 // pushPreflightError verifies the forwarded agent can authenticate a git push.
-// It only applies to the commit agent (the only kind that pushes); other kinds
-// return nil without running anything. A non-nil error carries an actionable
-// message and makes Run abort instead of failing silently at `git push`.
+// It only applies to the kinds that push — the commit agent (on a push task)
+// and the archive agent (publishing a finished work stream at cleanup); other
+// kinds return nil without running anything. A non-nil error carries an
+// actionable message and makes Run abort instead of failing silently at
+// `git push`.
 func pushPreflightError(ctx context.Context, run commandFunc, c Config) error {
-	if c.Kind != "commit" {
+	if !pushingKind(c.Kind) {
 		return nil
 	}
 	res := gitsign.PushPreflight(ctx, gitsign.RunFunc(run), c.SbxPath, c.SandboxName)
@@ -714,6 +719,13 @@ func pushPreflightError(ctx context.Context, run commandFunc, c Config) error {
 		return nil
 	}
 	return fmt.Errorf("acpwrapper: push preflight FAILED for sandbox %q: %s", c.SandboxName, res.Reason)
+}
+
+// pushingKind reports whether an agent of this kind may run `git push`, and so
+// needs the push preflight. Compared as the agent.Kind strings the --kind flag
+// carries.
+func pushingKind(kind string) bool {
+	return kind == agent.CommitAgent.String() || kind == agent.ArchiveAgent.String()
 }
 
 // withSigningPreflightResult is the actual fix for the root cause this task

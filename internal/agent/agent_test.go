@@ -67,9 +67,8 @@ func TestParseKindRoundTrip(t *testing.T) {
 }
 
 // Interactive drives the --print flag in runner.DefaultCommandBuilder and the
-// ACP-vs-tmux routing in Runner.Start, so it has to be exact: the archive agent
-// may need a human to approve a .gitignore change, which makes it interactive
-// like the wolf.
+// ACP-vs-tmux routing in Runner.Start, so it has to be exact: the wolf is the
+// only kind a human drives.
 func TestKindInteractive(t *testing.T) {
 	cases := []struct {
 		kind Kind
@@ -80,7 +79,10 @@ func TestKindInteractive(t *testing.T) {
 		{TaskAgent, false},
 		{CommitAgent, false},
 		{WolfAgent, true},
-		{ArchiveAgent, true},
+		// The archive agent no longer waits for a human to approve a .gitignore
+		// change — it reports the proposal instead — so it runs autonomously in
+		// an ACP sandbox like the commit agent.
+		{ArchiveAgent, false},
 		// The review agent is autonomous: it runs under ACP with `--print` so it
 		// can carry --static-mcp github, like planning.
 		{ReviewAgent, false},

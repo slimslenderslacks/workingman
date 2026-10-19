@@ -270,8 +270,7 @@ func TestRenderArchive(t *testing.T) {
 		"/ws",                         // the wsp workspace it works in
 		"git status",                  // step 1: find uncommitted work
 		".gitignore",                  // step 2: the proposal
-		"WAIT",                        // ...and that it must not apply it alone
-		"notification",                // approval arrives via the interactive session
+		"on your own authority",       // ...which it must not apply itself
 		"rev-parse --abbrev-ref HEAD", // step 4: branch is read, not assumed
 		"@{upstream}..HEAD",           // ...and so is how far ahead it is
 		"archive: true",               // step 5: success marker
@@ -301,6 +300,26 @@ func TestRenderArchive(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// The archive agent runs autonomously in an ACP sandbox: nobody can answer
+	// it, so a .gitignore proposal must become a report, never a wait. Pin both
+	// halves — that it is told so, and that no stale notify-and-wait survives.
+	for _, want := range []string{
+		"There is no human attached to",
+		"do not wait",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing autonomous-operation instruction %q in:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{
+		"WAIT for a human",
+		"notification",
+		"attach to this session",
+	} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("archive template still waits on a human (%q) in:\n%s", unwanted, out)
 		}
 	}
 	// The push has to be gated from the framing down, not just in step 4: the

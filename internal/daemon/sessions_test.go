@@ -252,14 +252,15 @@ func TestListSessionsPopulatesSandboxNameForACPSessions(t *testing.T) {
 
 // TestListSessionsLeavesWolfSandboxEmptyOnHost covers the --wolf-host escape
 // hatch: with WolfOnHost the wolf is a host tmux window with no sandbox, so no
-// sandbox name is surfaced even though the runner has an AcpLauncher. The archive
-// agent never uses ACP and likewise has none.
+// sandbox name is surfaced even though the runner has an AcpLauncher. The
+// archive agent is unaffected by that flag — it runs under ACP either way, so
+// its sandbox name IS surfaced, keyed off the "#archive" session key.
 func TestListSessionsLeavesWolfSandboxEmptyOnHost(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	d.runner = &runner.Runner{AcpLauncher: stubLauncher{}, WolfOnHost: true}
 
 	wolfKey := filepath.Join(t.TempDir(), "bravo", ".project.yaml")
-	archiveKey := filepath.Join(t.TempDir(), "charlie", ".project.yaml")
+	archiveKey := archiveSessionKey(filepath.Join(t.TempDir(), "charlie", ".project.yaml"))
 	wolfSess := newStubSession("wolf-bravo")
 	archiveSess := newStubSession("archive-charlie")
 	if !d.trackSession(wolfKey, wolfSess, agent.WolfAgent, "", nil) ||
@@ -269,10 +270,18 @@ func TestListSessionsLeavesWolfSandboxEmptyOnHost(t *testing.T) {
 	defer wolfSess.Close()
 	defer archiveSess.Close()
 
+	byID := map[string]SessionInfo{}
 	for _, info := range d.ListSessions() {
-		if info.SandboxName != "" {
-			t.Errorf("%s session SandboxName = %q, want empty", info.AgentName, info.SandboxName)
-		}
+		byID[info.ID] = info
+	}
+	if got := byID[wolfKey].SandboxName; got != "" {
+		t.Errorf("host wolf SandboxName = %q, want empty", got)
+	}
+	if got := byID[archiveKey].SandboxName; got != "charlie-archive" {
+		t.Errorf("archive SandboxName = %q, want %q", got, "charlie-archive")
+	}
+	if byID[archiveKey].Interactive {
+		t.Error("the archive agent is autonomous and must not be flagged interactive")
 	}
 }
 

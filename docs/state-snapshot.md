@@ -147,7 +147,7 @@ Optional fields are omitted when empty.
 | `kind` | `project`, `planning`, `task`, `commit`, `wolf`, `archive`, `review` |
 | `work_stream`, `project_path`, `task` | what it works on (`task` only for task/commit agents) |
 | `started_at` | when tracking began |
-| `interactive` | wolf/archive wait for a human (the wolf is also an ACP session unless `--wolf-host`; it then has a `sandbox_name` and no `tmux_target`) |
+| `interactive` | only the wolf waits for a human; it is an ACP session too unless `--wolf-host`, in which case it has a `tmux_target` and no `sandbox_name` |
 | `source` | `"daemon"` or `"disk"` |
 | `sandbox_name` | the `sbx` sandbox (ACP sessions) |
 | `tmux_target` | tmux session name (non-ACP sessions) |

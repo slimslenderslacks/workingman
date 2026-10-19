@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
@@ -127,8 +128,9 @@ func (d *Daemon) strandedVerdict(key string, e sessionEntry) reapVerdict {
 	// terminal-status signal (stageComplete returns false for it) and may sit
 	// idle indefinitely while a human thinks or steps away. Killing it on an idle
 	// timeout would silently discard that context, so it holds its slot until it
-	// exits on its own. (The project agent used to be interactive too but now
-	// runs autonomously; it has a terminal signal in stageComplete.)
+	// exits on its own. (The project and archive agents used to be interactive
+	// too but now run autonomously; both have a terminal signal in
+	// stageComplete.)
 	if e.kind.Interactive() {
 		return reapVerdict{}
 	}
@@ -172,7 +174,7 @@ func (d *Daemon) sessionIdle(e sessionEntry) time.Duration {
 // done by advancing the on-disk state to a status terminal for its kind — after
 // which a still-running wrapper is stranded, not working. Kinds without a single
 // terminal-status signal (the interactive wolf) return false and are covered
-// only by the idle timeout.
+// only by the idle timeout; so is an archive agent that could not finish.
 func (d *Daemon) stageComplete(key string, e sessionEntry) bool {
 	switch e.kind {
 	case agent.TaskAgent, agent.CommitAgent:
@@ -210,6 +212,17 @@ func (d *Daemon) stageComplete(key string, e sessionEntry) bool {
 		// on success, or status:blocked if it escalated to the wolf. Either
 		// way status is no longer empty (the unpopulated seed state).
 		return !p.Unpopulated()
+	case agent.ArchiveAgent:
+		// Its key carries the "#archive" marker that keeps it out of the
+		// project's main slot; strip it to reach the project file.
+		p, err := project.Load(strings.TrimSuffix(key, archiveKeyMarker))
+		if err != nil {
+			return false
+		}
+		// The archive agent's whole job is to turn a dirty workspace into
+		// `archive: true`. An agent that gave up never sets it and so has no
+		// stage-complete signal — the idle timeout is what covers that case.
+		return p.Archive
 	default:
 		return false
 	}

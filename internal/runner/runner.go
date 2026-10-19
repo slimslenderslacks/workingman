@@ -66,7 +66,10 @@ type Plan struct {
 	// Policies are sbx policy rules applied to the sandbox right after
 	// `sbx create` and before any `sbx exec`. Forwarded by the daemon from
 	// the task's policies field for task and commit agents (commit shares
-	// the task's sandbox; the rules already on it remain in effect).
+	// the task's sandbox; the rules already on it remain in effect), and
+	// supplied by the daemon itself for the archive agent, which has no task
+	// to declare them but does have to reach the git host to push (see
+	// daemon.archivePolicies).
 	Policies []policy.Rule
 
 	// SaveSandbox forwards the task's save_sandbox field to the acp-wrapper so
@@ -185,15 +188,14 @@ const initialPrompt = "Read .orch/instructions.md and .orch/context.yaml, then f
 // DefaultCommandBuilder returns the production command: claude-code, told to
 // read the instructions and context the orchestrator just wrote.
 //
-// Autonomous kinds (project, planning, task, commit) use --print so claude
-// executes one turn — including any tool use needed to complete the task —
-// and exits. That exit closes the tmux window and lets the daemon chain to the
-// next phase.
+// Autonomous kinds (project, planning, task, commit, archive) use --print so
+// claude executes one turn — including any tool use needed to complete the task
+// — and exits. That exit closes the tmux window and lets the daemon chain to
+// the next phase.
 //
-// Interactive kinds (wolf, archive) omit --print: a human attaches via tmux
-// and drives the conversation, so claude must remain at the prompt. The wolf
-// waits for guidance on a blocked project; the archive agent waits for the
-// user to approve a proposed `.gitignore` change.
+// The wolf, the one interactive kind, omits --print: a human attaches via tmux
+// and drives the conversation, so claude must remain at the prompt waiting for
+// guidance on the blocked project.
 //
 // Sandbox wrapping (running claude inside an `sbx exec`) is layered on by
 // Runner.Start *after* this builder returns — keeping the builder pure of
@@ -369,14 +371,13 @@ type Runner struct {
 	Sandbox SandboxCreator
 
 	// AcpLauncher, when non-nil, switches non-interactive agents
-	// (planning/task/commit) from the tmux + `sbx exec claude -p` path to a
-	// per-session acp-wrapper host process that backs an ACP claude session.
+	// (planning/task/commit/archive) from the tmux + `sbx exec claude -p` path
+	// to a per-session acp-wrapper host process that backs an ACP claude session.
 	// The wrapper creates the sandbox (with acp-kit layered on), execs the ACP
 	// client, and serves <SessionsRoot>/<id>/agent.sock; the TUI watches the
 	// stream over that socket. The wolf is routed here too, as a persistent
-	// (conversational) session, unless WolfOnHost is set; the archive agent
-	// always keeps the tmux path. Leave nil to fall back to the legacy launcher
-	// for every kind (dev/tests).
+	// (conversational) session, unless WolfOnHost is set. Leave nil to fall back
+	// to the legacy launcher for every kind (dev/tests).
 	AcpLauncher agent.Launcher
 
 	// WolfOnHost is the escape hatch for the ACP-backed wolf. By default, with an
@@ -453,8 +454,9 @@ func (r *Runner) signingPreflightRun() gitsign.RunFunc {
 //
 // The wolf is interactive but conversational, so it is the one interactive kind
 // that also runs under ACP (a persistent session other processes can tune in
-// to) — unless WolfOnHost selects the host/tmux escape hatch. The archive agent
-// stays on tmux.
+// to) — unless WolfOnHost selects the host/tmux escape hatch. Every other kind,
+// the archive agent included, is autonomous and takes the ACP path whenever an
+// AcpLauncher is configured.
 func (r *Runner) UsesACP(kind agent.Kind) bool {
 	if r.AcpLauncher == nil {
 		return false
@@ -1062,10 +1064,9 @@ func sessionName(p Plan) string {
 //     for that task reuses the same sandbox so it sees the task's git work.
 //   - Archive → "<work-stream>-archive". It runs against the project's wsp
 //     workspace (not a per-task sandbox: it is a whole-project wrap-up), so it
-//     gets a name of its own rather than reusing any task's. Note that the
-//     archive agent is interactive, so it takes the tmux path, and production
-//     wires the ACP launcher with a nil Sandbox creator — meaning this name is
-//     only used by the legacy sandboxed tmux path (dev/tests).
+//     gets a name of its own rather than reusing any task's. Like the other
+//     autonomous kinds it takes the ACP path in production, where this is the
+//     sandbox acp-wrapper creates for it.
 //
 // sbx rejects sandbox names containing underscores, so any "_" in the derived
 // name is rewritten to "-" here — that matches the normalization the
@@ -1176,9 +1177,7 @@ func (r *Runner) resolveWolfWorktree(ctx context.Context, p Plan) string {
 //
 // The archive agent needs the same two mounts and for the same reason: it does
 // its git work in the wsp workspace but writes `archive: true` back to
-// `.project.yaml` in the orch dir. (It is interactive, so it only ever reaches
-// this function on the legacy tmux path — production leaves Sandbox nil and
-// runs it on the host, where both paths are visible anyway.)
+// `.project.yaml` in the orch dir.
 //
 // Planning's primary mount is the project's orch dir (where .orch/ lives).
 // When planningWorktree is non-empty, it is mounted as a second workspace so

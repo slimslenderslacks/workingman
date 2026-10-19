@@ -46,13 +46,12 @@ type SessionInfo struct {
 	// task and commit agents — empty for project/planning/wolf agents,
 	// which don't own a single task.
 	TaskName string
-	// Interactive is true for agent kinds whose tmux session waits for a
-	// human (project, wolf). The TUI uses it to flag sessions that won't
-	// make progress on their own.
+	// Interactive is true for agent kinds that wait for a human — the wolf.
+	// The TUI uses it to flag sessions that won't make progress on their own.
 	Interactive bool
 	// SandboxName is the sbx sandbox the agent is running inside. Populated
 	// only for ACP-routed sessions (the daemon's runner has an AcpLauncher
-	// and Runner.UsesACP(kind) — every kind but archive, and the wolf unless
+	// and Runner.UsesACP(kind) — every kind, with the wolf the exception when
 	// it runs on the host); empty otherwise, because the
 	// legacy tmux + `sbx exec` path treats the sandbox as an implementation
 	// detail. Matches the name visible in `sbx ls` — underscores already

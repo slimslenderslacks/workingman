@@ -85,16 +85,34 @@ func (d *Daemon) reconcileSessions() {
 		projectPath := rec.ProjectPath
 		sess := newReconciledSession(rec.ID, store, nil)
 		onEnd := func(error) { d.revisitProject(projectPath) }
-		// A wolf lives in its own slot (see launchWolfAgent) so it can run in
-		// tandem with the project's main agent; adopting it under the bare
-		// project path would both occupy that main slot and let a second
-		// wolf launch alongside it.
+		// The wolf and the archive agent each live in a slot of their own (see
+		// launchWolfAgent / launchArchiveAgent) so they can run in tandem with
+		// the project's main agent; adopting either under the bare project path
+		// would both occupy that main slot and let a second one launch alongside
+		// it.
 		key := projectPath
-		if kind == agent.WolfAgent {
+		switch kind {
+		case agent.WolfAgent:
 			key = wolfSessionKey(projectPath)
+		case agent.ArchiveAgent:
+			// The archive agent's dedup is the in-flight reservation, not its
+			// session key (see beginCleanup), and the reservation died with the
+			// previous daemon. Re-take it, or the first project event after this
+			// restart would read the still-set `cleanup: true` and dispatch a
+			// second archive agent beside the adopted one. Adopt the end callback
+			// too, so the flag is cleared when the adopted run finishes.
+			if !d.beginCleanup(projectPath) {
+				continue
+			}
+			key = archiveSessionKey(projectPath)
+			onEnd = func(waitErr error) { d.afterArchiveSession(projectPath, waitErr) }
 		}
 		if d.trackSession(key, sess, kind, taskNameFor(rec.TaskPath), onEnd) {
 			d.audit.Log("session_reconciled", "key", key, "kind", rec.Kind, "id", rec.ID)
+		} else if kind == agent.ArchiveAgent {
+			// Already tracked, so nothing will run afterArchiveSession for this
+			// reservation — release the one we just took.
+			d.endCleanup(projectPath)
 		}
 	}
 }

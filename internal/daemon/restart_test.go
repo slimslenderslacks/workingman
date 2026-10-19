@@ -13,6 +13,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/session"
+	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
 // selfClosingStubSession mimics the one behavior that matters about
@@ -242,5 +243,80 @@ func TestReconcileSessionsAdoptsWolfUnderWolfKey(t *testing.T) {
 	}
 	if d.hasSession(projectPath) {
 		t.Errorf("reconciled wolf occupies the project's main slot")
+	}
+}
+
+// TestReconcileSessionsAdoptsArchiveUnderArchiveKey: now that the archive agent
+// runs under ACP it survives an orch restart, so a restarting daemon finds its
+// session on disk. It must be adopted under the "#archive" key (not the
+// project's main slot) AND must re-take the cleanup reservation — the project
+// file still carries `cleanup: true` until the run ends, so without the
+// reservation the startup scan would read that request and dispatch a second
+// archive agent beside the adopted one.
+func TestReconcileSessionsAdoptsArchiveUnderArchiveKey(t *testing.T) {
+	root := t.TempDir()
+	sessionsRoot := t.TempDir()
+
+	projectPath := filepath.Join(root, ".project.yaml")
+	p := &project.Project{
+		Description: "test",
+		Branch:      "feat/x",
+		Status:      project.StatusWorking,
+		Cleanup:     true,
+	}
+	if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+
+	store, err := session.NewStore(sessionsRoot)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	now := time.Now()
+	if err := store.Write(session.Session{
+		ID:          "archive-feat-x",
+		SandboxName: filepath.Base(root) + "-archive",
+		Status:      session.StatusRunning,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		ProjectPath: projectPath,
+		Kind:        "archive",
+	}); err != nil {
+		t.Fatalf("Write session record: %v", err)
+	}
+
+	buf := &safeBuf{}
+	lch := &recordingLauncher{}
+	d, err := New([]string{root}, audit.New(buf), WithRunner(&runner.Runner{
+		Workspaces:   workspace.NewStub(t.TempDir()),
+		Launcher:     lch,
+		AcpLauncher:  lch,
+		Kit:          "kit-ref",
+		SessionsRoot: sessionsRoot,
+	}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = d.Run(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() { cancel(); lch.closeAll(); <-done })
+
+	if ok, snap := waitFor(t, buf, "session_reconciled"); !ok {
+		t.Fatalf("daemon never reconciled the on-disk archive session.\naudit:\n%s", snap)
+	}
+	if !d.hasSession(archiveSessionKey(projectPath)) {
+		t.Errorf("reconciled archive agent not tracked under %q", archiveSessionKey(projectPath))
+	}
+	if d.hasSession(projectPath) {
+		t.Errorf("reconciled archive agent occupies the project's main slot")
+	}
+	// Let the startup scan see the still-set `cleanup: true`.
+	time.Sleep(300 * time.Millisecond)
+	if n := lch.countKind(agent.ArchiveAgent); n != 0 {
+		t.Errorf("startup scan launched %d archive agents beside the adopted one, want 0.\naudit:\n%s", n, buf.String())
 	}
 }

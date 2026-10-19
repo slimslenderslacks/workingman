@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
+	"github.com/slimslenderslacks/work/internal/gitsign"
+	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/task"
@@ -433,6 +435,20 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	}
 }
 
+// archivePolicies are the sbx policy rules the daemon puts on the archive
+// agent's sandbox. The archive agent has no task file to declare `policies:` of
+// its own, but it is the agent that publishes a finished work stream — and sbx
+// denies network egress by default, so without this rule its `git push` cannot
+// reach the git host at all. Push tasks carry the equivalent rule themselves;
+// this is the same grant, issued by the daemon on the archive agent's behalf.
+func archivePolicies() []policy.Rule {
+	return []policy.Rule{{
+		Action:   policy.ActionAllow,
+		Kind:     policy.KindNetwork,
+		Resource: gitsign.PushHost,
+	}}
+}
+
 // launchArchiveAgent starts the archive (cleanup) agent for a project whose
 // `cleanup: true` request flag the daemon has just observed (see
 // project.Project.Cleanup for the full contract). Unlike the other project-root
@@ -473,6 +489,9 @@ func (d *Daemon) launchArchiveAgent(projectPath string, p *project.Project) {
 		Repos:       workspaceReposFor(p),
 		ProjectPath: projectPath,
 		TasksDir:    filepath.Join(root, "tasks"),
+		// It runs sandboxed under ACP and has to push, so it needs the egress a
+		// task would have declared for itself.
+		Policies: archivePolicies(),
 	}
 	d.audit.Log("archive_dispatch", "path", projectPath, "branch", p.Branch)
 	if err := d.startSession(archiveSessionKey(projectPath), plan, func(waitErr error) {
@@ -579,8 +598,13 @@ func (d *Daemon) endCleanup(projectPath string) {
 // added as a path segment, so filepath.Dir(key) still yields the project dir
 // ListSessions labels the sessions pane from.
 func archiveSessionKey(projectPath string) string {
-	return projectPath + "#archive"
+	return projectPath + archiveKeyMarker
 }
+
+// archiveKeyMarker is the suffix archiveSessionKey appends. Named so the
+// reaper can strip it back off and recover the project path (see
+// stageComplete).
+const archiveKeyMarker = "#archive"
 
 // wolfSessionKey is the session-map key for a project's wolf agent. It appends
 // a "#wolf" marker to the project path so the wolf occupies a slot separate

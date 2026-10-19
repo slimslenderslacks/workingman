@@ -15,7 +15,7 @@ Every agent's role is defined by `agent.Kind` (`internal/agent/agent.go`).
 `Kind.Interactive()` splits the project-lifecycle seven into two families, but the *launch path*
 is no longer exactly that split (see the wolf):
 
-- **Autonomous** (project, planning, task, commit, review) — run under
+- **Autonomous** (project, planning, task, commit, review, archive) — run under
   `claude --print` (single turn, then exit) as an **ACP session** backed by a
   per-session `acp-wrapper` host process (`internal/runner/runner.go:
   Runner.startACP`), when the daemon is wired with an `AcpLauncher` (production
@@ -24,12 +24,7 @@ is no longer exactly that split (see the wolf):
   to stream. There is no tmux window to attach to for these. The wrapper is
   launched `--exit-when-empty`: it ends when the TUI watcher that drove the one
   prompt disconnects.
-- **Interactive** (wolf, archive) — a human is expected in the loop.
-  - The **archive** agent always takes the legacy path: a tmux window inside the
-    shared umbrella session `orch` (`internal/agent/tmux.go`), running `claude
-    --dangerously-skip-permissions` (no `--print`) inside `sbx exec -it
-    <sandbox>`, so a human can attach (`tmux attach -t orch`) and drive the
-    conversation or answer a macOS notification.
+- **Interactive** (wolf) — a human is expected in the loop.
   - The **wolf** is a *persistent* ACP session (conversational: no
     exit-when-empty; it ends when its work is done, see §5) when an
     `AcpLauncher` is configured, so the TUI, the daemon and messaging channels
@@ -465,7 +460,7 @@ session id this connection never created).
 
 ## 6. Archive agent
 
-**Kind:** `agent.ArchiveAgent`. **Template:** `archive.tmpl`. **Interactive:** yes.
+**Kind:** `agent.ArchiveAgent`. **Template:** `archive.tmpl`. **Interactive:** no.
 
 **Trigger.** `dispatchProject` checks `p.Cleanup` *ahead of* all status
 routing — set by the TUI's `:cleanup` — and calls `launchArchiveAgent`
@@ -481,13 +476,21 @@ sandbox, not reused from any task). Tracked under its own session key
 in tandem with the project's main-slot agent, deduped via a separate
 `beginCleanup`/`endCleanup` in-flight guard (wider than the session's own
 lifetime, to also cover the window before the `cleanup` flag is cleared).
-Being interactive, it takes the tmux path (attachable, since it may need
-`.gitignore`-edit approval).
+Being autonomous it takes the ACP path like task/commit: a one-shot
+(`--exit-when-empty`) `acp-wrapper` session with the wsp worktree and the orch
+dir mounted. Because it pushes, `launchArchiveAgent` attaches an
+`allow network github.com` policy to the Plan (`archivePolicies`) — sbx denies
+egress by default and the archive agent has no task file to declare one — and
+`acpwrapper.pushingKind` runs the commit agent's push preflight for it.
+Reconciliation after an orch restart re-takes the `beginCleanup` reservation
+before adopting it, or the startup scan would read the still-set `cleanup: true`
+and dispatch a second one.
 
 **Reads/writes.** Per repo in the workspace: `git status --porcelain`,
-classifies uncommitted files, optionally proposes (never applies without
-approval) a `.gitignore` edit via a macOS notification + wait, makes at most
-one final commit, and pushes only when `git rev-parse --abbrev-ref
+classifies uncommitted files, never edits `.gitignore` itself (it reports the
+edit it would have made and leaves that repo unfinished — nobody is attached to
+approve one), makes at most one final commit, and pushes only when `git
+rev-parse --abbrev-ref
 --symbolic-full-name @{upstream}` and `git rev-list --count @{upstream}..HEAD`
 together show real ahead-of-upstream work (never a hardcoded branch, never
 `--force`/`--allow-empty`/`--set-upstream`). Writes back only `archive: true`
@@ -495,8 +498,9 @@ on full success — the project's `status:` field is left exactly as found,
 since `archive` is an independent flag, not a status.
 
 **Prompt structure (`archive.tmpl`).** A numbered procedure: (1) `git status`
-per repo; (2) classify uncommitted paths, propose-and-wait for anything
-"doesn't belong" (build artifacts, editor scratch, caches); (3) one commit if
+per repo; (2) classify uncommitted paths, and report (never apply, never wait
+on) a `.gitignore` proposal for anything that "doesn't belong" (build
+artifacts, editor scratch, caches); (3) one commit if
 needed; (4) push decision tree keyed strictly off the three shell variables
 above, with an explicit "no workarounds" list; (5) report outcome by editing
 `.project.yaml` (`archive: true` on full success, left unset with a clear
@@ -510,7 +514,10 @@ automatically; the user re-issues `:cleanup`), *then* calls `revisitProject`
 so normal status routing resumes. The in-flight guard (`endCleanup`) is
 released via `defer`, after the flag clear, so a late fsnotify event carrying
 the agent's own `archive: true` write can't slip in and launch a second
-archive session mid-cleanup.
+archive session mid-cleanup. The reaper treats `archive: true` on the project
+file as this kind's stage-complete signal (stripping the `#archive` marker off
+the session key to find it), so a wrapper that outlives the agent is reaped;
+a run that gave up has no such signal and is covered by the idle timeout only.
 
 ---
 

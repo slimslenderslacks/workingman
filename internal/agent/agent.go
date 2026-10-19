@@ -17,11 +17,14 @@ const (
 	WolfAgent
 	CommitAgent
 	// ArchiveAgent cleans a project up before it can be archived: it checks
-	// the workspace for uncommitted work, proposes a `.gitignore` edit when
-	// the leftovers are build artifacts (waiting for human approval), makes a
-	// final commit and pushes — but only where there is actually something to
-	// commit or push — and sets `archive: true` on the project file. New
-	// kinds are appended so the iota values of the existing ones don't shift.
+	// the workspace for uncommitted work, makes a final commit and pushes —
+	// but only where there is actually something to commit or push — and sets
+	// `archive: true` on the project file. It is autonomous (runs under ACP in
+	// a sandbox of its own, like the commit agent): leftovers it cannot
+	// classify, including build artifacts that want a `.gitignore` rule, are
+	// reported in its final message for a human to deal with rather than
+	// waited on. New kinds are appended so the iota values of the existing
+	// ones don't shift.
 	ArchiveAgent
 	// ReviewAgent drives the PR-resolution loop for a project in
 	// status:reviewing: it polls the project's pull request via the github MCP,
@@ -92,23 +95,23 @@ func ParseKind(s string) (Kind, bool) {
 	return 0, false
 }
 
-// Interactive reports whether this Kind expects a human in the loop. Two kinds
-// do: the wolf agent asks for guidance when a project is blocked, and the
-// archive agent may have to get a proposed `.gitignore` change approved before
-// it commits. The project, planning, task, and commit agents are all
-// autonomous — they run under `claude --print`, finish one turn, and exit
-// without prompting. The project agent generates `.project.yaml` from the
-// user's seed description and, when the description is insufficient, escalates
-// by blocking the project (which summons the wolf) rather than interviewing the
-// user itself.
+// Interactive reports whether this Kind expects a human in the loop. Exactly
+// one does: the wolf agent, which asks for guidance when a project is blocked.
+// Every other kind is autonomous — it runs one turn and exits without
+// prompting. The project agent generates `.project.yaml` from the user's seed
+// description and, when the description is insufficient, escalates by blocking
+// the project (which summons the wolf) rather than interviewing the user
+// itself. The archive agent used to wait for a human to approve a `.gitignore`
+// change; it now reports such leftovers instead of blocking on an answer, so it
+// is autonomous like the rest and runs in an ACP sandbox.
 //
 // The runner uses this to pick the right claude flags; the TUI uses it to
 // highlight sessions that won't make progress until someone attaches. It does
-// NOT decide the launch path: the archive agent runs in tmux, while the wolf is
-// interactive but runs as a persistent ACP session when an ACP launcher is
-// configured (see runner.Runner.UsesACP).
+// NOT decide the launch path on its own: the wolf is interactive but still runs
+// as a persistent ACP session when an ACP launcher is configured, unless
+// --wolf-host selects the host/tmux escape hatch (see runner.Runner.UsesACP).
 func (k Kind) Interactive() bool {
-	return k == WolfAgent || k == ArchiveAgent
+	return k == WolfAgent
 }
 
 // Spec is the minimum a Launcher needs to start a session. Command is
