@@ -29,6 +29,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/prompts"
+	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/setup"
 	"github.com/slimslenderslacks/work/internal/workspace"
@@ -1068,10 +1069,19 @@ func sessionName(p Plan) string {
 //     autonomous kinds it takes the ACP path in production, where this is the
 //     sandbox acp-wrapper creates for it.
 //
-// sbx rejects sandbox names containing underscores, so any "_" in the derived
-// name is rewritten to "-" here — that matches the normalization the
-// acp-wrapper does before calling sbx, so the returned name is the one the
-// sandbox actually registers under.
+// The derived name is passed through sbx.SanitizeName before it is returned,
+// which (a) rewrites "_" to "-" (sbx rejects underscores) and (b) shortens
+// anything over sbx.MaxNameLen to a deterministic "<prefix>-<hash>" form. Both
+// match the normalization acp-wrapper does before calling sbx, so the returned
+// name is the one the sandbox actually registers under.
+//
+// (b) is what makes an over-long task name a cosmetic problem instead of a
+// fatal one. The work stream contributes len(base)+1 characters that the task
+// name's own validation cannot see, so a task name that is individually legal
+// (<= task.MaxNameLen) can still push "<work-stream>-<task-name>" past 63 and
+// make `sbx create` fail every single relaunch — the task never runs. Shortening
+// here means the composite can never exceed the limit no matter what a planning
+// or review agent wrote, and no matter what suffix a future agent kind adds.
 //
 // Returns "" when there's no ProjectPath to derive a name from, or when a
 // Task/Commit launch is missing TaskName (the daemon always supplies it).
@@ -1104,7 +1114,7 @@ func SandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 	default:
 		return ""
 	}
-	return strings.ReplaceAll(name, "_", "-")
+	return sbx.SanitizeName(name)
 }
 
 // durationOrDefault resolves a Runner duration knob: zero means "use def",
@@ -1138,7 +1148,7 @@ func ACPSandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 			return ""
 		}
 		name := filepath.Base(filepath.Dir(projectPath)) + "-wolf"
-		return strings.ReplaceAll(name, "_", "-")
+		return sbx.SanitizeName(name)
 	}
 	return SandboxNameFor(kind, projectPath, taskName)
 }

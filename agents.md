@@ -131,9 +131,19 @@ nothing else. Finishes by setting `status: working` with `updated_by: agent`.
 **Prompt structure (`planning.tmpl`).** Three main parts:
 1. Task file schema and the *hard* naming constraint: `name` must be
    non-empty, lowercase kebab-case, unique, stable once referenced by a
-   `depends_on`, and no longer than `62 - len(ProjectName)` characters (the
-   sandbox name `<work-stream>-<task-name>` is an RFC-1123 DNS label capped at
-   63 chars) — computed live via the template's `sub` function.
+   `depends_on`, and no longer than `task.MaxNameLenFor(ProjectName)`
+   characters (the sandbox name `<work-stream>-<task-name>` is an RFC-1123 DNS
+   label capped at `sbx.MaxNameLen` = 63 chars) — computed live via the
+   template's `nameBudget` function, which calls that same code so the number
+   an agent is told can't drift from the one the loader enforces.
+
+   The constraint is advisory in the prompt but **enforced in code**, because
+   agents got it wrong anyway: `taskgraph.Load` repairs an over-budget name
+   (shortened + digest-suffixed, logged as `taskgraph_repair`), and
+   `runner.SandboxNameFor` passes every derived name through
+   `sbx.SanitizeName` as a final backstop. An over-long name is therefore a
+   cosmetic problem, never the "`sbx create` fails on every relaunch and the
+   task never runs" failure it used to be.
 2. A conditional branch on `{{if .Replan}}`:
    - **Replan** (cron cycle): treat existing tasks as last cycle's record —
      for each, delete / reset-to-`ready` (clearing `summary`/`commits`/

@@ -19,6 +19,7 @@ import (
 	"text/template"
 
 	"github.com/slimslenderslacks/work/internal/agent"
+	"github.com/slimslenderslacks/work/internal/sbx"
 )
 
 //go:embed templates/*.tmpl
@@ -81,13 +82,21 @@ type Data struct {
 	SessionsRoot string   // ACP sessions root (<id>/session.json, <id>/stream.log)
 }
 
-// tmplFuncs are the helpers available to every template. `sub` lets the
-// planning template compute the exact per-task-name character budget from the
-// work-stream name length (max task name = 62 - len(ProjectName), since the
-// sandbox name is "<ProjectName>-<task-name>" and must fit the 63-char DNS
-// label limit).
+// tmplFuncs are the helpers available to every template.
+//
+// `nameBudget` gives a template the exact per-task-name character budget for a
+// work stream: the sandbox name is "<ProjectName>-<task-name>" and must fit
+// sbx.MaxNameLen, so a task name may be at most that minus the work stream and
+// its hyphen. Templates MUST call this rather than spelling the arithmetic out
+// — any prompt that hardcodes the limit is one place for it to drift from what
+// taskgraph.Load enforces, and a prompt that quotes a larger number than the
+// loader accepts produces names that get silently repaired out from under the
+// agent that chose them.
+//
+// `sub` remains for ordinary arithmetic in templates.
 var tmplFuncs = template.FuncMap{
-	"sub": func(a, b int) int { return a - b },
+	"sub":        func(a, b int) int { return a - b },
+	"nameBudget": sbx.NameBudget,
 }
 
 var tmpls = template.Must(template.New("").Funcs(tmplFuncs).ParseFS(templatesFS, "templates/*.tmpl"))

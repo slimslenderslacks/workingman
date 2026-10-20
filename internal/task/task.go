@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/policy"
+	"github.com/slimslenderslacks/work/internal/sbx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -27,12 +28,25 @@ const (
 // disk that pre-date the field.
 const ModelDefault = "default"
 
-// MaxNameLen is the maximum length of a task name. A task name flows into the
-// task's sbx sandbox name ("<work-stream>-<task-name>"), which sbx passes to
-// Docker as a container name — an RFC 1123 DNS label capped at 63 characters.
-// taskgraph.Load repairs (rather than rejects) a name that violates this, so
-// this constant is the single source of truth both packages consult.
-const MaxNameLen = 63
+// MaxNameLen is the ABSOLUTE maximum length of a task name — the ceiling no
+// name may exceed regardless of project. A task name flows into the task's sbx
+// sandbox name ("<work-stream>-<task-name>"), which sbx passes to Docker as a
+// container name: an RFC 1123 DNS label capped at sbx.MaxNameLen characters.
+//
+// Note what this constant can NOT express: the work stream contributes
+// len(work-stream)+1 characters to that same budget, so a name of exactly
+// MaxNameLen is always too long in practice. The per-project limit is
+// MaxNameLenFor(workStream), and that — not this — is what Load/validation
+// should check whenever the work stream is known. MaxNameLen survives as the
+// context-free bound for the places that see a task in isolation (Save) and for
+// the regex-level ValidName.
+const MaxNameLen = sbx.MaxNameLen
+
+// MaxNameLenFor returns the longest task name that still leaves room for the
+// work stream in the sandbox name "<workStream>-<task-name>". This is the real
+// limit a planning or review agent must respect, and the one taskgraph.Load
+// repairs against; the prompts quote this same number back to the agent.
+func MaxNameLenFor(workStream string) int { return sbx.NameBudget(workStream) }
 
 var nameRE = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
@@ -43,6 +57,16 @@ var nameRE = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 // keys, so anything else must be repaired before it reaches the graph.
 func ValidName(name string) bool {
 	return name != "" && len(name) <= MaxNameLen && nameRE.MatchString(name)
+}
+
+// ValidNameFor is ValidName with the project's work stream taken into account:
+// the name must additionally fit MaxNameLenFor(workStream), so that
+// "<workStream>-<name>" is a legal sandbox name. Callers that know which
+// project a task belongs to (taskgraph.Load does) should prefer this —
+// ValidName alone accepts names that are individually well-formed but produce a
+// sandbox name sbx will refuse to create.
+func ValidNameFor(name, workStream string) bool {
+	return ValidName(name) && len(name) <= MaxNameLenFor(workStream)
 }
 
 // Slugify derives a valid task name from free-form text such as a
@@ -71,6 +95,29 @@ func Slugify(s string) string {
 	}
 	if slug == "" {
 		return "task"
+	}
+	return slug
+}
+
+// SlugifyFor is Slugify capped to the project's budget instead of the absolute
+// MaxNameLen: the result is guaranteed to satisfy ValidNameFor(_, workStream),
+// so "<workStream>-<result>" always fits a sandbox name.
+//
+// When the slug has to be shortened it keeps the leading words and appends a
+// short digest of the full slug (see sbx.FitNameTo) rather than just chopping
+// the tail. That matters because the names that overflow are usually long and
+// similar — "fix-x-in-some-very-long-package" vs. "fix-y-in-some-very-long-..."
+// — and a plain chop would collapse them onto one name, turning a cosmetic
+// repair into two tasks fighting over one identity. The digest is of the whole
+// slug, so the tail that distinguished them still does.
+func SlugifyFor(s, workStream string) string {
+	slug := sbx.FitNameTo(Slugify(s), MaxNameLenFor(workStream))
+	if slug == "" {
+		// The work stream alone consumes the entire budget; there is no legal
+		// task name under it. Return the unqualified slug so the caller still
+		// has a usable task id — the sandbox layer (sbx.SanitizeName) remains
+		// the backstop that keeps `sbx create` from ever seeing it over-long.
+		return Slugify(s)
 	}
 	return slug
 }

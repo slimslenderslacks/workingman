@@ -72,6 +72,13 @@ func Load(dir string) (*Graph, error) {
 		deps:  map[string][]string{},
 	}
 
+	// The work stream is the basename of the project's control dir — dir is
+	// "<control-dir>/tasks". It is half of every task's sandbox name
+	// ("<work-stream>-<task-name>"), so it sets how long a task name may be
+	// here; a name that fits MaxNameLen but not this project's budget is just as
+	// unrunnable as a malformed one, and gets the same loud repair.
+	workStream := filepath.Base(filepath.Dir(dir))
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -108,14 +115,14 @@ func Load(dir string) (*Graph, error) {
 		}
 
 		name := t.Name
-		if !task.ValidName(name) {
+		if !task.ValidNameFor(name, workStream) {
 			var repaired string
 			if name == "" {
-				repaired = task.Slugify(strings.TrimSuffix(e.Name(), ".yaml"))
+				repaired = task.SlugifyFor(strings.TrimSuffix(e.Name(), ".yaml"), workStream)
 			} else {
-				repaired = task.Slugify(name)
+				repaired = task.SlugifyFor(name, workStream)
 			}
-			repaired = dedupeName(repaired, g.tasks)
+			repaired = dedupeName(repaired, g.tasks, workStream)
 			g.warnings = append(g.warnings, fmt.Sprintf(
 				"taskgraph: %s had invalid name %q; repaired to %q", path, name, repaired))
 			if name != "" {
@@ -162,15 +169,27 @@ func Load(dir string) (*Graph, error) {
 // distinct identity instead of silently colliding; two files that both
 // carry the same already-valid name are a separate, fatal condition (see
 // the duplicate check in Load).
-func dedupeName(name string, tasks map[string]*task.Task) string {
+//
+// The suffix is made to fit the project's name budget (MaxNameLenFor), not the
+// absolute MaxNameLen: the whole point of the repair is to produce a name whose
+// sandbox name sbx will accept, and appending "-2" must not undo that.
+func dedupeName(name string, tasks map[string]*task.Task, workStream string) string {
 	if _, exists := tasks[name]; !exists {
 		return name
 	}
+	budget := task.MaxNameLenFor(workStream)
 	for i := 2; ; i++ {
 		suffix := fmt.Sprintf("-%d", i)
 		base := name
-		if over := len(base) + len(suffix) - task.MaxNameLen; over > 0 {
-			base = base[:len(base)-over]
+		// Trim base so base+suffix fits, but never past empty: a work stream
+		// long enough to leave no room is already handled by SlugifyFor, and
+		// slicing to a negative length here would panic.
+		if over := len(base) + len(suffix) - budget; over > 0 {
+			if over >= len(base) {
+				base = ""
+			} else {
+				base = base[:len(base)-over]
+			}
 		}
 		candidate := base + suffix
 		if _, exists := tasks[candidate]; !exists {

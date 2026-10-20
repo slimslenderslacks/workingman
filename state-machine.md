@@ -521,6 +521,18 @@ long), by contrast, *is* repaired in place (slugified, deduped) with a loud
 `Warnings()` entry — one bad task file must not abort every other task in the
 project.
 
+"Too long" is measured against the **project's** budget,
+`task.MaxNameLenFor(<work-stream>)`, not the context-free `task.MaxNameLen`:
+the task name is only half of the sandbox name `<work-stream>-<task-name>`,
+and it is that composite sbx caps at 63 characters. A name that fits
+`MaxNameLen` but not the project's budget used to load clean and then fail
+`sbx create` on every relaunch, so the task could never run and the daemon
+retried it forever. Shortening appends a short digest of the full name rather
+than just chopping the tail, so two long names sharing a prefix can't collapse
+onto one task identity — and `runner.SandboxNameFor` re-applies the same cap
+to whatever it derives, which makes an over-long sandbox name unreachable no
+matter which agent wrote the name or which kind suffix gets added later.
+
 ### running → success / failed / blocked
 
 `afterTaskSession` (`internal/daemon/dispatch_lifecycle.go`) is the single

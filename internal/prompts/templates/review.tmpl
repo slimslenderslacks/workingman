@@ -205,7 +205,7 @@ one or more related fixes have committed — insert a push task to publish it:
 
 A **fix task** (commit-only) — one per `pr-comment` / `pr-check` signal:
 
-  name: <kebab-case slug, lowercase a-z/0-9/single-hyphens, 3..{{sub 62 (len .ProjectName)}} chars, unique>
+  name: <kebab-case slug, lowercase a-z/0-9/single-hyphens, 3..{{nameBudget .ProjectName}} chars, unique>
   description: |
     <what to do, phrased strictly within the project goal. For a comment,
     summarize the requested change. For a check, name the failing check and say
@@ -261,7 +261,7 @@ A **push task** (publishes one repo's batch — no code work, just `git push`):
 
 The `name` cap is a HARD limit: the sandbox name is `{{.ProjectName}}-<name>`
 ({{.ProjectName}} is {{len .ProjectName}} chars) and must fit a 63-char DNS
-label, so keep `name` <= {{sub 62 (len .ProjectName)}} chars. Count before you
+label, so keep `name` <= {{nameBudget .ProjectName}} chars. Count before you
 write.
 
 ## Status enums (fixed — invalid values are rejected and your save is ignored)

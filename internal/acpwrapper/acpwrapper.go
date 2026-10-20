@@ -34,6 +34,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
+	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
 )
@@ -458,8 +459,15 @@ func (c *Config) normalize() error {
 	if c.SandboxName == "" {
 		c.SandboxName = sandboxNamePrefix + c.SessionID
 	}
-	// sbx rejects sandbox names containing underscores.
-	c.SandboxName = strings.ReplaceAll(c.SandboxName, "_", "-")
+	// Last stop before the name reaches `sbx create`: rewrite underscores (sbx
+	// rejects them) and shorten anything past sbx.MaxNameLen to a deterministic
+	// hashed form. The daemon already hands us a fitted name (see
+	// runner.SandboxNameFor), but this is the choke point every invocation
+	// passes through — including a hand-run acp-wrapper and the
+	// "acp-<session-id>" default above, neither of which goes near the runner —
+	// so the guarantee lives here too. Without it an over-long name fails
+	// `sbx create` on every relaunch and the session can never start.
+	c.SandboxName = sbx.SanitizeName(c.SandboxName)
 
 	if c.SbxPath == "" {
 		c.SbxPath = "sbx"

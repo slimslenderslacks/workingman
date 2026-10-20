@@ -5,11 +5,11 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
+	"github.com/slimslenderslacks/work/internal/sbx"
 )
 
 // OpenInteractiveShell opens a plain bash shell window on the host (no sandbox)
@@ -115,10 +115,12 @@ func interactiveKindName(claudeSession bool) string {
 	return "shell"
 }
 
-// sanitizeSandboxName rewrites characters sbx rejects (underscores) to hyphens,
-// mirroring runner.SandboxNameFor so the name we ask for is the one sbx registers.
+// sanitizeSandboxName rewrites characters sbx rejects (underscores) to hyphens
+// and shortens an over-long name, mirroring runner.SandboxNameFor so the name we
+// ask for is the one sbx registers. Both share sbx.SanitizeName so the two paths
+// can't drift.
 func sanitizeSandboxName(name string) string {
-	return strings.ReplaceAll(name, "_", "-")
+	return sbx.SanitizeName(name)
 }
 
 // sessionCommand builds the claude invocation for a `:session` window. It runs
