@@ -20,7 +20,15 @@ import (
 // Tasks are named "alpha" and "beta" so the alphabetical order taskgraph
 // uses to list them matches the natural-language order of the variables —
 // avoiding the trap of "first task" meaning two different things.
-func withTaskFixtures(t *testing.T) (m model, taskAPath, taskBPath string) {
+// withTaskFixtures builds a model holding one project with two ready tasks.
+//
+// It returns the task paths in the order the Tasks pane renders them, NOT in
+// filename order: the pane is sorted most-recent-first (sortTasksByRecency), so
+// 01-beta — written second, therefore the newer file — is the first row and
+// 00-alpha the second. The tests below are about selection mechanics (default
+// selection, j/k movement, mouse hit-testing), so they want "whatever is in row
+// 0" rather than a particular task.
+func withTaskFixtures(t *testing.T) (m model, firstRowPath, secondRowPath string) {
 	t.Helper()
 	root := t.TempDir()
 	pDir := filepath.Join(root, "proj")
@@ -35,21 +43,23 @@ func withTaskFixtures(t *testing.T) (m model, taskAPath, taskBPath string) {
 	}, project.WriterAgent); err != nil {
 		t.Fatal(err)
 	}
-	taskAPath = filepath.Join(pDir, "tasks", "00-alpha.yaml")
-	if err := task.Save(taskAPath, &task.Task{
+	alphaPath := filepath.Join(pDir, "tasks", "00-alpha.yaml")
+	if err := task.Save(alphaPath, &task.Task{
 		Name:   "alpha",
 		Status: task.StatusReady,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	taskBPath = filepath.Join(pDir, "tasks", "01-beta.yaml")
-	if err := task.Save(taskBPath, &task.Task{
+	betaPath := filepath.Join(pDir, "tasks", "01-beta.yaml")
+	if err := task.Save(betaPath, &task.Task{
 		Name:      "beta",
 		Status:    task.StatusReady,
 		DependsOn: []string{"alpha"},
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// Newest file first: beta was written last, so it heads the pane.
+	firstRowPath, secondRowPath = betaPath, alphaPath
 
 	m = newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
@@ -60,7 +70,7 @@ func withTaskFixtures(t *testing.T) (m model, taskAPath, taskBPath string) {
 	}
 	step, _ := m.Update(projectsMsg{views: views})
 	m = step.(model)
-	return m, taskAPath, taskBPath
+	return m, firstRowPath, secondRowPath
 }
 
 // focusPane focuses the given pane directly. Pane focus is a pure model
@@ -77,7 +87,7 @@ func focusPane(t *testing.T, m model, target pane) model {
 }
 
 func TestTaskViewCarriesPathFromDisk(t *testing.T) {
-	m, taskAPath, _ := withTaskFixtures(t)
+	m, firstRowPath, _ := withTaskFixtures(t)
 	if len(m.projects) != 1 {
 		t.Fatalf("expected 1 project, got %d", len(m.projects))
 	}
@@ -85,8 +95,8 @@ func TestTaskViewCarriesPathFromDisk(t *testing.T) {
 	if len(tasks) != 2 {
 		t.Fatalf("expected 2 tasks, got %d", len(tasks))
 	}
-	if tasks[0].Path != taskAPath {
-		t.Errorf("Tasks[0].Path = %q, want %q", tasks[0].Path, taskAPath)
+	if tasks[0].Path != firstRowPath {
+		t.Errorf("Tasks[0].Path = %q, want %q", tasks[0].Path, firstRowPath)
 	}
 }
 
@@ -238,27 +248,27 @@ func TestAltHFromRightColumnStepsToCenterNotLeft(t *testing.T) {
 }
 
 func TestTaskSelectionDefaultsToFirstTask(t *testing.T) {
-	m, taskAPath, _ := withTaskFixtures(t)
-	if m.taskSel != taskAPath {
-		t.Errorf("taskSel after load = %q, want %q (first task)", m.taskSel, taskAPath)
+	m, firstRowPath, _ := withTaskFixtures(t)
+	if m.taskSel != firstRowPath {
+		t.Errorf("taskSel after load = %q, want %q (first task)", m.taskSel, firstRowPath)
 	}
 }
 
 func TestRightArrowOnTasksPaneAdvancesSelection(t *testing.T) {
-	m, taskAPath, taskBPath := withTaskFixtures(t)
+	m, firstRowPath, secondRowPath := withTaskFixtures(t)
 	m = focusPane(t, m, paneTasks)
 
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step.(model)
-	if m.taskSel != taskBPath {
-		t.Errorf("after right on tasks pane, taskSel = %q, want %q", m.taskSel, taskBPath)
+	if m.taskSel != secondRowPath {
+		t.Errorf("after right on tasks pane, taskSel = %q, want %q", m.taskSel, secondRowPath)
 	}
 
 	// Left returns to the first task.
 	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 	m = step.(model)
-	if m.taskSel != taskAPath {
-		t.Errorf("after left, taskSel = %q, want %q", m.taskSel, taskAPath)
+	if m.taskSel != firstRowPath {
+		t.Errorf("after left, taskSel = %q, want %q", m.taskSel, firstRowPath)
 	}
 }
 
@@ -293,14 +303,14 @@ func TestDetailPaneShowsSelectedProjectsTaskGraph(t *testing.T) {
 }
 
 func TestMouseClickOnTaskRowSelectsIt(t *testing.T) {
-	m, taskAPath, taskBPath := withTaskFixtures(t)
+	m, firstRowPath, secondRowPath := withTaskFixtures(t)
 	l := m.computeLayout()
 	// Tasks is now stacked in the center column below Projects, starting at
 	// y = l.projectsH. Inside its own band: row 0 top border, then the
-	// dependency-graph tree (see taskDepTree) — alpha is selected by
-	// default and beta depends on it, a 2-member graph, so that's rows 1-2
-	// ("alpha" then, indented under it, "beta") — then row 3 column header,
-	// row 4 the first task, row 5 the second task.
+	// dependency-graph tree (see taskDepTree) — beta heads the pane and is
+	// selected by default, and it depends on alpha, a 2-member graph, so
+	// that's rows 1-2 — then row 3 column header, row 4 the first task row,
+	// row 5 the second.
 	clickX := l.leftW + 5
 	clickY := l.projectsH + 5
 	step, _ := m.Update(tea.MouseMsg{
@@ -313,8 +323,8 @@ func TestMouseClickOnTaskRowSelectsIt(t *testing.T) {
 	if m.focus != paneTasks {
 		t.Errorf("click in tasks region should focus paneTasks, got %v", m.focus)
 	}
-	if m.taskSel != taskBPath {
-		t.Errorf("click on second task row should select it; taskSel = %q, want %q (alpha was %q)",
-			m.taskSel, taskBPath, taskAPath)
+	if m.taskSel != secondRowPath {
+		t.Errorf("click on second task row should select it; taskSel = %q, want %q (first row was %q)",
+			m.taskSel, secondRowPath, firstRowPath)
 	}
 }

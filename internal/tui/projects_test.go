@@ -284,9 +284,10 @@ func TestScanProjectsOrdersTasksByCompletion(t *testing.T) {
 	}, project.WriterAgent); err != nil {
 		t.Fatal(err)
 	}
-	// Alphabetical (taskgraph) order is a, b, c. The pane is most-recent-first:
-	// b (never completed — the current frontier) rises to the top, then a (later
-	// completion) above c (earlier completion).
+	// Alphabetical (taskgraph) order is a, b, c. The pane is most-recent-first
+	// by Recency(): b has no completion stamp so it falls back to its file's
+	// birth time (just now, the newest of the three), then a (completed an hour
+	// ago) above c (two hours ago).
 	earlier := time.Now().UTC().Add(-2 * time.Hour)
 	later := time.Now().UTC().Add(-1 * time.Hour)
 	writeTask(t, filepath.Join(dir, "tasks", "01-a.yaml"),
@@ -313,8 +314,60 @@ func TestScanProjectsOrdersTasksByCompletion(t *testing.T) {
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("task order = %v, want %v (uncompleted first, then completed newest-first)", got, want)
+			t.Errorf("task order = %v, want %v (most recent first)", got, want)
 			break
+		}
+	}
+}
+
+// TestSortTasksByRecency exercises the ordering directly, on hand-built views.
+// ScanProjects can't reach these cases: CreatedAt comes from the file's
+// filesystem birth time, which a test can't backdate (os.Chtimes moves mtime,
+// not birthtime), so every task it writes looks newly created.
+func TestSortTasksByRecency(t *testing.T) {
+	now := time.Now().UTC()
+	ago := func(d time.Duration) time.Time { return now.Add(-d) }
+
+	// Deliberately NOT the old grouping: "running-old" has no completion stamp
+	// but was created three hours ago, so it now sorts BELOW tasks that
+	// committed more recently instead of being pinned to the top.
+	tasks := []TaskView{
+		{Name: "committed-old", CompletedAt: ago(2 * time.Hour), CreatedAt: ago(4 * time.Hour)},
+		{Name: "fresh-seed", CreatedAt: ago(1 * time.Minute)},
+		{Name: "never-stat", Status: task.StatusReady}, // no timestamps at all
+		{Name: "running-old", Status: task.StatusRunning, CreatedAt: ago(3 * time.Hour)},
+		{Name: "committed-new", CompletedAt: ago(10 * time.Minute), CreatedAt: ago(5 * time.Hour)},
+	}
+	sortTasksByRecency(tasks)
+
+	want := []string{"fresh-seed", "committed-new", "committed-old", "running-old", "never-stat"}
+	got := make([]string, len(tasks))
+	for i, tk := range tasks {
+		got[i] = tk.Name
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestSortTasksByRecencyKeepsTiesAlphabetical pins the stability the pane
+// depends on: tasks written in the same batch share a recency, and a list that
+// reshuffles under the cursor between polls is unusable.
+func TestSortTasksByRecencyKeepsTiesAlphabetical(t *testing.T) {
+	at := time.Now().UTC()
+	tasks := []TaskView{
+		{Name: "a", CreatedAt: at},
+		{Name: "b", CreatedAt: at},
+		{Name: "c", CreatedAt: at},
+	}
+	for i := 0; i < 10; i++ {
+		sortTasksByRecency(tasks)
+		for j, want := range []string{"a", "b", "c"} {
+			if tasks[j].Name != want {
+				t.Fatalf("tied tasks reordered: %v", tasks)
+			}
 		}
 	}
 }

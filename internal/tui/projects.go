@@ -111,8 +111,8 @@ type TaskView struct {
 	Path       string
 	// CompletedAt mirrors the task file's `completed_at` — when the daemon
 	// observed the task reach `committed`. Zero for tasks that haven't
-	// committed (or committed before the field existed). The Tasks pane sorts
-	// by it so completed tasks appear in the order they actually ran.
+	// committed (or committed before the field existed). It is the first choice
+	// of Recency(), which the Tasks pane sorts by.
 	CompletedAt time.Time
 	// DependsOn mirrors the task file's `depends_on` list — the task graph's
 	// edges, for the detail pane's task-graph rendering and the Tasks pane's
@@ -128,8 +128,25 @@ type TaskView struct {
 	// since no task on disk records when it was created — only when it
 	// completed. Best-effort: it falls back to ModTime on platforms that
 	// don't expose a true birth time, and is zero if the file could not be
-	// stat'd. The Tasks pane's "age" column renders time-since-CreatedAt.
+	// stat'd. The Tasks pane's "age" column renders time-since-CreatedAt, and
+	// Recency() falls back to it for a task that hasn't completed.
 	CreatedAt time.Time
+}
+
+// Recency is the single timestamp the Tasks pane orders by: the most recent
+// thing that happened to this task. That is its completion when it has one and
+// otherwise when its file was created — a task is born when the planning or
+// review agent writes its file, and nothing else on disk records a later
+// moment. Zero when neither is known, which sorts to the bottom.
+//
+// Collapsing both into one key is what makes the pane a plain most-recent-first
+// list: a fix task the review agent just wrote appears at the top next to a task
+// that just committed, rather than in a separate group ordered by name.
+func (v TaskView) Recency() time.Time {
+	if !v.CompletedAt.IsZero() {
+		return v.CompletedAt
+	}
+	return v.CreatedAt
 }
 
 // ScanProjects walks each root for .project.yaml files and returns a snapshot
@@ -342,25 +359,29 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 	if len(tasks) == 0 {
 		return counts, nil
 	}
-	// ReadDir returns entries sorted by name, so tasks start in stable
-	// alphabetical order. Order the pane most-recent-first on top of that: tasks
-	// that haven't completed yet (the current frontier of the run) sit at the
-	// top, then completed tasks below with the latest completion first; both
-	// groups keep their alphabetical order for ties, via the stable sort.
+	sortTasksByRecency(tasks)
+	return counts, tasks
+}
+
+// sortTasksByRecency orders the Tasks pane most-recent-first: one ordering over
+// every task by Recency(), newest at the top. Tasks whose recency is unknown
+// (no completion stamp and an un-stat-able file) sink to the bottom.
+//
+// The sort is stable and callers hand it tasks in alphabetical order (ReadDir
+// returns entries sorted by name), so same-instant ties stay alphabetical
+// instead of shuffling between polls — the pane re-renders on every snapshot,
+// and a list that reorders under the cursor is unusable.
+func sortTasksByRecency(tasks []TaskView) {
 	sort.SliceStable(tasks, func(i, j int) bool {
-		ci, cj := tasks[i].CompletedAt, tasks[j].CompletedAt
-		switch {
-		case !ci.IsZero() && !cj.IsZero():
-			return ci.After(cj)
-		case !ci.IsZero():
-			return false
-		case !cj.IsZero():
-			return true
-		default:
+		ri, rj := tasks[i].Recency(), tasks[j].Recency()
+		if ri.Equal(rj) {
 			return false
 		}
+		if ri.IsZero() || rj.IsZero() {
+			return !ri.IsZero() // a known time outranks an unknown one
+		}
+		return ri.After(rj)
 	})
-	return counts, tasks
 }
 
 // WatchProjects polls roots on interval and emits a snapshot whenever the
