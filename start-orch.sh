@@ -130,7 +130,7 @@ fi
 # now resolves to a path with no kit checked out, which fails sandbox creation
 # for every project ("resolve kits: path does not exist"). Point ACP_KIT at the
 # real kit checkout; still overridable from the environment.
-export ACP_KIT="${ACP_KIT:-/Users/slim/dev/repos_docker/slimslenderslacks/acp-kit}"
+export ACP_KIT="${ACP_KIT:-$HOME/dev/repos/slimslenderslacks/acp-kit}"
 
 # Create every ACP sandbox from acp-kit's prebuilt image rather than the stock
 # claude template. acp-kit is a mixin, and a user --kit mixin is never embedded

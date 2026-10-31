@@ -1013,6 +1013,7 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 		StaticMCPs:  t.StaticMCPs,
 		Policies:    t.Policies,
 		SaveSandbox: t.SaveSandbox,
+		Model:       t.Model,
 	}
 	err := d.startSession(projectPath, plan, func(error) {
 		d.afterTaskSession(projectPath, plan.TaskPath, p)

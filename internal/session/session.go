@@ -142,9 +142,16 @@ type Session struct {
 	// whoever happened to be tailing acp-wrapper's stderr at the time.
 	SigningBroken bool `json:"signing_broken,omitempty"`
 
-	// PushBroken is true when the commit agent's ssh push preflight failed
+	// PushBroken is true when a pushing session's ssh push preflight failed
 	// (agent empty, key not authorised, host unreachable); the wrapper aborted.
 	PushBroken bool `json:"push_broken,omitempty"`
+
+	// Error is why the session failed, set alongside StatusFailed when the
+	// wrapper gave up before the agent ever ran (sandbox create failed, push
+	// preflight failed, ...). The TUI shows it on the session's tab and the
+	// daemon folds it into the project's blocked_reason, so a session that
+	// never started is not mistaken for one that is still starting.
+	Error string `json:"error,omitempty"`
 }
 
 // validID reports whether id is usable as a single-segment directory name.

@@ -27,6 +27,10 @@ const (
 	methodInitialize     = "initialize"
 	methodSessionNew     = "session/new"
 	methodSessionSetMode = "session/set_mode"
+	// methodSetConfigOption changes one of the session config options the agent
+	// advertised in session/new's result.configOptions — notably the model
+	// (ConfigIDModel), which can be switched on a live session.
+	methodSetConfigOption = "session/set_config_option"
 	methodPrompt         = "session/prompt"
 	methodUpdate         = "session/update"
 	methodCancel         = "session/cancel"
@@ -135,9 +139,86 @@ type newSessionParams struct {
 }
 
 // newSessionResult carries the agent-assigned session id that every subsequent
-// prompt is scoped to.
+// prompt is scoped to, plus the session's config options (model, effort, …) when
+// the agent advertises any.
 type newSessionResult struct {
+	SessionID     string         `json:"sessionId"`
+	ConfigOptions []ConfigOption `json:"configOptions"`
+}
+
+// ConfigIDModel is the config option id claude-agent-acp uses for the session's
+// model (its MODEL_CONFIG_ID). Its value accepts an advertised option value or
+// an alias such as "opus"/"sonnet"/"haiku", which the agent resolves itself.
+const ConfigIDModel = "model"
+
+// ConfigOption is one session config option from session/new (or a
+// session/set_config_option response / config_option_update). Only the "select"
+// type carries Options; boolean options (e.g. fast mode) have a bool
+// CurrentValue, so it is kept raw.
+type ConfigOption struct {
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	Category     string          `json:"category,omitempty"`
+	Type         string          `json:"type"`
+	CurrentValue json.RawMessage `json:"currentValue,omitempty"`
+	Options      []ConfigValue   `json:"options,omitempty"`
+}
+
+// ConfigValue is one selectable value of a select option. ACP allows options to
+// be grouped: a group has Name and its own Options but no Value. Values flattens
+// both shapes.
+type ConfigValue struct {
+	Value       string        `json:"value,omitempty"`
+	Name        string        `json:"name"`
+	Description string        `json:"description,omitempty"`
+	Options     []ConfigValue `json:"options,omitempty"`
+}
+
+// Current returns the option's current value when it is a string ("" for a
+// boolean or absent value).
+func (o ConfigOption) Current() string {
+	var s string
+	if json.Unmarshal(o.CurrentValue, &s) != nil {
+		return ""
+	}
+	return s
+}
+
+// Values returns every selectable value, with groups flattened.
+func (o ConfigOption) Values() []ConfigValue {
+	var out []ConfigValue
+	var walk func([]ConfigValue)
+	walk = func(vs []ConfigValue) {
+		for _, v := range vs {
+			if len(v.Options) > 0 {
+				walk(v.Options)
+				continue
+			}
+			out = append(out, v)
+		}
+	}
+	walk(o.Options)
+	return out
+}
+
+// setConfigOptionParams changes one config option on a live session.
+type setConfigOptionParams struct {
 	SessionID string `json:"sessionId"`
+	ConfigID  string `json:"configId"`
+	Value     string `json:"value"`
+}
+
+// setConfigOptionResult is the agent's reply: the full, updated option list.
+type setConfigOptionResult struct {
+	ConfigOptions []ConfigOption `json:"configOptions"`
+}
+
+// configOptionUpdate decodes the config_option_update kind, which carries the
+// full option list after any change (ACP v2 sends it for every change, so a
+// client sharing the session sees another client's switch).
+type configOptionUpdate struct {
+	ConfigOptions []ConfigOption `json:"configOptions"`
 }
 
 // setModeParams switches the session into one of the modes the agent advertised
@@ -243,4 +324,5 @@ const (
 	updateToolCall          = "tool_call"
 	updateToolCallUpdate    = "tool_call_update"
 	updatePlan              = "plan"
+	updateConfigOption      = "config_option_update"
 )

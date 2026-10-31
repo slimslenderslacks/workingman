@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/slimslenderslacks/work/internal/project"
+	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
@@ -168,6 +169,10 @@ type model struct {
 	acpComposing bool
 	acpInputErr  string
 	acpSend      func(id, text string) error
+	// acpRemove deletes a dead session's on-disk directory when its tab is
+	// dismissed (`x`). Run wires it to the sessions root's Store.Remove; nil
+	// (standalone/test models) makes dismissal drop the tab only.
+	acpRemove func(id string) error
 
 	// interactive opens the ad-hoc `:dir` shell and `:session` claude windows
 	// for a work stream. Wired by Run in integrated daemon mode; nil in
@@ -335,6 +340,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.acp.apply(msg.id, msg.ev)
 		case acpTabRemoved:
 			m.acp.remove(msg.id)
+		case acpTabFailed:
+			m.acp.markFailed(msg.id, msg.title, msg.text)
 		}
 		return m, waitForACP(m.acpCh)
 	case attachResultMsg:
@@ -638,7 +645,8 @@ var scrollCursorStyle = lipgloss.NewStyle().Reverse(true)
 // alt-j/alt-k (or h/l) switch tabs; esc (or `a`) returns to the normal two-pane
 // UI; q and ctrl+c still quit the whole TUI. Cursor keys are unbound. On a
 // conversational tab (the wolf) enter starts composing a message — see
-// handleACPComposeKey.
+// handleACPComposeKey. x dismisses the selected tab when its session is dead
+// (failed to start, errored, or disconnected), removing its session directory.
 func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.acpComposing {
 		return m.handleACPComposeKey(msg)
@@ -658,6 +666,23 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.acp.prev()
 	case "z":
 		m.acpToolsExpanded = !m.acpToolsExpanded
+	case "x":
+		t, ok := m.acp.selected()
+		if !ok {
+			break
+		}
+		if !t.dead() {
+			m.acpInputErr = "x only dismisses dead sessions; this one is still " + acpStatusLabel(t.status)
+			break
+		}
+		id := t.id
+		if m.acpRemove != nil {
+			if err := m.acpRemove(id); err != nil {
+				m.acpInputErr = fmt.Sprintf("dismiss %s: %v", id, err)
+				break
+			}
+		}
+		m.acp.remove(id)
 	case "enter", "i":
 		if t, ok := m.acp.selected(); ok && t.interactive {
 			m.acpComposing = true
@@ -2894,6 +2919,7 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, audit
 	// ACP tabs, matching its nil sessions source.
 	if sessionsRoot != "" {
 		m.acpCh = WatchACPSessions(tuiCtx, sessionsRoot, 0)
+		m.acpRemove = session.Store{Root: sessionsRoot}.Remove
 	}
 	// projectRoot backs `:archive`'s backup-directory computation. Standalone
 	// tui mode without any --root leaves it empty.

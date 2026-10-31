@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +39,10 @@ const (
 	acpTabStream
 	// acpTabRemoved drops a tab — the session's directory is gone (cleaned up).
 	acpTabRemoved
+	// acpTabFailed marks a session's tab as failed before its agent ever ran
+	// (session.StatusFailed — sandbox create or push preflight failed); text is
+	// the wrapper's recorded error. Creates the tab if it doesn't exist yet.
+	acpTabFailed
 )
 
 // acpTabEvent is one mutation to the tab view, delivered over the watcher's
@@ -46,7 +51,7 @@ type acpTabEvent struct {
 	kind  acpEventKind
 	id    string
 	title string
-	text  string          // acpTabPrompt: the prompt text
+	text  string          // acpTabPrompt: the prompt text; acpTabFailed: the error
 	ev    acpclient.Event // acpTabStream: the lifecycle/stream event
 	// interactive (acpTabAdded): the session is persistent/conversational, so
 	// the tab accepts typed messages (see acpInputs).
@@ -244,6 +249,10 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 		// starting tracks sessions currently shown as a placeholder tab (see
 		// acpTabStarting) so each one is announced only once, not on every poll.
 		starting := map[string]bool{}
+		// failed tracks sessions shown as failed-to-start (see acpTabFailed),
+		// keyed by id with the failed instance's CreatedAt, so each failure is
+		// announced once and a relaunch under the same id gets a fresh tab.
+		failed := map[string]time.Time{}
 		var wg sync.WaitGroup
 		defer func() {
 			for _, w := range active {
@@ -280,6 +289,23 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 					delete(active, s.ID)
 					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: s.ID})
 				}
+				if at, ok := failed[s.ID]; ok {
+					if at.Equal(s.CreatedAt) {
+						continue
+					}
+					// Relaunched under the same id: drop the failed tab so the new
+					// instance starts from a clean placeholder.
+					delete(failed, s.ID)
+					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: s.ID})
+				}
+				if s.Status == session.StatusFailed {
+					// The wrapper gave up before the agent ran. Say so on the tab
+					// rather than leave a placeholder that reads as still starting.
+					delete(starting, s.ID)
+					failed[s.ID] = s.CreatedAt
+					emitACP(ctx, out, acpTabEvent{kind: acpTabFailed, id: s.ID, title: acpTabTitle(s), text: failureText(s)})
+					continue
+				}
 				if s.Status == session.StatusStarting {
 					if !starting[s.ID] {
 						starting[s.ID] = true
@@ -315,6 +341,12 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 			for id := range starting {
 				if !seen[id] {
 					delete(starting, id)
+					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: id})
+				}
+			}
+			for id := range failed {
+				if !seen[id] {
+					delete(failed, id)
 					emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: id})
 				}
 			}
@@ -645,6 +677,15 @@ func startingSessionStale(ctx context.Context, probe sandboxProbe, s session.Ses
 func cleanupDeadSession(ctx context.Context, out chan<- acpTabEvent, store session.Store, id string) {
 	_ = store.Remove(id)
 	emitACP(ctx, out, acpTabEvent{kind: acpTabRemoved, id: id})
+}
+
+// failureText is the message a failed-to-start session's tab shows: the
+// wrapper's recorded error, or a generic line for a record without one.
+func failureText(s session.Session) string {
+	if e := strings.TrimSpace(s.Error); e != "" {
+		return e
+	}
+	return "session failed before the agent started (no error recorded; see acp-wrapper.log)"
 }
 
 // acpTabTitle is the label shown on a session's tab. The session id already

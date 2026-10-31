@@ -144,7 +144,7 @@ func TestStoppedGuardsSkipCommitSessionEnd(t *testing.T) {
 	}
 
 	stale := &project.Project{Description: "x", Branch: "b", Status: project.StatusWorking}
-	d.afterCommitSession(projectPath, taskPath, stale)
+	d.afterCommitSession(projectPath, taskPath, stale, "")
 
 	if !strings.Contains(buf.String(), "session_end_skipped_stopped") {
 		t.Errorf("expected session_end_skipped_stopped in audit:\n%s", buf.String())

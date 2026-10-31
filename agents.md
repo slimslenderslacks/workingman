@@ -251,6 +251,14 @@ list back to the task file.
 
 Both modes end with the same fixed status-enum reminder.
 
+Only push-task commits get the wrapper's ssh push preflight (`--push`, from
+`runner.Plan.Pushes`); an ordinary commit's sandbox has no route to
+`github.com:22`, so probing it there would abort every local commit. When the
+wrapper does give up before the agent runs (sandbox create or preflight
+failure) it records `status: failed` plus `error` in `session.json`: the TUI's
+tab shows that error instead of a "starting" placeholder, and
+`afterCommitSession` puts it in the project's `blocked_reason`.
+
 **Completion signal / lifecycle.** `afterCommitSession` requires `status:
 committed`; anything else blocks the project for the wolf. On success it
 stamps `completed_at` (once), reloads the task graph, and either
@@ -396,7 +404,9 @@ the watcher (`internal/tui/acpwatch.go`) drives the opening prompt once and then
 composing, **enter** sends, **esc** stops composing (keeps the draft), **ctrl+u**
 clears, ⌥j/⌥k switch tabs; the usual single-letter commands (q, z, h, l) are
 disabled only while composing. The host wolf (`--wolf-host`) is unchanged: enter
-on its row `tmux attach`es.
+on its row `tmux attach`es. On any ACP tab whose session is dead (failed to
+start, errored, disconnected), **x** dismisses the tab and removes its session
+directory; live and still-starting tabs refuse it.
 
 **Messaging channels: start/end notifications and conversation.** With
 `channels.yaml` configured (`docs/channels.md`) the wolf is also reachable from
@@ -453,6 +463,13 @@ opening prompt — the router sends it for the workingman agent). If another
 - `Events()` is the observe-only stream: assistant text from turns *other*
   clients started (`Own == false`), closed by an `EventTurnEnd` carrying the full
   reply — what a channel relays when the human types into the wolf.
+- `SetModel(ctx, model)` switches the live session's model for every client
+  sharing it (ACP `session/set_config_option`, `configId: "model"`; an alias
+  like `opus`/`sonnet`/`haiku` or an advertised model id), from the next turn
+  on — the launch-time `--model`/`ANTHROPIC_MODEL` only picks the starting one.
+  `Model()` is the last value the agent reported (from `session/new`, a
+  `SetModel` reply, or a `config_option_update`). Same primitive on
+  `acpclient.Client` (`SetModel`/`SetConfigOption`/`ConfigOptions`).
 - Agent permission requests go to `Options.OnPermission` (default: reject) and
   are also surfaced as `EventPermission`.
 - A dropped socket (the hub evicts slow clients) is reconnected on the same
@@ -491,7 +508,8 @@ Being autonomous it takes the ACP path like task/commit: a one-shot
 dir mounted. Because it pushes, `launchArchiveAgent` attaches an
 `allow network github.com` policy to the Plan (`archivePolicies`) — sbx denies
 egress by default and the archive agent has no task file to declare one — and
-`acpwrapper.pushingKind` runs the commit agent's push preflight for it.
+`runner.Plan.Pushes` passes the wrapper `--push`, which runs the ssh push
+preflight for it.
 Reconciliation after an orch restart re-takes the `beginCleanup` reservation
 before adopting it, or the startup scan would read the still-set `cleanup: true`
 and dispatch a second one.

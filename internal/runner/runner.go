@@ -15,7 +15,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,6 +31,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/setup"
+	"github.com/slimslenderslacks/work/internal/task"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
@@ -78,6 +78,11 @@ type Plan struct {
 	// for the task and commit agents (the ones with a per-task sandbox);
 	// planning/project/wolf leave it false. See task.Task.SaveSandbox.
 	SaveSandbox bool
+
+	// Model forwards the task's model field to the acp-wrapper as --model, which
+	// sets ANTHROPIC_MODEL for the agent. The task and commit agents set it; empty or
+	// task.ModelDefault leaves claude on its own default. See task.Task.Model.
+	Model string
 
 	// Replan asks the planning agent to re-plan the project's existing tasks
 	// rather than treat them as settled — set by the daemon on a cron firing.
@@ -302,16 +307,11 @@ func readSandboxWorkspaces(ctx context.Context, name string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var data struct {
-		Sandboxes []struct {
-			Name       string   `json:"name"`
-			Workspaces []string `json:"workspaces"`
-		} `json:"sandboxes"`
-	}
-	if err := json.Unmarshal(out, &data); err != nil {
+	list, err := sbx.DecodeList(out)
+	if err != nil {
 		return nil, fmt.Errorf("decode sbx ls output: %w", err)
 	}
-	for _, s := range data.Sandboxes {
+	for _, s := range list {
 		if s.Name == name {
 			return s.Workspaces, nil
 		}
@@ -833,7 +833,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
 	}
 
-	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, p.StaticMCPs, p.Policies, p.TaskPath, p.SaveSandbox, p.Persistent)
+	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, p.StaticMCPs, p.Policies, p.TaskPath, p.Model, p.SaveSandbox, p.Persistent, p.Pushes())
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionID,
@@ -861,7 +861,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 // acpWrapperCommand builds the argv that launches one acp-wrapper host process
 // for an ACP session. The wrapper resolves --workspace paths to absolute itself,
 // but they already are (workspace.Manager and the orch dir both yield abs paths).
-func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, staticMCPs []string, policies []policy.Rule, taskPath string, saveSandbox, persistent bool) []string {
+func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, staticMCPs []string, policies []policy.Rule, taskPath, model string, saveSandbox, persistent, push bool) []string {
 	bin := r.AcpWrapperPath
 	if bin == "" {
 		bin = "acp-wrapper"
@@ -930,6 +930,16 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, project
 	if saveSandbox {
 		args = append(args, "--save-sandbox")
 	}
+	// --push turns on the wrapper's ssh push preflight. Only sessions that
+	// actually push get it (see Plan.Pushes): an ordinary commit agent's
+	// sandbox has no route to the git host's ssh port, so the probe would
+	// abort every local-only commit.
+	if push {
+		args = append(args, "--push")
+	}
+	if m := strings.TrimSpace(model); m != "" && m != task.ModelDefault {
+		args = append(args, "--model", m)
+	}
 	for _, m := range staticMCPs {
 		args = append(args, "--static-mcp", m)
 	}
@@ -972,6 +982,29 @@ func (r *Runner) SessionLogPath(name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, name, "stream.log"), nil
+}
+
+// StartFailure returns why the ACP session p launched failed before its agent
+// ever ran — the error acp-wrapper recorded in session.json alongside
+// StatusFailed (sandbox create failed, push preflight failed, ...). Empty when
+// the session isn't ACP-backed, has no record, or didn't fail that way.
+func (r *Runner) StartFailure(p Plan) string {
+	if !r.UsesACP(p.Kind) {
+		return ""
+	}
+	root, err := r.ResolveSessionsRoot()
+	if err != nil {
+		return ""
+	}
+	store, err := session.NewStore(root)
+	if err != nil {
+		return ""
+	}
+	rec, err := store.Read(acpSessionID(p))
+	if err != nil || rec.Status != session.StatusFailed {
+		return ""
+	}
+	return rec.Error
 }
 
 // acpSessionID derives the ACP session id from the Plan. It reuses the tmux
@@ -1044,6 +1077,20 @@ func sessionName(p Plan) string {
 	// No "orch-" prefix — the umbrella tmux session carries that brand.
 	// Window names show up bare in tmux's status bar.
 	return fmt.Sprintf("%s-%s", p.Kind, tail)
+}
+
+// Pushes reports whether the session this Plan launches will `git push`: a
+// commit agent on a push task (PushBranch), or the archive agent publishing a
+// finished work stream. Those are the only sessions that need the wrapper's
+// ssh push preflight.
+func (p Plan) Pushes() bool {
+	switch p.Kind {
+	case agent.CommitAgent:
+		return p.PushBranch
+	case agent.ArchiveAgent:
+		return true
+	}
+	return false
 }
 
 // SandboxNameFor derives the sbx sandbox name for a given launch:

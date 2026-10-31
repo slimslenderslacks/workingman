@@ -48,6 +48,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -186,13 +187,18 @@ type Client struct {
 	// on '\n', so a split line would corrupt the agent's stdin).
 	writeMu sync.Mutex
 
-	// mu guards nextID, pending, sessionID, state, and closed.
+	// mu guards nextID, pending, sessionID, configOptions, state, and closed.
 	mu        sync.Mutex
 	nextID    int
 	pending   map[int]chan response
 	sessionID string
-	state     State
-	closed    bool
+	// configOptions is the latest config option list the agent reported for
+	// sessionID: from session/new, a session/set_config_option reply, or a
+	// config_option_update notification. Nil until one of those arrives (an
+	// adopted session learns it only from a later reply or update).
+	configOptions []ConfigOption
+	state         State
+	closed        bool
 
 	// events carries lifecycle/stream Events to the caller. The read loop is the
 	// only sender and the only closer; closeOnce guards the close.
@@ -357,6 +363,7 @@ func (c *Client) Connect(ctx context.Context, cwd string) error {
 
 	c.mu.Lock()
 	c.sessionID = newRes.SessionID
+	c.configOptions = newRes.ConfigOptions
 	c.mu.Unlock()
 
 	// Flip the session into bypassPermissions so the bridge stops issuing
@@ -399,6 +406,9 @@ func (c *Client) Adopt(sessionID string) error {
 		return ErrConnectionClosed
 	}
 	rebind := c.sessionID != ""
+	if c.sessionID != sessionID {
+		c.configOptions = nil
+	}
 	c.sessionID = sessionID
 	c.mu.Unlock()
 	if rebind {
@@ -410,6 +420,71 @@ func (c *Client) Adopt(sessionID string) error {
 	c.setState(StateConnected)
 	c.emit(Event{State: StateConnected})
 	return nil
+}
+
+// ConfigOptions returns the session's config options as last reported by the
+// agent, or nil when none has been seen (an agent that advertises none, or an
+// adopted session whose session/new this client did not issue).
+func (c *Client) ConfigOptions() []ConfigOption {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.configOptions)
+}
+
+// SetConfigOption sets one session config option (session/set_config_option)
+// on the live session and returns the agent's updated option list. The agent
+// validates value against the option it advertised; an unknown configId or
+// value comes back as the agent's JSON-RPC error.
+func (c *Client) SetConfigOption(ctx context.Context, configID, value string) ([]ConfigOption, error) {
+	c.mu.Lock()
+	sessionID := c.sessionID
+	c.mu.Unlock()
+	if sessionID == "" {
+		return nil, errors.New("acpclient: SetConfigOption before Connect/Adopt (no session id)")
+	}
+	var res setConfigOptionResult
+	params := setConfigOptionParams{SessionID: sessionID, ConfigID: configID, Value: value}
+	if err := c.call(ctx, methodSetConfigOption, params, &res); err != nil {
+		return nil, fmt.Errorf("acpclient: session/set_config_option %s: %w", configID, err)
+	}
+	c.storeConfigOptions(sessionID, res.ConfigOptions)
+	return slices.Clone(res.ConfigOptions), nil
+}
+
+// SetModel switches the live session's model: SetConfigOption on ConfigIDModel.
+// model may be an advertised option value or an alias ("opus", "sonnet",
+// "haiku") — claude-agent-acp resolves aliases itself. It takes effect from the
+// next turn; a turn already in flight keeps its model.
+func (c *Client) SetModel(ctx context.Context, model string) error {
+	_, err := c.SetConfigOption(ctx, ConfigIDModel, model)
+	return err
+}
+
+// Model returns the session's current model as last reported by the agent, or
+// "" when unknown.
+func (c *Client) Model() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, o := range c.configOptions {
+		if o.ID == ConfigIDModel {
+			return o.Current()
+		}
+	}
+	return ""
+}
+
+// storeConfigOptions records opts as sessionID's options, unless the client has
+// since been re-pointed at another session. A nil list (an agent that replied
+// without one) leaves the previous list in place.
+func (c *Client) storeConfigOptions(sessionID string, opts []ConfigOption) {
+	if opts == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.sessionID == sessionID {
+		c.configOptions = opts
+	}
+	c.mu.Unlock()
 }
 
 // Cancel asks the agent to stop the session's in-flight turn (the ACP
@@ -657,9 +732,29 @@ func (c *Client) rejectRequest(id int, method string) {
 // and plan updates each become an Event (distinguished by Event.Kind); kinds we
 // don't render decode to ok=false and are dropped.
 func (c *Client) handleUpdate(params json.RawMessage) {
+	c.trackConfigUpdate(params)
 	if ev, ok := eventFromUpdateParams(params); ok {
 		c.emit(ev)
 	}
+}
+
+// trackConfigUpdate records a config_option_update's option list. It is state,
+// not display, so it produces no Event: that is how another client's model
+// switch on a shared session becomes visible through Model/ConfigOptions.
+func (c *Client) trackConfigUpdate(params json.RawMessage) {
+	var p updateParams
+	if err := json.Unmarshal(params, &p); err != nil || len(p.Update) == 0 {
+		return
+	}
+	var k updateKind
+	if err := json.Unmarshal(p.Update, &k); err != nil || k.SessionUpdate != updateConfigOption {
+		return
+	}
+	var u configOptionUpdate
+	if err := json.Unmarshal(p.Update, &u); err != nil {
+		return
+	}
+	c.storeConfigOptions(p.SessionID, u.ConfigOptions)
 }
 
 // eventFromUpdateParams maps a session/update notification's params to the

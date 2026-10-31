@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -102,6 +103,94 @@ func TestNormalizeErrors(t *testing.T) {
 	}
 }
 
+// claudeEnvArgs is the "exec" prefix every execArgs result starts with: the
+// subcommand followed by the unconditional claudeEnv -e pairs.
+func claudeEnvArgs() []string {
+	args := []string{"exec"}
+	for _, kv := range claudeEnv {
+		args = append(args, "-e", kv)
+	}
+	return args
+}
+
+func TestExecArgsInjectsClaudeEnv(t *testing.T) {
+	got := Config{SandboxName: "acp-s"}.execArgs()
+	for _, want := range []string{
+		"ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5-5[1m]",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5",
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("execArgs() = %v, missing -e %s", got, want)
+		}
+	}
+}
+
+// ANTHROPIC_BASE_URL is only set when Run() found a gateway secret.
+func TestExecArgsGatewayBaseURL(t *testing.T) {
+	const baseURL = "ANTHROPIC_BASE_URL=https://llm.es.atko.services"
+	if got := (Config{SandboxName: "acp-s"}).execArgs(); slices.Contains(got, baseURL) {
+		t.Errorf("execArgs() without useGateway = %v, want no %s", got, baseURL)
+	}
+	got := Config{SandboxName: "acp-s", useGateway: true}.execArgs()
+	want := append([]string{"exec", "-e", baseURL}, claudeEnvArgs()[1:]...)
+	want = append(want, "acp-s", "--", "claude-acp-client")
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("execArgs() with useGateway = %v, want %v", got, want)
+	}
+}
+
+func TestExecArgsModel(t *testing.T) {
+	got := Config{SandboxName: "acp-s", Model: "haiku"}.execArgs()
+	want := append(claudeEnvArgs(), "-e", "ANTHROPIC_MODEL=haiku", "acp-s", "--", "claude-acp-client")
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("execArgs() = %v, want %v", got, want)
+	}
+	for _, a := range (Config{SandboxName: "acp-s"}).execArgs() {
+		if strings.HasPrefix(a, "ANTHROPIC_MODEL=") {
+			t.Errorf("unexpected %q with no Model", a)
+		}
+	}
+}
+
+func TestGatewaySecretConfigured(t *testing.T) {
+	secret := func(scope, target string) string {
+		return `{"secrets":[],"custom_secrets":[{"scope":"` + scope + `","targets":["` + target +
+			`"],"env":"ANTHROPIC_AUTH_TOKEN","placeholder":"sbx-cs-x","kind":"command"}]}`
+	}
+	for _, tc := range []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"global", secret("global", "llm.es.atko.services"), nil, true},
+		{"this sandbox", secret("acp-s", "llm.es.atko.services"), nil, true},
+		{"other sandbox", secret("acp-other", "llm.es.atko.services"), nil, false},
+		{"other host", secret("global", "api.example.com"), nil, false},
+		{"none", `{"secrets":[],"custom_secrets":[]}`, nil, false},
+		{"sbx fails", "", errors.New("exit status 1"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if got := append([]string{name}, args...); !reflect.DeepEqual(got, []string{"sbx", "secret", "ls", "--json"}) {
+					t.Errorf("ran %v, want sbx secret ls --json", got)
+				}
+				return []byte(tc.out), tc.err
+			}
+			got, err := gatewaySecretConfigured(context.Background(), run, "sbx", "acp-s")
+			if (err != nil) != (tc.err != nil) {
+				t.Errorf("err = %v, want error %v", err, tc.err != nil)
+			}
+			if got != tc.want {
+				t.Errorf("gatewaySecretConfigured = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExecArgs(t *testing.T) {
 	c := Config{
 		SessionID:   "s",
@@ -110,7 +199,7 @@ func TestExecArgs(t *testing.T) {
 		Workspaces:  []string{"/host/repo", "/host/orch"},
 	}
 	got := c.execArgs()
-	want := []string{"exec", "-w", "/host/repo", "acp-s", "--", "claude-acp-client"}
+	want := append(claudeEnvArgs(), "-w", "/host/repo", "acp-s", "--", "claude-acp-client")
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("execArgs() = %v, want %v", got, want)
 	}
@@ -119,7 +208,7 @@ func TestExecArgs(t *testing.T) {
 func TestExecArgsNoWorkspace(t *testing.T) {
 	c := Config{SandboxName: "acp-s"}
 	got := c.execArgs()
-	want := []string{"exec", "acp-s", "--", "claude-acp-client"}
+	want := append(claudeEnvArgs(), "acp-s", "--", "claude-acp-client")
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("execArgs() = %v, want %v", got, want)
 	}
@@ -133,15 +222,14 @@ func TestExecArgsInjectsGitIdentity(t *testing.T) {
 		GitEmail:    "jim@example.com",
 	}
 	got := c.execArgs()
-	want := []string{
-		"exec",
+	want := append(claudeEnvArgs(),
 		"-e", "GIT_AUTHOR_NAME=Jim Clark",
 		"-e", "GIT_AUTHOR_EMAIL=jim@example.com",
 		"-e", "GIT_COMMITTER_NAME=Jim Clark",
 		"-e", "GIT_COMMITTER_EMAIL=jim@example.com",
 		"-w", "/host/repo",
 		"acp-s", "--", "claude-acp-client",
-	}
+	)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("execArgs() = %v, want %v", got, want)
 	}
@@ -156,8 +244,7 @@ func TestExecArgsInjectsSigningConfig(t *testing.T) {
 		SigningKey:  "ssh-ed25519 AAAAKEY",
 	}
 	got := c.execArgs()
-	want := []string{
-		"exec",
+	want := append(claudeEnvArgs(),
 		"-e", "GIT_AUTHOR_NAME=Jim Clark",
 		"-e", "GIT_AUTHOR_EMAIL=jim@example.com",
 		"-e", "GIT_COMMITTER_NAME=Jim Clark",
@@ -173,7 +260,7 @@ func TestExecArgsInjectsSigningConfig(t *testing.T) {
 		"-e", "GIT_CONFIG_VALUE_3=true",
 		"-w", "/host/repo",
 		"acp-s", "--", "claude-acp-client",
-	}
+	)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("execArgs() = %v, want %v", got, want)
 	}
@@ -248,7 +335,7 @@ func TestEnsureSandboxCreatesFromTemplateImage(t *testing.T) {
 	create := f.calls[1]
 	want := []string{
 		"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp",
-		"-t", "slimslenderslacks/claude-code-acp:0.88.0", "--pull", "never", "/repo",
+		"-t", "slimslenderslacks/claude-code-acp:0.88.0", "--pull", "missing", "/repo",
 	}
 	if !reflect.DeepEqual(create, want) {
 		t.Errorf("create call = %v, want %v", create, want)
@@ -275,7 +362,7 @@ func TestExecArgsOmitsGitIdentityWhenIncomplete(t *testing.T) {
 	// produce commits with a blank email. Fall back to the sandbox default.
 	c := Config{SandboxName: "acp-s", GitName: "Jim Clark"}
 	got := c.execArgs()
-	want := []string{"exec", "acp-s", "--", "claude-acp-client"}
+	want := append(claudeEnvArgs(), "acp-s", "--", "claude-acp-client")
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("execArgs() = %v, want %v", got, want)
 	}
@@ -1199,8 +1286,9 @@ func TestNormalizeKeepsReadOnlyMounts(t *testing.T) {
 	if p, ro := SplitMount(c.Workspaces[1]); !ro || !filepath.IsAbs(p) {
 		t.Errorf("read-only workspace = %q, want absolute with :ro kept", c.Workspaces[1])
 	}
-	if got := c.execArgs(); got[2] != c.Workspaces[0] {
-		t.Errorf("cwd = %q, want the writable primary %q", got[2], c.Workspaces[0])
+	got := c.execArgs()
+	if i := slices.Index(got, "-w"); i < 0 || got[i+1] != c.Workspaces[0] {
+		t.Errorf("execArgs() = %v, want -w the writable primary %q", got, c.Workspaces[0])
 	}
 
 	bad := Config{SessionID: "s", KitPath: "k", Workspaces: []string{"/orch:ro", "/scratch"}}
@@ -1252,36 +1340,34 @@ func TestPushPreflightError(t *testing.T) {
 	fail := func(context.Context, string, ...string) ([]byte, error) {
 		return nil, errors.New("exit status 1")
 	}
-	// Non-pushing kinds never push: no command runs, no error.
-	task := Config{Kind: "task", SandboxName: "acp-s", SbxPath: "sbx"}
-	if err := pushPreflightError(context.Background(), func(context.Context, string, ...string) ([]byte, error) {
-		t.Fatal("run must not be called for non-pushing kinds")
+	noRun := func(context.Context, string, ...string) ([]byte, error) {
+		t.Fatal("run must not be called for a session that doesn't push")
 		return nil, nil
-	}, task); err != nil {
-		t.Errorf("task kind: err = %v, want nil", err)
 	}
-	// The archive agent pushes too — it is what publishes a finished work
-	// stream at cleanup — so it gets the same preflight as the commit agent.
-	archive := Config{Kind: "archive", SandboxName: "acp-s", SbxPath: "sbx"}
-	if err := pushPreflightError(context.Background(), fail, archive); err == nil ||
-		!strings.Contains(err.Error(), "check-signing.sh") {
-		t.Errorf("archive kind with dead agent: err = %v, want actionable error", err)
+	// Sessions that don't push never probe — including an ordinary commit
+	// agent, whose sandbox has no route to the git host's ssh port.
+	for _, kind := range []string{"task", "commit"} {
+		c := Config{Kind: kind, SandboxName: "acp-s", SbxPath: "sbx"}
+		if err := pushPreflightError(context.Background(), noRun, c); err != nil {
+			t.Errorf("%s kind without Push: err = %v, want nil", kind, err)
+		}
 	}
-	// Commit agent with a dead agent fails loudly with an actionable message.
-	commit := Config{Kind: "commit", SandboxName: "acp-s", SbxPath: "sbx"}
-	err := pushPreflightError(context.Background(), fail, commit)
+	// A pushing session (push-task commit, archive) with a dead agent fails
+	// loudly with an actionable message.
+	push := Config{Kind: "commit", Push: true, SandboxName: "acp-s", SbxPath: "sbx"}
+	err := pushPreflightError(context.Background(), fail, push)
 	if err == nil || !strings.Contains(err.Error(), "check-signing.sh") {
-		t.Errorf("commit kind with dead agent: err = %v, want actionable error", err)
+		t.Errorf("pushing session with dead agent: err = %v, want actionable error", err)
 	}
-	// Commit agent with a working push passes.
+	// A pushing session with a working push passes.
 	good := func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		if args[len(args)-1] == "-l" {
 			return []byte("SHA256:x"), nil
 		}
 		return []byte("successfully authenticated"), errors.New("exit status 1")
 	}
-	if err := pushPreflightError(context.Background(), good, commit); err != nil {
-		t.Errorf("commit kind with good agent: err = %v", err)
+	if err := pushPreflightError(context.Background(), good, push); err != nil {
+		t.Errorf("pushing session with good agent: err = %v", err)
 	}
 }
 

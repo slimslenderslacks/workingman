@@ -26,11 +26,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/gitsign"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
@@ -166,10 +166,16 @@ type Config struct {
 	// sandbox or the ACP client; both are recorded into session.json so a
 	// restarting daemon can tell which project (and how) to resume dispatching
 	// for a session it did not itself launch (see the daemon package's startup
-	// reconciliation). Kind additionally selects the push preflight, which only
-	// the pushing kinds run — see pushingKind.
+	// reconciliation).
 	ProjectPath string
 	Kind        string
+
+	// Push is true when this session will `git push` — a commit agent on a
+	// push task, or the archive agent — and so needs the ssh push preflight
+	// (see pushPreflightError). An ordinary commit agent commits locally and
+	// never pushes; its sandbox has no route to the git host's ssh port, so
+	// probing it there would abort every ordinary commit.
+	Push bool
 
 	// SaveSandbox, when true, makes the wrapper leave the sandbox in place when
 	// the agent exits instead of removing it with `sbx rm --force`. It is the
@@ -177,6 +183,13 @@ type Config struct {
 	// the daemon. False by default so per-task sandboxes are cleaned up as tasks
 	// complete rather than accumulating across a project's run.
 	SaveSandbox bool
+
+	// Model, when set, is passed to the agent as ANTHROPIC_MODEL, which the ACP
+	// adapter ranks above settings.json when choosing the session's model. It
+	// may be an alias (opus/sonnet/haiku, resolved through the
+	// ANTHROPIC_DEFAULT_*_MODEL entries in claudeEnv) or a full model id.
+	// Empty leaves claude on its own default.
+	Model string
 
 	// StaticMCPs are sbx static-MCP names to attach to the sandbox when it
 	// is created (each becomes a `--static-mcp <name>` flag on `sbx create`).
@@ -238,6 +251,13 @@ type Config struct {
 	// headless.
 	signingPreflightFailed bool
 
+	// useGateway is set internally by Run() when `sbx secret ls` shows a
+	// custom secret targeting gatewayHost (global, or scoped to this sandbox).
+	// sbx's proxy only swaps the placeholder token for the real credential on
+	// requests to that host, so pointing ANTHROPIC_BASE_URL at the gateway
+	// without the secret would just fail auth; execArgs adds it only when set.
+	useGateway bool
+
 	// pushPreflightFailed is set internally when the commit agent's ssh push
 	// preflight fails (see pushPreflightError); recorded in session.json.
 	pushPreflightFailed bool
@@ -281,6 +301,16 @@ func (c Config) sessionRecord(status session.Status, createdAt, updatedAt time.T
 		SigningBroken: c.signingPreflightFailed,
 		PushBroken:    c.pushPreflightFailed,
 	}
+}
+
+// failRecord writes session.json as StatusFailed carrying err's message, for a
+// session that gave up before its agent ever ran. Without it the record would
+// be removed (or left at StatusStarting) and a watching TUI could not tell a
+// session that failed to start from one still starting.
+func failRecord(store session.Store, c Config, createdAt time.Time, err error) {
+	rec := c.sessionRecord(session.StatusFailed, createdAt, time.Now())
+	rec.Error = err.Error()
+	_ = store.Write(rec)
 }
 
 // primaryWorkspace is the first mount — the ACP client's cwd inside the
@@ -350,6 +380,23 @@ func (c Config) goModCacheDir() string {
 	return ""
 }
 
+// gatewayHost is the LLM gateway the sandboxed Claude Code agent is pointed at
+// when sbx holds a secret for it (see gatewaySecretConfigured).
+const gatewayHost = "llm.es.atko.services"
+
+// claudeEnv is injected into every `sbx exec` so the Claude Code agent inside
+// the sandbox resolves its opus/sonnet/haiku aliases to the gateway's model
+// ids, and skips the nonessential traffic and experimental betas the gateway
+// doesn't support. ANTHROPIC_BASE_URL is added separately, and only when
+// c.useGateway is set.
+var claudeEnv = []string{
+	"ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]",
+	"ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5-5[1m]",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5",
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+	"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
+}
+
 // execArgs builds the argv (after the sbx binary) that runs acp-kit's
 // claude-acp-client entrypoint inside the sandbox over `sbx exec`, producing an
 // ACP client on the child's stdio.
@@ -360,6 +407,15 @@ func (c Config) goModCacheDir() string {
 // agent's cwd matches the mounted host path.
 func (c Config) execArgs() []string {
 	args := []string{"exec"}
+	if c.useGateway {
+		args = append(args, "-e", "ANTHROPIC_BASE_URL=https://"+gatewayHost)
+	}
+	for _, kv := range claudeEnv {
+		args = append(args, "-e", kv)
+	}
+	if m := strings.TrimSpace(c.Model); m != "" {
+		args = append(args, "-e", "ANTHROPIC_MODEL="+m)
+	}
 	// Commit as the host user without a local .git/config: passing the identity
 	// as environment overrides any git config (including the base image's baked
 	// `agent@orch.local`) for every git command in the session — author AND
@@ -500,14 +556,14 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 	// here until it is loaded in (`docker save` | `sbx template load`). Without
 	// this, `sbx create -t <locally-built>` fails at PREPARE IMAGE with a
 	// registry 403 for an image sitting right there in `docker images`.
-	// `never` is sbx's own documented pairing for a loaded template and is the
-	// right semantics besides: the image is local, so never pull it. A
-	// registry-hosted image must likewise be pulled into the sandbox store
-	// once, up front — which is the point, since the whole purpose here is to
-	// keep the network off the per-create path. The stock-template path keeps
-	// sbx's own default untouched.
+	// `missing` uses a loaded/cached image without touching the network, and
+	// pulls a registry-hosted (public) image into the sandbox store only on
+	// first use — so the per-create path stays offline once it's cached, but a
+	// wiped store (e.g. after an sbx upgrade) self-heals instead of failing
+	// every create with "not cached locally and pull_policy=never". The
+	// stock-template path keeps sbx's own default untouched.
 	if img := strings.TrimSpace(c.TemplateImage); img != "" {
-		args = append(args, "-t", img, "--pull", "never")
+		args = append(args, "-t", img, "--pull", "missing")
 	}
 	for _, m := range c.StaticMCPs {
 		args = append(args, "--static-mcp", m)
@@ -587,20 +643,43 @@ func listSandboxes(ctx context.Context, run commandFunc, sbxPath string) (map[st
 	if err != nil {
 		return nil, err
 	}
-	var data struct {
-		Sandboxes []struct {
-			Name       string   `json:"name"`
-			Workspaces []string `json:"workspaces"`
-		} `json:"sandboxes"`
-	}
-	if err := json.Unmarshal(out, &data); err != nil {
+	list, err := sbx.DecodeList(out)
+	if err != nil {
 		return nil, fmt.Errorf("decode sbx ls output: %w", err)
 	}
-	m := make(map[string][]string, len(data.Sandboxes))
-	for _, s := range data.Sandboxes {
+	m := make(map[string][]string, len(list))
+	for _, s := range list {
 		m[s.Name] = s.Workspaces
 	}
 	return m, nil
+}
+
+// gatewaySecretConfigured reports whether `sbx secret ls --json` lists a
+// custom secret targeting gatewayHost that applies to sandboxName — i.e. one
+// scoped globally or to that sandbox.
+func gatewaySecretConfigured(ctx context.Context, run commandFunc, sbxPath, sandboxName string) (bool, error) {
+	out, err := run(ctx, sbxPath, "secret", "ls", "--json")
+	if err != nil {
+		return false, fmt.Errorf("sbx secret ls: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	var data struct {
+		CustomSecrets []struct {
+			Scope   string   `json:"scope"`
+			Targets []string `json:"targets"`
+		} `json:"custom_secrets"`
+	}
+	if err := json.Unmarshal(out, &data); err != nil {
+		return false, fmt.Errorf("decode sbx secret ls output: %w", err)
+	}
+	for _, s := range data.CustomSecrets {
+		if s.Scope != "global" && s.Scope != sandboxName {
+			continue
+		}
+		if slices.Contains(s.Targets, gatewayHost) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // sameWorkspaceSet reports whether a and b contain the same paths, ignoring
@@ -713,13 +792,13 @@ func signingPreflight(ctx context.Context, run commandFunc, c Config) (checked, 
 }
 
 // pushPreflightError verifies the forwarded agent can authenticate a git push.
-// It only applies to the kinds that push — the commit agent (on a push task)
-// and the archive agent (publishing a finished work stream at cleanup); other
-// kinds return nil without running anything. A non-nil error carries an
-// actionable message and makes Run abort instead of failing silently at
-// `git push`.
+// It only applies to sessions that push (c.Push — the commit agent on a push
+// task, and the archive agent publishing a finished work stream at cleanup);
+// every other session returns nil without running anything. A non-nil error
+// carries an actionable message and makes Run abort instead of failing
+// silently at `git push`.
 func pushPreflightError(ctx context.Context, run commandFunc, c Config) error {
-	if !pushingKind(c.Kind) {
+	if !c.Push {
 		return nil
 	}
 	res := gitsign.PushPreflight(ctx, gitsign.RunFunc(run), c.SbxPath, c.SandboxName)
@@ -727,13 +806,6 @@ func pushPreflightError(ctx context.Context, run commandFunc, c Config) error {
 		return nil
 	}
 	return fmt.Errorf("acpwrapper: push preflight FAILED for sandbox %q: %s", c.SandboxName, res.Reason)
-}
-
-// pushingKind reports whether an agent of this kind may run `git push`, and so
-// needs the push preflight. Compared as the agent.Kind strings the --kind flag
-// carries.
-func pushingKind(kind string) bool {
-	return kind == agent.CommitAgent.String() || kind == agent.ArchiveAgent.String()
 }
 
 // withSigningPreflightResult is the actual fix for the root cause this task
@@ -791,10 +863,19 @@ func Run(ctx context.Context, c Config) error {
 	sandboxName, err := ensureSandbox(ctx, execCommand, c)
 	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ensureSandbox took %s\n", c.SessionID, time.Since(ensureStart))
 	if err != nil {
-		_ = store.Remove(c.SessionID) // never started — don't leave a stale record
+		failRecord(store, c, createdAt, err)
 		return err
 	}
 	c.SandboxName = sandboxName
+
+	// Route the agent through the LLM gateway only when sbx can authenticate
+	// it there; otherwise leave ANTHROPIC_BASE_URL unset (the default API).
+	useGateway, err := gatewaySecretConfigured(ctx, execCommand, c.SbxPath, c.SandboxName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING %v; not setting ANTHROPIC_BASE_URL\n", c.SessionID, err)
+	}
+	c.useGateway = useGateway
+	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: LLM gateway %s: %v\n", c.SessionID, gatewayHost, useGateway)
 
 	// Signing preflight: when signing is configured, confirm the forwarded agent
 	// can actually reach a key. This runs fresh on every Run() invocation — every
@@ -836,7 +917,7 @@ func Run(ctx context.Context, c Config) error {
 	if err := pushPreflightError(ctx, execCommand, c); err != nil {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ERROR %v\n", c.SessionID, err)
 		c.pushPreflightFailed = true
-		_ = store.Write(c.sessionRecord(session.StatusFailed, createdAt, time.Now()))
+		failRecord(store, c, createdAt, err)
 		return err
 	}
 

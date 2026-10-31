@@ -772,3 +772,26 @@ func TestLastSessionIDInLog(t *testing.T) {
 		t.Errorf("got %q, want the newest id b", got)
 	}
 }
+
+// SetModel switches the adopted session's model with one set_config_option on
+// that session id, and the conversation then reports the new model.
+func TestSetModelOnAdoptedSession(t *testing.T) {
+	a := newFakeAgent(t)
+	tuiClient(t, a)
+	before := len(a.requests())
+	conv := attach(t, a)
+
+	if m := conv.Model(); m != "" {
+		t.Errorf("Model before SetModel = %q, want empty (adopted, not yet reported)", m)
+	}
+	if err := conv.SetModel(testCtx(t), "haiku"); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	ours := a.requests()[before:]
+	if len(ours) != 1 || ours[0].Method != "session/set_config_option" || ours[0].SessionID != "sess-1" {
+		t.Fatalf("our wire traffic = %+v, want one session/set_config_option to sess-1", ours)
+	}
+	if m := conv.Model(); m != "haiku" {
+		t.Errorf("Model = %q, want haiku", m)
+	}
+}

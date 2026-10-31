@@ -170,6 +170,15 @@ func (a *fakeAgent) handle(line []byte) {
 		a.result(id, map[string]any{"sessionId": sid})
 	case "session/set_mode":
 		a.result(id, map[string]any{})
+	case "session/set_config_option":
+		var cp struct {
+			ConfigID string `json:"configId"`
+			Value    string `json:"value"`
+		}
+		_ = json.Unmarshal(f.Params, &cp)
+		a.result(id, map[string]any{"configOptions": []map[string]any{
+			{"id": cp.ConfigID, "name": "Model", "type": "select", "currentValue": cp.Value},
+		}})
 	case "session/cancel":
 		a.cancels <- p.SessionID
 	case "session/prompt":

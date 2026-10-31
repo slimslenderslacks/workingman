@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1093,5 +1094,46 @@ func TestWatchPersistentStopsWhenConnectionCloses(t *testing.T) {
 			t.Fatal("watcher still accepting input after its connection closed")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestWatchFailedSessionShowsError: a session the wrapper marked failed before
+// its agent ran (push preflight, sandbox create) gets an acpTabFailed carrying
+// the recorded error — not a placeholder that reads as still starting — and
+// is never dialed.
+func TestWatchFailedSessionShowsError(t *testing.T) {
+	root := t.TempDir()
+	store := session.Store{Root: root}
+	if err := store.Write(session.Session{
+		ID:          "commit-first",
+		SandboxName: "commit-first",
+		Status:      session.StatusFailed,
+		CreatedAt:   time.Now(),
+		SocketPath:  store.SocketPath("commit-first"),
+		Error:       "push preflight FAILED: could not reach github.com:22",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dial := func(_ context.Context, _ string) (acpConn, error) {
+		t.Error("a failed session must never be dialed")
+		return newFakeACPConn(), nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := watchACPSessions(ctx, root, 5*time.Millisecond, dial, aliveProbe, "go read it")
+	defer stopWatch(cancel, ch)
+
+	ev := waitForKind(t, ch, acpTabFailed, 2*time.Second)
+	if ev.id != "commit-first" || !strings.Contains(ev.text, "github.com:22") {
+		t.Errorf("acpTabFailed = %+v, want id commit-first with the recorded error", ev)
+	}
+
+	var tabs acpTabs
+	tabs.markFailed(ev.id, ev.title, ev.text)
+	tab, _ := tabs.selected()
+	if tab.status != acpclient.StateErrored || tab.placeholder {
+		t.Errorf("tab status = %v placeholder = %v, want errored, not a placeholder", tab.status, tab.placeholder)
+	}
+	if body := renderACPTabBody(tab, 80, 20, false); !strings.Contains(body, "failed to start") || !strings.Contains(body, "github.com:22") {
+		t.Errorf("tab body missing failure: %q", body)
 	}
 }

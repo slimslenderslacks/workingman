@@ -28,6 +28,8 @@ const (
 	entryThought
 	entryTool
 	entryPlan
+	// entryError is why the session failed before its agent ever ran.
+	entryError
 )
 
 // transcriptEntry is one block in a tab's scrollback. text holds the prose for
@@ -146,6 +148,30 @@ func (a *acpTabs) upsertPlaceholder(id, title string) {
 		return
 	}
 	a.appendTab(acpTab{id: id, title: title, status: acpclient.StateConnecting, curMsg: -1, placeholder: true})
+}
+
+// dead reports whether the tab's session has ended for good — it failed to
+// start, errored, or its transport disconnected — so dismissing it (`x`) can't
+// interrupt anything. A placeholder is still starting and is never dead.
+func (t *acpTab) dead() bool {
+	return !t.placeholder && t.status.IsTerminal()
+}
+
+// markFailed records that the session id failed before its agent ever ran:
+// the tab (created if this is the first the TUI hears of the session) shows
+// the errored status and reason as its transcript, instead of a placeholder
+// that reads as still starting.
+func (a *acpTabs) markFailed(id, title, reason string) {
+	i := a.indexOf(id)
+	if i < 0 {
+		a.appendTab(acpTab{id: id, title: title, curMsg: -1})
+		i = a.indexOf(id)
+	}
+	t := &a.tabs[i]
+	t.placeholder = false
+	t.status = acpclient.StateErrored
+	t.curMsg = -1
+	t.entries = append(t.entries, transcriptEntry{kind: entryError, text: reason})
 }
 
 // remove drops the tab for id (a session whose resources were cleaned up),
@@ -612,6 +638,11 @@ func renderACPTabBody(t *acpTab, width, height int, expandTools bool) string {
 					lines = append(lines, dimStyle.Render(l))
 				}
 			}
+		case entryError:
+			lines = append(lines, statusErrStyle.Render("✗ failed to start"))
+			for _, l := range acpWrapLines(e.text, width) {
+				lines = append(lines, statusErrStyle.Render(l))
+			}
 		case entryPlan:
 			lines = append(lines, acpPlanLabelStyle.Render("☰ plan"))
 			for _, pe := range e.plan {
@@ -664,6 +695,10 @@ func (m model) renderACPView() string {
 	bar := lipgloss.NewStyle().MaxWidth(width).Render(renderACPTabBar(m.acp.tabs, m.acp.sel, width))
 
 	t, _ := m.acp.selected()
+	if t.dead() {
+		hintText = "x: dismiss  •  " + hintText
+		hint = hintStyle.Render(truncate(hintText, width))
+	}
 	// A conversational tab gets one extra row for its message line (and a hint
 	// that says how to use it); the body shrinks by the same row so the composed
 	// view's height is unchanged.
@@ -719,6 +754,10 @@ func (m model) renderACPView() string {
 	parts := []string{header, bar, statusLine, box}
 	if t.interactive {
 		parts = append(parts, m.renderACPInputLine(t, width))
+	} else if m.acpInputErr != "" {
+		// No message line on this tab: an error (e.g. a refused `x`) takes the
+		// hint's row so the view's height doesn't change.
+		hint = statusErrStyle.Render(truncate(m.acpInputErr, width))
 	}
 	parts = append(parts, hint)
 	view := lipgloss.JoinVertical(lipgloss.Left, parts...)

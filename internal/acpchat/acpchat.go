@@ -346,6 +346,32 @@ func (c *Conversation) Ask(ctx context.Context, text string, options ...AskOptio
 	return reply, nil
 }
 
+// SetModel switches the attached session's model (acpclient.Client.SetModel):
+// an advertised model id or an alias such as "opus"/"sonnet"/"haiku". It applies
+// from the next turn for every client sharing the session, and may be called
+// while a turn is in flight (that turn keeps its model). During a reconnect it
+// waits, like Ask.
+func (c *Conversation) SetModel(ctx context.Context, model string) error {
+	client, err := c.waitClient(ctx)
+	if err != nil {
+		return err
+	}
+	return client.SetModel(ctx, model)
+}
+
+// Model is the session's current model as last reported to this conversation's
+// connection, or "" when unknown. An adopted session reports it only once a
+// SetModel reply or config_option_update has been seen on this connection.
+func (c *Conversation) Model() string {
+	c.mu.Lock()
+	client := c.client
+	c.mu.Unlock()
+	if client == nil {
+		return ""
+	}
+	return client.Model()
+}
+
 // waitClient blocks until a connected client is available, the conversation is
 // over, or ctx is done (Ask during a reconnect waits it out).
 func (c *Conversation) waitClient(ctx context.Context) (*acpclient.Client, error) {

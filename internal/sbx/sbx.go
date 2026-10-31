@@ -7,10 +7,38 @@
 package sbx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os/exec"
 )
+
+// Sandbox is one entry of `sbx ls --json`.
+type Sandbox struct {
+	Name       string   `json:"name"`
+	Workspaces []string `json:"workspaces"`
+}
+
+// DecodeList parses `sbx ls --json` output. Older sbx releases wrap the list
+// as {"sandboxes": [...]}; newer ones (v0.50+) print a bare array (`[]` when
+// empty). Both are accepted.
+func DecodeList(out []byte) ([]Sandbox, error) {
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var list []Sandbox
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			return nil, err
+		}
+		return list, nil
+	}
+	var data struct {
+		Sandboxes []Sandbox `json:"sandboxes"`
+	}
+	if err := json.Unmarshal(trimmed, &data); err != nil {
+		return nil, err
+	}
+	return data.Sandboxes, nil
+}
 
 // Alive reports whether the named sandbox currently exists according to
 // `sbx ls --json`.
@@ -24,15 +52,11 @@ func Alive(ctx context.Context, name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	var data struct {
-		Sandboxes []struct {
-			Name string `json:"name"`
-		} `json:"sandboxes"`
-	}
-	if err := json.Unmarshal(out, &data); err != nil {
+	list, err := DecodeList(out)
+	if err != nil {
 		return false, err
 	}
-	for _, s := range data.Sandboxes {
+	for _, s := range list {
 		if s.Name == name {
 			return true, nil
 		}

@@ -447,6 +447,50 @@ func TestACPLaunchTaskAgentForwardsSandboxCleanupFlags(t *testing.T) {
 	}
 }
 
+// TestACPLaunchForwardsModel: a task's non-default model reaches the wrapper as
+// --model; "default" and empty leave the flag off so claude picks its own.
+func TestACPLaunchForwardsModel(t *testing.T) {
+	for _, tc := range []struct{ model, want string }{
+		{"", ""},
+		{"default", ""},
+		{"haiku", "haiku"},
+		{"claude-opus-5-5[1m]", "claude-opus-5-5[1m]"},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			orchDir := t.TempDir()
+			projectPath := filepath.Join(orchDir, ".project.yaml")
+			if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			taskPath := filepath.Join(orchDir, "tasks", "first.yaml")
+			acp := &fakeLauncher{}
+			r := &Runner{
+				Workspaces:   workspace.NewStub(t.TempDir()),
+				Launcher:     &fakeLauncher{},
+				AcpLauncher:  acp,
+				Kit:          "kit-ref",
+				SessionsRoot: t.TempDir(),
+			}
+			if _, err := r.Start(context.Background(), Plan{
+				Kind:        agent.TaskAgent,
+				Branch:      "feat-x",
+				ProjectPath: projectPath,
+				TaskPath:    taskPath,
+				TaskName:    "first",
+				Model:       tc.model,
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got := argValue(acp.last.Command, "--model"); got != tc.want {
+				t.Errorf("--model = %q, want %q (command %v)", got, tc.want, acp.last.Command)
+			}
+			if tc.want == "" && hasFlag(acp.last.Command, "--model") {
+				t.Errorf("--model present for model %q: %v", tc.model, acp.last.Command)
+			}
+		})
+	}
+}
+
 // TestACPLaunchArchiveAgent: the archive agent is autonomous, so an ACP-wired
 // runner launches it through acp-wrapper — one-shot (--exit-when-empty, not
 // --persistent), in its own "<work-stream>-archive" sandbox, with both the wsp
@@ -838,4 +882,72 @@ type failLauncher struct{ t *testing.T }
 func (f *failLauncher) Launch(context.Context, agent.Spec) (agent.Session, error) {
 	f.t.Fatal("AcpLauncher must not be used for interactive agents")
 	return nil, nil
+}
+
+// TestACPLaunchForwardsPushOnlyForPushingSessions: --push (the wrapper's ssh
+// push preflight) goes only to sessions that actually push — a push-task
+// commit and the archive agent. An ordinary commit agent's sandbox has no
+// route to the git host's ssh port, so probing there aborted every commit.
+func TestACPLaunchForwardsPushOnlyForPushingSessions(t *testing.T) {
+	orchDir := t.TempDir()
+	projectPath := filepath.Join(orchDir, ".project.yaml")
+	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		plan Plan
+		want bool
+	}{
+		{"ordinary commit", Plan{Kind: agent.CommitAgent, TaskName: "first"}, false},
+		{"push-task commit", Plan{Kind: agent.CommitAgent, TaskName: "push", PushBranch: true}, true},
+		{"archive", Plan{Kind: agent.ArchiveAgent}, true},
+		{"task", Plan{Kind: agent.TaskAgent, TaskName: "first", PushBranch: true}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			acp := &fakeLauncher{}
+			r := &Runner{
+				Workspaces:   workspace.NewStub(t.TempDir()),
+				Launcher:     &fakeLauncher{},
+				AcpLauncher:  acp,
+				Kit:          "kit-ref",
+				SessionsRoot: t.TempDir(),
+			}
+			p := tc.plan
+			p.Branch = "feat-x"
+			p.ProjectPath = projectPath
+			if _, err := r.Start(context.Background(), p); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got := hasFlag(acp.last.Command, "--push"); got != tc.want {
+				t.Errorf("--push present = %v, want %v: %v", got, tc.want, acp.last.Command)
+			}
+		})
+	}
+}
+
+// TestStartFailureReadsWrapperError: a session the wrapper marked failed
+// before the agent ran reports the recorded error; a running one reports none.
+func TestStartFailureReadsWrapperError(t *testing.T) {
+	root := t.TempDir()
+	r := &Runner{AcpLauncher: &fakeLauncher{}, Kit: "kit-ref", SessionsRoot: root}
+	p := Plan{Kind: agent.CommitAgent, TaskName: "first"}
+	store := session.Store{Root: root}
+	id := acpSessionID(p)
+	if got := r.StartFailure(p); got != "" {
+		t.Errorf("no record: StartFailure = %q, want empty", got)
+	}
+	if err := store.Write(session.Session{ID: id, Status: session.StatusRunning, Error: "ignored"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.StartFailure(p); got != "" {
+		t.Errorf("running: StartFailure = %q, want empty", got)
+	}
+	if err := store.Write(session.Session{ID: id, Status: session.StatusFailed, Error: "push preflight FAILED"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.StartFailure(p); got != "push preflight FAILED" {
+		t.Errorf("failed: StartFailure = %q, want the recorded error", got)
+	}
 }

@@ -144,7 +144,7 @@ func (d *Daemon) retainSandbox(taskPath string, t *task.Task) {
 // done if every task is committed. Any other terminal state from the commit
 // agent is treated as a hard failure — the project is blocked for the wolf
 // agent to investigate.
-func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Project) {
+func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Project, startFailure string) {
 	if d.isStopped(projectPath) {
 		// Same guard as afterTaskSession: a commit agent enforceStopped killed
 		// mid-commit leaves the task at whatever non-committed status it had
@@ -165,8 +165,13 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		"after", "commit-session",
 	)
 	if t.Status != task.StatusCommitted {
-		d.transitionProjectBlocked(projectPath, p,
-			fmt.Sprintf("commit agent ended with task %q in status %q", t.Name, t.Status))
+		reason := fmt.Sprintf("commit agent ended with task %q in status %q", t.Name, t.Status)
+		if startFailure != "" {
+			// The agent never ran: say why, rather than leave the wolf (and the
+			// TUI) to guess from a task that is still at success.
+			reason = fmt.Sprintf("commit agent for %q could not start: %s", t.Name, startFailure)
+		}
+		d.transitionProjectBlocked(projectPath, p, reason)
 		return
 	}
 
@@ -261,6 +266,8 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		StaticMCPs:  t.StaticMCPs,
 		Policies:    t.Policies,
 		SaveSandbox: t.SaveSandbox,
+		// Commit runs under the task's model for now; it may get its own later.
+		Model: t.Model,
 		// Only a push task publishes: it pushes the commit-only fixes earlier
 		// review tasks accumulated in the worktree to the remote PR branch. Every
 		// other task's commit stays local (ordinary work is published by the
@@ -268,8 +275,12 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		// so the reviewer sees a coherent batch rather than a stream of commits).
 		PushBranch: t.IsPushTask(),
 	}
-	err := d.startSession(projectPath, plan, func(error) {
-		d.afterCommitSession(projectPath, plan.TaskPath, p)
+	err := d.startSession(projectPath, plan, func(waitErr error) {
+		startFailure := ""
+		if waitErr != nil {
+			startFailure = d.runner.StartFailure(plan)
+		}
+		d.afterCommitSession(projectPath, plan.TaskPath, p, startFailure)
 	})
 	if err != nil {
 		d.transitionProjectBlocked(projectPath, p,
