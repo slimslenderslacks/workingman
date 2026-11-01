@@ -404,9 +404,19 @@ type wspListEntry struct {
 	Path string `json:"path"`
 }
 
+// wspRmResult is `wsp rm --json` output. Current wsp reports one entry per
+// workspace under "removals"; older releases printed a single top-level
+// {ok, error}. Both are accepted.
 type wspRmResult struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error"`
+	OK       bool         `json:"ok"`
+	Error    string       `json:"error"`
+	Removals []wspRmEntry `json:"removals"`
+}
+
+type wspRmEntry struct {
+	Workspace string `json:"workspace"`
+	OK        bool   `json:"ok"`
+	Error     string `json:"error"`
 }
 
 type wspRegistryListResult struct {
@@ -491,6 +501,15 @@ func parseRmResult(out []byte) (bool, string, error) {
 	var r wspRmResult
 	if err := json.Unmarshal(body, &r); err != nil {
 		return false, "", fmt.Errorf("wsp rm: parse JSON: %w", err)
+	}
+	if len(r.Removals) > 0 {
+		// One workspace per call, so the first failing entry is the answer.
+		for _, e := range r.Removals {
+			if !e.OK {
+				return false, e.Error, nil
+			}
+		}
+		return true, "", nil
 	}
 	return r.OK, r.Error, nil
 }

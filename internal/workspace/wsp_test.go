@@ -93,6 +93,35 @@ func TestParseRmResultNotFound(t *testing.T) {
 	}
 }
 
+// Current wsp nests each result under "removals"; these pin that shape for a
+// successful removal and for an already-removed workspace, which `:archive`
+// must treat as done rather than as a failure.
+func TestParseRmResultRemovalsSuccess(t *testing.T) {
+	out := []byte(`Removing workspace "x"...
+{"removals": [{"workspace": "x", "ok": true, "message": "Workspace \"x\" removed."}]}`)
+	ok, errMsg, err := parseRmResult(out)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !ok || errMsg != "" {
+		t.Errorf("ok=%v errMsg=%q", ok, errMsg)
+	}
+}
+
+func TestParseRmResultRemovalsNotFound(t *testing.T) {
+	out := []byte(`{"removals": [{"workspace": "x", "ok": false, "error": "reading workspace metadata: opening /w/x/.wsp.yaml"}]}`)
+	ok, errMsg, err := parseRmResult(out)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if ok {
+		t.Error("ok should be false")
+	}
+	if !isNotFound(errMsg) {
+		t.Errorf("isNotFound(%q) = false", errMsg)
+	}
+}
+
 func TestSSHURLFromIdentity(t *testing.T) {
 	cases := []struct {
 		identity, want string
