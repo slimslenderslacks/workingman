@@ -504,10 +504,11 @@ func TestRenderWolfHostVsSandboxed(t *testing.T) {
 	}
 }
 
-// TestRenderWorkingman: the workingman agent's instructions must carry its
-// read-only contract, point it at the snapshot first, name every path it
-// observes, and tell it to answer for a phone (WhatsApp) — and must never tell
-// it it can change state.
+// TestRenderWorkingman: the workingman agent's instructions must point it at
+// the snapshot first, lay out the orch directory and every log it can read,
+// tell it to answer for a phone (WhatsApp), and carry its editing contract:
+// it may change the roots, but only on request, after confirming, marked
+// `updated_by: agent`, and never the daemon-owned files.
 func TestRenderWorkingman(t *testing.T) {
 	out, err := Render(agent.WorkingmanAgent, Data{
 		Workspace:    "/home/.workingman/workingman-agent",
@@ -520,25 +521,43 @@ func TestRenderWorkingman(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	for _, want := range []string{
-		"READ-ONLY observer",
 		"START by reading the snapshot (/home/.workingman/state/snapshot.json)",
 		"generated_at",
 		"/orch\n", "/orch2\n",
+		"Orch roots (read-write)",
+		// the orch directory layout
+		"tasks/<name>.yaml", "intake/<request>.md", "intake/<request>.processed",
+		"blocked-session.yaml", "last-planned.yaml", ".orch/context.yaml",
+		// every log, at its real path
 		"/orch/logs/audit.log",
+		"/orch/logs/daemon.log",
+		"/orch/logs/acp-wrapper.log",
+		"/orch/logs/channels.log",
+		"/orch/logs/whatsapp-bridge.log",
+		"/home/.workingman/state/channel-conversations.json",
 		"/home/.workingman/sessions/<session-id>/stream.log",
+		"/home/.workingman/sessions/<session-id>/session.json",
 		"<sessions-root>/<id>/stream.log",
+		"READ-ONLY",
+		// answering
 		"WhatsApp",
 		"SHORT, plain text",
 		"no tables",
-		"NEVER change orch state",
+		// the editing contract
+		"## Making changes",
+		"CONFIRM first",
+		"updated_by: agent",
+		"Write atomically",
+		"Never edit\n  `last-planned.yaml`",
+		"never set a task to `success` or `committed` yourself",
+		"stopped_from",
+		"review_now: true",
+		"cleanup: true",
+		"archive is NOT something you can do",
+		"attempts: 0",
 		"project.md",
-		"intake/<task-description>.md",
 		"kebab-case",
-		"CONFIRM with the human before creating",
 		"Never overwrite",
-		"`tasks/*.yaml`, `blocked-session.yaml`",
-		"The orch roots are also writable",
-		"TUI's `:` menu",
 		"`blocked` → the WOLF agent",
 		"attempts` reaches\n  3",
 		"/home/.workingman/workingman-agent", // scratch dir
@@ -547,9 +566,9 @@ func TestRenderWorkingman(t *testing.T) {
 			t.Errorf("workingman prompt missing %q in:\n%s", want, out)
 		}
 	}
-	for _, bad := range []string{"<no value>", "{{"} {
+	for _, bad := range []string{"<no value>", "{{", "NEVER change orch state", "strictly read-only"} {
 		if strings.Contains(out, bad) {
-			t.Errorf("workingman prompt has template debris %q:\n%s", bad, out)
+			t.Errorf("workingman prompt has %q:\n%s", bad, out)
 		}
 	}
 }

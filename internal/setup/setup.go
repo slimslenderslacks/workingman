@@ -55,8 +55,8 @@ type Context struct {
 	// than on the host. See prompts.Data.Sandboxed.
 	Sandboxed bool `yaml:"sandboxed,omitempty"`
 
-	// Roots/SnapshotFile/AuditLog/SessionsRoot describe the read-only orch
-	// state a workingman agent observes. See prompts.Data.
+	// Roots/SnapshotFile/AuditLog/SessionsRoot describe the orch state a
+	// workingman agent observes (the roots also writable). See prompts.Data.
 	Roots        []string `yaml:"roots,omitempty"`
 	SnapshotFile string   `yaml:"snapshot_file,omitempty"`
 	AuditLog     string   `yaml:"audit_log,omitempty"`

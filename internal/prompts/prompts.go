@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"path/filepath"
 	"text/template"
 
 	"github.com/slimslenderslacks/work/internal/agent"
@@ -74,8 +75,11 @@ type Data struct {
 
 	// The fields below are for the WorkingmanAgent: the orch state it observes.
 	// All of these are mounted into its sandbox at these same absolute paths:
-	// Roots read-write (it may create project.md and intake files), the rest
-	// read-only. Workspace is its writable scratch directory.
+	// Roots read-write (it edits project/task files and creates project.md and
+	// intake files there, on the human's request), the rest read-only — the
+	// directories of SnapshotFile and AuditLog, so their sibling files (the
+	// daemon, acp-wrapper and channel logs) are visible too. Workspace is its
+	// writable scratch directory.
 	Roots        []string // orch roots (--root)
 	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
 	AuditLog     string   // the audit log file; empty when unknown
@@ -97,6 +101,7 @@ type Data struct {
 var tmplFuncs = template.FuncMap{
 	"sub":        func(a, b int) int { return a - b },
 	"nameBudget": sbx.NameBudget,
+	"dir":        filepath.Dir,
 }
 
 var tmpls = template.Must(template.New("").Funcs(tmplFuncs).ParseFS(templatesFS, "templates/*.tmpl"))

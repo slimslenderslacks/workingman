@@ -634,7 +634,11 @@ task, and is started by the daemon rather than dispatched by a status change.)*
 own and answers a human's questions — relayed over messaging channels, e.g.
 WhatsApp or Signal — about the orch state: which projects are open, which tasks are
 running/blocked/failed and why, what the wolf is doing, what happened recently
-in the audit log. It is autonomous-ACP (nobody drives its prompt by hand;
+in the audit log. On request (and after confirming) it also **changes** that
+state, by editing the files under the orch roots exactly as a human would —
+every TUI `:` command is a `.project.yaml` edit, so it can stop/start, summon
+the wolf, kick a review, request a cleanup, retry a task, unblock a project,
+queue intake work or start a new project. It is autonomous-ACP (nobody drives its prompt by hand;
 `Interactive()` is false) but **persistent**, using the same
 `acp-wrapper --persistent` mode as the wolf, so its conversation outlives every
 client that attaches to it (the TUI, the message router). Unlike the wolf it
@@ -656,9 +660,9 @@ snapshot gives it no work stream / project path. `session.json` carries
 
 **Mounts (read-only enforced by the mount).** The scratch dir is the agent's
 cwd and holds the usual `.orch/` handoff files. Every orch `--root` is a
-second, **writable** workspace (`Plan.WritableMounts`), so the agent can create
-`<root>/<project>/project.md` and `<root>/<project>/intake/<task>.md`; the
-prompt limits it to creating new files, never editing existing state. All other
+second, **writable** workspace (`Plan.WritableMounts`): the agent edits
+`.project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md` there.
+The guard on *what* it edits is the prompt (see below), not the mount. All other
 observed paths are a separate `--workspace <path>:ro` (sbx's read-only
 bind-mount syntax, understood by `acp-wrapper --workspace`):
 
@@ -683,14 +687,19 @@ already give the guarantee and the filesystem-policy semantics are sbx's.
 (`acp-wrapper` treats the first `--workspace` as cwd and rejects a read-only
 one; it compares existing sandboxes on host paths only, so a relaunch reuses
 the sandbox.) Note the audit-log directory also holds `channels.log`,
-`daemon.log` and `acp-wrapper.log` if the audit log lives beside them.
+`daemon.log` and `acp-wrapper.log` if the audit log lives beside them; if that
+directory lies inside a `--root` the read-only mount is dropped in favour of the
+writable root, so the prompt, not the mount, keeps the agent off the logs.
 
-**Prompt structure (`workingman.tmpl`).** It states the agent is a read-only
-observer/answerer whose only write exception is creating new
-`<root>/<project>/project.md` and `<root>/<project>/intake/<task>.md` files
-(kebab-case names, human confirmation first, never overwriting, never touching
-`.project.yaml`, `tasks/*.yaml`, `blocked-session.yaml` or other files); lists every observed path (from `prompts.Data.Roots`,
-`SnapshotFile`, `AuditLog`, `SessionsRoot`, mirrored into `.orch/context.yaml`);
+**Prompt structure (`workingman.tmpl`).** It states the agent observes and, on
+request, edits the orch roots; lays out the orch directory (per work stream:
+`project.md`, `.project.yaml`, `tasks/`, `intake/*.md` / `*.processed`,
+`blocked-session.yaml`, `last-planned.yaml`, `.orch/`) and every log at its real
+path — the audit log and its siblings `daemon.log`, `acp-wrapper.log`,
+`channels.log`, `whatsapp-bridge.log`, the state dir's
+`channel-conversations.json`, each session's `session.json`/`stream.log` (from
+`prompts.Data.Roots`, `SnapshotFile`, `AuditLog`, `SessionsRoot`, mirrored into
+`.orch/context.yaml`; the template's `dir` func derives the sibling paths);
 says to START by reading the snapshot (checking `generated_at` /
 `daemon.state` for a dead or stale daemon) and to re-read it for every
 question; summarises the snapshot schema; embeds a condensed project/task
@@ -698,9 +707,17 @@ state machine (the semantics of `state-machine.md`); explains finding a wolf
 session in `sessions[]` and reading `<sessions-root>/<id>/stream.log`; sets
 the answer style (replies go out over WhatsApp or Signal: short, plain text, no wide
 tables, lead with the answer, cite `blocked_reason`/`failure_reason`); and
-otherwise forbids claiming to change state — to act, it names the TUI command (`:` →
-`stop`/`start`/`wolf`/`review`/`cleanup`/`archive`) or the YAML edit (project
-`status`, task `status`, an `intake/*.md` file) for the human to use.
+gives the editing contract ("Making changes"): only on the human's request and
+after confirming the exact change; always `updated_by: agent` (a `daemon` write
+is ignored by the daemon's self-write filter); edit fields in place and write
+atomically (temp file + `mv`); valid status values only; beware a live
+task/commit agent overwriting its task file; never touch the logs, snapshot,
+sessions, `last-planned.yaml`, `.orch/`, `*.processed` or the wolf-owned
+`blocked-session.yaml`, and never mark a task `success`/`committed`. It spells
+out each TUI command's equivalent edit (stop/start via `stopped_from`, wolf,
+review/`review_now`, cleanup, hide) plus retry/unblock recipes, and says
+`:archive` (host-side: moves the directory, removes the wsp workspace) is for
+the human.
 
 **Supervision (`internal/daemon/workingman_agent.go`).**
 `daemon.WithWorkingmanAgent(WorkingmanAgentConfig{...})` enables it; `Run`

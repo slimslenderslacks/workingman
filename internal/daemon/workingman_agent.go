@@ -80,9 +80,9 @@ func (w *workingmanAgent) signalEnded() {
 	}
 }
 
-// WithWorkingmanAgent makes the daemon run the workingman agent: a persistent,
-// read-only observer in its own sandbox that answers questions about the orch
-// state (see agents.md §8). It is started when Run begins, relaunched with
+// WithWorkingmanAgent makes the daemon run the workingman agent: a persistent
+// assistant in its own sandbox that answers questions about the orch state and,
+// on request, edits the orch roots (see agents.md §8). It is started when Run begins, relaunched with
 // exponential backoff whenever it exits, and stopped on shutdown. A failing
 // launch is audit-logged and retried; it never delays or blocks project
 // dispatch. Needs a runner with an ACP launcher — without one it is skipped and
@@ -187,8 +187,8 @@ func (d *Daemon) resolveWorkingman() error {
 }
 
 // workingmanPlan builds the launch Plan: the scratch dir and the orch roots
-// writable (so the agent can create <root>/<project>/project.md and intake
-// files), and everything else it observes — snapshot, audit log, sessions —
+// writable (the agent edits project/task files and creates project.md and
+// intake files there on request), and everything else it observes — snapshot, audit log, sessions —
 // mounted read-only.
 func (d *Daemon) workingmanPlan() (runner.Plan, error) {
 	w := d.workingman

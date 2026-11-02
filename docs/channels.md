@@ -54,7 +54,7 @@ flowchart LR
 
     subgraph sandboxes["sbx sandboxes (one ACP session each)"]
         wolf["wolf agent<br/>per blocked project"]
-        wm["workingman agent<br/>read-only observer<br/>(+ creates new project/intake files)"]
+        wm["workingman agent<br/>observer<br/>(+ edits project/task files on request)"]
     end
 
     phone <--> graphapi
@@ -424,14 +424,17 @@ default is fail-closed.
   de-duplicated by `wamid`, and the subscription handshake compares the verify
   token in constant time. The listener binds loopback by default and warns when
   bound elsewhere.
-- **Read-only agent sandbox.** The workingman agent runs in its own sbx sandbox
-  whose writable mounts are a scratch directory and the orch roots (the
-  prompt limits it to creating new `project.md` / `intake/*.md` files); the
+- **Scoped agent sandbox.** The workingman agent runs in its own sbx sandbox
+  whose writable mounts are a scratch directory and the orch roots; the
   state-snapshot directory, the audit-log directory and the ACP sessions root
-  are mounted `:ro` (the mount enforces it — the prompt does not). It has no
-  GitHub or other secrets and no extra network policy, and it is told not to change
-  `.project.yaml` or `tasks/` (the roots are writable, so the prompt is the guard there); to act it names the TUI command or YAML edit for
-  the human. The wolf is sandboxed too and can only write its project's control
+  are mounted `:ro` (the mount enforces it — the prompt does not; an audit-log
+  directory inside a root is covered by the root's writable mount instead). It
+  has no GitHub or other secrets and no extra network policy. It edits
+  `.project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md`, but
+  only on request and after confirming the change with the human — the prompt is
+  the guard there. Anyone who can message it can therefore change project
+  state (but nothing on the host: no push, no wsp, no `:archive`), so keep the
+  channel allowlist to people you would hand the TUI. The wolf is sandboxed too and can only write its project's control
   directory (+ its worktree). The workingman agent is told its replies go out
   over a phone messenger (short, plain text, no secrets).
 - **Tool permissions are asked, not assumed.** When a wolf raises a permission

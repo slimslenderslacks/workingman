@@ -145,9 +145,9 @@ type Plan struct {
 
 	// WritableMounts, for the workingman agent, are host paths bind-mounted into
 	// its sandbox READ-WRITE next to its scratch directory (WorkingDir): the orch
-	// roots, so it can create <root>/<project>/project.md and
-	// <root>/<project>/intake/*.md. Ignored for every other Kind. See
-	// workingmanWorkspaces.
+	// roots, where it edits .project.yaml / tasks/*.yaml and creates
+	// project.md / intake/*.md on a human's request. Ignored for every other
+	// Kind. See workingmanWorkspaces.
 	WritableMounts []string
 
 	// ReadOnlyMounts, for the workingman agent, are host paths bind-mounted into

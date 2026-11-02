@@ -91,7 +91,7 @@ The gallery renders a project with `archive: true` inside a blue border, so a wo
 
 # workingman agent
 
-The workingman agent is an always-on assistant, reachable over a messaging channel, that answers questions about orch state. It is read-only except that, after confirming with the human, it may create new `<root>/<project>/project.md` and `<root>/<project>/intake/<task>.md` files in the orch roots (never overwriting or editing existing files, and never touching `.project.yaml` or `tasks/`).
+The workingman agent is an always-on assistant, reachable over a messaging channel, that answers questions about orch state. When asked, and after confirming with the human, it also changes that state by editing files in the orch roots — `.project.yaml`, `tasks/*.yaml`, and new `<root>/<project>/project.md` / `<root>/<project>/intake/<task>.md` files — always writing as `updated_by: agent`. The snapshot, logs and sessions stay read-only to it.
 
 # ssh agent
 

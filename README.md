@@ -177,14 +177,14 @@ daemon ignores its own fsnotify events.
   (or enter on a session row); the wolf's tab is interactive — press enter to
   type to it. `--wolf-host` runs the wolf on the host in tmux instead (full
   host access, but only reachable via tmux).
-- **Workingman agent** (`--workingman-agent`, needs `--acp-kit`): an always-on,
-  mostly read-only assistant in its own sandbox that answers questions about the
-  orch state (projects, tasks, the wolf, the audit log) for a human on a
-  messaging channel. On automatically when `channels.yaml` has an
-  inbound-capable channel; it can read the roots, snapshot, audit log and every
-  session's stream, and change nothing — except that, after confirming with the
-  human, it may create new `<root>/<project>/project.md` and
-  `<root>/<project>/intake/*.md` files (never overwriting or editing). See [agents.md §8](agents.md#8-workingman-agent).
+- **Workingman agent** (`--workingman-agent`, needs `--acp-kit`): an always-on
+  assistant in its own sandbox that answers questions about the orch state
+  (projects, tasks, the wolf, the logs) for a human on a messaging channel, and,
+  when asked (after confirming), changes it by editing the orch roots: stop/start
+  a work stream, summon the wolf, retry a task, unblock a project, queue intake
+  work, start a new project. On automatically when `channels.yaml` has an
+  inbound-capable channel; the snapshot, logs and every session's stream are
+  mounted read-only. See [agents.md §8](agents.md#8-workingman-agent).
 - **State snapshot** (`--state-file`, `orch status`): the daemon's in-memory
   state (live sessions, wolf in flight, failure counters, review polls)
   published as JSON for external readers. See
@@ -196,9 +196,9 @@ The daemon can reach you on WhatsApp, modelled on hermes-agent's WhatsApp
 gateway. It messages you the moment a wolf agent starts (`🐺 wolf is running for
 <project> … Reply to this message to talk to the wolf.`), relays your reply into
 that wolf's conversation, and routes any other message to the always-on
-**workingman agent**, a mostly read-only assistant that answers questions about
-open projects, running tasks and the daemon state, and can create new
-`project.md` / intake files on request. Details, configuration reference,
+**workingman agent**, an assistant that answers questions about open projects,
+running tasks and the daemon state, and makes changes to projects and tasks on
+request. Details, configuration reference,
 security model, troubleshooting and a manual smoke-test checklist:
 [docs/channels.md](docs/channels.md).
 
