@@ -192,7 +192,9 @@ daemon ignores its own fsnotify events.
   and, by default, the wolf run as ACP sessions. Press `a` in the TUI for the tab view
   (or enter on a session row); the wolf's tab is interactive — press enter to
   type to it. `--wolf-host` runs the wolf on the host in a terminal tab instead
-  (full host access, but only reachable from that tab).
+  (full host access, but only reachable from that tab). Each tab keeps a
+  scrollback of its session's output (the most recent ~5000 lines; older output
+  is dropped, with a marker saying how much). See [ACP view keys](#acp-view-keys).
 - **Workingman agent** (`--workingman-agent`, needs `--acp-kit`): an always-on
   assistant in its own sandbox that answers questions about the orch state
   (projects, tasks, the wolf, the logs) for a human on a messaging channel, and,
@@ -397,6 +399,35 @@ moved the project off `ready`. Agents should not write it.
 
 See `examples/project.yaml` and `examples/tasks/*.yaml` for the full
 schemas.
+
+## ACP view keys
+
+The ACP view (`a` in the TUI) has two scroll modes per tab, shown at the end of
+the tab's status line:
+
+- **live** (the default) — the view stays pinned to the newest output as it
+  streams in.
+- **inspection** — entered as soon as you scroll up off the bottom. The view
+  stays on the history you're reading while new output keeps buffering below
+  it; the status line reads `inspection — press G to follow`. Scrolling back to
+  the bottom with `j`/`ctrl-f`, or pressing `G`, returns to live.
+
+| Key | Effect |
+|-----|--------|
+| `j` / `k` | scroll down / up one line |
+| `ctrl-f` / `ctrl-b` | scroll down / up a page |
+| `G` | jump to the newest output and return to live |
+| `⌥j` / `⌥k` (or `l` / `h`) | next / previous tab |
+| `z` | expand / collapse tool-call output |
+| `x` | dismiss a dead session's tab |
+| `enter` (or `i`) | type a message to a conversational tab (the wolf) |
+| `esc` (or `a`) | back to the main view |
+| `q` | quit |
+
+`j`/`k` here are scroll keys, not tab switches — tabs move with `⌥j`/`⌥k`
+(as on the main screen) or `h`/`l`. While typing a message, letters are text,
+so only `ctrl-f`/`ctrl-b` scroll; `esc` stops typing and gives `j`/`k`/`G` back.
+Each tab keeps its own scroll position.
 
 ## Hiding work streams
 

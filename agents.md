@@ -404,8 +404,9 @@ the watcher (`internal/tui/acpwatch.go`) drives the opening prompt once and then
 **stays connected**, relaying messages typed in the tab (`acpInputs`,
 `servePersistentInput`) as successive turns. In the tab: **enter** starts
 composing, **enter** sends, **esc** stops composing (keeps the draft), **ctrl+u**
-clears, ⌥j/⌥k switch tabs; the usual single-letter commands (q, z, h, l) are
-disabled only while composing. The host wolf (`--wolf-host`) runs in its own
+clears, ⌥j/⌥k switch tabs, ctrl+f/ctrl+b scroll; the usual single-letter
+commands (q, z, h, l, and the j/k/G scroll keys) are disabled only while
+composing. The host wolf (`--wolf-host`) runs in its own
 terminal tab: enter on its row switches to that tab (where the terminal
 supports it — see docs/terminal-tabs.md). On any ACP tab whose session is dead (failed to
 start, errored, disconnected), **x** dismisses the tab and removes its session

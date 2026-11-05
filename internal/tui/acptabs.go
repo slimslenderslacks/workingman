@@ -47,6 +47,50 @@ type transcriptEntry struct {
 
 	// entryPlan field: the agent's current task list.
 	plan []acpclient.PlanEntry
+
+	// lines caches the entry's scrollback weight (see weight) so the tab's
+	// running total can be kept without rescanning every entry per chunk.
+	lines int
+}
+
+// acpScrollbackLimit bounds each tab's scrollback, in source lines (see
+// transcriptEntry.weight). Once a transcript grows past it the oldest entries
+// are dropped, so a long-running session can't grow the TUI's memory without
+// bound. A var so tests can shrink it.
+var acpScrollbackLimit = 5000
+
+// textLines counts the lines in s (0 for the empty string).
+func textLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+// tailLines keeps the last n lines of s.
+func tailLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+// weight is the entry's size in source lines for scrollback accounting: its
+// label/heading row, its body's lines, and the blank separator under it. It
+// ignores wrapping (that depends on the terminal width), so it is an estimate
+// of the rendered height, which is all a memory bound needs.
+func (e *transcriptEntry) weight() int {
+	n := 2
+	switch e.kind {
+	case entryTool:
+		n += textLines(e.toolOutput)
+	case entryPlan:
+		n += len(e.plan)
+	default:
+		n += textLines(e.text)
+	}
+	return n
 }
 
 // acpTab is the per-session state the tab view renders. status is the latest
@@ -74,6 +118,21 @@ type acpTab struct {
 	// is per-tab so switching tabs doesn't lose or leak a half-typed message.
 	interactive bool
 	draft       string
+
+	// Scrollback accounting: lineCount is the sum of the entries' weights, kept
+	// at or under acpScrollbackLimit by trim; dropped is how many source lines
+	// trim has discarded, shown as a marker atop the transcript.
+	lineCount int
+	dropped   int
+	// Scroll position. A tab follows its newest output (the "live" mode) until
+	// the user scrolls up; then inspecting is set and the view is pinned to a
+	// spot in the history — anchorLine rows into entry anchorEntry's rendered
+	// block — so output arriving below it (or trim dropping entries above it)
+	// doesn't move what the user is reading. Anchoring to an entry rather than
+	// a row also keeps the spot across a resize that rewraps everything.
+	inspecting  bool
+	anchorEntry int
+	anchorLine  int
 }
 
 // acpTabs is the collection of tabs plus the selected index. The zero value is
@@ -172,6 +231,7 @@ func (a *acpTabs) markFailed(id, title, reason string) {
 	t.status = acpclient.StateErrored
 	t.curMsg = -1
 	t.entries = append(t.entries, transcriptEntry{kind: entryError, text: reason})
+	t.touch(len(t.entries) - 1)
 }
 
 // remove drops the tab for id (a session whose resources were cleaned up),
@@ -212,8 +272,10 @@ func (a *acpTabs) addPrompt(id, text string) {
 	if i < 0 {
 		return
 	}
-	a.tabs[i].entries = append(a.tabs[i].entries, transcriptEntry{kind: entryPrompt, text: text})
-	a.tabs[i].curMsg = -1
+	t := &a.tabs[i]
+	t.entries = append(t.entries, transcriptEntry{kind: entryPrompt, text: text})
+	t.curMsg = -1
+	t.touch(len(t.entries) - 1)
 }
 
 // apply folds one acpclient.Event into the tab's state: it updates the status
@@ -262,6 +324,7 @@ func (a *acpTabs) apply(id string, ev acpclient.Event) {
 		} else {
 			t.entries[t.curMsg].text += ev.Text
 		}
+		t.touch(t.curMsg)
 	case acpclient.StateCompleted:
 		t.status = ev.State
 		t.curMsg = -1
@@ -297,6 +360,7 @@ func (t *acpTab) applyToolCall(ev acpclient.Event) {
 				e.toolStatus = ev.ToolStatus
 			}
 			e.toolOutput += ev.Text
+			t.touch(idx)
 			return
 		}
 	}
@@ -311,6 +375,7 @@ func (t *acpTab) applyToolCall(ev acpclient.Event) {
 	if ev.ToolCallID != "" {
 		t.toolIdx[ev.ToolCallID] = len(t.entries) - 1
 	}
+	t.touch(len(t.entries) - 1)
 }
 
 // applyPlan records the agent's task list. ACP sends the whole plan on every
@@ -321,10 +386,179 @@ func (t *acpTab) applyPlan(ev acpclient.Event) {
 	for i := range t.entries {
 		if t.entries[i].kind == entryPlan {
 			t.entries[i].plan = ev.Plan
+			t.touch(i)
 			return
 		}
 	}
 	t.entries = append(t.entries, transcriptEntry{kind: entryPlan, plan: ev.Plan})
+	t.touch(len(t.entries) - 1)
+}
+
+// touch re-weighs entry i after it was appended or mutated, then trims the
+// scrollback back under acpScrollbackLimit. Callers must have finished
+// recording any index of theirs (curMsg, toolIdx) first: trim shifts them.
+func (t *acpTab) touch(i int) {
+	e := &t.entries[i]
+	t.lineCount -= e.lines
+	e.lines = e.weight()
+	t.lineCount += e.lines
+	t.trim()
+}
+
+// trim enforces acpScrollbackLimit: it drops the oldest entries until the
+// transcript fits, always keeping the newest one (it may be mid-stream). If
+// that last entry alone is over the limit, its body is cut to its tail.
+func (t *acpTab) trim() {
+	limit := acpScrollbackLimit
+	if limit <= 0 || t.lineCount <= limit {
+		return
+	}
+	n := 0
+	for t.lineCount > limit && n < len(t.entries)-1 {
+		t.lineCount -= t.entries[n].lines
+		t.dropped += t.entries[n].lines
+		n++
+	}
+	if n > 0 {
+		t.dropFront(n)
+	}
+	if t.lineCount > limit && len(t.entries) == 1 {
+		e := &t.entries[0]
+		keep := limit - 2
+		if keep < 1 {
+			keep = 1
+		}
+		switch e.kind {
+		case entryTool:
+			e.toolOutput = tailLines(e.toolOutput, keep)
+		case entryPlan:
+			if len(e.plan) > keep {
+				e.plan = e.plan[len(e.plan)-keep:]
+			}
+		default:
+			e.text = tailLines(e.text, keep)
+		}
+		before := e.lines
+		e.lines = e.weight()
+		t.lineCount += e.lines - before
+		t.dropped += before - e.lines
+	}
+}
+
+// dropFront removes the first n entries, shifting every stored entry index
+// (curMsg, toolIdx, the inspection anchor) to match. The dropped slots are
+// zeroed so their text is garbage-collectable before the next reallocation.
+func (t *acpTab) dropFront(n int) {
+	for i := 0; i < n; i++ {
+		t.entries[i] = transcriptEntry{}
+	}
+	t.entries = t.entries[n:]
+	if t.curMsg >= 0 {
+		t.curMsg -= n
+		if t.curMsg < 0 {
+			t.curMsg = -1
+		}
+	}
+	for id, idx := range t.toolIdx {
+		if idx < n {
+			delete(t.toolIdx, id)
+		} else {
+			t.toolIdx[id] = idx - n
+		}
+	}
+	if t.inspecting {
+		t.anchorEntry -= n
+		if t.anchorEntry < 0 {
+			t.anchorEntry, t.anchorLine = 0, 0
+		}
+	}
+}
+
+// --- scrolling ---
+
+// viewTop is the index of the first transcript row shown in a height-row
+// body, given the rendered rows' total and each entry's first row (starts, as
+// returned by acpTranscriptLines). Following, it's whatever puts the newest row
+// at the bottom; inspecting, it's the anchor's row. Either way it is clamped to
+// the transcript, which is what keeps a resize (which rewraps everything) from
+// scrolling past either end.
+func (t *acpTab) viewTop(starts []int, total, height int) int {
+	maxTop := total - height
+	if maxTop < 0 {
+		maxTop = 0
+	}
+	if !t.inspecting || len(starts) == 0 {
+		return maxTop
+	}
+	i := t.anchorEntry
+	if i >= len(starts) {
+		i = len(starts) - 1
+	}
+	if i < 0 {
+		i = 0
+	}
+	top := starts[i] + t.anchorLine
+	if top > maxTop {
+		top = maxTop
+	}
+	if top < 0 {
+		top = 0
+	}
+	return top
+}
+
+// scroll moves the view delta rows (negative is up, toward older output).
+// Scrolling up off the bottom enters inspection mode, pinning the view to
+// the history being read; reaching the bottom again returns to follow mode.
+func (t *acpTab) scroll(delta int, starts []int, total, height int) {
+	maxTop := total - height
+	if maxTop < 0 {
+		maxTop = 0
+	}
+	top := t.viewTop(starts, total, height) + delta
+	// Everything already fits (nothing to inspect), or the move reaches the
+	// bottom: follow.
+	if maxTop == 0 || top >= maxTop || len(starts) == 0 {
+		t.follow()
+		return
+	}
+	if top < 0 {
+		top = 0
+	}
+	i := 0
+	for j, s := range starts {
+		if s > top {
+			break
+		}
+		i = j
+	}
+	t.inspecting = true
+	t.anchorEntry = i
+	t.anchorLine = top - starts[i]
+}
+
+// follow pins the view back to the newest output (G).
+func (t *acpTab) follow() {
+	t.inspecting = false
+	t.anchorEntry, t.anchorLine = 0, 0
+}
+
+// acpScrollStatus is the scroll-mode half of the status line: "live" while
+// following, or "inspection" plus how to get back.
+func acpScrollStatus(t *acpTab) string {
+	if t.inspecting {
+		return "inspection — press G to follow"
+	}
+	return "live"
+}
+
+// acpPageRows is how far ctrl+f / ctrl+b move in a height-row body: a page,
+// less two rows of overlap for context (as in vim).
+func acpPageRows(height int) int {
+	if height > 2 {
+		return height - 2
+	}
+	return 1
 }
 
 // next / prev cycle the selected tab, wrapping at the ends so left/right keys
@@ -496,6 +730,9 @@ var (
 	acpPlanLabelStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("147"))
+	acpInspectStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("214"))
 
 	// acpPromptBox / acpMsgBox wrap a conversation turn in a rounded border,
 	// colour-coded by role (prompt vs assistant), so the transcript reads as a
@@ -605,22 +842,22 @@ func renderACPTabBar(tabs []acpTab, sel int, width int) string {
 	return render(start, end)
 }
 
-// renderACPTabBody renders the selected tab's transcript into a width×height
-// box, newest content at the bottom (stream semantics: the eye lands on the
-// latest chunk). Each entry is a labelled block — "▷ prompt" or "◁ agent" —
-// followed by its wrapped text and a blank separator. Tool calls render as a
-// single collapsed summary line; their output is shown only when expandTools is
-// set (toggled by the `z` key). When the transcript is taller than the box,
-// only the trailing lines that fit are shown.
-func renderACPTabBody(t *acpTab, width, height int, expandTools bool) string {
-	if width <= 0 || height <= 0 {
-		return ""
-	}
-	var lines []string
+// acpTranscriptLines lays out a tab's whole transcript at width columns, oldest
+// first. Each entry is a labelled block — "▷ prompt" or "◁ agent" — followed
+// by its wrapped text and a blank separator. Tool calls render as a single
+// collapsed summary line; their output is shown only when expandTools is set
+// (toggled by the `z` key). starts[i] is the row entry i's block begins on,
+// which is what the inspection anchor is resolved against.
+func acpTranscriptLines(t *acpTab, width int, expandTools bool) (lines []string, starts []int) {
 	if len(t.entries) == 0 {
-		lines = append(lines, dimStyle.Render("(waiting for output…)"))
+		return []string{dimStyle.Render("(waiting for output…)")}, nil
 	}
-	for _, e := range t.entries {
+	if t.dropped > 0 {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("… %d earlier lines dropped from scrollback", t.dropped)))
+	}
+	starts = make([]int, len(t.entries))
+	for i, e := range t.entries {
+		starts[i] = len(lines)
 		switch e.kind {
 		case entryPrompt:
 			lines = append(lines, acpBoxLines("▷ prompt", acpPromptLabelStyle, e.text, acpPromptBox, width)...)
@@ -651,10 +888,24 @@ func renderACPTabBody(t *acpTab, width, height int, expandTools bool) string {
 		}
 		lines = append(lines, "")
 	}
-	if len(lines) > height {
-		lines = lines[len(lines)-height:]
+	return lines, starts
+}
+
+// renderACPTabBody renders the window of the selected tab's transcript that
+// fits a width×height box: the newest rows while following (stream semantics:
+// the eye lands on the latest chunk), or the pinned spot in the history while
+// inspecting (see acpTab.viewTop).
+func renderACPTabBody(t *acpTab, width, height int, expandTools bool) string {
+	if width <= 0 || height <= 0 {
+		return ""
 	}
-	return strings.Join(lines, "\n")
+	lines, starts := acpTranscriptLines(t, width, expandTools)
+	top := t.viewTop(starts, len(lines), height)
+	end := top + height
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return strings.Join(lines[top:end], "\n")
 }
 
 // acpWrapLines hard-wraps plain text to width columns using lipgloss's
@@ -684,8 +935,8 @@ func (m model) renderACPView() string {
 	if m.acpToolsExpanded {
 		toolHint = "z: collapse tools"
 	}
-	hintText := "⌥j/⌥k: switch tab  •  " + toolHint + "  •  esc: back  •  q: quit"
-	hint := hintStyle.Render(hintText)
+	hintText := "⌥j/⌥k: switch tab  •  j/k ^f/^b: scroll  •  G: follow  •  " + toolHint + "  •  esc: back  •  q: quit"
+	hint := hintStyle.Render(truncate(hintText, width))
 
 	if len(m.acp.tabs) == 0 {
 		body := dimStyle.Render("(no active ACP sessions)")
@@ -700,13 +951,11 @@ func (m model) renderACPView() string {
 		hint = hintStyle.Render(truncate(hintText, width))
 	}
 	// A conversational tab gets one extra row for its message line (and a hint
-	// that says how to use it); the body shrinks by the same row so the composed
-	// view's height is unchanged.
-	inputRows := 0
+	// that says how to use it); acpBodySize shrinks the body by the same row so
+	// the composed view's height is unchanged.
 	if t.interactive {
-		inputRows = 1
 		if m.acpComposing {
-			hintText = "enter: send  •  esc: stop typing  •  ctrl+u: clear  •  ⌥j/⌥k: switch tab"
+			hintText = "enter: send  •  esc: stop typing  •  ctrl+u: clear  •  ^f/^b: scroll  •  ⌥j/⌥k: switch tab"
 		} else {
 			hintText = "enter: type a message  •  " + hintText
 		}
@@ -716,31 +965,16 @@ func (m model) renderACPView() string {
 	if t.placeholder {
 		statusLine = dimStyle.Render("○ starting…")
 	} else {
-		statusLine = acpStatusStyle(t.status).Render(acpStatusGlyph(t.status) + " " + acpStatusLabel(t.status))
+		statusLine = acpStatusStyle(t.status).Render(acpStatusGlyph(t.status)+" "+acpStatusLabel(t.status)) + "  •  "
+		if t.inspecting {
+			statusLine += acpInspectStyle.Render(acpScrollStatus(t))
+		} else {
+			statusLine += dimStyle.Render(acpScrollStatus(t))
+		}
 	}
+	statusLine = lipgloss.NewStyle().MaxWidth(width).Render(statusLine)
 
-	// The body gets height - acpChromeRows - 1 rows, not height - acpChromeRows:
-	// composing header+bar+statusLine+box+hint to land on EXACTLY m.height rows
-	// leaves zero vertical slack, so a transient mismatch between the cached
-	// m.width/m.height and the real terminal size (a resize, or the frame right
-	// as this view is entered) renders one row too tall for the real viewport.
-	// A full-screen altscreen takeover overflowing by even one row scrolls the
-	// terminal, stranding the previous frame's tab bar above the current one —
-	// see acp-session-screen-rendering-glitch. Reserving this row means the
-	// composed view is always at least one row shorter than m.height, so that
-	// transient overshoot can never reach the real ceiling.
-	bodyOuterH := height - acpChromeRows - 1 - inputRows
-	if bodyOuterH < 3 {
-		bodyOuterH = 3
-	}
-	innerW := width - unfocusedBorder.GetHorizontalFrameSize()
-	if innerW < 1 {
-		innerW = 1
-	}
-	innerH := bodyOuterH - unfocusedBorder.GetVerticalFrameSize()
-	if innerH < 1 {
-		innerH = 1
-	}
+	innerW, innerH := m.acpBodySize(t)
 	bodyContent := renderACPTabBody(t, innerW, innerH, m.acpToolsExpanded)
 	// lipgloss's Width sets the content+padding width, so to give the body an
 	// innerW-wide text area (what renderACPTabBody drew to) the box Width must add
@@ -768,6 +1002,61 @@ func (m model) renderACPView() string {
 		view = strings.Join(lines[:height], "\n")
 	}
 	return view
+}
+
+// acpBodySize is the text area (columns × rows) the selected tab's transcript
+// gets inside the ACP view's border. The scroll keys need it too, to know how
+// far a page is and where the bottom of the transcript sits.
+func (m model) acpBodySize(t *acpTab) (innerW, innerH int) {
+	width, height := m.width, m.height
+	inputRows := 0
+	if t.interactive {
+		inputRows = 1
+	}
+	// The body gets height - acpChromeRows - 1 rows, not height - acpChromeRows:
+	// composing header+bar+statusLine+box+hint to land on EXACTLY m.height rows
+	// leaves zero vertical slack, so a transient mismatch between the cached
+	// m.width/m.height and the real terminal size (a resize, or the frame right
+	// as this view is entered) renders one row too tall for the real viewport.
+	// A full-screen altscreen takeover overflowing by even one row scrolls the
+	// terminal, stranding the previous frame's tab bar above the current one —
+	// see acp-session-screen-rendering-glitch. Reserving this row means the
+	// composed view is always at least one row shorter than m.height, so that
+	// transient overshoot can never reach the real ceiling.
+	bodyOuterH := height - acpChromeRows - 1 - inputRows
+	if bodyOuterH < 3 {
+		bodyOuterH = 3
+	}
+	innerW = width - unfocusedBorder.GetHorizontalFrameSize()
+	if innerW < 1 {
+		innerW = 1
+	}
+	innerH = bodyOuterH - unfocusedBorder.GetVerticalFrameSize()
+	if innerH < 1 {
+		innerH = 1
+	}
+	return innerW, innerH
+}
+
+// scrollACP scrolls the selected tab by delta transcript rows (negative is up).
+func (m model) scrollACP(delta int) {
+	t, ok := m.acp.selected()
+	if !ok || t.placeholder {
+		return
+	}
+	w, h := m.acpBodySize(t)
+	lines, starts := acpTranscriptLines(t, w, m.acpToolsExpanded)
+	t.scroll(delta, starts, len(lines), h)
+}
+
+// acpPage is one ctrl+f / ctrl+b step for the selected tab.
+func (m model) acpPage() int {
+	t, ok := m.acp.selected()
+	if !ok {
+		return 1
+	}
+	_, h := m.acpBodySize(t)
+	return acpPageRows(h)
 }
 
 // renderACPInputLine draws the message line under a conversational tab: the

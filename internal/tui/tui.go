@@ -527,7 +527,10 @@ func (m model) moveSelectionInPane(delta int) model {
 
 // handleACPKey processes a keystroke while the full-window ACP tab view is open.
 // alt-j/alt-k (or h/l) switch tabs; esc (or `a`) returns to the normal two-pane
-// UI; q and ctrl+c still quit the whole TUI. Cursor keys are unbound. On a
+// UI; q and ctrl+c still quit the whole TUI. Cursor keys are unbound. j/k
+// scroll the transcript a line, ctrl+f/ctrl+b a page; scrolling up leaves
+// follow ("live") mode for inspection mode, and G (or scrolling back to the
+// bottom) returns to following the newest output. On a
 // conversational tab (the wolf) enter starts composing a message — see
 // handleACPComposeKey. x dismisses the selected tab when its session is dead
 // (failed to start, errored, or disconnected), removing its session directory.
@@ -548,6 +551,18 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.acp.next()
 	case "alt+k", "˚", "h":
 		m.acp.prev()
+	case "j":
+		m.scrollACP(1)
+	case "k":
+		m.scrollACP(-1)
+	case "ctrl+f":
+		m.scrollACP(m.acpPage())
+	case "ctrl+b":
+		m.scrollACP(-m.acpPage())
+	case "G":
+		if t, ok := m.acp.selected(); ok {
+			t.follow()
+		}
 	case "z":
 		m.acpToolsExpanded = !m.acpToolsExpanded
 	case "x":
@@ -578,8 +593,9 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleACPComposeKey handles keys while typing a message into a conversational
 // tab: everything printable is text, enter sends, esc stops typing (the draft is
 // kept), ctrl+u clears it, and alt-j/alt-k still switch tabs. Typing is a
-// separate mode so the view's single-letter commands (q, z, h, l) stay usable on
-// every other tab and when not composing.
+// separate mode so the view's single-letter commands (q, z, h, l, j, k, G) stay
+// usable on every other tab and when not composing; while composing those are
+// text, so only the ctrl+f/ctrl+b page scroll still moves the transcript.
 func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	t, ok := m.acp.selected()
 	if !ok || !t.interactive {
@@ -601,6 +617,12 @@ func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+u":
 		t.draft = ""
+		return m, nil
+	case "ctrl+f":
+		m.scrollACP(m.acpPage())
+		return m, nil
+	case "ctrl+b":
+		m.scrollACP(-m.acpPage())
 		return m, nil
 	}
 	switch msg.Type {
