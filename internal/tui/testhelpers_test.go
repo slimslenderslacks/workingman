@@ -58,7 +58,7 @@ func runProjectCommand(t *testing.T, m model, key string) (model, tea.Cmd) {
 	return step.(model), cmd
 }
 
-// selectProject writes a minimal .project.yaml under root/<name> and returns
+// selectProject writes a minimal project.yaml under root/<name> and returns
 // a model with that project selected, projects pane focused. The project
 // starts in status:done so tests can assert a command flips it back to ready.
 func selectProject(t *testing.T, root, name string) (model, string) {
@@ -67,12 +67,12 @@ func selectProject(t *testing.T, root, name string) (model, string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, ".project.yaml")
+	path := filepath.Join(dir, "project.yaml")
 	yaml := "description: a project\nbranch: feature/x\nstatus: idle\nupdated_by: daemon\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.projectRoot = root
 	m.projects = []ProjectView{{Name: name, Path: path, Status: project.StatusIdle}}
 	m.projSel = path

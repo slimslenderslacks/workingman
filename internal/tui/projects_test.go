@@ -19,7 +19,7 @@ func TestScanProjectsOrdersByCreatedAtDescending(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
+		if err := project.SaveAs(filepath.Join(dir, "project.yaml"), &project.Project{
 			Description: name,
 			Branch:      "feat/" + name,
 			Status:      project.StatusReady,
@@ -55,7 +55,7 @@ func TestScanProjectsReturnsViews(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(alphaDir, "tasks"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	alphaPath := filepath.Join(alphaDir, ".project.yaml")
+	alphaPath := filepath.Join(alphaDir, "project.yaml")
 	if err := project.SaveAs(alphaPath, &project.Project{
 		Description: "alpha description",
 		Branch:      "feat/alpha",
@@ -75,7 +75,7 @@ func TestScanProjectsReturnsViews(t *testing.T) {
 	if err := os.MkdirAll(bravoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	bravoPath := filepath.Join(bravoDir, ".project.yaml")
+	bravoPath := filepath.Join(bravoDir, "project.yaml")
 	if err := project.SaveAs(bravoPath, &project.Project{
 		Description: "bravo description",
 		Branch:      "feat/bravo",
@@ -145,7 +145,7 @@ func TestScanProjectsSurfacesBrokenAndDedupes(t *testing.T) {
 	if err := os.MkdirAll(goodDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := project.SaveAs(filepath.Join(goodDir, ".project.yaml"), &project.Project{
+	if err := project.SaveAs(filepath.Join(goodDir, "project.yaml"), &project.Project{
 		Description: "good",
 		Status:      project.StatusReady,
 	}, project.WriterAgent); err != nil {
@@ -156,7 +156,7 @@ func TestScanProjectsSurfacesBrokenAndDedupes(t *testing.T) {
 	if err := os.MkdirAll(badDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(badDir, ".project.yaml"),
+	if err := os.WriteFile(filepath.Join(badDir, "project.yaml"),
 		[]byte("status: not-a-real-status\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestWatchProjectsEmitsUpdates(t *testing.T) {
 	if err := os.MkdirAll(pDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pPath := filepath.Join(pDir, ".project.yaml")
+	pPath := filepath.Join(pDir, "project.yaml")
 	if err := project.SaveAs(pPath, &project.Project{
 		Description: "alpha",
 		Status:      project.StatusReady,
@@ -279,7 +279,7 @@ func TestScanProjectsOrdersTasksByCompletion(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
+	if err := project.SaveAs(filepath.Join(dir, "project.yaml"), &project.Project{
 		Description: "p", Branch: "feat/p", Status: project.StatusWorking,
 	}, project.WriterAgent); err != nil {
 		t.Fatal(err)
@@ -384,7 +384,7 @@ func TestScanProjectsKeepsTasksWithUnnamedSeed(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
+	if err := project.SaveAs(filepath.Join(dir, "project.yaml"), &project.Project{
 		Description: "p", Branch: "feat/p", Status: project.StatusReady,
 	}, project.WriterAgent); err != nil {
 		t.Fatal(err)
@@ -427,7 +427,7 @@ func TestScanProjectsCarriesArchiveFlag(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &project.Project{
+		if err := project.SaveAs(filepath.Join(dir, "project.yaml"), &project.Project{
 			Description: name,
 			Branch:      "feat/" + name,
 			Status:      project.StatusIdle,
@@ -470,7 +470,7 @@ func TestScanProjectsCarriesWatchingPRAndCron(t *testing.T) {
 		}
 		p.Description = name
 		p.Branch = "feat/" + name
-		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &p, project.WriterAgent); err != nil {
+		if err := project.SaveAs(filepath.Join(dir, "project.yaml"), &p, project.WriterAgent); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -521,7 +521,7 @@ func TestScanProjectsCarriesCronActiveFlag(t *testing.T) {
 		p.Description = name
 		p.Branch = "feat/" + name
 		p.Status = project.StatusWorking
-		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &p, project.WriterAgent); err != nil {
+		if err := project.SaveAs(filepath.Join(dir, "project.yaml"), &p, project.WriterAgent); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -579,7 +579,7 @@ func TestScanProjectsSortsCronActiveLast(t *testing.T) {
 			p.Cron = cron
 			p.CronUntil = &future
 		}
-		if err := project.SaveAs(filepath.Join(dir, ".project.yaml"), &p, project.WriterAgent); err != nil {
+		if err := project.SaveAs(filepath.Join(dir, "project.yaml"), &p, project.WriterAgent); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -613,7 +613,7 @@ func TestScanProjectsSortsCronActiveLast(t *testing.T) {
 // A schedule expiring must make the poller emit a new snapshot, otherwise the
 // green border lingers until some unrelated field changes.
 func TestProjectViewEqualDetectsCronActiveFlip(t *testing.T) {
-	base := ProjectView{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusWorking}
+	base := ProjectView{Name: "alpha", Path: "/x/alpha/project.yaml", Status: project.StatusWorking}
 	live := base
 	live.CronActive = true
 	if projectViewEqual(base, live) {
@@ -628,7 +628,7 @@ func TestProjectViewEqualDetectsCronActiveFlip(t *testing.T) {
 // snapshot, otherwise the blue border waits for some unrelated field to
 // change before it appears.
 func TestProjectViewEqualDetectsArchiveFlip(t *testing.T) {
-	base := ProjectView{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusIdle}
+	base := ProjectView{Name: "alpha", Path: "/x/alpha/project.yaml", Status: project.StatusIdle}
 	archived := base
 	archived.Archive = true
 	if projectViewEqual(base, archived) {
@@ -643,7 +643,7 @@ func TestProjectViewEqualDetectsArchiveFlip(t *testing.T) {
 // snapshot, otherwise the watching-PR border/short-links line lingers or
 // misses an update until some unrelated field changes.
 func TestProjectViewEqualDetectsWatchingPRFlip(t *testing.T) {
-	base := ProjectView{Name: "alpha", Path: "/x/alpha/.project.yaml", Status: project.StatusIdle}
+	base := ProjectView{Name: "alpha", Path: "/x/alpha/project.yaml", Status: project.StatusIdle}
 	watching := base
 	watching.WatchingPR = true
 	if projectViewEqual(base, watching) {

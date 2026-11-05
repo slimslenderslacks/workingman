@@ -98,7 +98,7 @@ func ParseKind(s string) (Kind, bool) {
 // Interactive reports whether this Kind expects a human in the loop. Exactly
 // one does: the wolf agent, which asks for guidance when a project is blocked.
 // Every other kind is autonomous — it runs one turn and exits without
-// prompting. The project agent generates `.project.yaml` from the user's seed
+// prompting. The project agent generates `project.yaml` from the user's seed
 // description and, when the description is insufficient, escalates by blocking
 // the project (which summons the wolf) rather than interviewing the user
 // itself. The archive agent used to wait for a human to approve a `.gitignore`
@@ -109,7 +109,7 @@ func ParseKind(s string) (Kind, bool) {
 // highlight sessions that won't make progress until someone attaches. It does
 // NOT decide the launch path on its own: the wolf is interactive but still runs
 // as a persistent ACP session when an ACP launcher is configured, unless
-// --wolf-host selects the host/tmux escape hatch (see runner.Runner.UsesACP).
+// --wolf-host selects the host escape hatch (a terminal tab on the host) (see runner.Runner.UsesACP).
 func (k Kind) Interactive() bool {
 	return k == WolfAgent
 }
@@ -119,8 +119,11 @@ func (k Kind) Interactive() bool {
 // pass the real `claude --dangerously-skip-permissions ...` invocation
 // without changing the Launcher.
 type Spec struct {
-	Kind      Kind
-	Name      string   // session/tmux name — must be unique per live session
+	Kind Kind
+	Name string // session name — must be unique per live session
+	// Title is the human-facing label of the session — the terminal tab title
+	// for launchers that open one (the work stream's name). Empty means Name.
+	Title     string
 	Workspace string   // working directory for the command
 	Command   []string // command + args
 }

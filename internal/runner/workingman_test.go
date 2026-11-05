@@ -93,11 +93,11 @@ func TestWorkingmanSandboxNamesAreProjectIndependent(t *testing.T) {
 		t.Errorf("ACPSandboxNameFor = %q, want workingman-agent", got)
 	}
 	// A stray project path must not leak into the name.
-	if got := ACPSandboxNameFor(agent.WorkingmanAgent, "/orch/myproj/.project.yaml", ""); got != "workingman-agent" {
+	if got := ACPSandboxNameFor(agent.WorkingmanAgent, "/orch/myproj/project.yaml", ""); got != "workingman-agent" {
 		t.Errorf("ACPSandboxNameFor with a project path = %q, want workingman-agent", got)
 	}
 	// The legacy (non-ACP) derivation has no sandbox for it.
-	if got := SandboxNameFor(agent.WorkingmanAgent, "/orch/myproj/.project.yaml", ""); got != "" {
+	if got := SandboxNameFor(agent.WorkingmanAgent, "/orch/myproj/project.yaml", ""); got != "" {
 		t.Errorf("SandboxNameFor = %q, want \"\"", got)
 	}
 }
@@ -120,9 +120,9 @@ func TestStartWorkingmanAgent(t *testing.T) {
 	auditDir := filepath.Join(t.TempDir(), "logs")
 
 	acp := &fakeLauncher{}
-	tmux := &fakeLauncher{}
+	tabs := &fakeLauncher{}
 	r := &Runner{
-		Launcher:       tmux,
+		Launcher:       tabs,
 		AcpLauncher:    acp,
 		Kit:            "/kits/acp-kit",
 		SessionsRoot:   sessionsRoot,
@@ -147,8 +147,8 @@ func TestStartWorkingmanAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if tmux.last.Name != "" {
-		t.Errorf("the tmux launcher must not be used: %+v", tmux.last)
+	if tabs.last.Name != "" {
+		t.Errorf("the tab launcher must not be used: %+v", tabs.last)
 	}
 	cmd := acp.last.Command
 	if len(cmd) == 0 || cmd[0] != "/bin/acp-wrapper" {

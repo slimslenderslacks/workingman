@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,17 +12,11 @@ import (
 	"github.com/slimslenderslacks/work/internal/task"
 )
 
-// maxRecentTransitions caps how many audit-log lines the "Recent" section
-// shows, so a long-lived project's history doesn't crowd out the task graph
-// above it.
-const maxRecentTransitions = 8
-
 // renderProjectDetail draws the optional right column ("tr", hidden by
 // default): a curated dashboard for the currently-selected project — its
-// status and what's watching it, its task graph, and its most recent
-// audit-log activity. Unlike the raw YAML this pane used to show, everything
-// here is derived from data the TUI already has (ProjectView/TaskView from
-// ScanProjects, and the audit tail); the underlying files under
+// status and what's watching it, and its task graph. Unlike the raw YAML this
+// pane used to show, everything here is derived from data the TUI already has
+// (ProjectView/TaskView from ScanProjects); the underlying files under
 // ~/orch/<project> are always a terminal away, so this pane summarizes
 // rather than dumps file content.
 //
@@ -46,7 +39,7 @@ func (m model) renderProjectDetail(width, height int) string {
 	if !ok {
 		return style.Render(clampLines(dimStyle.Render("(none)"), innerHeight))
 	}
-	body := renderProjectDetailBody(v, m.auditLines, innerWidth)
+	body := renderProjectDetailBody(v, innerWidth)
 	return style.Render(clampLines(body, innerHeight))
 }
 
@@ -66,11 +59,11 @@ func (m model) selectedProject() (ProjectView, bool) {
 
 // renderProjectDetailBody composes the panel's full content, most important
 // information first: header/status, then anything actively worth flagging
-// (archive/cron/watching-PR/blocked), then the task graph, then recent audit
-// activity. Sections are joined and handed to clampLines by the caller, so
-// on a short pane the LEAST essential section (recent activity) is what gets
-// cut off first, never the header.
-func renderProjectDetailBody(v ProjectView, auditLines []string, width int) string {
+// (archive/cron/watching-PR/blocked), then the task graph. Sections are joined
+// and handed to clampLines by the caller, so on a short pane the LEAST
+// essential section (the task graph) is what gets cut off first, never the
+// header.
+func renderProjectDetailBody(v ProjectView, width int) string {
 	if v.LoadErr != "" {
 		var lines []string
 		for _, l := range wrapDisplayWidth("parse error: "+v.LoadErr, width) {
@@ -84,9 +77,6 @@ func renderProjectDetailBody(v ProjectView, auditLines []string, width int) stri
 		sections = append(sections, badges)
 	}
 	sections = append(sections, renderProjectDetailTasks(v, width))
-	if recent := renderProjectDetailRecent(recentProjectTransitions(auditLines, v, maxRecentTransitions), width); len(recent) > 0 {
-		sections = append(sections, recent)
-	}
 
 	var lines []string
 	for i, s := range sections {
@@ -232,95 +222,6 @@ func taskStatusGlyph(s task.Status) string {
 	default:
 		return "?"
 	}
-}
-
-// renderProjectDetailRecent renders the "Recent" section from an
-// already-filtered, already-capped list of audit lines (see
-// recentProjectTransitions), oldest first — so newest reads at the bottom,
-// the same direction the Audit pane itself tails.
-func renderProjectDetailRecent(lines []string, width int) []string {
-	if len(lines) == 0 {
-		return nil
-	}
-	out := []string{paneTitleStyle.Render(truncate("Recent", width))}
-	for _, l := range lines {
-		out = append(out, dimStyle.Render(truncate(compactAuditLine(l), width)))
-	}
-	return out
-}
-
-// recentProjectTransitions returns the audit lines that plausibly belong to
-// project v: those whose path= value falls inside the project's own
-// directory (covers .project.yaml, tasks/*.yaml, intake/*.md, and
-// last-planned.yaml events) or whose task= value names one of the project's
-// own tasks (covers task-scoped events, which the daemon logs without a
-// path= at all — see internal/daemon/dispatch_lifecycle.go's task_observed
-// etc.). Returned oldest-first, capped to the most recent `limit` matches,
-// since that's what a human wants to see first.
-func recentProjectTransitions(auditLines []string, v ProjectView, limit int) []string {
-	if v.Path == "" {
-		return nil
-	}
-	// Require a trailing "/" so a project named "widget" doesn't also match
-	// a sibling "widget-2" whose directory happens to share the prefix.
-	pathNeedle := "path=" + filepath.Dir(v.Path) + "/"
-	taskNames := make(map[string]bool, len(v.Tasks))
-	for _, t := range v.Tasks {
-		if t.Name != "" {
-			taskNames[t.Name] = true
-		}
-	}
-
-	var matched []string
-	for _, line := range auditLines {
-		if strings.Contains(line, pathNeedle) || auditLineMentionsTask(line, taskNames) {
-			matched = append(matched, line)
-		}
-	}
-	if limit > 0 && len(matched) > limit {
-		matched = matched[len(matched)-limit:]
-	}
-	return matched
-}
-
-// auditLineMentionsTask reports whether line carries a task=<name> field
-// naming one of taskNames. Audit lines are space-separated key=value pairs
-// (see internal/audit), and task names are kebab-case slugs with no spaces,
-// so the value runs to the next space or end of line.
-func auditLineMentionsTask(line string, taskNames map[string]bool) bool {
-	idx := strings.Index(line, "task=")
-	if idx < 0 {
-		return false
-	}
-	rest := line[idx+len("task="):]
-	if sp := strings.IndexByte(rest, ' '); sp >= 0 {
-		rest = rest[:sp]
-	}
-	return taskNames[rest]
-}
-
-// compactAuditLine reformats a raw audit line for the detail pane: the
-// timestamp shortens to local HH:MM:SS (the date is implicit — this is
-// "recent" activity), and any path= field is dropped since every line here
-// already belongs to the one project the pane is showing. task=, status=,
-// and every other field are kept as-is.
-func compactAuditLine(raw string) string {
-	fields := strings.Fields(raw)
-	if len(fields) == 0 {
-		return raw
-	}
-	ts := fields[0]
-	if t, err := time.Parse(time.RFC3339, ts); err == nil {
-		ts = t.Local().Format("15:04:05")
-	}
-	kept := []string{ts}
-	for _, f := range fields[1:] {
-		if strings.HasPrefix(f, "path=") {
-			continue
-		}
-		kept = append(kept, f)
-	}
-	return strings.Join(kept, " ")
 }
 
 // wrapDisplayWidth hard-wraps each newline-separated line of s to width

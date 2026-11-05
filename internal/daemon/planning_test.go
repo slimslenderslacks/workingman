@@ -32,7 +32,7 @@ func newPlanningTestDaemon(t *testing.T, ctx context.Context) (*Daemon, *safeBuf
 
 func writeReadyProject(t *testing.T, root string) string {
 	t.Helper()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "test",
 		Branch:      "feat/planning",

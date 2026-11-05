@@ -12,7 +12,7 @@ import (
 )
 
 // stubSession is a controllable agent.Session for tests. Wait blocks until
-// Close (or ctx cancellation). It avoids any tmux/process dependency so the
+// Close (or ctx cancellation). It avoids any terminal/process dependency so the
 // session-data tests can run unit-fast on every platform.
 type stubSession struct {
 	name string
@@ -69,8 +69,8 @@ func newTestDaemon(t *testing.T) (*Daemon, context.CancelFunc) {
 func TestListSessionsReturnsTrackedSessions(t *testing.T) {
 	d, _ := newTestDaemon(t)
 
-	keyA := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
-	keyB := filepath.Join(t.TempDir(), "bravo", ".project.yaml")
+	keyA := filepath.Join(t.TempDir(), "alpha", "project.yaml")
+	keyB := filepath.Join(t.TempDir(), "bravo", "project.yaml")
 
 	sa := newStubSession("orch-task-alpha")
 	if !d.trackSession(keyA, sa, agent.TaskAgent, "alpha-task", nil) {
@@ -96,8 +96,8 @@ func TestListSessionsReturnsTrackedSessions(t *testing.T) {
 	if got[0].Project != "alpha" {
 		t.Errorf("got[0].Project = %q, want %q", got[0].Project, "alpha")
 	}
-	if got[0].TmuxTarget != "orch-task-alpha" {
-		t.Errorf("got[0].TmuxTarget = %q", got[0].TmuxTarget)
+	if got[0].TabName != "orch-task-alpha" {
+		t.Errorf("got[0].TabName = %q", got[0].TabName)
 	}
 	if got[0].Status != SessionStatusRunning {
 		t.Errorf("got[0].Status = %q, want %q", got[0].Status, SessionStatusRunning)
@@ -120,7 +120,7 @@ func TestListSessionsReturnsTrackedSessions(t *testing.T) {
 
 func TestListSessionsRemovesEndedSessions(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
+	key := filepath.Join(t.TempDir(), "alpha", "project.yaml")
 	s := newStubSession("orch-task-alpha")
 	if !d.trackSession(key, s, agent.TaskAgent, "", nil) {
 		t.Fatal("trackSession returned false")
@@ -156,7 +156,7 @@ func TestWatchSessionsEmitsUpdates(t *testing.T) {
 		t.Fatal("no initial snapshot")
 	}
 
-	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
+	key := filepath.Join(t.TempDir(), "alpha", "project.yaml")
 	s := newStubSession("orch-task-alpha")
 	if !d.trackSession(key, s, agent.TaskAgent, "", nil) {
 		t.Fatal("trackSession returned false")
@@ -218,8 +218,8 @@ func TestListSessionsPopulatesSandboxNameForACPSessions(t *testing.T) {
 	// here since trackSession is driven directly with stub sessions.
 	d.runner = &runner.Runner{AcpLauncher: stubLauncher{}}
 
-	taskKey := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
-	wolfKey := filepath.Join(t.TempDir(), "bravo", ".project.yaml")
+	taskKey := filepath.Join(t.TempDir(), "alpha", "project.yaml")
+	wolfKey := filepath.Join(t.TempDir(), "bravo", "project.yaml")
 
 	taskSess := newStubSession("orch-task-alpha")
 	if !d.trackSession(taskKey, taskSess, agent.TaskAgent, "scaffold", nil) {
@@ -251,7 +251,7 @@ func TestListSessionsPopulatesSandboxNameForACPSessions(t *testing.T) {
 }
 
 // TestListSessionsLeavesWolfSandboxEmptyOnHost covers the --wolf-host escape
-// hatch: with WolfOnHost the wolf is a host tmux window with no sandbox, so no
+// hatch: with WolfOnHost the wolf is a host terminal tab with no sandbox, so no
 // sandbox name is surfaced even though the runner has an AcpLauncher. The
 // archive agent is unaffected by that flag — it runs under ACP either way, so
 // its sandbox name IS surfaced, keyed off the "#archive" session key.
@@ -259,8 +259,8 @@ func TestListSessionsLeavesWolfSandboxEmptyOnHost(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	d.runner = &runner.Runner{AcpLauncher: stubLauncher{}, WolfOnHost: true}
 
-	wolfKey := filepath.Join(t.TempDir(), "bravo", ".project.yaml")
-	archiveKey := archiveSessionKey(filepath.Join(t.TempDir(), "charlie", ".project.yaml"))
+	wolfKey := filepath.Join(t.TempDir(), "bravo", "project.yaml")
+	archiveKey := archiveSessionKey(filepath.Join(t.TempDir(), "charlie", "project.yaml"))
 	wolfSess := newStubSession("wolf-bravo")
 	archiveSess := newStubSession("archive-charlie")
 	if !d.trackSession(wolfKey, wolfSess, agent.WolfAgent, "", nil) ||
@@ -287,12 +287,12 @@ func TestListSessionsLeavesWolfSandboxEmptyOnHost(t *testing.T) {
 
 func TestListSessionsLeavesSandboxNameEmptyWithoutACP(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	// Runner with no AcpLauncher — the legacy tmux+sbx-exec path. Sandbox
+	// Runner with no AcpLauncher — the legacy terminal-tab+sbx-exec path. Sandbox
 	// is an implementation detail under that path, so the daemon shouldn't
 	// surface it.
 	d.runner = &runner.Runner{}
 
-	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
+	key := filepath.Join(t.TempDir(), "alpha", "project.yaml")
 	sess := newStubSession("orch-task-alpha")
 	if !d.trackSession(key, sess, agent.TaskAgent, "scaffold", nil) {
 		t.Fatal("trackSession returned false")

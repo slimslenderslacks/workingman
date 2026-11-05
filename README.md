@@ -1,6 +1,6 @@
 # orch — autonomous claude-code project daemon
 
-`orch` watches one or more directories for `.project.yaml` files and runs
+`orch` watches one or more directories for `project.yaml` files and runs
 claude-code agents (project, planning, task, commit, wolf, archive) through a
 state machine until the project is done — or blocked, in which case you get a
 macOS notification and a wolf-agent session to drop into.
@@ -22,21 +22,26 @@ cycle's tasks for context, then deleting, reusing, or replacing them and leaving
 what survives in `ready` for the task agents. A firing on a project with work in
 flight (`working`) or one that needs attention (`blocked`) just re-evaluates it,
 as before. Every schedule needs an explicit stop condition (`cron_until:` or
-`cron_max_runs:`) — see [Example `.project.yaml`](#example-projectyaml).
+`cron_max_runs:`) — see [Example `project.yaml`](#example-projectyaml).
 `cron_max_runs` counts cycles, not wake-ups: a firing that starts no cycle isn't
 charged against it.
 
 ## Prerequisites
 
 - Go 1.22+
-- `tmux` — every agent runs in a detached tmux session you can attach to
+- A terminal orch can open tabs in — [Ghostty](https://ghostty.org) (macOS via
+  AppleScript, Linux via `ghostty +new-tab`), WezTerm or kitty. Sessions that
+  need a human at a TTY (the `--wolf-host` wolf, the TUI's `:dir`/`:session`)
+  open in a new tab titled after the project. orch detects the terminal it runs
+  in; otherwise set `terminal: ghostty` in `~/.config/workingman/settings.yaml`.
+  See [docs/terminal-tabs.md](docs/terminal-tabs.md).
 - `claude` (claude-code CLI) — the actual agent worker
 - `wsp` — multi-repo workspace manager. Repos must be registered (`wsp registry add ...`) before the planning step finishes. If you don't have wsp set up, run with `--workspace-manager=stub` instead.
 - macOS for `osascript` notifications (optional; wolf still launches without them)
 
 ## SSH agent: commit signing and push (private ssh-agent)
 
-`./start-orch.sh` starts a **private `ssh-agent`** for the daemon, loads the
+`./start.sh` starts a **private `ssh-agent`** for the daemon, loads the
 signing key into it straight from 1Password (never written to disk), and
 exports its `SSH_AUTH_SOCK` so sbx forwards it into every sandbox. The same
 agent serves both commit signing and `git push` over ssh remotes (wsp repos use
@@ -51,8 +56,8 @@ unattended runs would hang.
   **"Personal"** via `op read`. Override the location with `ORCH_SSH_KEY_REF`
   (an `op://` reference to an openssh-format private key).
 - `op` must authenticate **non-interactively** (`OP_SERVICE_ACCOUNT_TOKEN`, or
-  an already-unlocked CLI session); otherwise start-orch fails at startup.
-- The agent's lifetime is tied to `start-orch.sh`: it is killed (and its
+  an already-unlocked CLI session); otherwise start.sh fails at startup.
+- The agent's lifetime is tied to `start.sh`: it is killed (and its
   socket dir removed) when the script exits.
 - If orch is started without it (`SSH_AUTH_SOCK` unset or the macOS launchd
   agent) the daemon logs an `ssh_auth_sock_unusable` audit event: commit
@@ -69,15 +74,26 @@ go build -o orch ./cmd/orch
 ## Start the daemon
 
 Pick a directory tree where you'll keep your project files. `orch` watches
-this tree recursively; any subdirectory with a `.project.yaml` becomes a
+this tree recursively; any subdirectory with a `project.yaml` becomes a
 project.
+
+Older versions of `orch` named this file `.project.yaml`. At startup the
+daemon renames any legacy `.project.yaml` it finds under a root to
+`project.yaml` (logged as `project_file_migrated`); a directory that already
+has a `project.yaml` is left untouched.
 
 ```sh
 mkdir -p ~/orch
 ./orch --root ~/orch --audit-log ~/orch/audit.log
 ```
 
-Repeat `--root` for multiple trees. Watch the audit log in another shell:
+Repeat `--root` for multiple trees.
+
+For day-to-day use, run `./start.sh` instead. It rebuilds `orch` and
+`acp-wrapper` from source, starts the private ssh-agent (see above), restarts
+sandboxd bound to it, and then runs the daemon and TUI in the foreground of
+the terminal you launched it from.
+`Ctrl-C` stops orch and tears the private agent down. Watch the audit log in another shell:
 
 ```sh
 tail -f ~/orch/audit.log
@@ -89,27 +105,21 @@ tail -f ~/orch/audit.log
 
 ```sh
 mkdir -p ~/orch/my-feature
-touch ~/orch/my-feature/.project.yaml
+touch ~/orch/my-feature/project.yaml
 ```
 
-The daemon logs `project_empty` and launches the **project agent** in a
-tmux session. Attach to it:
-
-```sh
-tmux list-sessions          # find the session name (orch-project-<hash>)
-tmux attach -t orch-project-<hash>
-```
-
-The agent reads `.orch/instructions.md` and interviews you about the
-project. When it's done it writes the `.project.yaml` itself with
-`status: ready`. Detach (`Ctrl-b d`) any time — the session keeps running.
+The daemon logs `project_empty` and launches the **project agent**. It is
+autonomous (an ACP session — press `a` in the TUI to watch it): it reads the
+seed `description:`, fills in the rest of `project.yaml` and sets
+`status: ready`, or blocks the project (summoning the wolf) when the
+description isn't enough to go on.
 
 ### 2. Planning
 
 The moment the project file is saved with `status: ready`, the daemon
 launches the **planning agent** in the same directory. It writes
 `tasks/*.yaml` (one file per task, with `depends_on` edges), then flips
-`.project.yaml` to `status: working` and exits.
+`project.yaml` to `status: working` and exits.
 
 ### 3. Tasks
 
@@ -118,7 +128,7 @@ launches the **planning agent** in the same directory. It writes
 1. Build the task DAG from `tasks/*.yaml`.
 2. Pick the first ready task (no uncommitted deps).
 3. Provision a wsp workspace at `~/dev/workspaces/<branch>/` with the repos
-   from `.project.yaml`.
+   from `project.yaml`.
 4. Launch a **task agent** in that workspace.
 5. When the task agent exits with `status: success`, launch a **commit agent**
    in the same workspace.
@@ -132,7 +142,9 @@ a wolf agent launches.
 
 ### 4. Stop
 
-`Ctrl-C` the daemon. In-flight sessions are closed; tmux sessions go away.
+`Ctrl-C` the daemon. ACP sessions keep running for the next orch to reconnect
+to; sessions in terminal tabs (the `--wolf-host` wolf) are closed, which closes
+their tabs.
 
 ## Stub mode (no wsp / no repos)
 
@@ -163,20 +175,26 @@ In the project root:
 tasks/*.yaml         # written by the planning agent; observed in audit
 ```
 
-Daemon-owned writes carry `updated_by: daemon` in `.project.yaml` so the
+Daemon-owned writes carry `updated_by: daemon` in `project.yaml` so the
 daemon ignores its own fsnotify events.
 
 ## Observability
 
-- **Audit log** (`--audit-log`): one line per event. `tail -f` it.
-- **Tmux sessions**: `tmux list-sessions` shows the agents that still run in
-  tmux (the wolf with `--wolf-host` or without `--acp-kit`).
-  Attach with `tmux attach -t <name>` to drive one.
+- **Audit log** (`--audit-log`, default `logs/audit.log` relative to where
+  `orch` runs; `~/orch/audit.log` with `./start.sh`): one line per event.
+  The TUI doesn't display it — `tail -f` it in a separate terminal.
+  `daemon.log`, `channels.log` and `acp-wrapper.log` are written beside it.
+- **Terminal tabs**: agents that run on the host rather than under ACP (the wolf
+  with `--wolf-host`, every agent without `--acp-kit`) each get a terminal tab
+  titled after their project. Enter on the session row in the TUI switches to
+  it. See [docs/terminal-tabs.md](docs/terminal-tabs.md).
 - **ACP sessions** (`--acp-kit`): planning/task/commit/review/archive agents
   and, by default, the wolf run as ACP sessions. Press `a` in the TUI for the tab view
   (or enter on a session row); the wolf's tab is interactive — press enter to
-  type to it. `--wolf-host` runs the wolf on the host in tmux instead (full
-  host access, but only reachable via tmux).
+  type to it. `--wolf-host` runs the wolf on the host in a terminal tab instead
+  (full host access, but only reachable from that tab). Each tab keeps a
+  scrollback of its session's output (the most recent ~5000 lines; older output
+  is dropped, with a marker saying how much). See [ACP view keys](#acp-view-keys).
 - **Workingman agent** (`--workingman-agent`, needs `--acp-kit`): an always-on
   assistant in its own sandbox that answers questions about the orch state
   (projects, tasks, the wolf, the logs) for a human on a messaging channel, and,
@@ -307,7 +325,7 @@ The security model matches WhatsApp: only allowlisted numbers reach an agent, an
 the signal-cli data directory (account keys, `~/.local/share/signal-cli/` by
 default) must be kept private. Both channels can be enabled at once.
 
-## Example `.project.yaml`
+## Example `project.yaml`
 
 ```yaml
 description: |
@@ -379,8 +397,37 @@ stays settled and still satisfies anything that depends on it.
 agent through `.orch/context.yaml`, and clears it once a planning session has
 moved the project off `ready`. Agents should not write it.
 
-See `examples/.project.yaml` and `examples/tasks/*.yaml` for the full
+See `examples/project.yaml` and `examples/tasks/*.yaml` for the full
 schemas.
+
+## ACP view keys
+
+The ACP view (`a` in the TUI) has two scroll modes per tab, shown at the end of
+the tab's status line:
+
+- **live** (the default) — the view stays pinned to the newest output as it
+  streams in.
+- **inspection** — entered as soon as you scroll up off the bottom. The view
+  stays on the history you're reading while new output keeps buffering below
+  it; the status line reads `inspection — press G to follow`. Scrolling back to
+  the bottom with `j`/`ctrl-f`, or pressing `G`, returns to live.
+
+| Key | Effect |
+|-----|--------|
+| `j` / `k` | scroll down / up one line |
+| `ctrl-f` / `ctrl-b` | scroll down / up a page |
+| `G` | jump to the newest output and return to live |
+| `⌥j` / `⌥k` (or `l` / `h`) | next / previous tab |
+| `z` | expand / collapse tool-call output |
+| `x` | dismiss a dead session's tab |
+| `enter` (or `i`) | type a message to a conversational tab (the wolf) |
+| `esc` (or `a`) | back to the main view |
+| `q` | quit |
+
+`j`/`k` here are scroll keys, not tab switches — tabs move with `⌥j`/`⌥k`
+(as on the main screen) or `h`/`l`. While typing a message, letters are text,
+so only `ctrl-f`/`ctrl-b` scroll; `esc` stops typing and gives `j`/`k`/`G` back.
+Each tab keeps its own scroll position.
 
 ## Hiding work streams
 
@@ -410,7 +457,7 @@ currently set. A gallery that is empty only because everything in it is hidden
 says so (`(none visible — 3 hidden; tp to show)`) rather than looking like the
 work streams vanished.
 
-Unlike `:cleanup` and `:review`, `:hide`/`:show` write `.project.yaml` as
+Unlike `:cleanup` and `:review`, `:hide`/`:show` write `project.yaml` as
 `updated_by: daemon`. The request flags are written as the agent *so that* the
 daemon's fsnotify handler acts on them; hiding must do the opposite — written
 as the agent it would be routed like any other project change, which on a
@@ -426,7 +473,7 @@ A finished project is retired in two steps — a **cleanup** that leaves every
 repo clean, committing and pushing only what needs it, then an **archive**
 that moves the project out of
 the watched root. Both are driven from the TUI's `:` command menu on the work
-streams pane, and both are recorded on `.project.yaml` by two independent
+streams pane, and both are recorded on `project.yaml` by two independent
 boolean flags (neither one is a `status:`, so a project keeps whatever status
 it already had):
 
@@ -464,7 +511,7 @@ TUI's tab view like any other ACP agent. In every repo of the workspace it:
 There are no other pre-commit steps: no tests, no lint, no formatting, no
 scratch-file cleanup. A repo that needed neither a commit nor a push is a
 success. On success the agent sets `archive: true` on
-`.project.yaml` and leaves `status:` untouched. If it can't finish, it leaves
+`project.yaml` and leaves `status:` untouched. If it can't finish, it leaves
 `archive` unset and says what's outstanding — its final message is the whole
 report, so read the session tab when a cleanup doesn't flip the flag.
 
@@ -483,7 +530,7 @@ already cleaned up (`archive: true`) is refused outright — its next step is
 
 ### `:archive`
 
-`:archive` only archives a project whose `.project.yaml` carries
+`:archive` only archives a project whose `project.yaml` carries
 `archive: true`. Anything else is refused on the status line with "has not been
 cleaned up — run :cleanup first", and nothing moves. When the guard passes and
 you confirm, the archive:
@@ -504,7 +551,7 @@ wins over the blue, so the cursor never disappears onto a blue card. See
 Doing it by hand instead:
 
 ```sh
-rm ~/orch/my-feature/.project.yaml
+rm ~/orch/my-feature/project.yaml
 rm -rf ~/orch/my-feature/{tasks,.orch}
 wsp rm feat/healthz-probe
 ```
@@ -543,5 +590,5 @@ selected, so moving the cursor never reflows the gallery.
 
 The green border tracks the same stop condition the daemon unschedules on
 (`cron_until` / `cron_max_runs` vs. `cron_runs`, see
-[Example `.project.yaml`](#example-projectyaml)), so it clears itself on the
+[Example `project.yaml`](#example-projectyaml)), so it clears itself on the
 gallery's next refresh once a schedule expires — no file edit needed.

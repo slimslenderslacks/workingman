@@ -12,17 +12,31 @@ import (
 )
 
 // handleIntakeFile is how a new task gets queued for planning: a human (or a
-// script) drops a markdown file into `<project>/intake/`, and this flips the
-// project back to status:ready (clearing any blocked_reason) so the daemon
-// relaunches the planning agent. The planning agent itself reads the pending
-// intake files directly — see launchProjectRootAgent, which scans the
-// intake/ dir at launch time and forwards the list via runner.Plan.IntakeFiles
-// — and is responsible for renaming each one to `*.processed` once it has
-// created tasks from it, so handlerFor's intake/*.md match never fires on it
-// again (see planning.tmpl).
+// script) drops a markdown file into `<project>/intake/`, and this gets a
+// planning agent onto it right away, whatever the project is doing:
+//
+//   - working — the status is left alone and the project is dispatched
+//     directly; dispatchProject's working branch sees intake no planner has
+//     been handed yet and launches one alongside the running tasks (planning
+//     has its own session slot — see launchPlanningAgent). Flipping a working
+//     project to ready is avoided on purpose: it would take the project out of
+//     the task dispatch loop's status for the length of the planning run.
+//   - anything else (idle, merged, blocked, ready) — flip to status:ready
+//     (clearing any blocked_reason), which routes to planning through the
+//     daemon's normal status:ready handling.
+//
+// If a planner is already running, the launch is a dedup no-op and the new
+// file is picked up by a follow-up run once the current one ends (see
+// afterPlanningSession) — never by a second concurrent planner.
+//
+// The planning agent itself reads the pending intake files directly — see
+// launchPlanningAgent, which scans the intake/ dir at launch time and forwards
+// the list via runner.Plan.IntakeFiles — and is responsible for renaming each
+// one to `*.processed` once it has created tasks from it, so handlerFor's
+// intake/*.md match never fires on it again (see planning.tmpl).
 func (d *Daemon) handleIntakeFile(path string) {
 	projectDir := filepath.Dir(filepath.Dir(path)) // .../<project>/intake/<file> -> .../<project>
-	projectPath := filepath.Join(projectDir, ".project.yaml")
+	projectPath := filepath.Join(projectDir, project.FileName)
 	if _, err := os.Stat(projectPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			d.audit.Log("intake_no_project", "path", path)
@@ -55,10 +69,25 @@ func (d *Daemon) handleIntakeFile(path string) {
 		d.audit.Log("project_load_error", "path", projectPath, "err", err.Error())
 		return
 	}
-	// Flip to ready unconditionally (same as the old `:task` command did):
-	// this drives the daemon's normal status:ready -> planning routing, and
-	// clearing blocked_reason means a queued intake request also un-sticks a
-	// project a human previously had to intervene on.
+	if d.planningInFlight(projectPath) {
+		// A planner is already running and will not see this file. No status
+		// write (it would race the planner's own project.yaml write) and no
+		// second planner: afterPlanningSession dispatches the project when the
+		// run ends, and a pending file nobody was handed then gets its
+		// follow-up run (working → launchPlanningAgent, ready → the retry,
+		// idle → seed_replan).
+		d.audit.Log("intake_queued", "path", path, "project", projectPath, "deferred", "planning_in_flight")
+		return
+	}
+	if p.Status == project.StatusWorking {
+		d.audit.Log("intake_queued", "path", path, "project", projectPath, "status", string(p.Status))
+		d.revisitProject(projectPath)
+		return
+	}
+	// Flip to ready (same as the old `:task` command did): this drives the
+	// daemon's normal status:ready -> planning routing, and clearing
+	// blocked_reason means a queued intake request also un-sticks a project a
+	// human previously had to intervene on.
 	p.Status = project.StatusReady
 	p.BlockedReason = ""
 	if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
@@ -104,8 +133,9 @@ func pendingIntakeFiles(root string) []string {
 
 // hasPendingIntake reports whether projectPath's intake/ directory holds any
 // unprocessed *.md files. Used alongside hasPendingSeed to re-arm planning
-// for a resting (done/reviewing) project whose intake-triggered status flip
-// was skipped or clobbered while another agent held the project slot.
+// for a resting (idle/merged) project whose intake-triggered status flip was
+// clobbered (e.g. by a review agent's own status write) or whose planning run
+// left a file unprocessed.
 func hasPendingIntake(projectPath string) bool {
 	return len(pendingIntakeFiles(filepath.Dir(projectPath))) > 0
 }

@@ -16,13 +16,13 @@ import (
 
 // ProjectView is the read-only snapshot of a single project that the TUI's
 // projects gallery renders. Construction goes through ScanProjects; callers
-// never build this struct directly from a .project.yaml.
+// never build this struct directly from a project.yaml.
 type ProjectView struct {
-	// Name is the basename of the directory containing the .project.yaml.
+	// Name is the basename of the directory containing the project.yaml.
 	// Projects don't carry a name field on disk, so the directory name is
 	// the closest stable identifier the user already recognises.
 	Name string
-	// Path is the absolute path to the .project.yaml file. Used as the
+	// Path is the absolute path to the project.yaml file. Used as the
 	// stable key when diffing snapshots.
 	Path        string
 	Description string
@@ -43,7 +43,7 @@ type ProjectView struct {
 	// same scan pass that computes TaskCounts so the Tasks pane doesn't have
 	// to re-walk disk.
 	Tasks []TaskView
-	// LastUpdate is the mtime of the .project.yaml file at scan time. Diff
+	// LastUpdate is the mtime of the project.yaml file at scan time. Diff
 	// logic uses it to detect changes even if the project's structured
 	// fields are unchanged.
 	LastUpdate time.Time
@@ -78,7 +78,7 @@ type ProjectView struct {
 	// PullRequests mirrors the project file's recorded pull requests, for the
 	// card body's short-link line when WatchingPR is set.
 	PullRequests []project.PullRequest
-	// LoadErr is the parse error when the project's .project.yaml exists but
+	// LoadErr is the parse error when the project's project.yaml exists but
 	// couldn't be decoded (e.g. an agent wrote a malformed field). Empty for a
 	// healthy project. When set, the other structured fields are zero and the
 	// gallery renders the card with an error badge instead of dropping it —
@@ -149,7 +149,7 @@ func (v TaskView) Recency() time.Time {
 	return v.CreatedAt
 }
 
-// ScanProjects walks each root for .project.yaml files and returns a snapshot
+// ScanProjects walks each root for project.yaml files and returns a snapshot
 // of every project it can load, sorted by CronActive (live cron schedules
 // last, so the gallery keeps quiescent projects up front), then by CreatedAt
 // descending (zero last), then by Path ascending as the final tie-break.
@@ -168,7 +168,7 @@ func ScanProjects(roots []string) ([]ProjectView, error) {
 				}
 				return nil
 			}
-			if entry.IsDir() || filepath.Base(p) != ".project.yaml" {
+			if entry.IsDir() || filepath.Base(p) != project.FileName {
 				return nil
 			}
 			abs, absErr := filepath.Abs(p)

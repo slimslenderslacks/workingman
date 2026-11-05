@@ -18,6 +18,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
 	"github.com/slimslenderslacks/work/internal/session"
+	"github.com/slimslenderslacks/work/internal/terminal"
 	"github.com/slimslenderslacks/work/internal/tui"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
@@ -95,12 +96,11 @@ func runDaemon(args []string) {
 	auditPath := fs.String("audit-log", "logs/audit.log", "path to the audit log")
 	workspaceMode := fs.String("workspace-manager", "wsp", `workspace manager: "wsp" (real) or "stub" (test/dev)`)
 	stubRoot := fs.String("stub-workspace-root", "", `when --workspace-manager=stub, directory where workspaces are created (default: $TMPDIR/orch-workspaces)`)
-	tmuxSession := fs.String("tmux-session", agent.DefaultUmbrellaSession, "name of the umbrella tmux session every agent's window lives in")
-	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, the planning/task/commit agents, the wolf and the workingman agent launch as acp-wrapper-backed ACP sessions instead of tmux+'sbx exec claude -p'")
+	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, the planning/task/commit agents, the wolf and the workingman agent launch as acp-wrapper-backed ACP sessions instead of in terminal tabs running 'sbx exec claude -p'")
 	acpImage := fs.String("acp-image", "", "prebuilt container image every ACP sandbox is created from, passed to `sbx create -t` (default: the stock claude template). Point it at acp-kit's prebuilt image (`make image-build`) so the kit's ~540MB npm install is paid once at image-build time instead of on every sandbox create. --acp-kit is still layered on top; only matters when --acp-kit is set")
 	acpWrapper := fs.String("acp-wrapper", "", "path to the acp-wrapper binary (default: acp-wrapper on PATH)")
 	sessionsRoot := fs.String("sessions-root", "", "root dir holding per-session dirs for ACP agents (default ~/.workingman/sessions)")
-	wolfHost := fs.Bool("wolf-host", false, "escape hatch: run the wolf agent in a tmux window directly on the host (full host access, no sandbox, only reachable by attaching to tmux) instead of as a persistent ACP session in its own sandbox. Only matters when --acp-kit is set")
+	wolfHost := fs.Bool("wolf-host", false, "escape hatch: run the wolf agent in a new terminal tab directly on the host (full host access, no sandbox, only reachable from that tab) instead of as a persistent ACP session in its own sandbox. Only matters when --acp-kit is set")
 	wolfUnblockGrace := fs.Duration("wolf-unblock-grace", 0, "how long an ACP wolf lingers after its project leaves status:blocked before its conversation is ended (0 = default 2m, negative = never end on unblock)")
 	wolfIdleTimeout := fs.Duration("wolf-idle-timeout", 0, "end an ACP wolf after this long with no ACP traffic (0 = default 24h, negative = never)")
 	channelsConfig := fs.String("channels-config", "", "messaging-channels config (default ~/.workingman/channels.yaml, or $WORKINGMAN_CHANNELS_CONFIG). A missing file disables channels and the daemon behaves exactly as without them")
@@ -133,13 +133,13 @@ func runDaemon(args []string) {
 		a.Seed(lines)
 	}
 
-	// Commit signing relies on the private ssh-agent that start-orch.sh starts
+	// Commit signing relies on the private ssh-agent that start.sh starts
 	// and exports as SSH_AUTH_SOCK. We never redirect it: if it is unset or is
 	// the macOS launchd agent (no signing key), warn loudly instead.
 	if sshAgentUnusable(os.Getenv("SSH_AUTH_SOCK")) {
 		a.Log("ssh_auth_sock_unusable",
 			"path", os.Getenv("SSH_AUTH_SOCK"),
-			"detail", "SSH_AUTH_SOCK is unset or the macOS launchd agent; commit signing will fail — start orch via start-orch.sh so it runs with the private ssh-agent")
+			"detail", "SSH_AUTH_SOCK is unset or the macOS launchd agent; commit signing will fail — start orch via start.sh so it runs with the private ssh-agent")
 	}
 
 	wsMgr, err := buildWorkspaceManager(*workspaceMode, *stubRoot)
@@ -148,30 +148,31 @@ func runDaemon(args []string) {
 	}
 
 	// A GUI-launched daemon inherits the bare macOS default PATH, missing
-	// the Nix profiles, Homebrew, etc. Augment so child shells (the tmux
-	// session running claude, git, wsp, ...) can find their binaries.
-	augmentedPATH := agent.AugmentSearchPath(agent.DefaultPATHCandidates())
-	tmuxBin, err := agent.ResolveTmux()
-	if err != nil {
-		log.Fatalf("locating tmux: %v\nPATH=%s", err, augmentedPATH)
-	}
+	// the Nix profiles, Homebrew, etc. Augment so child processes (claude in
+	// its terminal tab, git, wsp, ...) can find their binaries; the tab
+	// launcher forwards this PATH into the tabs it opens.
+	agent.AugmentSearchPath(agent.DefaultPATHCandidates())
+
+	// Sessions that need a human at a real TTY — the --wolf-host wolf, the
+	// TUI's :dir/:session — open in a new tab of the user's terminal. The
+	// terminal is resolved when a tab is first needed (detected from the
+	// environment, else ~/.config/workingman/settings.yaml), so an unknown
+	// terminal only fails the launch that needs one.
+	tabs := &terminal.TabLauncher{}
 
 	r := &runner.Runner{
 		Workspaces: wsMgr,
-		Launcher: &agent.TmuxLauncher{
-			Binary:      tmuxBin,
-			SessionName: *tmuxSession,
-		},
-		Audit: a,
+		Launcher:   tabs,
+		Audit:      a,
 		// Command defaults to claude-code via runner.DefaultCommandBuilder.
 	}
 
 	// When --acp-kit is set, non-interactive agents (planning/task/commit/
-	// archive) are launched as acp-wrapper-backed ACP sessions rather than tmux
-	// windows running `sbx exec claude -p`. The wrapper is a host process: its
+	// archive) are launched as acp-wrapper-backed ACP sessions rather than
+	// terminal tabs running `sbx exec claude -p`. The wrapper is a host process: its
 	// stderr (diagnostics) goes to a log file so it never corrupts the TUI
 	// alt-screen. The wolf also runs as a (persistent) ACP session unless
-	// --wolf-host is set, in which case it keeps the tmux launcher above.
+	// --wolf-host is set, in which case it keeps the tab launcher above.
 	if *acpKit != "" {
 		acpLogPath := filepath.Join(filepath.Dir(*auditPath), "acp-wrapper.log")
 		acpLog, err := os.OpenFile(acpLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -188,7 +189,7 @@ func runDaemon(args []string) {
 		r.PersistentUnblockGrace = *wolfUnblockGrace
 		r.PersistentIdleTimeout = *wolfIdleTimeout
 	} else {
-		// No ACP kit configured: keep the legacy sandboxed tmux path for
+		// No ACP kit configured: keep the legacy sandboxed terminal-tab path for
 		// non-interactive agents so the daemon still functions standalone.
 		r.Sandbox = runner.DefaultSandboxCreator
 	}
@@ -221,7 +222,6 @@ func runDaemon(args []string) {
 				AcpImage:         *acpImage,
 				AcpWrapper:       *acpWrapper,
 				SessionsRoot:     *sessionsRoot,
-				TmuxSession:      *tmuxSession,
 				AuditLog:         absPath(*auditPath),
 				Headless:         *headless,
 			}),
@@ -253,8 +253,7 @@ func runDaemon(args []string) {
 		"workspace_manager", *workspaceMode,
 		"roots", strings.Join(roots, ","),
 		"headless", fmt.Sprintf("%t", *headless),
-		"tmux", tmuxBin,
-		"tmux_session", *tmuxSession,
+		"terminal", terminal.Detect(os.Getenv),
 		"acp_kit", *acpKit,
 		"acp_image", *acpImage,
 		"wolf_host", fmt.Sprintf("%t", *wolfHost),
@@ -307,7 +306,7 @@ func runDaemon(args []string) {
 		}
 	}
 
-	tuiErr := tui.Run(ctx, roots, sessCh, *auditPath, acpSessionsRoot, interactiveLauncher{d})
+	tuiErr := tui.Run(ctx, roots, sessCh, acpSessionsRoot, interactiveLauncher{d}, tabs)
 
 	// TUI exited — either the user quit or ctx was already cancelled. Cancel
 	// to be sure, then wait for the daemon to wind down so its shutdown
@@ -355,7 +354,7 @@ func adaptSessionFeed(ctx context.Context, in <-chan []daemon.SessionInfo) <-cha
 						ID:          s.ID,
 						AgentName:   s.AgentName,
 						Project:     s.Project,
-						TmuxTarget:  s.TmuxTarget,
+						TabName:     s.TabName,
 						Status:      string(s.Status),
 						StartedAt:   s.StartedAt,
 						TaskName:    s.TaskName,
@@ -399,8 +398,10 @@ func redirectStdlibLog(w io.Writer) func() {
 func runTUI(args []string) {
 	fs := flag.NewFlagSet("orch tui", flag.ExitOnError)
 	var roots rootsFlag
-	fs.Var(&roots, "root", "directory to scan for .project.yaml files (repeatable)")
-	auditPath := fs.String("audit-log", "", "path to an audit log file to tail in the bottom pane (optional)")
+	fs.Var(&roots, "root", "directory to scan for project.yaml files (repeatable)")
+	// The TUI no longer shows an audit pane (tail -f the daemon's --audit-log
+	// instead); the flag is still accepted so existing invocations don't break.
+	_ = fs.String("audit-log", "", "deprecated and ignored: the TUI no longer shows the audit log; tail -f it instead")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -414,7 +415,7 @@ func runTUI(args []string) {
 	// mode wires the daemon's WatchSessions into the TUI).
 	// Standalone tui has no daemon/runner, so :dir and :session are unavailable
 	// (nil launcher). Run `orch --root=...` for the integrated experience.
-	if err := tui.Run(ctx, roots, nil, *auditPath, "", nil); err != nil {
+	if err := tui.Run(ctx, roots, nil, "", nil, nil); err != nil {
 		log.Fatal(err)
 	}
 }

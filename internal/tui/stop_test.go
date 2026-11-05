@@ -19,7 +19,7 @@ func TestRequestStopPausesProject(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, ".project.yaml")
+	path := filepath.Join(dir, "project.yaml")
 	yaml := "description: p\nbranch: b\nstatus: working\nupdated_by: daemon\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestRequestStopRefusals(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			path := filepath.Join(root, ".project.yaml")
+			path := filepath.Join(root, "project.yaml")
 			if err := os.WriteFile(path, []byte(tc.yaml), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -98,7 +98,7 @@ func TestRequestStartResumesToStoppedFrom(t *testing.T) {
 	} {
 		t.Run(string(from), func(t *testing.T) {
 			root := t.TempDir()
-			path := filepath.Join(root, ".project.yaml")
+			path := filepath.Join(root, "project.yaml")
 			yaml := "description: p\nbranch: b\nstatus: stopped\nstopped_from: " + string(from) + "\nupdated_by: daemon\n"
 			if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 				t.Fatal(err)
@@ -135,7 +135,7 @@ func TestRequestStartResumesToStoppedFrom(t *testing.T) {
 // to the project agent, so `:start` falls back to done instead.
 func TestRequestStartFallsBackToDoneWithoutStoppedFrom(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, ".project.yaml")
+	path := filepath.Join(root, "project.yaml")
 	yaml := "description: p\nbranch: b\nstatus: stopped\nupdated_by: daemon\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func TestRequestStartFallsBackToDoneWithoutStoppedFrom(t *testing.T) {
 
 func TestRequestStartRefusesNonStopped(t *testing.T) {
 	root := t.TempDir()
-	path := filepath.Join(root, ".project.yaml")
+	path := filepath.Join(root, "project.yaml")
 	yaml := "description: p\nbranch: b\nstatus: working\nupdated_by: daemon\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)

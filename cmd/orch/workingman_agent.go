@@ -42,7 +42,7 @@ func (f *workingmanFlag) Set(s string) error {
 // to it: auto turns it on only when an inbound-capable channel is configured,
 // since otherwise nobody can ask it anything. It always needs the ACP launcher
 // (--acp-kit): the agent is a persistent sandboxed session with read-only
-// mounts, which the legacy tmux path cannot provide.
+// mounts, which the legacy terminal-tab path cannot provide.
 func workingmanAgentEnabled(mode workingmanFlag, ch *daemonChannels, acpKit string) (bool, string) {
 	switch mode {
 	case workingmanOff:

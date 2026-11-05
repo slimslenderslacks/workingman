@@ -309,7 +309,7 @@ func TestWorkingmanAgentLaunchFailureRetriesAndNeverBlocksDispatch(t *testing.T)
 		t.Fatal(err)
 	}
 	body := "description: x\nstatus: ready\nbranch: feat-x\nrepos: []\nupdated_by: human\n"
-	if err := os.WriteFile(filepath.Join(proj, ".project.yaml"), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(proj, "project.yaml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	h.run(t)
@@ -444,7 +444,7 @@ func TestWorkingmanAgentIsNeverReaped(t *testing.T) {
 	}
 	// Control: the same staleness reaps an ordinary autonomous agent.
 	old.kind = agent.ReviewAgent
-	if v := d.strandedVerdict("/orch/p/.project.yaml", old); !v.reap {
+	if v := d.strandedVerdict("/orch/p/project.yaml", old); !v.reap {
 		t.Errorf("control: a stale review session should be reaped: %+v", v)
 	}
 }

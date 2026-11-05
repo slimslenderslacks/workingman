@@ -12,9 +12,9 @@ func TestLogFormat(t *testing.T) {
 	var buf bytes.Buffer
 	l := New(&buf)
 	l.now = func() time.Time { return time.Date(2026, 5, 12, 18, 4, 0, 0, time.UTC) }
-	l.Log("project_updated", "path", "/x/.project.yaml", "status", "ready")
+	l.Log("project_updated", "path", "/x/project.yaml", "status", "ready")
 	got := buf.String()
-	want := "2026-05-12T18:04:00Z project_updated path=/x/.project.yaml status=ready\n"
+	want := "2026-05-12T18:04:00Z project_updated path=/x/project.yaml status=ready\n"
 	if got != want {
 		t.Errorf("got %q\nwant %q", got, want)
 	}

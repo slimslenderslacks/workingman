@@ -17,7 +17,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/scheduler"
 )
 
-// Daemon watches a list of root directories for changes to .project.yaml and
+// Daemon watches a list of root directories for changes to project.yaml and
 // (eventually) tasks/*.yaml files, and dispatches work to claude-code agents.
 //
 // When constructed without WithRunner the daemon is observation-only: it
@@ -47,6 +47,20 @@ type Daemon struct {
 	planningMu       sync.Mutex
 	planningFailures map[string]int // keyed by project file path
 	projectFailures  map[string]int // keyed by project file path
+	// planningBusy (also guarded by planningMu) marks a project whose planning
+	// agent has been dispatched and whose session-end callback has not run yet.
+	// It is set before runner.Start — which can take real seconds provisioning
+	// the worktree — so a second dispatch in that window cannot start a second
+	// planner; the session map alone only covers the tracked lifetime. See
+	// beginPlanning / planningInFlight.
+	planningBusy map[string]bool // keyed by project file path
+	// planningOffered (also guarded by planningMu) is the intake file list the
+	// most recent planning run for a project was handed at launch. It is what
+	// separates a request that arrived mid-run, which is owed a follow-up run
+	// (see unofferedIntake), from one a run was given and left unprocessed,
+	// which must not relaunch planning in a loop. Kept after the run ends; the
+	// next launch overwrites it.
+	planningOffered map[string][]string // keyed by project file path
 
 	// cleanupMu guards cleanupInFlight, the set of projects whose archive
 	// (cleanup) agent has been dispatched and whose `cleanup: true` request
@@ -107,7 +121,7 @@ const (
 	// error) blocks immediately and does not consume a retry.
 	maxPlanningRetries = 3
 	// maxProjectRetries is the same tolerance for the project agent: how many
-	// consecutive cycles that left .project.yaml unpopulated the daemon
+	// consecutive cycles that left project.yaml unpopulated the daemon
 	// tolerates before blocking (which summons the wolf). A hard launch
 	// failure blocks immediately and does not consume a retry.
 	maxProjectRetries = 3
@@ -157,7 +171,7 @@ func WithNotifier(n notify.Sender) Option {
 }
 
 // WithScheduler enables cron-driven re-evaluation of projects. The daemon
-// registers each .project.yaml's cron field on observation; on firing it
+// registers each project.yaml's cron field on observation; on firing it
 // re-runs handleProject as if a fresh fsnotify event had arrived.
 func WithScheduler(s *scheduler.Scheduler) Option {
 	return func(d *Daemon) { d.scheduler = s }
@@ -193,6 +207,8 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		sessions:           map[string]sessionEntry{},
 		planningFailures:   map[string]int{},
 		projectFailures:    map[string]int{},
+		planningBusy:       map[string]bool{},
+		planningOffered:    map[string][]string{},
 		cleanupInFlight:    map[string]bool{},
 		reviewFixCycles:    map[string]int{},
 		reviewErrors:       map[string]int{},
@@ -233,6 +249,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.scheduler.Start()
 	}
 	for _, r := range d.roots {
+		// Before the watch is installed, so the renames aren't seen as events.
+		migrated, err := project.MigrateLegacy(r)
+		for _, p := range migrated {
+			d.audit.Log("project_file_migrated", "path", p)
+		}
+		if err != nil {
+			d.audit.Log("project_file_migrate_error", "root", r, "err", err.Error())
+		}
 		if err := d.addTree(r); err != nil {
 			return fmt.Errorf("daemon: watch %s: %w", r, err)
 		}
@@ -269,7 +293,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			// Ordering guarantee: events are dispatched concurrently across
 			// directories, but two events for the same directory (e.g. two
-			// rapid-fire writes to one project's .project.yaml) still run in
+			// rapid-fire writes to one project's project.yaml) still run in
 			// the order they were received here. See dispatchEvent.
 			d.dispatchEvent(ev)
 		case err, ok := <-d.watcher.Errors:
@@ -320,7 +344,7 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 // a crash-adjacent path. It must NOT tear down ACP-backed sessions: an
 // acp-wrapper process is meant to keep running (and its sandbox with it) so a
 // future orch process can reconnect over the session's socket. Only sessions
-// that aren't ACP-backed (the legacy tmux + `sbx exec` path, and interactive
+// that aren't ACP-backed (the legacy terminal-tab + `sbx exec` path, and interactive
 // project/wolf agents) are actually closed here — detachable ones are simply
 // dropped from local tracking, exactly like a deliberate detach.
 func (d *Daemon) shutdown() {
@@ -351,7 +375,7 @@ func (d *Daemon) shutdown() {
 // (project, planning, task, commit, review, archive, and the wolf unless it
 // runs on the host via WolfOnHost), which run as a standalone acp-wrapper host
 // process the daemon does not need to keep alive to keep running. A
-// --wolf-host wolf and the legacy tmux path (no AcpLauncher configured) are
+// --wolf-host wolf and the legacy terminal-tab path (no AcpLauncher configured) are
 // unaffected — those sessions are still closed on shutdown as before.
 //
 // The workingman agent is the exception among the ACP kinds: it is owned by the
@@ -443,4 +467,13 @@ func (d *Daemon) hasSession(key string) bool {
 	defer d.sessionsMu.Unlock()
 	_, ok := d.sessions[key]
 	return ok
+}
+
+// sessionKind returns the kind of the session tracked under key, and whether
+// there is one.
+func (d *Daemon) sessionKind(key string) (agent.Kind, bool) {
+	d.sessionsMu.Lock()
+	defer d.sessionsMu.Unlock()
+	e, ok := d.sessions[key]
+	return e.kind, ok
 }

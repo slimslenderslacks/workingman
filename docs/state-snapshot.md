@@ -1,7 +1,7 @@
 # Daemon state snapshot
 
 An external agent (the future *workingman agent*) running in a sandbox can read
-the orch roots (`<root>/<work-stream>/.project.yaml`, `tasks/*.yaml`), the audit
+the orch roots (`<root>/<work-stream>/project.yaml`, `tasks/*.yaml`), the audit
 log, and the ACP session dirs. It cannot see what only the daemon's **memory**
 knows: which sessions are live per project, whether a wolf is in flight, the
 planning/project/review failure counters, the PR-poll state. The state snapshot
@@ -89,7 +89,7 @@ Optional fields are omitted when empty.
 | `notes` | string[] | caveats, e.g. why live state is missing |
 | `daemon` | object | absent when `source` is `offline` (see below) |
 | `roots` | string[] | watched / scanned roots |
-| `projects` | object[] | one per `.project.yaml`, sorted by path |
+| `projects` | object[] | one per `project.yaml`, sorted by path |
 | `sessions` | object[] | live sessions (daemon) or ACP dirs on disk (offline), oldest first |
 | `audit_events` | object[] | last N audit events, oldest first (default 50) |
 
@@ -100,7 +100,7 @@ Optional fields are omitted when empty.
 | `state` | `"running"` or `"stopped"` |
 | `pid`, `started_at` | the daemon process |
 | `workspace_manager` | `--workspace-manager` (`wsp`/`stub`) |
-| `acp_kit`, `acp_image`, `acp_wrapper`, `sessions_root`, `tmux_session` | the matching flags (resolved sessions root) |
+| `acp_kit`, `acp_image`, `acp_wrapper`, `sessions_root` | the matching flags (resolved sessions root) |
 | `audit_log`, `state_file` | absolute paths |
 | `headless` | `--headless` |
 | `roots` | the `--root` list |
@@ -110,11 +110,11 @@ Optional fields are omitted when empty.
 | field | notes |
 |---|---|
 | `work_stream` | basename of the project dir |
-| `path` | absolute path of `.project.yaml` |
+| `path` | absolute path of `project.yaml` |
 | `status` | `ready`, `working`, `blocked`, `idle`, `stopped` (empty for an unpopulated seed) |
 | `blocked_reason` | why a blocked project is blocked |
 | `branch`, `description` | description truncated to 400 chars |
-| `load_error` | set when `.project.yaml` can't be parsed; most other fields are then empty |
+| `load_error` | set when `project.yaml` can't be parsed; most other fields are then empty |
 | `review`, `review_now`, `cleanup`, `archive`, `replan` | the project-file flags |
 | `hidden` | `hide: true` — filtered out of the TUI gallery; display only, dispatch is unaffected |
 | `watching_pr` | idle **and** still watched for PR review |
@@ -123,7 +123,7 @@ Optional fields are omitted when empty.
 | `task_counts` | object with a count for **every** task status (`ready`, `running`, `success`, `failed`, `blocked`, `committed`), zeros included |
 | `task_total` | sum of `task_counts` |
 | `tasks[]` | `{name, status, attempts, failure_reason, blocked_reason, depends_on[]}`, sorted by name. A not-yet-named planning seed appears under its filename stem |
-| `updated_at` | mtime of `.project.yaml` |
+| `updated_at` | mtime of `project.yaml` |
 | `live` | daemon-only block, below |
 
 ### `projects[].live` (daemon snapshots only)
@@ -143,14 +143,14 @@ Optional fields are omitted when empty.
 
 | field | notes |
 |---|---|
-| `key` | daemon session-map key: the `.project.yaml` path, plus `#wolf` / `#archive` for those agents (absent for disk sessions) |
+| `key` | daemon session-map key: the `project.yaml` path, plus `#wolf` / `#archive` for those agents (absent for disk sessions) |
 | `kind` | `project`, `planning`, `task`, `commit`, `wolf`, `archive`, `review` |
 | `work_stream`, `project_path`, `task` | what it works on (`task` only for task/commit agents) |
 | `started_at` | when tracking began |
-| `interactive` | only the wolf waits for a human; it is an ACP session too unless `--wolf-host`, in which case it has a `tmux_target` and no `sandbox_name` |
+| `interactive` | only the wolf waits for a human; it is an ACP session too unless `--wolf-host`, in which case it has a `tab_name` and no `sandbox_name` |
 | `source` | `"daemon"` or `"disk"` |
 | `sandbox_name` | the `sbx` sandbox (ACP sessions) |
-| `tmux_target` | tmux session name (non-ACP sessions) |
+| `tab_name` | session name of the terminal tab a non-ACP session runs in (see `docs/terminal-tabs.md`) |
 | `acp` | ACP-backed sessions: `{session_id, session_dir, socket_path, status}`; `socket_path` is `<session_dir>/agent.sock`, `status` is from `session.json` |
 
 ### `audit_events[]`
@@ -174,7 +174,7 @@ becomes `{"time": "2026-…", "event": "session_ended", "fields": {"key": "/x",
              "audit_log": "/Users/me/orch/audit.log", "roots": ["/Users/me/orch"]},
   "roots": ["/Users/me/orch"],
   "projects": [{
-    "work_stream": "my-feature", "path": "/Users/me/orch/my-feature/.project.yaml",
+    "work_stream": "my-feature", "path": "/Users/me/orch/my-feature/project.yaml",
     "status": "working", "branch": "my-feature",
     "review": false, "review_now": false, "cleanup": false, "archive": false,
     "replan": false, "hidden": false, "watching_pr": false, "cron_active": false,
@@ -186,7 +186,7 @@ becomes `{"time": "2026-…", "event": "session_ended", "fields": {"key": "/x",
              "review_agent_in_flight": false, "planning_failures": 0, "project_failures": 0,
              "review_fix_cycles": 0, "review_errors": 0}
   }],
-  "sessions": [{"key": "/Users/me/orch/my-feature/.project.yaml", "kind": "task",
+  "sessions": [{"key": "/Users/me/orch/my-feature/project.yaml", "kind": "task",
                 "work_stream": "my-feature", "task": "build", "source": "daemon",
                 "started_at": "2026-10-02T23:20:00Z", "interactive": false,
                 "sandbox_name": "my-feature-build",

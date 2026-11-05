@@ -190,18 +190,14 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		}
 	}
 
-	root := filepath.Dir(projectPath)
-	tasksDir := filepath.Join(root, "tasks")
-	g, err := taskgraph.Load(tasksDir)
-	if err != nil {
-		d.audit.Log("taskgraph_error", "path", projectPath, "err", err.Error())
-		d.transitionProjectBlocked(projectPath, p, "taskgraph error: "+err.Error())
+	g, ok := d.loadTaskGraph(projectPath, p)
+	if !ok {
 		return
 	}
-	for _, w := range g.Warnings() {
-		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
-	}
 	if g.AllCommitted() {
+		if d.deferToPlanner(projectPath, "complete") {
+			return
+		}
 		d.transitionProjectComplete(projectPath, p)
 		return
 	}
@@ -213,7 +209,11 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 	ready := g.Ready()
 	if len(ready) == 0 {
 		// No ready tasks but not all committed — something is stuck (a
-		// failed task with no retry budget, or a graph oddity). Block.
+		// failed task with no retry budget, or a graph oddity). Block —
+		// unless a planner is still writing the graph.
+		if d.deferToPlanner(projectPath, "no_ready_tasks") {
+			return
+		}
 		d.transitionProjectBlocked(projectPath, p,
 			"no ready tasks remain but project is not fully committed")
 		return
@@ -422,7 +422,7 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 		// than exit after the first turn like the one-shot agents. It ends when
 		// the project leaves `blocked` (the wolf resolved it), on the idle
 		// timeout, or when the wolf itself exits — see acpwrapper.Config.Persistent.
-		// Ignored on the host/tmux path, where the claude process is already
+		// Ignored on the host terminal-tab path, where the claude process is already
 		// long-lived.
 		Persistent: true,
 	}
@@ -431,7 +431,7 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 	// into transitionProjectBlocked would loop. The session_start_error
 	// audit entry plus the notification we already sent are enough to
 	// surface the failure. onEnd revisits under the real project path (not the
-	// wolf key) so post-wolf re-evaluation reloads the actual .project.yaml.
+	// wolf key) so post-wolf re-evaluation reloads the actual project.yaml.
 	//
 	// The wolf's start message goes out only once the session is really up —
 	// not on a failed launch, and not on the dedup no-op above — and is sent
@@ -540,7 +540,7 @@ func (d *Daemon) launchArchiveAgent(projectPath string, p *project.Project) {
 // to archive a project without the flag), so there is nothing here worth
 // blocking over.
 func (d *Daemon) afterArchiveSession(projectPath string, waitErr error) {
-	// Held until every step below is done, so a late .project.yaml event — the
+	// Held until every step below is done, so a late project.yaml event — the
 	// agent's own `archive: true` write, typically — can't slip in and launch a
 	// second agent while we are still clearing the request.
 	defer d.endCleanup(projectPath)
@@ -581,7 +581,7 @@ func (d *Daemon) afterArchiveSession(projectPath string, waitErr error) {
 // The reservation spans from the launch until the request flag has been cleared
 // — strictly wider than the session's lifetime, which is why it, and not
 // hasSession(archiveSessionKey(...)), is the dedup check. The session entry is
-// removed the moment the agent exits, leaving a window in which a .project.yaml
+// removed the moment the agent exits, leaving a window in which a project.yaml
 // event still carrying `cleanup: true` (the agent's own write of `archive:
 // true`, delivered late) would dispatch a second archive agent. Guarding the
 // whole span is what makes one `:cleanup` produce exactly one archive session.

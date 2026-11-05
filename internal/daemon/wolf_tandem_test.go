@@ -38,7 +38,7 @@ func TestWolfRunsInTandemWithMainSession(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projectPath := filepath.Join(projectDir, ".project.yaml")
+	projectPath := filepath.Join(projectDir, "project.yaml")
 
 	// Occupy the project's main slot with a running task session, exactly the
 	// situation `:wolf` must not be blocked by.
@@ -95,7 +95,7 @@ func TestLaunchWolfAgentUnderACPIsPersistent(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, "myproj", ".project.yaml")
+	projectPath := filepath.Join(root, "myproj", "project.yaml")
 	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -131,15 +131,15 @@ func TestLaunchWolfAgentUnderACPIsPersistent(t *testing.T) {
 	}
 }
 
-// TestLaunchWolfAgentOnHostStaysOnTmux verifies the --wolf-host escape hatch:
+// TestLaunchWolfAgentOnHostUsesTerminalTab verifies the --wolf-host escape hatch:
 // even with an AcpLauncher configured, WolfOnHost keeps the wolf on the host
-// tmux path (no ACP wrapper, no sandbox, host-flavored prompt).
-func TestLaunchWolfAgentOnHostStaysOnTmux(t *testing.T) {
+// terminal-tab path (no ACP wrapper, no sandbox, host-flavored prompt).
+func TestLaunchWolfAgentOnHostUsesTerminalTab(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	acp := &recordingLauncher{}
-	tmux := &recordingLauncher{}
+	tabs := &recordingLauncher{}
 	d.runner = &runner.Runner{
-		Launcher:     tmux,
+		Launcher:     tabs,
 		AcpLauncher:  acp,
 		WolfOnHost:   true,
 		Kit:          "kit",
@@ -147,7 +147,7 @@ func TestLaunchWolfAgentOnHostStaysOnTmux(t *testing.T) {
 		Command:      func(agent.Kind, string) []string { return []string{"claude", "hi"} },
 	}
 
-	projectPath := filepath.Join(t.TempDir(), "myproj", ".project.yaml")
+	projectPath := filepath.Join(t.TempDir(), "myproj", "project.yaml")
 	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +156,8 @@ func TestLaunchWolfAgentOnHostStaysOnTmux(t *testing.T) {
 	if got := acp.launched(); len(got) != 0 {
 		t.Errorf("WolfOnHost must not use the ACP launcher, got %+v", got)
 	}
-	if got := tmux.launched(); len(got) != 1 || got[0].Command[0] != "claude" {
-		t.Fatalf("wolf should launch once on the tmux path, got %+v", got)
+	if got := tabs.launched(); len(got) != 1 || got[0].Command[0] != "claude" {
+		t.Fatalf("wolf should launch once on the terminal-tab path, got %+v", got)
 	}
 	instructions, err := os.ReadFile(filepath.Join(filepath.Dir(projectPath), ".orch", "instructions.md"))
 	if err != nil {

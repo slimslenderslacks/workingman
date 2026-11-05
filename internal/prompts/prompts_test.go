@@ -9,13 +9,13 @@ import (
 
 func TestRenderProject(t *testing.T) {
 	out, err := Render(agent.ProjectAgent, Data{
-		ProjectPath: "/ws/.project.yaml",
+		ProjectPath: "/ws/project.yaml",
 		Workspace:   "/ws",
 	})
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if !strings.Contains(out, "/ws/.project.yaml") {
+	if !strings.Contains(out, "/ws/project.yaml") {
 		t.Errorf("project path not substituted:\n%s", out)
 	}
 	if !strings.Contains(out, "updated_by: agent") {
@@ -62,7 +62,7 @@ func TestRenderPlanningModesAreExclusive(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := Render(agent.PlanningAgent, Data{
 				Workspace:   "/ws",
-				ProjectPath: "/ws/.project.yaml",
+				ProjectPath: "/ws/project.yaml",
 				TasksDir:    "/ws/tasks",
 				Replan:      tc.replan,
 			})
@@ -87,7 +87,7 @@ func TestRenderPlanningModesAreExclusive(t *testing.T) {
 func TestRenderPlanningIntakeFilesListedWithProcessedInstruction(t *testing.T) {
 	out, err := Render(agent.PlanningAgent, Data{
 		Workspace:   "/ws",
-		ProjectPath: "/ws/.project.yaml",
+		ProjectPath: "/ws/project.yaml",
 		TasksDir:    "/ws/tasks",
 		IntakeFiles: []string{"/ws/intake/add-healthz.md", "/ws/intake/fix-flaky-test.md"},
 	})
@@ -111,7 +111,7 @@ func TestRenderPlanningIntakeFilesListedWithProcessedInstruction(t *testing.T) {
 func TestRenderPlanningNoIntakeFilesOmitsTheList(t *testing.T) {
 	out, err := Render(agent.PlanningAgent, Data{
 		Workspace:   "/ws",
-		ProjectPath: "/ws/.project.yaml",
+		ProjectPath: "/ws/project.yaml",
 		TasksDir:    "/ws/tasks",
 	})
 	if err != nil {
@@ -129,7 +129,7 @@ func TestRenderPlanningNoIntakeFilesOmitsTheList(t *testing.T) {
 func TestRenderPlanningProjectChangesListed(t *testing.T) {
 	out, err := Render(agent.PlanningAgent, Data{
 		Workspace:      "/ws",
-		ProjectPath:    "/ws/.project.yaml",
+		ProjectPath:    "/ws/project.yaml",
 		TasksDir:       "/ws/tasks",
 		Worktree:       "/worktrees/widget",
 		ProjectChanges: []string{"repos: added docker/cli", "description changed:\n    was: a\n    now: b"},
@@ -153,7 +153,7 @@ func TestRenderPlanningProjectChangesListed(t *testing.T) {
 func TestRenderPlanningNoProjectChangesOmitsTheNote(t *testing.T) {
 	out, err := Render(agent.PlanningAgent, Data{
 		Workspace:   "/ws",
-		ProjectPath: "/ws/.project.yaml",
+		ProjectPath: "/ws/project.yaml",
 		TasksDir:    "/ws/tasks",
 	})
 	if err != nil {
@@ -172,7 +172,7 @@ func TestRenderPlanningNoProjectChangesOmitsTheNote(t *testing.T) {
 func TestRenderPlanningReplanSpellsOutTheResetRules(t *testing.T) {
 	out, err := Render(agent.PlanningAgent, Data{
 		Workspace:   "/ws",
-		ProjectPath: "/ws/.project.yaml",
+		ProjectPath: "/ws/project.yaml",
 		TasksDir:    "/ws/tasks",
 		Replan:      true,
 	})
@@ -196,7 +196,7 @@ func TestRenderPlanningReplanSpellsOutTheResetRules(t *testing.T) {
 
 func TestRenderWolfWithFailedTasks(t *testing.T) {
 	out, err := Render(agent.WolfAgent, Data{
-		ProjectPath: "/ws/.project.yaml",
+		ProjectPath: "/ws/project.yaml",
 		Workspace:   "/ws",
 		FailedTasks: []string{"/ws/tasks/01.yaml", "/ws/tasks/03.yaml"},
 	})
@@ -213,7 +213,7 @@ func TestRenderWolfWithFailedTasks(t *testing.T) {
 // rendered prompt, alongside the file path the wolf should keep writing to.
 func TestRenderWolfWithBlockedSessionSummary(t *testing.T) {
 	out, err := Render(agent.WolfAgent, Data{
-		ProjectPath:             "/ws/.project.yaml",
+		ProjectPath:             "/ws/project.yaml",
 		Workspace:               "/ws",
 		BlockedSessionPath:      "/ws/blocked-session.yaml",
 		BlockedSessionSummary:   "1. Fix the missing import in handler.go\n2. Re-run the task",
@@ -240,7 +240,7 @@ func TestRenderWolfWithBlockedSessionSummary(t *testing.T) {
 // write even on its first investigation of a project.
 func TestRenderWolfWithoutBlockedSessionSummary(t *testing.T) {
 	out, err := Render(agent.WolfAgent, Data{
-		ProjectPath:        "/ws/.project.yaml",
+		ProjectPath:        "/ws/project.yaml",
 		Workspace:          "/ws",
 		BlockedSessionPath: "/ws/blocked-session.yaml",
 	})
@@ -257,7 +257,7 @@ func TestRenderWolfWithoutBlockedSessionSummary(t *testing.T) {
 
 func TestRenderArchive(t *testing.T) {
 	out, err := Render(agent.ArchiveAgent, Data{
-		ProjectPath: "/orch/myproj/.project.yaml",
+		ProjectPath: "/orch/myproj/project.yaml",
 		Workspace:   "/ws",
 		TasksDir:    "/orch/myproj/tasks",
 		Branch:      "feat/x",
@@ -266,7 +266,7 @@ func TestRenderArchive(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	for _, want := range []string{
-		"/orch/myproj/.project.yaml",  // where archive: true is written
+		"/orch/myproj/project.yaml",   // where archive: true is written
 		"/ws",                         // the wsp workspace it works in
 		"git status",                  // step 1: find uncommitted work
 		".gitignore",                  // step 2: the proposal
@@ -316,7 +316,7 @@ func TestRenderArchive(t *testing.T) {
 	for _, unwanted := range []string{
 		"WAIT for a human",
 		"notification",
-		"attach to this session",
+		"switch to this terminal tab",
 	} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("archive template still waits on a human (%q) in:\n%s", unwanted, out)
@@ -368,7 +368,7 @@ func TestRenderArchive(t *testing.T) {
 func TestRenderReview(t *testing.T) {
 	out, err := Render(agent.ReviewAgent, Data{
 		Workspace:   "/orch/myproj",
-		ProjectPath: "/orch/myproj/.project.yaml",
+		ProjectPath: "/orch/myproj/project.yaml",
 		ProjectName: "myproj",
 		TasksDir:    "/orch/myproj/tasks",
 		Branch:      "feat/x",
@@ -377,15 +377,15 @@ func TestRenderReview(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	for _, want := range []string{
-		"/orch/myproj/.project.yaml", // where status/pull_request are written
-		"/orch/myproj/tasks",         // where new tasks go
-		"feat/x",                     // the head branch to find the PR for
-		"github` MCP",                // uses the MCP, not gh
-		"resolve_thread",             // resolves a thread once its fix lands
-		"source:",                    // correlation block on created tasks
-		"status: idle",               // the status it settles at either way
-		"merged or closed",           // the terminal condition
-		"updated_by: agent",          // write convention
+		"/orch/myproj/project.yaml", // where status/pull_request are written
+		"/orch/myproj/tasks",        // where new tasks go
+		"feat/x",                    // the head branch to find the PR for
+		"github` MCP",               // uses the MCP, not gh
+		"resolve_thread",            // resolves a thread once its fix lands
+		"source:",                   // correlation block on created tasks
+		"status: idle",              // the status it settles at either way
+		"merged or closed",          // the terminal condition
+		"updated_by: agent",         // write convention
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in review prompt:\n%s", want, out)
@@ -452,13 +452,13 @@ func TestRenderAllKinds(t *testing.T) {
 // which is shown in the TUI and relayed to any configured channel (named
 // generically — no channel-specific wording).
 func TestRenderWolfHostVsSandboxed(t *testing.T) {
-	base := Data{ProjectPath: "/ws/.project.yaml", Workspace: "/ws", BlockedSessionPath: "/ws/blocked-session.yaml"}
+	base := Data{ProjectPath: "/ws/project.yaml", Workspace: "/ws", BlockedSessionPath: "/ws/blocked-session.yaml"}
 
 	host, err := Render(agent.WolfAgent, base)
 	if err != nil {
 		t.Fatalf("Render host: %v", err)
 	}
-	for _, want := range []string{"you run on the host", "send a macOS notification", "attach to this session"} {
+	for _, want := range []string{"you run on the host", "send a macOS notification", "switch to this terminal tab"} {
 		if !strings.Contains(host, want) {
 			t.Errorf("host wolf missing %q in:\n%s", want, host)
 		}
@@ -491,7 +491,7 @@ func TestRenderWolfHostVsSandboxed(t *testing.T) {
 			t.Errorf("sandboxed wolf missing %q in:\n%s", want, boxed)
 		}
 	}
-	for _, bad := range []string{"you run on the host", "send a macOS notification", "attach to this session", "WhatsApp"} {
+	for _, bad := range []string{"you run on the host", "send a macOS notification", "switch to this terminal tab", "WhatsApp"} {
 		if strings.Contains(boxed, bad) {
 			t.Errorf("sandboxed wolf should not say %q:\n%s", bad, boxed)
 		}

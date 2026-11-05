@@ -49,7 +49,7 @@ func (s *fakeSession) Close() error {
 
 func TestDefaultCommandBuilderModes(t *testing.T) {
 	// Autonomous kinds (project/planning/task/commit/archive) run with --print
-	// so claude executes one turn and exits, closing the tmux window and letting
+	// so claude executes one turn and exits, ending the session and letting
 	// the daemon advance project state. The wolf, the one interactive kind,
 	// omits --print so the human can drive the conversation. Every kind carries
 	// --dangerously-skip-permissions and the initial prompt on argv.
@@ -83,7 +83,7 @@ func TestDefaultCommandBuilderModes(t *testing.T) {
 }
 
 func TestSandboxNameFor(t *testing.T) {
-	const projectPath = "/orch/myproj/.project.yaml"
+	const projectPath = "/orch/myproj/project.yaml"
 	cases := []struct {
 		name     string
 		kind     agent.Kind
@@ -119,12 +119,12 @@ func TestSandboxNameFor(t *testing.T) {
 }
 
 // TestReviewAgentSandbox pins the review agent's launch shape: it runs in the
-// project's control dir (a single mount — that dir holds .project.yaml and
+// project's control dir (a single mount — that dir holds project.yaml and
 // tasks/), and its plan's github MCP and network policy reach the sandbox
 // creator so the agent can talk to GitHub.
 func TestReviewAgentSandbox(t *testing.T) {
 	workingDir := t.TempDir()
-	projectPath := filepath.Join(workingDir, ".project.yaml")
+	projectPath := filepath.Join(workingDir, "project.yaml")
 	_ = os.WriteFile(projectPath, nil, 0o644)
 
 	type call struct {
@@ -180,7 +180,7 @@ func TestReviewAgentSandbox(t *testing.T) {
 
 func TestSandboxCreatorInvokedAndWraps(t *testing.T) {
 	workingDir := t.TempDir()
-	projectPath := filepath.Join(workingDir, ".project.yaml")
+	projectPath := filepath.Join(workingDir, "project.yaml")
 	_ = os.WriteFile(projectPath, nil, 0o644)
 
 	type call struct {
@@ -236,7 +236,7 @@ func TestSandboxCreatorInvokedAndWraps(t *testing.T) {
 func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	_ = os.WriteFile(projectPath, nil, 0o644)
 
 	type call struct {
@@ -291,12 +291,12 @@ func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
 // The archive agent supplies no WorkingDir: it works in the project's wsp
 // workspace (git status / commit / push across every repo) and must have that
 // workspace provisioned for it. It also writes `archive: true` back to
-// `.project.yaml`, which lives outside the workspace — so like task/commit it
+// `project.yaml`, which lives outside the workspace — so like task/commit it
 // needs the orch dir as a second mount.
 func TestArchiveAgentResolvesWorkspaceAndMountsOrchDir(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	_ = os.WriteFile(projectPath, nil, 0o644)
 
 	launcher := &fakeLauncher{}
@@ -345,7 +345,7 @@ func TestArchiveAgentTakesACPPath(t *testing.T) {
 	if !r.UsesACP(agent.CommitAgent) {
 		t.Error("commit agent should still use the ACP path")
 	}
-	// Without an ACP launcher it falls back to the legacy tmux path, like
+	// Without an ACP launcher it falls back to the legacy terminal-tab path, like
 	// every other kind.
 	if (&Runner{}).UsesACP(agent.ArchiveAgent) {
 		t.Error("archive agent must not claim ACP without an AcpLauncher")
@@ -353,13 +353,13 @@ func TestArchiveAgentTakesACPPath(t *testing.T) {
 }
 
 // TestProjectAgentIsSandboxed pins the post-redesign behavior: the project
-// agent is autonomous, so on the legacy tmux path it is sandboxed like the
+// agent is autonomous, so on the legacy terminal-tab path it is sandboxed like the
 // planning agent — the sandbox creator is called with "<work-stream>-project"
 // and the command is wrapped in `sbx exec`. (Previously it was interactive and
 // ran in a bare workspace.)
 func TestProjectAgentIsSandboxed(t *testing.T) {
 	workingDir := t.TempDir()
-	projectPath := filepath.Join(workingDir, ".project.yaml")
+	projectPath := filepath.Join(workingDir, "project.yaml")
 	_ = os.WriteFile(projectPath, nil, 0o644)
 
 	launcher := &fakeLauncher{}
@@ -399,7 +399,7 @@ func contains(s []string, want string) bool {
 
 func TestProjectAgentSkipsWorkspaceCreate(t *testing.T) {
 	workingDir := t.TempDir()
-	projectPath := filepath.Join(workingDir, ".project.yaml")
+	projectPath := filepath.Join(workingDir, "project.yaml")
 	_ = os.WriteFile(projectPath, nil, 0o644)
 
 	launcher := &fakeLauncher{}
@@ -538,7 +538,7 @@ func TestPlanningAgentRunsInProjectRoot(t *testing.T) {
 	_, err := r.Start(context.Background(), Plan{
 		Kind:        agent.PlanningAgent,
 		WorkingDir:  workingDir,
-		ProjectPath: filepath.Join(workingDir, ".project.yaml"),
+		ProjectPath: filepath.Join(workingDir, "project.yaml"),
 		TasksDir:    filepath.Join(workingDir, "tasks"),
 		Branch:      "feat/x",
 	})

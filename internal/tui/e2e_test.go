@@ -24,8 +24,8 @@ import (
 // asks for: a daemon, a fake agent (the e2eFakeLauncher), a fake project
 // dropped on disk, and a headless bubbletea program wired to the daemon's
 // live snapshots. It asserts that the sessions and projects panes both
-// render the right content and that pressing Enter dispatches a tmux-attach
-// command with the correct target name — without needing tmux or a TTY.
+// render the right content and that pressing Enter dispatches a tab-attach
+// command with the correct target name — without needing a terminal or a TTY.
 func TestEndToEndDaemonAndTUI(t *testing.T) {
 	root := t.TempDir()
 	stubRoot := t.TempDir()
@@ -66,7 +66,7 @@ func TestEndToEndDaemonAndTUI(t *testing.T) {
 
 	// Drop a populated, status:ready project. The daemon dispatches a
 	// planning agent for that state, which the fake launcher captures.
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "smoke",
 		Branch:      "feat/smoke",
@@ -95,7 +95,7 @@ func TestEndToEndDaemonAndTUI(t *testing.T) {
 	defer tuiCancel()
 
 	prog := tea.NewProgram(
-		newModel(projects, sessions, nil, att),
+		newModel(projects, sessions, att),
 		tea.WithInput(nil),
 		tea.WithOutput(outBuf),
 		tea.WithContext(tuiCtx),
@@ -128,7 +128,7 @@ func TestEndToEndDaemonAndTUI(t *testing.T) {
 
 	// Press Enter: the sessions pane is the default focus, so this triggers
 	// the attach code path. The stubbed attacher records the target name
-	// without touching tmux or os/exec.
+	// without touching the terminal or os/exec.
 	prog.Send(tea.KeyMsg{Type: tea.KeyEnter})
 
 	if err := waitForCondition(2*time.Second, func() bool { return att.count() >= 1 }); err != nil {
@@ -136,11 +136,9 @@ func TestEndToEndDaemonAndTUI(t *testing.T) {
 			auditBuf.String(), outBuf.String())
 	}
 
-	// runner.sessionName produces "<kind>-<branch>"; the real TmuxLauncher
-	// prepends the umbrella session, giving the canonical "session:window"
-	// target. The e2eFakeLauncher mirrors that so the TUI's click-to-attach
-	// path is exercised end-to-end.
-	if got, want := att.firstTarget(), agent.DefaultUmbrellaSession+":planning-feat/smoke"; got != want {
+	// runner.sessionName produces "<kind>-<branch>", which the tab launcher
+	// uses verbatim as the session name the TUI focuses the tab by.
+	if got, want := att.firstTarget(), "planning-feat/smoke"; got != want {
 		t.Errorf("attach target = %q, want %q", got, want)
 	}
 }
@@ -177,7 +175,7 @@ func (s *e2eFakeSession) Close() error {
 	return nil
 }
 
-// e2eFakeLauncher stands in for agent.TmuxLauncher in the e2e test. It hands
+// e2eFakeLauncher stands in for terminal.TabLauncher in the e2e test. It hands
 // the daemon back a session it can track without ever shelling out, and
 // retains the live sessions so the test cleanup can release them.
 type e2eFakeLauncher struct {
@@ -186,9 +184,7 @@ type e2eFakeLauncher struct {
 }
 
 func (l *e2eFakeLauncher) Launch(_ context.Context, spec agent.Spec) (agent.Session, error) {
-	// Mirror the real TmuxLauncher's Name format ("session:window") so the
-	// TUI's TmuxTarget plumbing exercises the same shape it sees in prod.
-	s := newE2EFakeSession(agent.DefaultUmbrellaSession + ":" + spec.Name)
+	s := newE2EFakeSession(spec.Name)
 	l.mu.Lock()
 	l.sessions = append(l.sessions, s)
 	l.mu.Unlock()
@@ -204,7 +200,7 @@ func (l *e2eFakeLauncher) shutdown() {
 }
 
 // e2eAttacher is a thread-safe attacher used by the e2e test. The unit-test
-// fakeAttacher in tmux_attach_test.go doesn't lock because its callers run
+// fakeAttacher in tab_attach_test.go doesn't lock because its callers run
 // synchronously; here the attach call comes from the tea event-loop
 // goroutine while the test reads in its own goroutine, so we need a mutex
 // to avoid a data race.
@@ -276,7 +272,7 @@ func adaptDaemonSessions(ctx context.Context, in <-chan []daemon.SessionInfo) <-
 						ID:          s.ID,
 						AgentName:   s.AgentName,
 						Project:     s.Project,
-						TmuxTarget:  s.TmuxTarget,
+						TabName:     s.TabName,
 						Status:      string(s.Status),
 						StartedAt:   s.StartedAt,
 						TaskName:    s.TaskName,

@@ -72,7 +72,7 @@ func TestSyncPlannedReposFirstPlanSeedsSnapshotWithoutAdding(t *testing.T) {
 	d, _ := newRepoSyncTestDaemon(t, mgr)
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "widget", Branch: "feat/widget",
 		Repos: []project.Repo{{Org: "docker", Name: "desktop"}},
@@ -106,7 +106,7 @@ func TestSyncPlannedReposAdoptsPreExistingWorkspace(t *testing.T) {
 	d, buf := newRepoSyncTestDaemon(t, mgr)
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "widget", Branch: "feat/widget",
 		Repos: []project.Repo{
@@ -148,7 +148,7 @@ func TestSyncPlannedReposAdoptionFailureDoesNotSeedSnapshot(t *testing.T) {
 	d, buf := newRepoSyncTestDaemon(t, mgr)
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Branch: "feat/widget",
 		Repos:  []project.Repo{{Org: "docker", Name: "desktop"}},
@@ -168,7 +168,7 @@ func TestSyncPlannedReposClonesNewlyAddedRepo(t *testing.T) {
 	d, buf := newRepoSyncTestDaemon(t, mgr)
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SavePlannedSnapshot(project.PlannedSnapshotPath(projectPath), &project.PlannedSnapshot{
 		Description: "widget", Branch: "feat/widget",
 		Repos: []project.Repo{{Org: "docker", Name: "desktop"}},
@@ -212,7 +212,7 @@ func TestSyncPlannedReposNoChangesIsNoop(t *testing.T) {
 	d, _ := newRepoSyncTestDaemon(t, mgr)
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "widget", Branch: "feat/widget",
 		Repos: []project.Repo{{Org: "docker", Name: "desktop"}},
@@ -235,7 +235,7 @@ func TestSyncPlannedReposFailedAddDoesNotAdvanceSnapshot(t *testing.T) {
 	d, buf := newRepoSyncTestDaemon(t, mgr)
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	original := &project.PlannedSnapshot{
 		Description: "widget", Branch: "feat/widget",
 		Repos: []project.Repo{{Org: "docker", Name: "desktop"}},
@@ -278,7 +278,7 @@ func TestSyncPlannedReposNoWorkspaceManagerStillReportsDiff(t *testing.T) {
 	d.runner = &runner.Runner{}
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SavePlannedSnapshot(project.PlannedSnapshotPath(projectPath), &project.PlannedSnapshot{
 		Branch: "feat/widget",
 		Repos:  []project.Repo{{Org: "docker", Name: "desktop"}},
@@ -304,7 +304,7 @@ func TestSyncPlannedReposDescribesNonRepoChanges(t *testing.T) {
 	d, _ := newRepoSyncTestDaemon(t, mgr)
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SavePlannedSnapshot(project.PlannedSnapshotPath(projectPath), &project.PlannedSnapshot{
 		Description: "old description", Branch: "feat/widget",
 	}); err != nil {

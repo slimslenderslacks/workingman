@@ -24,7 +24,7 @@ func writeStatusFixture(t *testing.T) (root, auditLog string) {
 			t.Fatal(err)
 		}
 	}
-	must(filepath.Join(proj, ".project.yaml"), "description: demo\nbranch: demo-branch\nstatus: blocked\nblocked_reason: \"task one failed; api_key=sk-abcdefghijklmnopqrstuv\"\nupdated_by: daemon\n")
+	must(filepath.Join(proj, "project.yaml"), "description: demo\nbranch: demo-branch\nstatus: blocked\nblocked_reason: \"task one failed; api_key=sk-abcdefghijklmnopqrstuv\"\nupdated_by: daemon\n")
 	must(filepath.Join(proj, "tasks", "one.yaml"), "name: one\ndescription: d\ndepends_on: []\nstatus: failed\nattempts: 3\nfailure_reason: boom\n")
 	must(filepath.Join(proj, "tasks", "two.yaml"), "name: two\ndescription: d\ndepends_on: [one]\nstatus: ready\nattempts: 0\n")
 	auditLog = filepath.Join(t.TempDir(), "audit.log")

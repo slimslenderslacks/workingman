@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,7 +17,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
-// TestHappyPathFullProject walks a populated .project.yaml all the way from
+// TestHappyPathFullProject walks a populated project.yaml all the way from
 // status:working through the task→commit→committed→next chain and finally
 // to status:done. Two tasks (the second depending on the first) make sure
 // the DAG re-evaluation after each commit actually picks the next ready
@@ -30,27 +29,16 @@ import (
 // 2-second window leaves comfortable slack so the daemon's afterX callback
 // always reads the updated file. Total test wall-clock is ~10s.
 func TestHappyPathFullProject(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
 	stubRoot := t.TempDir()
-	socket := fmt.Sprintf("orch-happy-%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	})
 
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(stubRoot),
-		Launcher: &agent.TmuxLauncher{
-			Socket:       socket,
-			PollInterval: 50 * time.Millisecond,
-		},
-		Audit:   a,
-		Command: func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 2"} },
+		Launcher:   &agent.ProcessLauncher{},
+		Audit:      a,
+		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 2"} },
 	}
 	d, err := New([]string{root}, a, WithRunner(r))
 	if err != nil {
@@ -79,7 +67,7 @@ func TestHappyPathFullProject(t *testing.T) {
 	mustSaveTask(t, task1Path, &task.Task{Name: "first", Status: task.StatusReady})
 	mustSaveTask(t, task2Path, &task.Task{Name: "second", Status: task.StatusReady, DependsOn: []string{"first"}})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "test project",
 		Branch:      "feat/happy",

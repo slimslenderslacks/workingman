@@ -8,7 +8,7 @@ a daemon-owned, always-on observer that answers questions about the orch state
 (§8).
 `design.md` has the original spec; this document describes the agents as
 implemented today, which has moved past that spec in places (most notably: an
-ACP/sandbox launch path superseding the tmux+`sbx exec` path for non-interactive
+ACP/sandbox launch path superseding the terminal-tab+`sbx exec` path for non-interactive
 agents, and a review agent design.md never mentions).
 
 Every agent's role is defined by `agent.Kind` (`internal/agent/agent.go`).
@@ -21,7 +21,7 @@ is no longer exactly that split (see the wolf):
   Runner.startACP`), when the daemon is wired with an `AcpLauncher` (production
   always is). The wrapper creates the sandbox (with `acp-kit` layered on),
   execs the ACP client, and serves `<SessionsRoot>/<id>/agent.sock` for the TUI
-  to stream. There is no tmux window to attach to for these. The wrapper is
+  to stream. There is no terminal tab to switch to for these. The wrapper is
   launched `--exit-when-empty`: it ends when the TUI watcher that drove the one
   prompt disconnects.
 - **Interactive** (wolf) — a human is expected in the loop.
@@ -29,7 +29,8 @@ is no longer exactly that split (see the wolf):
     exit-when-empty; it ends when its work is done, see §5) when an
     `AcpLauncher` is configured, so the TUI, the daemon and messaging channels
     can all tune in to one conversation. `orch --wolf-host` (`Runner.WolfOnHost`)
-    keeps the pre-ACP host/tmux wolf as an escape hatch. `Runner.UsesACP(kind)`
+    keeps the pre-ACP host wolf — in a new terminal tab (`internal/terminal`,
+    docs/terminal-tabs.md) — as an escape hatch. `Runner.UsesACP(kind)`
     is the single place that answers "does this kind run under ACP?".
 
 Every launch, regardless of family, gets the same two-file handoff written
@@ -46,8 +47,9 @@ The initial message piped to `claude` is always the same one-liner
 > Read .orch/instructions.md and .orch/context.yaml, then follow the instructions.
 
 Sandbox names are derived by `runner.SandboxNameFor` (`_` replaced with `-`
-since sbx rejects underscores). Session/tmux/ACP-session names come from
-`runner.sessionName`: `"<kind>-<task-name-or-branch-or-hash>"`.
+since sbx rejects underscores). Session/ACP-session names come from
+`runner.sessionName`: `"<kind>-<task-name-or-branch-or-hash>"`; a terminal tab
+is tracked by that name and titled with the project name (`runner.tabTitle`).
 
 ---
 
@@ -57,19 +59,19 @@ since sbx rejects underscores). Session/tmux/ACP-session names come from
 
 **Trigger.** `internal/daemon/dispatch.go: dispatchProject` calls
 `launchProjectRootAgent(path, agent.ProjectAgent, p)` whenever it observes an
-"unpopulated" `.project.yaml` (`p.Unpopulated()`) — either the legacy
+"unpopulated" `project.yaml` (`p.Unpopulated()`) — either the legacy
 zero-byte file, or a `:new`-seeded file that has only `description:` set.
 
 **Workspace/session.** No wsp workspace: `WorkingDir` is set directly to the
-control directory holding `.project.yaml` (`filepath.Dir(projectPath)`), so
+control directory holding `project.yaml` (`filepath.Dir(projectPath)`), so
 `Runner.resolveWorkingDir` skips workspace provisioning entirely. Sandbox name
 is `"<work-stream>-project"` (`runner.SandboxNameFor`) — deliberately distinct
 from planning's sandbox, since project and planning run back-to-back in the
 same control dir and would otherwise collide on one sandbox with different
 mounts. Runs via the ACP path (autonomous, `claude --print`).
 
-**Reads/writes.** Reads the seed `description:` in `.project.yaml`. Writes the
-fully populated `.project.yaml` — `repos`/`new_repos`, `branch`, optionally
+**Reads/writes.** Reads the seed `description:` in `project.yaml`. Writes the
+fully populated `project.yaml` — `repos`/`new_repos`, `branch`, optionally
 `cron`/`cron_until`/`cron_max_runs`, `review`/`no_review` — with
 `status: ready` and `updated_by: agent` on success, or `status: blocked` with
 a specific `blocked_reason` when the description is genuinely insufficient
@@ -109,14 +111,33 @@ blocked → wolf).
 **Kind:** `agent.PlanningAgent`. **Template:** `planning.tmpl`. **Interactive:** no.
 
 **Trigger.** `dispatchProject`'s `switch p.Status` routes `status: ready` to
-`launchProjectRootAgent(path, agent.PlanningAgent, p)`. This also fires after
+`launchPlanningAgent(path, p)`. This also fires after
 a cron cycle re-arms a project (`requestCronReplan` sets `status: ready` +
-`Replan: true`) and after a `:task` seed re-arms a resting `done`/`reviewing`
-project (`hasPendingSeed`).
+`Replan: true`), after a pending intake file or task seed re-arms a resting
+`idle`/`merged` project (`seed_replan`), and — new — on a **`working`**
+project with intake no planning run has been handed yet (`unofferedIntake`):
+`handleIntakeFile` dispatches a working project directly instead of flipping
+it to `ready`, and the planner runs alongside its tasks. Intake that lands
+while a planner is already running gets a follow-up run once that one ends
+(`afterPlanningSession` re-dispatches), never a second concurrent planner.
 
 **Workspace/session.** Also runs with `WorkingDir` pinned to the control
 directory (no wsp workspace of its own) — sandbox name is the bare
-work-stream basename (`SandboxNameFor`, case `PlanningAgent`). But unlike
+work-stream basename (`SandboxNameFor`, case `PlanningAgent`). It is tracked
+under a **dedicated planning slot**, `planningSessionKey = projectPath +
+"#planning"`, rather than the main slot task/commit agents hold, so a planner
+can run while a task/commit agent is mid-flight. Design choice: task and commit
+agents work in the wsp workspace and only touch their own task file, while the
+planner only adds task files in the control dir, so they do not conflict;
+sharing one slot is what used to strand intake on a working project. The
+one-planner rule is enforced by an in-memory reservation (`beginPlanning` /
+`endPlanning`, `planningBusy`) taken before `runner.Start` and released in
+`afterPlanningSession`, re-taken by `reconcileSessions` for an adopted planner.
+Planning still waits for the main slot when it holds a project or review agent
+(both write the control dir), and a cron re-plan waits for it to be empty (a
+re-plan may delete tasks). While a planner is in flight, task dispatch defers
+project completion and graph-error/no-ready-task blocks to
+`afterPlanningSession`, and review dispatch stands aside. But unlike
 project/wolf, planning *also* provisions the project's wsp worktree
 (`Runner.resolvePlanningWorktree`, idempotent — the later task agent's own
 `Create` call returns the same directory) and mounts it as a **second**
@@ -124,8 +145,8 @@ sandbox workspace, so the planner can read real source to inform task
 breakdown without cloning (the sandbox has no GitHub credentials). That path
 is surfaced to the template as `{{.Worktree}}`.
 
-**Reads/writes.** Reads `.project.yaml` and existing `tasks/*.yaml`. May
-freely add/remove/edit files under `tasks/*.yaml` and edit `.project.yaml` —
+**Reads/writes.** Reads `project.yaml` and existing `tasks/*.yaml`. May
+freely add/remove/edit files under `tasks/*.yaml` and edit `project.yaml` —
 nothing else. Finishes by setting `status: working` with `updated_by: agent`.
 
 **Prompt structure (`planning.tmpl`).** Three main parts:
@@ -158,11 +179,16 @@ nothing else. Finishes by setting `status: working` with `updated_by: agent`.
    right after `sbx create`) fields, plus the fixed status enums for both
    project and task, and `model: default` on every new task.
 
-**Completion signal / lifecycle.** `afterPlanningSession` mirrors the project
+**Completion signal / lifecycle.** `afterPlanningSession` releases the planning
+slot, then mirrors the project
 agent's circuit breaker (`maxPlanningRetries`, backoff, block on hard failure
 or exhausted retries). Productive exit is "no longer `status: ready`" — the
 daemon resets the counter, clears `Replan` (`clearReplan`, written as
-`daemon`), and re-dispatches (`working` → first ready task).
+`daemon`), and re-dispatches (`working` → first ready task, plus a follow-up
+planning run for intake that arrived mid-run). An intake file the run was
+handed but left unprocessed is logged (`planning_intake_unprocessed`) and not
+relaunched on a working project — it is re-armed through the breaker once the
+project comes to rest.
 
 ---
 
@@ -190,7 +216,7 @@ somewhere that exists inside the sandbox).
 **Reads/writes.** Reads its own `TaskPath` (task yaml) and the project file.
 Does the actual code work in the workspace. Writes only `status:
 success|failed` (+ `failure_reason` on failure) back to its task file — it
-must NOT commit, push, or touch `.project.yaml`; that's the commit agent's and
+must NOT commit, push, or touch `project.yaml`; that's the commit agent's and
 daemon's job.
 
 **Prompt structure (`task.tmpl`).** Short and direct — this is the exact text
@@ -283,18 +309,18 @@ restart finding the file already blocked).
 
 | | ACP wolf (default with `--acp-kit`) | host wolf (`--wolf-host`, or no `--acp-kit`) |
 |---|---|---|
-| process | `acp-wrapper --persistent` host process → sandboxed `claude-acp-client` | tmux window running `claude --dangerously-skip-permissions` |
+| process | `acp-wrapper --persistent` host process → sandboxed `claude-acp-client` | new terminal tab (titled after the project) running `claude --dangerously-skip-permissions` |
 | where it runs | sbx sandbox `<work-stream>-wolf` (`runner.ACPSandboxNameFor`) | directly on the host, no sandbox (`SandboxNameFor` returns `""`) |
-| who can talk to it | anything that can dial `<SessionsRoot>/<id>/agent.sock`: the TUI tab, the daemon, a messaging channel | a human attached to tmux |
+| who can talk to it | anything that can dial `<SessionsRoot>/<id>/agent.sock`: the TUI tab, the daemon, a messaging channel | a human at that terminal tab |
 | survives an `orch` restart | yes (`detachable`; re-adopted under the wolf key by `reconcileSessions`) | no (closed on shutdown, like before) |
-| ends | see "Completion" below | when its tmux window closes |
+| ends | see "Completion" below | when claude in its tab exits (or the tab is closed) |
 
 **Workspace/session.** `WorkingDir` = control dir (like project/planning), so
 no wsp provisioning of its own; `Repos`/`Branch` are still forwarded in case
 the wolf needs to look at source. It is tracked under a session key distinct
 from the project's main slot (`wolfSessionKey = projectPath + "#wolf"`), so it
-can run *in tandem* with a task/commit/planning session rather than waiting
-for that slot to free up. `Plan.Persistent` is set for every wolf launch; it
+can run *in tandem* with a task/commit session (or a planner, which has a slot
+of its own too) rather than waiting for that slot to free up. `Plan.Persistent` is set for every wolf launch; it
 only has an effect on the ACP path.
 
 **Host access: what the ACP wolf gets and loses.** The decision (goal 3): the
@@ -303,7 +329,7 @@ daemon, the TUI and a messaging channel has to be a long-lived ACP session, and
 ACP sessions are sandboxed (the wrapper owns sandbox creation). To keep it
 useful it is given:
 
-- **Mounts:** the control dir (primary/cwd — it holds `.project.yaml`,
+- **Mounts:** the control dir (primary/cwd — it holds `project.yaml`,
   `tasks/`, `blocked-session.yaml` and `.orch/`, i.e. everything the wolf
   writes) and, when the project has `Repos`+`Branch`, the project's wsp
   worktree as a second mount (provisioned idempotently by
@@ -331,9 +357,9 @@ tasks' `failure_reason`/`blocked_reason` (`FailedTasks`, paths gathered by
 `failedOrBlockedTaskPaths`), and any prior durable diagnosis at
 `project.BlockedSessionPath`. Writes/updates that same blocked-session record
 (`blocked_reason`, `summary`, `attempted`) every time it investigates, and
-ultimately updates `.project.yaml`/task files to move the project out of
+ultimately updates `project.yaml`/task files to move the project out of
 `blocked`. Scoped strictly to this one project's files — never another
-project's `.project.yaml`.
+project's `project.yaml`.
 
 **Prompt structure (`wolf.tmpl`).** Opens with scope rules (only this
 project's files; "you run on the host" vs "you run inside a sandbox …"), the
@@ -341,7 +367,7 @@ blocked reason and failed-task list, and any inherited prior summary/attempted
 list so a second wolf run doesn't re-derive diagnosis from scratch. Sandboxed
 wolves then get an ENVIRONMENT paragraph (what they can't do). Then:
 "investigate…". When it needs the user, the *host* wolf is told to send a macOS
-notification and wait for them to attach to tmux; the *sandboxed* wolf is told
+notification and wait for them to switch to its terminal tab; the *sandboxed* wolf is told
 to ask in the conversation and stop — the message appears in the TUI's wolf tab
 and is relayed to whatever messaging channel is configured (the template stays
 channel-agnostic), and the answer arrives as its next prompt — and to make the
@@ -356,12 +382,12 @@ intact). Ends with the fixed status enums for both project and task.
 **Completion signal / lifecycle.** No enforced schema — the wolf just edits
 whatever files resolve the block. Whatever ends the session, the daemon's
 `launchWolfAgent` `onEnd` callback calls `revisitProject`, which re-reads
-`.project.yaml` from scratch and re-routes based on whatever status the wolf
+`project.yaml` from scratch and re-routes based on whatever status the wolf
 left behind (bypassing the daemon-write filter, since wolf writes as
 `updated_by: agent`).
 
 How an **ACP wolf ends** (the wrapper owns all of this, so it works headless and
-across daemon restarts; the host wolf just lives until its window closes). The
+across daemon restarts; the host wolf just lives until its terminal tab closes). The
 first turn finishing is *not* an end — the wolf typically finishes its first
 turn by asking the user something. It ends on the first of:
 
@@ -392,19 +418,21 @@ A second block arriving while a wolf is still inside its unblock grace dedups
 against the live session (`launchWolfAgent` → `session_skip_duplicate`): the
 old conversation continues (its wrapper sees `blocked` again and does not end),
 so the user keeps talking to the same wolf — which has the *old* block's context
-in its prompt; it re-reads `.project.yaml`/the blocked-session record if asked.
+in its prompt; it re-reads `project.yaml`/the blocked-session record if asked.
 
 **TUI.** An ACP wolf appears in the sessions pane with its sandbox name, and
 **enter/click on that row opens the ACP tab view on the wolf's tab**
-(`attachSelected`; there is no tmux window to `tmux attach` to). The wolf's tab
+(`attachSelected`; there is no terminal tab to switch to). The wolf's tab
 is marked *interactive* (`session.json: persistent` → `acpTabEvent.interactive`):
 the watcher (`internal/tui/acpwatch.go`) drives the opening prompt once and then
 **stays connected**, relaying messages typed in the tab (`acpInputs`,
 `servePersistentInput`) as successive turns. In the tab: **enter** starts
 composing, **enter** sends, **esc** stops composing (keeps the draft), **ctrl+u**
-clears, ⌥j/⌥k switch tabs; the usual single-letter commands (q, z, h, l) are
-disabled only while composing. The host wolf (`--wolf-host`) is unchanged: enter
-on its row `tmux attach`es. On any ACP tab whose session is dead (failed to
+clears, ⌥j/⌥k switch tabs, ctrl+f/ctrl+b scroll; the usual single-letter
+commands (q, z, h, l, and the j/k/G scroll keys) are disabled only while
+composing. The host wolf (`--wolf-host`) runs in its own
+terminal tab: enter on its row switches to that tab (where the terminal
+supports it — see docs/terminal-tabs.md). On any ACP tab whose session is dead (failed to
 start, errored, disconnected), **x** dismisses the tab and removes its session
 directory; live and still-starting tabs refuse it.
 
@@ -531,7 +559,7 @@ on) a `.gitignore` proposal for anything that "doesn't belong" (build
 artifacts, editor scratch, caches); (3) one commit if
 needed; (4) push decision tree keyed strictly off the three shell variables
 above, with an explicit "no workarounds" list; (5) report outcome by editing
-`.project.yaml` (`archive: true` on full success, left unset with a clear
+`project.yaml` (`archive: true` on full success, left unset with a clear
 explanation of what's outstanding otherwise). Explicitly forbids any other
 pre-commit work (no tests/lint/formatting/refactors).
 
@@ -576,15 +604,16 @@ wsp workspace of its own), plus `Repos`/`Branch` forwarded, and
 `api.githubcopilot.com`) so the sandbox can reach GitHub's API through the
 attached `github` MCP. `SandboxNameFor` gives it its own sandbox,
 `"<work-stream>-review"`. Runs on the ACP path (autonomous, `claude --print`),
-sharing the project's *main* session slot (not a side key like wolf/archive),
-so it cannot run concurrently with a task/commit/planning agent for the same
-project.
+sharing the project's *main* session slot (not a side key like
+wolf/archive/planning), so it cannot run concurrently with a task/commit agent
+for the same project; it also stands aside while a planner is in flight
+(`planningInFlight`), since both write the control dir.
 
-**Reads/writes.** Reads `.project.yaml` (`description`, `repos`, `branch`,
+**Reads/writes.** Reads `project.yaml` (`description`, `repos`, `branch`,
 `review`, prior `pull_requests:`) and existing task files' `status`/`source`.
 Uses the `github` MCP exclusively for PR access — explicitly forbidden from
 running `gh`, `git push`, or cloning anything. Writes only within the control
-dir: new task files (fix tasks and push tasks) and `.project.yaml` (the
+dir: new task files (fix tasks and push tasks) and `project.yaml` (the
 `pull_requests:` list and `status:`). Never touches source, never commits.
 
 **Prompt structure (`review.tmpl`).** A five-step reconcile procedure per
@@ -636,7 +665,7 @@ WhatsApp or Signal — about the orch state: which projects are open, which task
 running/blocked/failed and why, what the wolf is doing, what happened recently
 in the audit log. On request (and after confirming) it also **changes** that
 state, by editing the files under the orch roots exactly as a human would —
-every TUI `:` command is a `.project.yaml` edit, so it can stop/start, summon
+every TUI `:` command is a `project.yaml` edit, so it can stop/start, summon
 the wolf, kick a review, request a cleanup, retry a task, unblock a project,
 queue intake work or start a new project. It is autonomous-ACP (nobody drives its prompt by hand;
 `Interactive()` is false) but **persistent**, using the same
@@ -648,8 +677,8 @@ the stranded-session reaper exempts it (`strandedVerdict` in `reaper.go`).
 
 **Launch/identity.** `runner.Plan{Kind: WorkingmanAgent, WorkingDir: <scratch>,
 SessionName: "workingman-agent", Persistent: true, WritableMounts, ReadOnlyMounts, Observe}`.
-Requires the ACP path (`Runner.Start` refuses otherwise — the tmux path has no
-read-only mounts, and silently launching it with write access would defeat the
+Requires the ACP path (`Runner.Start` refuses otherwise — the terminal-tab path
+has no read-only mounts, and silently launching it with write access would defeat the
 point). The ACP session id and the sbx sandbox are both the fixed name
 `workingman-agent` (`runner.WorkingmanAgentSession` / `WorkingmanAgentSandbox`,
 `ACPSandboxNameFor`), independent of any project path. The daemon tracks it
@@ -661,7 +690,7 @@ snapshot gives it no work stream / project path. `session.json` carries
 **Mounts (read-only enforced by the mount).** The scratch dir is the agent's
 cwd and holds the usual `.orch/` handoff files. Every orch `--root` is a
 second, **writable** workspace (`Plan.WritableMounts`): the agent edits
-`.project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md` there.
+`project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md` there.
 The guard on *what* it edits is the prompt (see below), not the mount. All other
 observed paths are a separate `--workspace <path>:ro` (sbx's read-only
 bind-mount syntax, understood by `acp-wrapper --workspace`):
@@ -693,7 +722,7 @@ writable root, so the prompt, not the mount, keeps the agent off the logs.
 
 **Prompt structure (`workingman.tmpl`).** It states the agent observes and, on
 request, edits the orch roots; lays out the orch directory (per work stream:
-`project.md`, `.project.yaml`, `tasks/`, `intake/*.md` / `*.processed`,
+`project.md`, `project.yaml`, `tasks/`, `intake/*.md` / `*.processed`,
 `blocked-session.yaml`, `last-planned.yaml`, `.orch/`) and every log at its real
 path — the audit log and its siblings `daemon.log`, `acp-wrapper.log`,
 `channels.log`, `whatsapp-bridge.log`, the state dir's

@@ -14,7 +14,7 @@ func TestFileConversationIndexRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := ConversationTarget{Kind: ConversationKindWolf, WorkStream: "ws", ProjectPath: "/r/ws/.project.yaml", SessionKey: "/r/ws/.project.yaml#wolf", SessionID: "wolf-1"}
+	want := ConversationTarget{Kind: ConversationKindWolf, WorkStream: "ws", ProjectPath: "/r/ws/project.yaml", SessionKey: "/r/ws/project.yaml#wolf", SessionID: "wolf-1"}
 	if err := x.Register("whatsapp", "wamid.1", want); err != nil {
 		t.Fatal(err)
 	}

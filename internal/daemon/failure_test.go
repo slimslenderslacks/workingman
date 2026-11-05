@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,34 +19,23 @@ import (
 )
 
 // setupRunnable wires a daemon with the standard test stack: stub workspace
-// manager, tmux launcher on an isolated socket, recording notifier, and a
+// manager, host process launcher, recording notifier, and a
 // command that just sleeps for 1s. Returns the audit buffer, the project
 // root the test should drop files into, the notifier recorder, and a
 // teardown the test can rely on via t.Cleanup.
 func setupRunnable(t *testing.T) (buf *safeBuf, root string, rec *notify.Recorder) {
 	t.Helper()
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root = t.TempDir()
 	stubRoot := t.TempDir()
-	socket := fmt.Sprintf("orch-fail-%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	})
 
 	buf = &safeBuf{}
 	a := audit.New(buf)
 	rec = &notify.Recorder{}
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(stubRoot),
-		Launcher: &agent.TmuxLauncher{
-			Socket:       socket,
-			PollInterval: 50 * time.Millisecond,
-		},
-		Audit:   a,
-		Command: func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
+		Launcher:   &agent.ProcessLauncher{},
+		Audit:      a,
+		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
 	d, err := New([]string{root}, a, WithRunner(r), WithNotifier(rec))
 	if err != nil {
@@ -81,7 +69,7 @@ func TestTaskFailureRetries(t *testing.T) {
 		Attempts: 0,
 	})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "test",
 		Branch:      "feat/retry",
@@ -145,7 +133,7 @@ func TestTaskFailureExhaustsRetriesAndBlocks(t *testing.T) {
 		Attempts: 3,
 	})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "test",
 		Branch:      "feat/doomed",
@@ -218,7 +206,7 @@ func TestTaskFailureExhaustsRetriesAndBlocks(t *testing.T) {
 }
 
 // erroringLauncher returns a Launch error for every call. Used to simulate
-// workspace-creation or tmux failures so the daemon's "session_start_error
+// workspace-creation or launch failures so the daemon's "session_start_error
 // blocks the project" path is exercised without needing a real broken
 // environment.
 type erroringLauncher struct{ msg string }
@@ -258,7 +246,7 @@ func TestTaskAgentStartFailureBlocksProject(t *testing.T) {
 	taskPath := filepath.Join(tasksDir, "the-task.yaml")
 	mustSaveTask(t, taskPath, &task.Task{Name: "the-task", Status: task.StatusReady})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "test",
 		Branch:      "feat/no-repos",
@@ -308,7 +296,7 @@ func TestTaskBlockedStatusBlocksProject(t *testing.T) {
 		Status: task.StatusReady,
 	})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "test",
 		Branch:      "feat/self-block",

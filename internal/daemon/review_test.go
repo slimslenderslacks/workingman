@@ -20,7 +20,7 @@ import (
 // newReviewDaemon builds a scheduler-backed, runner-less daemon. Like the cron
 // stop-condition tests, the PR-loop routing decisions live entirely in the
 // dispatch/scheduler path — nothing here launches an agent (launchReviewAgent
-// no-ops without a runner) — so these tests need neither tmux nor Run().
+// no-ops without a runner) — so these tests need neither a launcher nor Run().
 func newReviewDaemon(t *testing.T, root string) (*Daemon, *safeBuf, *scheduler.Scheduler) {
 	t.Helper()
 	buf := &safeBuf{}
@@ -73,7 +73,7 @@ func reviewDispatchDaemon(t *testing.T) (*Daemon, *recordingLauncher, string) {
 func TestReviewCommandDispatchesReviewAgentImmediately(t *testing.T) {
 	t.Run("starting the loop fresh", func(t *testing.T) {
 		d, lch, root := reviewDispatchDaemon(t)
-		projectPath := filepath.Join(root, ".project.yaml")
+		projectPath := filepath.Join(root, "project.yaml")
 		p := &project.Project{
 			Description: "x", Branch: "feat/x", Status: project.StatusIdle,
 			Repos:  []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -92,7 +92,7 @@ func TestReviewCommandDispatchesReviewAgentImmediately(t *testing.T) {
 
 	t.Run("kicking an already-watching project", func(t *testing.T) {
 		d, lch, root := reviewDispatchDaemon(t)
-		projectPath := filepath.Join(root, ".project.yaml")
+		projectPath := filepath.Join(root, "project.yaml")
 		p := &project.Project{
 			Description: "x", Branch: "feat/x", Status: project.StatusIdle,
 			Repos:        []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -177,7 +177,7 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			d, _, sched := newReviewDaemon(t, root)
-			projectPath := filepath.Join(root, ".project.yaml")
+			projectPath := filepath.Join(root, "project.yaml")
 
 			d.transitionProjectComplete(projectPath, &tc.p)
 
@@ -208,7 +208,7 @@ func TestTransitionProjectCompleteRoutes(t *testing.T) {
 func TestReviewPollSelfHeals(t *testing.T) {
 	root := t.TempDir()
 	d, _, sched := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	// Arm the poll, then move the project to plain idle (e.g. the reconciler
 	// concluded the PR was merged, leaving nothing to watch).
@@ -236,7 +236,7 @@ func TestReviewPollSelfHeals(t *testing.T) {
 func TestAfterReviewSessionCleanResets(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b", Status: project.StatusIdle, Review: true,
 		Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -267,7 +267,7 @@ func TestAfterReviewSessionCleanResets(t *testing.T) {
 func TestReviewCrashDoesNotReadAsCleanAndBlocksAfterMax(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b", Status: project.StatusIdle, Review: true,
 		Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -303,7 +303,7 @@ func TestReviewCrashDoesNotReadAsCleanAndBlocksAfterMax(t *testing.T) {
 func TestReviewPollBacksOffWhenQuietAndResetsOnChange(t *testing.T) {
 	root := t.TempDir()
 	d, buf, sched := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b", Status: project.StatusIdle,
 		Repos:        []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -361,7 +361,7 @@ func TestReviewPollBacksOffWhenQuietAndResetsOnChange(t *testing.T) {
 func TestReviewNowKickForcesImmediateReconcile(t *testing.T) {
 	root := t.TempDir()
 	d, buf, sched := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b", Status: project.StatusIdle, Review: true,
 		Repos:     []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -405,7 +405,7 @@ func TestReviewNowKickForcesImmediateReconcile(t *testing.T) {
 func TestReviewPRFingerprintNoPRs(t *testing.T) {
 	root := t.TempDir()
 	d, _, _ := newReviewDaemon(t, root)
-	path := filepath.Join(root, ".project.yaml")
+	path := filepath.Join(root, "project.yaml")
 
 	if _, ok := d.reviewPRFingerprint(path, &project.Project{}); ok {
 		t.Errorf("fingerprint ok=true with no PRs, want false")
@@ -421,7 +421,7 @@ func TestReviewPRFingerprintNoPRs(t *testing.T) {
 func TestReviewFixCyclesBlockAfterMax(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	// A ready task keeps dispatchNextTask (reached via revisitProject on the
 	// working branch) a no-op under the runner-less daemon while leaving the
@@ -470,7 +470,7 @@ func TestMergedTransition(t *testing.T) {
 		root := t.TempDir()
 		d, _, _ := newReviewDaemon(t, root)
 		d.reposWithCommitsFn = func(string, *project.Project) ([]string, bool) { return extra, probeOK }
-		path := filepath.Join(root, ".project.yaml")
+		path := filepath.Join(root, "project.yaml")
 		if err := project.SaveAs(path, &project.Project{
 			Description: "x", Branch: "b", Status: status, Review: true,
 			Repos:        []project.Repo{{Org: "docker", Name: "gateway"}},

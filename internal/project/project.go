@@ -1,7 +1,9 @@
 package project
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,13 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// FileName is the per-project file the daemon watches: <root>/<work-stream>/project.yaml.
+const FileName = "project.yaml"
+
+// LegacyFileName is the hidden name the project file used to have. The daemon
+// renames any it finds to FileName at startup (see MigrateLegacy).
+const LegacyFileName = ".project.yaml"
 
 type Writer string
 
@@ -187,7 +196,7 @@ type Project struct {
 	// have never had one requested.
 	Replan bool `yaml:"replan,omitempty"`
 	// CreatedAt is stamped by the daemon the first time it observes a
-	// populated .project.yaml (i.e. just after the project agent fills in
+	// populated project.yaml (i.e. just after the project agent fills in
 	// description/branch/status). Used by the TUI to order work streams
 	// most-recent-first. Pointer + omitempty so the field stays out of
 	// the YAML on disk until the daemon writes it.
@@ -466,4 +475,35 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmpName)
 	}
 	return err
+}
+
+// MigrateLegacy renames every LegacyFileName under root to FileName in the
+// same directory, returning the new paths. A directory that already has a
+// FileName is left alone (the legacy file stays put) so nothing is clobbered.
+func MigrateLegacy(root string) ([]string, error) {
+	var migrated []string
+	err := filepath.WalkDir(root, func(p string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || entry.Name() != LegacyFileName {
+			return nil
+		}
+		dst := filepath.Join(filepath.Dir(p), FileName)
+		if _, err := os.Stat(dst); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err := os.Rename(p, dst); err != nil {
+			return err
+		}
+		migrated = append(migrated, dst)
+		return nil
+	})
+	return migrated, err
+}
+
+// CanonicalPath maps a path recorded under LegacyFileName (e.g. in a session
+// record written before the rename) to its FileName equivalent.
+func CanonicalPath(path string) string {
+	if filepath.Base(path) == LegacyFileName {
+		return filepath.Join(filepath.Dir(path), FileName)
+	}
+	return path
 }

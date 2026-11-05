@@ -1,4 +1,4 @@
-# .project.yaml — populated by the project agent, mutated by the daemon and
+# project.yaml — populated by the project agent, mutated by the daemon and
 # subsequent agents. The daemon ignores fsnotify events where updated_by=daemon
 # so it does not loop on its own writes.
 

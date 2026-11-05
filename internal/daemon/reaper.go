@@ -196,13 +196,18 @@ func (d *Daemon) stageComplete(key string, e sessionEntry) bool {
 		// The task agent's turn is over once it records a terminal outcome.
 		return t.Status == task.StatusSuccess || t.Status == task.StatusFailed
 	case agent.PlanningAgent:
-		p, err := project.Load(key)
+		// Its key carries the "#planning" marker that keeps it out of the
+		// project's main slot; strip it to reach the project file.
+		projectPath := strings.TrimSuffix(key, planningKeyMarker)
+		p, err := project.Load(projectPath)
 		if err != nil {
 			return false
 		}
 		// Planning is done once it moves the project off ready (to working, or
-		// blocked/done if it gave up).
-		return p.Status != project.StatusReady
+		// blocked/done if it gave up) — and, for a planner run alongside tasks
+		// on a project that was already working, once it has processed the
+		// intake it was handed (the status alone says nothing there).
+		return p.Status != project.StatusReady && !d.plannerOwesIntake(projectPath)
 	case agent.ProjectAgent:
 		p, err := project.Load(key)
 		if err != nil {

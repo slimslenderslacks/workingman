@@ -14,7 +14,7 @@ import (
 const summonReason = "summoned manually by the user via the TUI (:wolf); no automated failure — ask the user what they need help with"
 
 // summonWolf flips the project identified by projectPath (the path of its
-// .project.yaml) to status:blocked so the daemon launches the wolf agent in
+// project.yaml) to status:blocked so the daemon launches the wolf agent in
 // that project's context. It returns the project's display name for the
 // confirmation message.
 //

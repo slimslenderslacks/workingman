@@ -430,7 +430,7 @@ default is fail-closed.
   are mounted `:ro` (the mount enforces it — the prompt does not; an audit-log
   directory inside a root is covered by the root's writable mount instead). It
   has no GitHub or other secrets and no extra network policy. It edits
-  `.project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md`, but
+  `project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md`, but
   only on request and after confirming the change with the human — the prompt is
   the guard there. Anyone who can message it can therefore change project
   state (but nothing on the host: no push, no wsp, no `:archive`), so keep the
@@ -498,7 +498,7 @@ Free tunnels change their URL on restart; re-register the callback when it does.
 | Wolf started but no WhatsApp message | outside the 24-hour window (`channel_send_error`, 131047): message the number once, then retry; no `wolf` (or `*`) route; rate-limited (`wolf_start_suppressed`); the start message is sent only once the session really started |
 | Replying to the wolf message says the wolf ended / is from an earlier session | the wolf session ended or was relaunched; reply to the newer message, or `/wolf` |
 | "The workingman agent is starting up, try again in a minute." | agent not running yet or being relaunched (it restarts with 5s→5m backoff): check `workingman_agent_*` audit events; it needs `--acp-kit` and `--workingman-agent` (auto-on only with an inbound channel) |
-| `/wolf` says the wolf cannot be attached | the wolf runs on the host under tmux (`--wolf-host`); only ACP wolves can be tuned into |
+| `/wolf` says the wolf cannot be attached | the wolf runs on the host in a terminal tab (`--wolf-host`); only ACP wolves can be tuned into |
 | Wolf never starts working under `--headless` | nobody sends a wolf its opening prompt headless; run the TUI |
 | Reply says "I cancelled it" | the turn exceeded `router.turn_timeout` |
 | Signal: `orch signal status` / `test` fails, or no messages arrive | signal-cli daemon not running, `http_url` mismatch, account not registered, sender not on `allow_from`: see [signal.md troubleshooting](signal.md#troubleshooting) |
@@ -516,7 +516,7 @@ bridge backend. `orch whatsapp status` is the quickest health check.
 The router attaches to sessions that already exist (`acpchat.Attach` adopts the
 ACP session id recorded in the session's `stream.log`); the one exception is the
 workingman agent, whose session the router creates (and primes) when nobody else
-has. A wolf running on the host under tmux (`--wolf-host`) has no ACP session, so
+has. A wolf running on the host in a terminal tab (`--wolf-host`) has no ACP session, so
 `/wolf` reports that it cannot be attached. The wire behaviour of the real
 `claude-acp-client` when it receives a prompt for a session this connection did
 not create is the one thing that needs a live smoke test (see the `acpchat`

@@ -1,5 +1,10 @@
 # TUI Survey: Orch Daemon
 
+> **Historical.** This survey predates the TUI. Its tmux material (the
+> `TmuxLauncher`, `tmux attach` on click) no longer applies: orch has no tmux
+> dependency, and sessions that need a TTY open in a new terminal tab — see
+> [terminal-tabs.md](terminal-tabs.md).
+
 Survey of the existing orch daemon to identify where a TUI subsystem can be
 wired in. The planned TUI has a left-hand column listing active agent sessions
 (clicking launches an external tmux session attached to that agent) and a main
@@ -27,7 +32,7 @@ Binary: `orch` (built via `go build -o orch ./cmd/orch`)
 
 - Registry: `Daemon.sessions map[string]agent.Session` guarded by
   `Daemon.sessionsMu` (`internal/daemon/daemon.go:33-34`). Key is the absolute
-  path of the `.project.yaml` driving the session.
+  path of the `project.yaml` driving the session.
 - Interface: `agent.Session` (`internal/agent/agent.go:51-55`):
   - `Name() string`
   - `Wait(ctx context.Context) error`
@@ -64,7 +69,7 @@ Binary: `orch` (built via `go build -o orch ./cmd/orch`)
   - `StatusDone` — terminal.
 - There is **no in-memory project registry**. Projects are discovered on disk:
   the daemon watches each `--root` directory recursively with fsnotify
-  (`internal/daemon/watcher.go:13`) and any `.project.yaml` found is loaded and
+  (`internal/daemon/watcher.go:13`) and any `project.yaml` found is loaded and
   routed through dispatch.
 - Dispatch routing (`internal/daemon/dispatch.go:48-84`):
   - Empty project → `ProjectAgent`.
@@ -89,7 +94,7 @@ package: `internal/tui/`.
 
 **Projects gallery (main panel).** Re-walk the watched roots (same logic as
 `Daemon.addTree()` in `internal/daemon/watcher.go:13`) to discover
-`.project.yaml` files, then `project.Load()` each one. Display `Description`,
+`project.yaml` files, then `project.Load()` each one. Display `Description`,
 `Branch`, `Status`, repo list, and (optionally) task counts from
 `tasks/*.yaml`.
 
@@ -130,7 +135,7 @@ In-process is the more direct fit for the described feature.
   ```
 
 - Flags:
-  - `--root` (required, repeatable) — directories watched for `.project.yaml`.
+  - `--root` (required, repeatable) — directories watched for `project.yaml`.
   - `--audit-log` (default `logs/audit.log`).
   - `--workspace-manager` (default `wsp`): `wsp` real repos or `stub` for tests.
   - `--stub-workspace-root` (default `$TMPDIR/orch-workspaces`).
@@ -176,7 +181,7 @@ go build -o orch ./cmd/orch
 
 Both confirm the state machine `ready → working → {done | blocked}` and the
 agent roster (project / planning / task / wolf / commit). `design.md` notes
-that the daemon re-evaluates a project on every `.project.yaml` write (the
+that the daemon re-evaluates a project on every `project.yaml` write (the
 fsnotify path), task graphs live under `tasks/*.yaml`, and the per-task retry
 budget is 3 before falling through to the wolf agent. None of these documents
 mention a TUI today — this is greenfield.

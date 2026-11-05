@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"path/filepath"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
+	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
@@ -82,16 +84,28 @@ func (d *Daemon) reconcileSessions() {
 			continue
 		}
 
-		projectPath := rec.ProjectPath
+		projectPath := project.CanonicalPath(rec.ProjectPath)
 		sess := newReconciledSession(rec.ID, store, nil)
 		onEnd := func(error) { d.revisitProject(projectPath) }
-		// The wolf and the archive agent each live in a slot of their own (see
-		// launchWolfAgent / launchArchiveAgent) so they can run in tandem with
+		// The planner, the wolf and the archive agent each live in a slot of
+		// their own (see launchPlanningAgent / launchWolfAgent /
+		// launchArchiveAgent) so they can run in tandem with
 		// the project's main agent; adopting either under the bare project path
 		// would both occupy that main slot and let a second one launch alongside
 		// it.
 		key := projectPath
 		switch kind {
+		case agent.PlanningAgent:
+			// Planning has a slot of its own too (see launchPlanningAgent), and
+			// its dedup is the planning reservation, which died with the previous
+			// daemon. Re-take it — offering whatever intake is pending, since what
+			// the adopted run was actually handed is unknown — and adopt the end
+			// callback that releases it and runs the circuit breaker.
+			if !d.beginPlanning(projectPath, pendingIntakeFiles(filepath.Dir(projectPath))) {
+				continue
+			}
+			key = planningSessionKey(projectPath)
+			onEnd = func(waitErr error) { d.afterPlanningSession(projectPath, waitErr) }
 		case agent.WolfAgent:
 			key = wolfSessionKey(projectPath)
 		case agent.ArchiveAgent:
@@ -113,6 +127,9 @@ func (d *Daemon) reconcileSessions() {
 			// Already tracked, so nothing will run afterArchiveSession for this
 			// reservation — release the one we just took.
 			d.endCleanup(projectPath)
+		} else if kind == agent.PlanningAgent {
+			// Same for the planning reservation.
+			d.endPlanning(projectPath)
 		}
 	}
 }

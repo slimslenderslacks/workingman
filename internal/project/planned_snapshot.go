@@ -14,9 +14,9 @@ import (
 // PlannedSnapshot is the daemon's durable record of the "intent" fields a
 // project carried the last time a planning agent successfully ran against
 // it, stored at the path returned by PlannedSnapshotPath (a
-// `last-planned.yaml` file next to `.project.yaml` and `tasks/`).
+// `last-planned.yaml` file next to `project.yaml` and `tasks/`).
 //
-// It exists so the daemon can tell what a human changed in .project.yaml
+// It exists so the daemon can tell what a human changed in project.yaml
 // between planning cycles: repos.Repos/NewRepos additions get cloned into
 // the already-provisioned wsp workspace via workspace.Manager.AddRepos
 // (Create is a no-op once a workspace exists — see AddedRepos), and any
@@ -37,7 +37,7 @@ type PlannedSnapshot struct {
 }
 
 // PlannedSnapshotPath returns the path to the last-planned record that
-// belongs next to the .project.yaml at projectPath.
+// belongs next to the project.yaml at projectPath.
 func PlannedSnapshotPath(projectPath string) string {
 	return filepath.Join(filepath.Dir(projectPath), "last-planned.yaml")
 }

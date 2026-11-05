@@ -45,7 +45,7 @@ func TestRenderProjectDetailBadgesShowsPRURLs(t *testing.T) {
 // TestRenderProjectDetailHeaderListsRepos pins the header's repos line: every
 // entry in ProjectView.Repos, formatted "org/name" and comma-joined, so the
 // summary shows what a multi-repo project actually spans without opening
-// .project.yaml. A project with no repos recorded yet (still being planned)
+// project.yaml. A project with no repos recorded yet (still being planned)
 // gets no such line at all, rather than an empty "repos: " one.
 func TestRenderProjectDetailHeaderListsRepos(t *testing.T) {
 	v := ProjectView{

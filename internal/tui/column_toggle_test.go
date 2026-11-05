@@ -5,11 +5,10 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 func TestTLTogglesLeftColumn(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	if !m.leftVisible {
 		t.Fatal("leftVisible should default to true")
 	}
@@ -29,7 +28,7 @@ func TestTLTogglesLeftColumn(t *testing.T) {
 }
 
 func TestTRTogglesRightColumn(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	if m.rightVisible {
 		t.Fatal("rightVisible should default to false — the detail pane is opt-in")
 	}
@@ -52,7 +51,7 @@ func TestTRTogglesRightColumn(t *testing.T) {
 // "tl"/"tr" chord: a lone "t" must not immediately toggle anything, or "tl"/
 // "tr" could never be distinguished from "t" followed by an unrelated key.
 func TestTChordDoesNotResolveUntilCompletedOrTimedOut(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m = pressKey(m, "t")
 	if m.pendingKey != "t" {
 		t.Fatalf("pendingKey = %q after t, want %q", m.pendingKey, "t")
@@ -67,7 +66,7 @@ func TestTChordDoesNotResolveUntilCompletedOrTimedOut(t *testing.T) {
 // instead of a real sleep) just abandons the chord — there's no standalone
 // "t" action left to fall back to.
 func TestTChordTimeoutClearsPendingKey(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m = pressKey(m, "t")
 	m = resolveChord(m)
 	if m.pendingKey != "" {
@@ -82,7 +81,7 @@ func TestTChordTimeoutClearsPendingKey(t *testing.T) {
 // other than "l"/"r": the pending "t" is abandoned and the new key is then
 // handled normally, rather than being swallowed by the chord.
 func TestTChordFallsThroughToFreshKeyWhenNotLR(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	step, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a"}, {ID: "b"}}})
 	m = step.(model)
 
@@ -102,7 +101,7 @@ func TestTChordFallsThroughToFreshKeyWhenNotLR(t *testing.T) {
 // toggle before chordTimeoutDelay elapsed): the stale message must not
 // re-trigger anything.
 func TestStaleChordTimeoutIsIgnored(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m = pressKey(m, "t")
 	staleSeq := m.pendingSeq
 	m = pressKey(m, "l") // resolves the chord as toggle-left, clearing pendingKey
@@ -116,7 +115,7 @@ func TestStaleChordTimeoutIsIgnored(t *testing.T) {
 }
 
 func TestFooterAdvertisesColumnToggle(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	view := m.View()
@@ -136,7 +135,7 @@ func TestFooterAdvertisesColumnToggle(t *testing.T) {
 // half of whatever the terminal's current width is — and stays that way
 // live across a resize.
 func TestRightColumnWidthIsHalfTerminalWidth(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m.rightVisible = true
 	m.width, m.height = 200, 40
 
@@ -157,7 +156,7 @@ func TestRightColumnWidthIsHalfTerminalWidth(t *testing.T) {
 // sized by splitCenterColumn, while the right column ("tr") holds the
 // project detail dashboard instead.
 func TestTaskPaneMovedToCenterColumn(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m.rightVisible = true
 	m.width, m.height = 200, 40
 	m.projects = []ProjectView{{
@@ -183,7 +182,7 @@ func TestTaskPaneMovedToCenterColumn(t *testing.T) {
 }
 
 func TestComputeLayoutDropsColumnsWhenToggledOff(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m.rightVisible = true
 	m.width, m.height = 200, 40
 
@@ -211,7 +210,7 @@ func TestComputeLayoutDropsColumnsWhenToggledOff(t *testing.T) {
 // terminal the column is dropped for this render regardless of the toggle
 // state, and reappears once the terminal widens again.
 func TestComputeLayoutHidesColumnWhenTerminalTooNarrow(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m.width, m.height = 50, 40 // too narrow for leftColumnWidth + minCenterWidth
 
 	l := m.computeLayout()
@@ -226,24 +225,33 @@ func TestComputeLayoutHidesColumnWhenTerminalTooNarrow(t *testing.T) {
 	}
 }
 
-// TestMouseClickOnAuditStripFocusesIt covers the click-to-focus affordance
-// every center-column pane has (see handleMouse) applied to Audit — alt-j/
-// alt-k also reaches Audit as part of the center column's focus cycle (see
-// cycleCenterFocus and TestAltJKCyclesCenterColumnPanesIncludingAudit in
-// tasks_focus_test.go).
-func TestMouseClickOnAuditStripFocusesIt(t *testing.T) {
-	m := newModel(nil, nil, make(<-chan []string), &fakeAttacher{})
+// TestCenterColumnStackFillsBody covers the center column's vertical
+// budget now that the audit pane is gone: Projects and Tasks between them
+// claim the whole body height (projectsH + tasksH == bodyH), so the rows the
+// audit strip used to reserve go to Tasks rather than being left blank.
+func TestCenterColumnStackFillsBody(t *testing.T) {
+	m := newModel(nil, nil, &fakeAttacher{})
+	m.width, m.height = 200, 40
+	l := m.computeLayout()
+	if l.tasksH <= 0 {
+		t.Fatalf("precondition: tasks should have room; tasksH=%d", l.tasksH)
+	}
+	if got, want := l.projectsH+l.tasksH, l.bodyH; got != want {
+		t.Errorf("projectsH+tasksH = %d, want bodyH (%d): the center stack should fill the column", got, want)
+	}
+	if got, want := l.projectsH, desiredProjectsHeight(l.centerW, 0); got != want {
+		t.Errorf("projectsH = %d, want %d (its desired height) — the reclaimed rows belong to tasks", got, want)
+	}
+}
+
+// TestMouseClickAtBottomOfCenterColumnFocusesTasks checks that the bottom
+// rows of the center column — where the audit strip used to sit — now route
+// clicks to the Tasks pane that fills them.
+func TestMouseClickAtBottomOfCenterColumnFocusesTasks(t *testing.T) {
+	m := newModel(nil, nil, &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	l := m.computeLayout()
-	if l.auditH <= 0 {
-		t.Fatalf("precondition: audit pane should have room; auditH=%d", l.auditH)
-	}
-
-	// Audit now stacks at the bottom of the center column rather than
-	// spanning a full-width row below it, so the click must land within the
-	// center column's X range and the audit band's Y range (the last
-	// l.auditH rows of the column's stack).
 	final, _ := m.Update(tea.MouseMsg{
 		X:      l.leftW + 5,
 		Y:      l.bodyH - 1,
@@ -251,83 +259,33 @@ func TestMouseClickOnAuditStripFocusesIt(t *testing.T) {
 		Button: tea.MouseButtonLeft,
 	})
 	m = final.(model)
-	if m.focus != paneAudit {
-		t.Errorf("click on audit pane should focus paneAudit, got %v", m.focus)
+	if m.focus != paneTasks {
+		t.Errorf("click on the bottom of the center column should focus paneTasks, got %v", m.focus)
 	}
 }
 
-// TestAuditStacksInCenterColumnBelowTasks covers the center-column-audit
-// requirement directly at the layout level: Audit fills out the bottom of
-// the center column's own vertical stack (projectsH + tasksH + auditH ==
-// bodyH) rather than being a fourth full-width row below the three columns,
-// and renderAudit draws it at the column's width, not the terminal's.
-func TestAuditStacksInCenterColumnBelowTasks(t *testing.T) {
-	m := newModel(nil, nil, make(<-chan []string), &fakeAttacher{})
+// TestSideColumnsFullHeight checks the side columns get the full body height
+// (window height minus only the footer).
+func TestSideColumnsFullHeight(t *testing.T) {
+	m := newModel(nil, nil, &fakeAttacher{})
+	m.rightVisible = true
 	m.width, m.height = 200, 40
 	l := m.computeLayout()
-	if l.auditH <= 0 {
-		t.Fatalf("precondition: audit should have room; auditH=%d", l.auditH)
+	if l.sessionsH != l.bodyH {
+		t.Errorf("sessionsH = %d, want it to equal bodyH (%d) — full height minus only the footer", l.sessionsH, l.bodyH)
 	}
-	if l.tasksH <= 0 {
-		t.Fatalf("precondition: tasks should have room; tasksH=%d", l.tasksH)
-	}
-	if got, want := l.projectsH+l.tasksH+l.auditH, l.bodyH; got != want {
-		t.Errorf("projectsH+tasksH+auditH = %d, want bodyH (%d): audit should fill out the center column's stack instead of sitting below it", got, want)
-	}
-
-	rendered := m.renderAudit(l.centerW, l.auditH)
-	for _, line := range strings.Split(rendered, "\n") {
-		if w := lipgloss.Width(line); w > l.centerW {
-			t.Errorf("audit line width %d exceeds centerW %d (terminal width is %d): audit should render at the column's width", w, l.centerW, m.width)
-		}
-	}
-}
-
-// TestSideColumnsFullHeightRegardlessOfAudit is the regression test for the
-// original bug: because audit's height used to be carved out of the window
-// height before the columns were sized, showing Audit shrank the left
-// (sessions) and right (detail) columns even though it never visually
-// occupied any of their space. Now that audit sizing is scoped to the
-// center column, the side columns must get the full body height (window
-// height minus only the footer) whether or not Audit is showing.
-func TestSideColumnsFullHeightRegardlessOfAudit(t *testing.T) {
-	withAudit := newModel(nil, nil, make(<-chan []string), &fakeAttacher{})
-	withAudit.rightVisible = true
-	withAudit.width, withAudit.height = 200, 40
-	lWith := withAudit.computeLayout()
-	if lWith.auditH <= 0 {
-		t.Fatalf("precondition: audit should have room; auditH=%d", lWith.auditH)
-	}
-
-	withoutAudit := newModel(nil, nil, nil, &fakeAttacher{})
-	withoutAudit.rightVisible = true
-	withoutAudit.width, withoutAudit.height = 200, 40
-	lWithout := withoutAudit.computeLayout()
-	if lWithout.auditH != 0 {
-		t.Fatalf("precondition: no audit source wired up, want auditH=0, got %d", lWithout.auditH)
-	}
-
-	if lWith.sessionsH != lWith.bodyH {
-		t.Errorf("sessionsH = %d, want it to equal bodyH (%d) — full height minus only the footer", lWith.sessionsH, lWith.bodyH)
-	}
-	if lWith.yamlH != lWith.bodyH {
-		t.Errorf("yamlH = %d, want it to equal bodyH (%d) — full height minus only the footer", lWith.yamlH, lWith.bodyH)
-	}
-	if lWith.sessionsH != lWithout.sessionsH {
-		t.Errorf("sessionsH = %d with audit showing, %d without; want equal — audit must not shrink the left column", lWith.sessionsH, lWithout.sessionsH)
-	}
-	if lWith.yamlH != lWithout.yamlH {
-		t.Errorf("yamlH = %d with audit showing, %d without; want equal — audit must not shrink the right column", lWith.yamlH, lWithout.yamlH)
+	if l.yamlH != l.bodyH {
+		t.Errorf("yamlH = %d, want it to equal bodyH (%d) — full height minus only the footer", l.yamlH, l.bodyH)
 	}
 }
 
 func TestMouseClickInHiddenLeftColumnFallsThroughToCenter(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), nil, att)
+	m := newModel(nil, make(<-chan []SessionView), att)
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	m.leftVisible = false
-	step, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a", TmuxTarget: "orch:task-alpha"}}})
+	step, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a", TabName: "task-alpha"}}})
 	m = step.(model)
 
 	// A click at the x-coordinate that would have been inside the sessions

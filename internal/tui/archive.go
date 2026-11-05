@@ -65,7 +65,7 @@ func backupRootFor(root string) string {
 
 // loadArchivable loads the project at projectPath and reports whether it may be
 // archived at all. Only a work stream the cleanup agent has already finished —
-// `archive: true` in its .project.yaml — is eligible; anything else is a
+// `archive: true` in its project.yaml — is eligible; anything else is a
 // refusal, including a project file that won't load (we can't tell whether it
 // was cleaned up, so we don't touch it). Callers turn the error into the status
 // message, so the wording is user-facing and points at the next step.
@@ -83,7 +83,7 @@ func loadArchivable(projectPath string) (*project.Project, error) {
 	return p, nil
 }
 
-// archiveProject moves the project whose .project.yaml is at projectPath out of
+// archiveProject moves the project whose project.yaml is at projectPath out of
 // the workspace root and into the sibling backup root, keeping its directory
 // name (e.g. ~/orch/weather-tui -> ~/orch.backup/weather-tui), and removes the
 // project's wsp workspace along the way. Because it's a move, the project

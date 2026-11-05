@@ -135,7 +135,7 @@ func (d *Daemon) onReviewPoll(projectPath string) {
 		d.scheduler.Unregister(reviewPollKey(projectPath))
 		return
 	}
-	if d.hasSession(projectPath) {
+	if d.hasSession(projectPath) || d.planningInFlight(projectPath) {
 		// A review (or other project-root) agent is mid-run; skip this tick
 		// without disturbing the cadence.
 		d.audit.Log("review_poll_skip_busy", "path", projectPath)
@@ -186,9 +186,13 @@ func (d *Daemon) forceReviewNow(projectPath string, p *project.Project) {
 // dispatchReviewAgent launches a review agent unless one (or any other
 // project-root agent) is already running for the project — the review agent
 // shares the bare project session slot, so it can't run concurrently with a
-// task/commit/planning agent, and a poll landing mid-run is a no-op.
+// task/commit agent, it also stands aside for a planner, and a poll landing
+// mid-run is a no-op.
 func (d *Daemon) dispatchReviewAgent(projectPath string, p *project.Project) {
-	if d.hasSession(projectPath) {
+	// A planner has a slot of its own but writes the same control dir (task
+	// files, project.yaml status) the review agent does, so the two never
+	// overlap; afterPlanningSession re-dispatches the project when it is done.
+	if d.hasSession(projectPath) || d.planningInFlight(projectPath) {
 		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.ReviewAgent.String())
 		return
 	}
@@ -198,7 +202,7 @@ func (d *Daemon) dispatchReviewAgent(projectPath string, p *project.Project) {
 // launchReviewAgent starts the review agent in the project's control directory
 // with the github MCP attached. Like the planning agent it runs autonomously
 // (ACP, `claude --print`) and needs no wsp workspace: it reads the project goal
-// from .project.yaml, reaches the PR through the MCP, and writes new task files
+// from project.yaml, reaches the PR through the MCP, and writes new task files
 // and status back into the control dir. On session end afterReviewSession
 // inspects what the reconciler decided and routes accordingly.
 func (d *Daemon) launchReviewAgent(projectPath string, p *project.Project) {
@@ -299,6 +303,13 @@ func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
 			d.storeReviewFinger(projectPath, fp)
 		}
 		d.audit.Log("review_clean", "path", projectPath)
+		// Intake (or a seed) that landed mid-review could not start a planner
+		// while this agent held the control dir (see dispatchReviewAgent), and
+		// the agent's own idle write may have clobbered its ready flip. Re-run
+		// dispatch so the idle re-arm (seed_replan) picks it up now.
+		if hasPendingIntake(projectPath) || d.hasPendingSeed(projectPath) {
+			d.revisitProject(projectPath)
+		}
 	case p.Status == project.StatusWorking:
 		n := d.bumpReviewFixCycles(projectPath)
 		if d.scheduler != nil {

@@ -123,7 +123,7 @@ func seedCleanupProject(t *testing.T, dir string, p *project.Project) string {
 		&task.Task{Name: "first", Status: task.StatusReady}); err != nil {
 		t.Fatalf("save task: %v", err)
 	}
-	projectPath := filepath.Join(dir, ".project.yaml")
+	projectPath := filepath.Join(dir, "project.yaml")
 	if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestArchiveSessionEndWithoutArchiveFlagDoesNotBlock(t *testing.T) {
 
 // TestSingleCleanupProducesOneArchiveSession is the end-to-end loop guard, run
 // against a live daemon with fsnotify wired up. Between the request landing and
-// the daemon clearing it, several .project.yaml writes fly past — the agent's
+// the daemon clearing it, several project.yaml writes fly past — the agent's
 // own `archive: true` writeback and the daemon's clear — and none of them may
 // produce a second archive session.
 func TestSingleCleanupProducesOneArchiveSession(t *testing.T) {
@@ -465,7 +465,7 @@ func TestCleanupDispatchesArchiveAgentUnderACP(t *testing.T) {
 	d.dispatchProject(projectPath, p)
 
 	if n := len(lch.launched()); n != 0 {
-		t.Errorf("tmux launcher used %d times for an ACP archive launch, want 0", n)
+		t.Errorf("tab launcher used %d times for an ACP archive launch, want 0", n)
 	}
 	specs := acp.launched()
 	if len(specs) != 1 || specs[0].Kind != agent.ArchiveAgent {

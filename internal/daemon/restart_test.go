@@ -80,7 +80,7 @@ func TestRestartDoesNotCloseDetachableSession(t *testing.T) {
 	// Daemon.detachable / Runner.UsesACP.
 	d.runner = &runner.Runner{AcpLauncher: stubLauncher{}}
 
-	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
+	key := filepath.Join(t.TempDir(), "alpha", "project.yaml")
 	s := newSelfClosingStubSession("orch-task-alpha")
 	if !d.trackSession(key, s, agent.TaskAgent, "", nil) {
 		t.Fatal("trackSession returned false")
@@ -116,7 +116,7 @@ func TestReconcileSessionsDiscoversOnDiskSession(t *testing.T) {
 	root := t.TempDir()
 	sessionsRoot := t.TempDir()
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "test",
 		Branch:      "feat/x",
@@ -166,8 +166,14 @@ func TestReconcileSessionsDiscoversOnDiskSession(t *testing.T) {
 		t.Fatalf("daemon never reconciled the on-disk session.\naudit:\n%s", snap)
 	}
 
-	if !d.hasSession(projectPath) {
-		t.Fatal("reconciled session not tracked under the project path")
+	if !d.hasSession(planningSessionKey(projectPath)) {
+		t.Fatal("reconciled planning session not tracked under the planning key")
+	}
+	if d.hasSession(projectPath) {
+		t.Error("reconciled planning session occupies the project's main slot")
+	}
+	if !d.planningInFlight(projectPath) {
+		t.Error("reconcile must re-take the planning reservation, or a second planner could launch beside the adopted one")
 	}
 	got := d.ListSessions()
 	if len(got) != 1 || got[0].AgentName != "planning" {
@@ -176,7 +182,7 @@ func TestReconcileSessionsDiscoversOnDiskSession(t *testing.T) {
 
 	// startupScan runs right after reconcileSessions and would otherwise
 	// dispatch a planning agent for this status:ready project — it must see
-	// hasSession(projectPath) == true and skip instead of launching a
+	// the planning slot taken and skip instead of launching a
 	// duplicate (which would show up as an acp/session_started audit entry).
 	if ok, snap := waitFor(t, buf, "session_skip_duplicate"); !ok {
 		t.Fatalf("startupScan did not dedup against the reconciled session.\naudit:\n%s", snap)
@@ -195,7 +201,7 @@ func TestReconcileSessionsAdoptsWolfUnderWolfKey(t *testing.T) {
 	root := t.TempDir()
 	sessionsRoot := t.TempDir()
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{Description: "test", Branch: "feat/x", Status: project.StatusIdle}
 	if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
@@ -257,7 +263,7 @@ func TestReconcileSessionsAdoptsArchiveUnderArchiveKey(t *testing.T) {
 	root := t.TempDir()
 	sessionsRoot := t.TempDir()
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "test",
 		Branch:      "feat/x",

@@ -27,7 +27,7 @@ const secretToken = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 //	alpha: working, branch alpha-branch, a failed task (with a secret in its
 //	       failure_reason) and a dependent ready task, one open PR
 //	bravo: blocked with a reason, no tasks
-//	broken: unparseable .project.yaml
+//	broken: unparseable project.yaml
 func writeFixtureRoot(t *testing.T) (root string) {
 	t.Helper()
 	root = t.TempDir()
@@ -40,7 +40,7 @@ func writeFixtureRoot(t *testing.T) (root string) {
 			t.Fatal(err)
 		}
 	}
-	mk("alpha/.project.yaml", `description: build the thing
+	mk("alpha/project.yaml", `description: build the thing
 repos:
   - org: acme
     name: widgets
@@ -72,13 +72,13 @@ status: ready
 attempts: 0
 `)
 	mk("alpha/tasks/notes.txt", "ignored")
-	mk("bravo/.project.yaml", `description: stuck
+	mk("bravo/project.yaml", `description: stuck
 branch: bravo-branch
 status: blocked
 blocked_reason: "needs human: password=hunter2"
 updated_by: daemon
 `)
-	mk("broken/.project.yaml", "status: [not, a, string\n")
+	mk("broken/project.yaml", "status: [not, a, string\n")
 	return root
 }
 
@@ -121,7 +121,7 @@ func TestOfflineSnapshotContent(t *testing.T) {
 	}
 
 	a := findProject(t, s, "alpha")
-	if a.Path != filepath.Join(root, "alpha", ".project.yaml") || a.Status != "working" || a.Branch != "alpha-branch" {
+	if a.Path != filepath.Join(root, "alpha", "project.yaml") || a.Status != "working" || a.Branch != "alpha-branch" {
 		t.Errorf("alpha = %+v", a)
 	}
 	if !a.Review || !a.CronActive || a.Cron != "@every 1h" || a.WatchingPR {
@@ -203,7 +203,7 @@ func TestLiveSnapshotCarriesInMemoryState(t *testing.T) {
 	d.ctx = ctx
 	t.Cleanup(func() { _ = d.watcher.Close() })
 
-	alpha := filepath.Join(root, "alpha", ".project.yaml")
+	alpha := filepath.Join(root, "alpha", "project.yaml")
 	task := newStubSession("orch-task-alpha")
 	wolf := newStubSession("orch-wolf-alpha")
 	d.trackSession(alpha, task, agent.TaskAgent, "build", nil)
@@ -247,7 +247,7 @@ func TestLiveSnapshotCarriesInMemoryState(t *testing.T) {
 	}
 	ts, ws := s.Sessions[0], s.Sessions[1]
 	if ts.Key != alpha || ts.Kind != "task" || ts.Task != "build" || ts.WorkStream != "alpha" || ts.ProjectPath != alpha ||
-		ts.TmuxTarget != "orch-task-alpha" || ts.Interactive || ts.Source != "daemon" || ts.StartedAt.IsZero() {
+		ts.TabName != "orch-task-alpha" || ts.Interactive || ts.Source != "daemon" || ts.StartedAt.IsZero() {
 		t.Errorf("task session = %+v", ts)
 	}
 	if ws.Key != wolfSessionKey(alpha) || ws.Kind != "wolf" || ws.ProjectPath != alpha || !ws.Interactive {
@@ -294,7 +294,7 @@ func TestLiveSnapshotACPSessionLocation(t *testing.T) {
 	d.ctx = ctx
 	t.Cleanup(func() { _ = d.watcher.Close() })
 
-	alpha := filepath.Join(root, "alpha", ".project.yaml")
+	alpha := filepath.Join(root, "alpha", "project.yaml")
 	store := session.Store{Root: sessRoot}
 	if err := store.Write(session.Session{
 		ID: "task-alpha-build-1", SandboxName: "alpha-build", Status: session.StatusRunning,
@@ -316,8 +316,8 @@ func TestLiveSnapshotACPSessionLocation(t *testing.T) {
 		got.ACP.SocketPath != store.SocketPath("task-alpha-build-1") || got.ACP.Status != "running" {
 		t.Errorf("acp = %+v", got.ACP)
 	}
-	if got.SandboxName != "alpha-build" || got.TmuxTarget != "" {
-		t.Errorf("sandbox=%q tmux=%q", got.SandboxName, got.TmuxTarget)
+	if got.SandboxName != "alpha-build" || got.TabName != "" {
+		t.Errorf("sandbox=%q tab=%q", got.SandboxName, got.TabName)
 	}
 	if !strings.HasPrefix(got.ACP.SessionDir, sessRoot) {
 		t.Errorf("session dir %q not under sessions root %q", got.ACP.SessionDir, sessRoot)
@@ -332,7 +332,7 @@ func TestCollectorCachesUnchangedProjectsAndSeesChanges(t *testing.T) {
 		t.Fatalf("cache size = %d", len(c.cache))
 	}
 	// Poison the cached copy: if the second call re-parsed, the poison is gone.
-	alphaPath := filepath.Join(root, "alpha", ".project.yaml")
+	alphaPath := filepath.Join(root, "alpha", "project.yaml")
 	cp := c.cache[alphaPath]
 	cp.snap.Description = "FROM-CACHE"
 	c.cache[alphaPath] = cp
@@ -634,7 +634,7 @@ func TestDaemonPublishesAndRefreshesOnSessionChange(t *testing.T) {
 	}
 
 	// A session start is reflected promptly (well inside the 2s tick).
-	alpha := filepath.Join(root, "alpha", ".project.yaml")
+	alpha := filepath.Join(root, "alpha", "project.yaml")
 	sess := newStubSession("orch-task-alpha")
 	d.trackSession(alpha, sess, agent.TaskAgent, "build", nil)
 	waitSnapshot(t, stateFile, "session start", func(s *Snapshot) bool { return len(s.Sessions) == 1 })

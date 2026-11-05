@@ -9,7 +9,7 @@ import (
 )
 
 func TestPlannedSnapshotPath(t *testing.T) {
-	got := PlannedSnapshotPath("/orch/widget/.project.yaml")
+	got := PlannedSnapshotPath("/orch/widget/project.yaml")
 	want := filepath.Join("/orch/widget", "last-planned.yaml")
 	if got != want {
 		t.Errorf("PlannedSnapshotPath = %q, want %q", got, want)

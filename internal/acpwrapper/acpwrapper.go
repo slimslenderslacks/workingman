@@ -134,7 +134,7 @@ type Config struct {
 	// UnblockGrace, in persistent mode with a ProjectPath, ends the session once
 	// the project file has not been `status: blocked` for this long (continuously
 	// — a re-block inside the grace resets the clock). It is how an ACP wolf
-	// "finishes": the wolf resolves the block by editing .project.yaml, then the
+	// "finishes": the wolf resolves the block by editing project.yaml, then the
 	// wrapper closes the conversation after a short grace that lets the wolf
 	// finish its closing message. Living in the wrapper (not the daemon) means it
 	// still works after a daemon restart, which cannot signal an adopted session.
@@ -160,7 +160,7 @@ type Config struct {
 	// tracking.
 	TaskPath string
 
-	// ProjectPath is the host path to the .project.yaml driving this session,
+	// ProjectPath is the host path to the project.yaml driving this session,
 	// and Kind is the agent.Kind string ("project", "planning", "task",
 	// "commit", "archive", …) running it. ProjectPath affects nothing about the
 	// sandbox or the ACP client; both are recorded into session.json so a
@@ -232,7 +232,7 @@ type Config struct {
 	// VM boundary (connect: connection refused) — and overriding SSH_AUTH_SOCK
 	// to that path would only clobber sbx's working socket. So signing relies on
 	// sandboxd being started with the private workingman ssh-agent (started by
-	// start-orch.sh, key loaded from 1Password) as its SSH_AUTH_SOCK, and the wrapper leaves SSH_AUTH_SOCK alone.
+	// start.sh, key loaded from 1Password) as its SSH_AUTH_SOCK, and the wrapper leaves SSH_AUTH_SOCK alone.
 	//
 	// IMPORTANT: SigningKey being non-empty means signing is *configured*, not
 	// that it will *work* — signingPreflight verifies the forwarded agent
@@ -401,7 +401,7 @@ var claudeEnv = []string{
 // claude-acp-client entrypoint inside the sandbox over `sbx exec`, producing an
 // ACP client on the child's stdio.
 //
-// Unlike the daemon's interactive tmux launches, this is NOT `-it`: ACP is
+// Unlike the daemon's interactive terminal-tab launches, this is NOT `-it`: ACP is
 // newline-delimited JSON-RPC on raw stdio, so a pty would corrupt the protocol
 // stream. `-w` pins the working directory to the primary workspace so the
 // agent's cwd matches the mounted host path.
@@ -902,7 +902,7 @@ func Run(ctx context.Context, c Config) error {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING signing preflight FAILED — the SSH "+
 			"agent forwarded into sandbox %q has no key. Commit signing is DISABLED for this session "+
 			"so `git commit` still succeeds (UNSIGNED) instead of hard-failing. Likely sandboxd was restarted without "+
-			"the private ssh-agent started by start-orch.sh; run ./check-signing.sh to fix.\n",
+			"the private ssh-agent started by start.sh; run ./check-signing.sh to fix.\n",
 			c.SessionID, c.SandboxName)
 	} else if checked {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: signing preflight OK — forwarded agent holds a key\n", c.SessionID)

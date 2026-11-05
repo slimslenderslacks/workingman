@@ -42,7 +42,7 @@ func TestCommandPickerCleanupRequestsArchiveAgent(t *testing.T) {
 }
 
 func TestCommandPickerCleanupWithoutSelectionSurfacesError(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m = focusProjectsPane(t, m)
 	m, _ = runProjectCommand(t, m, "cleanup")
 
@@ -51,7 +51,7 @@ func TestCommandPickerCleanupWithoutSelectionSurfacesError(t *testing.T) {
 	}
 }
 
-// writeProjectFile drops a .project.yaml with the given body under root/<name>
+// writeProjectFile drops a project.yaml with the given body under root/<name>
 // and returns its path.
 func writeProjectFile(t *testing.T, root, name, body string) string {
 	t.Helper()
@@ -59,7 +59,7 @@ func writeProjectFile(t *testing.T, root, name, body string) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, ".project.yaml")
+	path := filepath.Join(dir, "project.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

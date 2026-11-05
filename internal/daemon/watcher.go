@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/slimslenderslacks/work/internal/project"
 )
 
 // addTree walks root and registers a watch on every directory it finds.
@@ -31,7 +33,7 @@ func (d *Daemon) addTree(root string) error {
 // N projects' first dispatch proceed independently of one another.
 const startupScanConcurrency = 8
 
-// startupScan re-evaluates every .project.yaml under each watched root.
+// startupScan re-evaluates every project.yaml under each watched root.
 // fsnotify only fires on changes-from-now, so without this call a daemon
 // restart strands any project whose file is already on disk in a
 // non-terminal state (e.g. status=ready that the previous daemon hadn't
@@ -57,7 +59,7 @@ func (d *Daemon) startupScan() {
 			if entry.IsDir() {
 				return nil
 			}
-			if filepath.Base(p) != ".project.yaml" {
+			if filepath.Base(p) != project.FileName {
 				return nil
 			}
 			found++
@@ -84,7 +86,7 @@ func (d *Daemon) maybeWatchNewDir(path string) bool {
 	// any handler-matching files found within. Callers (a human or script
 	// dropping a new project.md, an agent scaffolding a project) commonly do
 	// mkdir+write back-to-back, so by the time we see the directory's Create
-	// event the project.md (or .project.yaml) inside has often already
+	// event the project.md (or project.yaml) inside has often already
 	// landed. Without this scan the file's own Create event is missed (the
 	// watch wasn't installed yet) and the project never gets dispatched.
 	_ = filepath.WalkDir(path, func(p string, entry fs.DirEntry, err error) error {
@@ -109,7 +111,7 @@ func (d *Daemon) maybeWatchNewDir(path string) bool {
 
 func (d *Daemon) handlerFor(path string) eventHandler {
 	base := filepath.Base(path)
-	if base == ".project.yaml" {
+	if base == project.FileName {
 		return d.handleProject
 	}
 	if base == "project.md" {

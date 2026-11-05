@@ -9,7 +9,7 @@ import (
 )
 
 // projectDisplayName is the human-facing name for the project whose
-// .project.yaml lives at path — the basename of its control directory, which
+// project.yaml lives at path — the basename of its control directory, which
 // is what the daemon and sandbox naming also key off. Empty path yields a
 // placeholder so a caller never renders a bare "in ".
 func projectDisplayName(path string) string {
@@ -20,7 +20,7 @@ func projectDisplayName(path string) string {
 }
 
 // requestCleanup flips the `cleanup: true` request flag on the project
-// identified by projectPath (the path of its .project.yaml) so the daemon
+// identified by projectPath (the path of its project.yaml) so the daemon
 // launches the archive agent for it. It returns the project's display name for
 // the confirmation message.
 //

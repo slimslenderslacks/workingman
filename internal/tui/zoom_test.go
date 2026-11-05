@@ -10,7 +10,7 @@ import (
 // zoomTestModel builds a fully-populated, sized model so View renders every
 // pane. Default focus is paneSessions (see newModel).
 func zoomTestModel() model {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	// Wide enough that the sessions left column and tasks right column both
 	// have room alongside the projects/YAML center column.
 	m.width, m.height = 200, 40
@@ -96,7 +96,7 @@ func TestZoomFollowsFocus(t *testing.T) {
 	// and now maximizes the newly focused pane. (alt-h is a no-op here since
 	// sessions is already the leftmost column — alt-h/alt-l step one column
 	// at a time and never wrap. alt-j/alt-k don't apply either — they only
-	// cycle within the center column's Projects/Tasks/Audit stack.)
+	// cycle within the center column's Projects/Tasks stack.)
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}, Alt: true})
 	m = next.(model)
 	if !m.zoomed {

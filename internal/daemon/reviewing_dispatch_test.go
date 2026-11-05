@@ -2,13 +2,10 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
@@ -30,7 +27,7 @@ func TestIdleWatchingRoutesPendingTasksBeforePR(t *testing.T) {
 	t.Run("ready task takes priority and keeps watching", func(t *testing.T) {
 		root := t.TempDir()
 		d, _, sched := newReviewDaemon(t, root)
-		projectPath := filepath.Join(root, ".project.yaml")
+		projectPath := filepath.Join(root, "project.yaml")
 		tasksDir := filepath.Join(root, "tasks")
 		if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
@@ -63,7 +60,7 @@ func TestIdleWatchingRoutesPendingTasksBeforePR(t *testing.T) {
 	t.Run("all committed falls through to the PR poll", func(t *testing.T) {
 		root := t.TempDir()
 		d, _, sched := newReviewDaemon(t, root)
-		projectPath := filepath.Join(root, ".project.yaml")
+		projectPath := filepath.Join(root, "project.yaml")
 		tasksDir := filepath.Join(root, "tasks")
 		if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
@@ -112,7 +109,7 @@ func TestIdleRoutesPendingTasksWithoutReopening(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			d, _, _ := newReviewDaemon(t, root)
-			projectPath := filepath.Join(root, ".project.yaml")
+			projectPath := filepath.Join(root, "project.yaml")
 			tasksDir := filepath.Join(root, "tasks")
 			if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 				t.Fatalf("mkdir: %v", err)
@@ -157,7 +154,7 @@ func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			d, buf, _ := newReviewDaemon(t, root)
-			projectPath := filepath.Join(root, ".project.yaml")
+			projectPath := filepath.Join(root, "project.yaml")
 			tasksDir := filepath.Join(root, "tasks")
 			if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 				t.Fatalf("mkdir: %v", err)
@@ -193,7 +190,7 @@ func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 	t.Run("no seed leaves idle untouched", func(t *testing.T) {
 		root := t.TempDir()
 		d, _, sched := newReviewDaemon(t, root)
-		projectPath := filepath.Join(root, ".project.yaml")
+		projectPath := filepath.Join(root, "project.yaml")
 		tasksDir := filepath.Join(root, "tasks")
 		if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
@@ -220,14 +217,9 @@ func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 // that a ready task under an idle-and-watching project actually launches a
 // task agent (not just a routing decision): the manual task runs even though
 // the project has an open PR. Same shape as the push-dispatch test — a real
-// tmux launcher, a stub workspace, and a fake command that just sleeps.
+// process launcher, a stub workspace, and a fake command that just sleeps.
 func TestIdleWatchingProjectDispatchesReadyTaskAgent(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-reviewing-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
 
 	tasksDir := filepath.Join(root, "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
@@ -237,7 +229,7 @@ func TestIdleWatchingProjectDispatchesReadyTaskAgent(t *testing.T) {
 	mustSaveTask(t, filepath.Join(tasksDir, "landed.yaml"), &task.Task{Name: "landed", Status: task.StatusCommitted})
 	mustSaveTask(t, filepath.Join(tasksDir, "manual-fix.yaml"), &task.Task{Name: "manual-fix", Status: task.StatusReady})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "reviewing dispatch",
 		Branch:      "feat/reviewing",
@@ -252,7 +244,7 @@ func TestIdleWatchingProjectDispatchesReadyTaskAgent(t *testing.T) {
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(t.TempDir()),
-		Launcher:   &agent.TmuxLauncher{Socket: socket, PollInterval: 50 * time.Millisecond},
+		Launcher:   &agent.ProcessLauncher{},
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}

@@ -67,7 +67,7 @@ func TestParseKindRoundTrip(t *testing.T) {
 }
 
 // Interactive drives the --print flag in runner.DefaultCommandBuilder and the
-// ACP-vs-tmux routing in Runner.Start, so it has to be exact: the wolf is the
+// ACP-vs-host routing in Runner.Start, so it has to be exact: the wolf is the
 // only kind a human drives.
 func TestKindInteractive(t *testing.T) {
 	cases := []struct {

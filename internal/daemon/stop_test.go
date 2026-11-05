@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
@@ -28,7 +26,7 @@ import (
 func TestDispatchStoppedUnregistersSchedules(t *testing.T) {
 	root := t.TempDir()
 	d, buf, sched := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	if err := sched.Register(projectPath, "@every 1m", func() {}); err != nil {
 		t.Fatalf("register cron: %v", err)
@@ -62,7 +60,7 @@ func TestDispatchStoppedUnregistersSchedules(t *testing.T) {
 func TestDispatchStoppedIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 	d, _, sched := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	p := &project.Project{Description: "x", Branch: "b", Status: project.StatusStopped, StoppedFrom: project.StatusIdle}
 	d.dispatchProject(projectPath, p)
@@ -81,7 +79,7 @@ func TestDispatchStoppedIsIdempotent(t *testing.T) {
 func TestStoppedGuardsSkipTaskSessionEnd(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	tasksDir := filepath.Join(root, "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -127,7 +125,7 @@ func TestStoppedGuardsSkipTaskSessionEnd(t *testing.T) {
 func TestStoppedGuardsSkipCommitSessionEnd(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	tasksDir := filepath.Join(root, "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -167,7 +165,7 @@ func TestStoppedGuardsSkipCommitSessionEnd(t *testing.T) {
 func TestStoppedGuardsSkipReviewSessionEnd(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b",
@@ -198,16 +196,11 @@ func TestStoppedGuardsSkipReviewSessionEnd(t *testing.T) {
 
 // TestStopKillsRunningTaskSession is the end-to-end proof that `:stop` doesn't
 // just refuse to launch new work — it actually terminates an agent already
-// running. A real tmux launcher runs a long sleep as the "task agent"; once
+// running. A real process launcher runs a long sleep as the "task agent"; once
 // it's up, the project file is flipped to status:stopped exactly as `:stop`
 // would write it, and the daemon must close that session in response.
 func TestStopKillsRunningTaskSession(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-stop-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
 
 	tasksDir := filepath.Join(root, "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
@@ -215,7 +208,7 @@ func TestStopKillsRunningTaskSession(t *testing.T) {
 	}
 	mustSaveTask(t, filepath.Join(tasksDir, "manual-fix.yaml"), &task.Task{Name: "manual-fix", Status: task.StatusReady})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "stop kills sessions",
 		Branch:      "feat/stop",
@@ -229,7 +222,7 @@ func TestStopKillsRunningTaskSession(t *testing.T) {
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(t.TempDir()),
-		Launcher:   &agent.TmuxLauncher{Socket: socket, PollInterval: 50 * time.Millisecond},
+		Launcher:   &agent.ProcessLauncher{},
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 30"} },
 	}

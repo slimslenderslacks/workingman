@@ -391,7 +391,7 @@ func TestRenderACPTabBodyEmptyState(t *testing.T) {
 // `a` key, ingest a tab-added + prompt + streamed message, and confirm the
 // rendered ACP view shows the streamed content. Then leave with esc.
 func TestModelACPViewLifecycle(t *testing.T) {
-	m := newModel(nil, nil, nil, nil)
+	m := newModel(nil, nil, nil)
 	m.acpCh = make(chan acpTabEvent) // non-nil so `a` opens the view
 	m.width, m.height = 100, 30
 
@@ -432,7 +432,7 @@ func TestModelACPViewLifecycle(t *testing.T) {
 // model: a tool call renders collapsed (output hidden) by default, z reveals the
 // output, and z again re-collapses it.
 func TestModelACPToolExpandToggle(t *testing.T) {
-	m := newModel(nil, nil, nil, nil)
+	m := newModel(nil, nil, nil)
 	m.acpCh = make(chan acpTabEvent)
 	m.width, m.height = 100, 30
 
@@ -476,7 +476,7 @@ func TestModelACPToolExpandToggle(t *testing.T) {
 // with an outer box plus an inner prompt card there must be at least two such
 // complete-top-border lines.
 func TestRenderACPViewNestedBoxesIntact(t *testing.T) {
-	m := newModel(nil, nil, nil, nil)
+	m := newModel(nil, nil, nil)
 	m.width, m.height = 90, 34
 	m.showACP = true
 	tab := acpTab{id: "s", title: "s", status: acpclient.StateStreaming, curMsg: -1}
@@ -509,7 +509,7 @@ func TestRenderACPViewNestedBoxesIntact(t *testing.T) {
 // one-row slack (strictly fewer than m.height rows) rather than merely being
 // clamped down to height after the fact.
 func TestRenderACPViewNeverExceedsHeight(t *testing.T) {
-	m := newModel(nil, nil, nil, nil)
+	m := newModel(nil, nil, nil)
 	m.showACP = true
 	for _, id := range []string{"t-1", "t-2", "t-3"} {
 		m.acp.appendTab(acpTab{id: id, title: "task-" + id, status: acpclient.StateStreaming, curMsg: -1})
@@ -535,7 +535,7 @@ func TestRenderACPViewNeverExceedsHeight(t *testing.T) {
 // leaves the cached m.height briefly out of step with the real terminal) —
 // and checks the top-level View() output never overflows the new height.
 func TestModelACPViewShrinksWithoutOverflow(t *testing.T) {
-	m := newModel(nil, nil, nil, nil)
+	m := newModel(nil, nil, nil)
 	m.acpCh = make(chan acpTabEvent)
 	m.width, m.height = 100, 30
 	for _, id := range []string{"t-1", "t-2", "t-3"} {
@@ -556,7 +556,7 @@ func TestModelACPViewShrinksWithoutOverflow(t *testing.T) {
 }
 
 func TestModelACPKeyNavigatesTabs(t *testing.T) {
-	m := newModel(nil, nil, nil, nil)
+	m := newModel(nil, nil, nil)
 	m.acpCh = make(chan acpTabEvent)
 	m.width, m.height = 100, 30
 	for _, id := range []string{"a", "b", "c"} {
@@ -580,7 +580,7 @@ func TestModelACPKeyNavigatesTabs(t *testing.T) {
 }
 
 func TestAKeyIgnoredWithoutACPSource(t *testing.T) {
-	m := newModel(nil, nil, nil, nil) // acpCh stays nil
+	m := newModel(nil, nil, nil) // acpCh stays nil
 	m.width, m.height = 100, 30
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	m = step.(model)

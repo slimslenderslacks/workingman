@@ -39,10 +39,10 @@ var allKinds = []agent.Kind{
 // this.
 func TestSandboxNameNeverExceedsSbxLimit(t *testing.T) {
 	projectPaths := []string{
-		"/orch/proj/.project.yaml",
-		"/orch/server-namespace/.project.yaml",
-		"/orch/" + strings.Repeat("work-stream-", 10) + "/.project.yaml",
-		"/orch/under_scored_work_stream/.project.yaml",
+		"/orch/proj/project.yaml",
+		"/orch/server-namespace/project.yaml",
+		"/orch/" + strings.Repeat("work-stream-", 10) + "/project.yaml",
+		"/orch/under_scored_work_stream/project.yaml",
 	}
 	taskNames := []string{
 		"",
@@ -82,7 +82,7 @@ func TestSandboxNameNeverExceedsSbxLimit(t *testing.T) {
 // (ensureSandbox looks the sandbox up by name to decide reuse vs. recreate), so
 // shortening must not introduce any per-call variation.
 func TestSandboxNameIsStableAcrossCalls(t *testing.T) {
-	projectPath := "/orch/server-namespace/.project.yaml"
+	projectPath := "/orch/server-namespace/project.yaml"
 	taskName := strings.Repeat("long-task-", 10)
 
 	want := SandboxNameFor(agent.TaskAgent, projectPath, taskName)
@@ -116,7 +116,7 @@ func TestSandboxNameUnchangedWhenItFits(t *testing.T) {
 		{agent.ReviewAgent, "", "myproj-review"},
 	}
 	for _, c := range cases {
-		if got := SandboxNameFor(c.kind, "/orch/myproj/.project.yaml", c.taskName); got != c.want {
+		if got := SandboxNameFor(c.kind, "/orch/myproj/project.yaml", c.taskName); got != c.want {
 			t.Errorf("SandboxNameFor(%v) = %q, want %q", c.kind, got, c.want)
 		}
 	}
@@ -129,7 +129,7 @@ func TestSandboxNameUnchangedWhenItFits(t *testing.T) {
 // their names get silently repaired out from under them.
 func TestTaskNameBudgetMatchesSandboxDerivation(t *testing.T) {
 	for _, workStream := range []string{"proj", "server-namespace", "shared-gateway", "a"} {
-		projectPath := "/orch/" + workStream + "/.project.yaml"
+		projectPath := "/orch/" + workStream + "/project.yaml"
 		budget := task.MaxNameLenFor(workStream)
 
 		atLimit := strings.Repeat("a", budget)

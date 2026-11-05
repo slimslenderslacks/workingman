@@ -6,7 +6,7 @@ sandbox has no `sbx`/`op`). Items marked **unverified** need a check on the host
 
 ## How SSH_AUTH_SOCK flows
 
-1. `start-orch.sh` starts a private `ssh-agent` (`$TMPDIR/orch-ssh.*/agent.sock`),
+1. `start.sh` starts a private `ssh-agent` (`$TMPDIR/orch-ssh.*/agent.sock`),
    loads one key into it from 1Password (`op read "$ORCH_SSH_KEY_REF" | ssh-add -`),
    and exports `SSH_AUTH_SOCK` to that socket.
 2. It then runs `sbx daemon stop; sbx daemon start -d` (output discarded, `|| true`)
@@ -38,10 +38,10 @@ sandbox has no `sbx`/`op`). Items marked **unverified** need a check on the host
    agent, so every sandbox, new or reused, sees an empty agent. The forwarded
    agent is live per-call, so it affects existing sandboxes too. `check-signing.sh`
    detects and repairs this, but nothing runs it automatically, and
-   `start-orch.sh` hides failures of `sbx daemon stop/start` (`>/dev/null || true`),
+   `start.sh` hides failures of `sbx daemon stop/start` (`>/dev/null || true`),
    so a failed restart at startup is silent.
 3. **The private agent died or holds the wrong key.** The agent lives and dies
-   with `start-orch.sh`. Since commits 88b7e66/eea3cd6 (Oct 6) the only agent is a
+   with `start.sh`. Since commits 88b7e66/eea3cd6 (Oct 6) the only agent is a
    private one with a *single* key from `ORCH_SSH_KEY_REF`; the old 1Password
    agent (all keys) was dropped. That key was chosen as the *signing* key. If it
    is not the key authorised for the repo/org (SSO authorisation, deploy key, a
@@ -71,7 +71,7 @@ Run on the host, then inside a sandbox (`sbx exec <name> -- ...`):
   signing, log loudly, and record it in `session.json` (e.g. `PushBroken`).
 - Have the preflight (or `check-signing.sh`) also run `ssh -T git@github.com` (or
   `git ls-remote` on the target remote) so it proves push, not just a key.
-- Stop swallowing `sbx daemon stop/start` errors in `start-orch.sh`; verify via
+- Stop swallowing `sbx daemon stop/start` errors in `start.sh`; verify via
   `check-signing.sh --check` after the restart.
 - Ensure the loaded key is the one authorised for push, or load several keys.
 - If cause 4: allow `github.com:22` in sbx policy and seed `known_hosts`

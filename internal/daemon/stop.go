@@ -10,7 +10,7 @@ import (
 
 // enforceStopped is dispatchProject's response to observing status:stopped: it
 // kills every agent session tracked for path — the bare project slot (the one
-// project/planning/task/commit/review agents share) plus the wolf and archive
+// project/task/commit/review agents share) plus the planning, wolf and archive
 // slots, which run under keys of their own — and unregisters the project's
 // cron and #review schedules. It does not touch the project file: the status
 // write that got it here already happened (via requestStop), and there is
@@ -29,9 +29,10 @@ func (d *Daemon) enforceStopped(path string) {
 }
 
 // killProjectSessions closes every live session keyed under path — the bare
-// key itself plus any "path#suffix" key (wolf, archive) — and logs each one.
+// key itself plus any "path#suffix" key (planning, wolf, archive) — and logs
+// each one.
 // Closing is what actually terminates the underlying agent process (SIGTERM
-// then SIGKILL for a host process, `tmux kill-window` for a tmux one); the
+// then SIGKILL for a host process, SIGHUP for one in a terminal tab); the
 // session's own tracking goroutine (see trackSession) removes it from
 // d.sessions and fires its onEnd callback once the process exits, exactly as
 // on a normal completion. Those callbacks guard themselves against a project

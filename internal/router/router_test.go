@@ -162,7 +162,7 @@ type harness struct {
 var agentSess = Session{Key: "workingman-agent", ID: "workingman-agent-1", Ref: "/sessions/workingman-agent-1"}
 
 func wolfSess(ws string) Session {
-	return Session{Key: "/orch/" + ws + "/.project.yaml#wolf", ID: "wolf-" + ws + "-1", Ref: "/sessions/wolf-" + ws + "-1", WorkStream: ws}
+	return Session{Key: "/orch/" + ws + "/project.yaml#wolf", ID: "wolf-" + ws + "-1", Ref: "/sessions/wolf-" + ws + "-1", WorkStream: ws}
 }
 
 // newHarness builds a router over a started channeltest channel. The workingman
@@ -504,7 +504,7 @@ func TestWolfCommandSelection(t *testing.T) {
 	h.addWolf("alpha")
 	h.addWolf("alphabet")
 	h.addWolf("beta")
-	hostWolf := Session{Key: "k-host#wolf", ID: "wolf-host", WorkStream: "hosty"} // Ref "": tmux wolf
+	hostWolf := Session{Key: "k-host#wolf", ID: "wolf-host", WorkStream: "hosty"} // Ref "": host-tab wolf
 	h.src.mu.Lock()
 	h.src.wolves = append(h.src.wolves, hostWolf)
 	h.src.mu.Unlock()

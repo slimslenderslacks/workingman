@@ -48,7 +48,7 @@ func (f *fakeWspRemover) Remove(ctx context.Context, branch string, force bool) 
 	return f.err
 }
 
-// writeProject drops a .project.yaml for a work stream named name under root
+// writeProject drops a project.yaml for a work stream named name under root
 // and returns its path. archive mirrors the cleanup agent's `archive: true`
 // marker, which `:archive` requires.
 func writeProject(t *testing.T, root, name, branch string, archive bool) string {
@@ -57,7 +57,7 @@ func writeProject(t *testing.T, root, name, branch string, archive bool) string 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, ".project.yaml")
+	path := filepath.Join(dir, "project.yaml")
 	p := &project.Project{
 		Description: name,
 		Branch:      branch,
@@ -92,8 +92,8 @@ func TestArchiveProjectMovesTree(t *testing.T) {
 	}
 	// The whole tree landed under <root>.backup/<name>.
 	dest := filepath.Join(root+".backup", "weather-tui")
-	if _, err := os.Stat(filepath.Join(dest, ".project.yaml")); err != nil {
-		t.Errorf("archived .project.yaml missing: %v", err)
+	if _, err := os.Stat(filepath.Join(dest, "project.yaml")); err != nil {
+		t.Errorf("archived project.yaml missing: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "tasks", "a.yaml")); err != nil {
 		t.Errorf("archived task file missing: %v", err)
@@ -161,7 +161,7 @@ func TestArchiveProjectRemovesOrchBeforeWorkspaceRemoval(t *testing.T) {
 	if len(wsp.forced) != 1 || !wsp.forced[0] {
 		t.Errorf("wsp force flags = %v, want [true]", wsp.forced)
 	}
-	if _, err := os.Stat(filepath.Join(root+".backup", "weather-tui", ".project.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(root+".backup", "weather-tui", "project.yaml")); err != nil {
 		t.Errorf("archived project missing: %v", err)
 	}
 }
@@ -183,7 +183,7 @@ func TestArchiveProjectSkipsOrchRemovalWhenAbsent(t *testing.T) {
 	if len(wsp.branches) != 1 || wsp.branches[0] != "bare" {
 		t.Errorf("wsp removals = %v, want [bare]", wsp.branches)
 	}
-	if _, err := os.Stat(filepath.Join(root+".backup", "bare", ".project.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(root+".backup", "bare", "project.yaml")); err != nil {
 		t.Errorf("archived project missing: %v", err)
 	}
 }
@@ -202,7 +202,7 @@ func TestArchiveProjectProceedsWhenWorkspacePathUnresolved(t *testing.T) {
 	if len(wsp.branches) != 1 || wsp.branches[0] != "unknown" {
 		t.Errorf("wsp removals = %v, want [unknown]", wsp.branches)
 	}
-	if _, err := os.Stat(filepath.Join(root+".backup", "unknown", ".project.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(root+".backup", "unknown", "project.yaml")); err != nil {
 		t.Errorf("archived project missing: %v", err)
 	}
 }
@@ -267,7 +267,7 @@ func TestArchiveProjectRefusesUnloadableProject(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projPath := filepath.Join(dir, ".project.yaml")
+	projPath := filepath.Join(dir, "project.yaml")
 	if err := os.WriteFile(projPath, []byte("description: [unterminated\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestArchiveProjectSkipsWorkspaceRemovalWithoutBranch(t *testing.T) {
 	if len(wsp.branches) != 0 {
 		t.Errorf("branchless project asked wsp to remove %v, want none", wsp.branches)
 	}
-	if _, err := os.Stat(filepath.Join(root+".backup", "no-branch", ".project.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(root+".backup", "no-branch", "project.yaml")); err != nil {
 		t.Errorf("project should still have been archived: %v", err)
 	}
 }
@@ -365,7 +365,7 @@ func TestArchiveProjectRejectsOutsideRoot(t *testing.T) {
 
 func TestArchiveCommandOpensConfirmModal(t *testing.T) {
 	root := t.TempDir()
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.projectRoot = root
 	m.wspRemover = &fakeWspRemover{}
 	m.projSel = writeProject(t, root, "alpha", "alpha", true)
@@ -396,7 +396,7 @@ func TestArchiveCommandOpensConfirmModal(t *testing.T) {
 func TestArchiveCommandRefusesUncleanedProject(t *testing.T) {
 	root := t.TempDir()
 	wsp := &fakeWspRemover{}
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.projectRoot = root
 	m.wspRemover = wsp
 	m.projSel = writeProject(t, root, "messy", "messy", false)
@@ -429,7 +429,7 @@ func TestArchiveCommandRefusesUncleanedProject(t *testing.T) {
 func TestArchiveConfirmArchivesAndRemovesWorkspace(t *testing.T) {
 	root := t.TempDir()
 	wsp := &fakeWspRemover{}
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.projectRoot = root
 	m.wspRemover = wsp
 	m.projSel = writeProject(t, root, "beta", "beta-branch", true)
@@ -451,7 +451,7 @@ func TestArchiveConfirmArchivesAndRemovesWorkspace(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "beta")); !os.IsNotExist(err) {
 		t.Errorf("project dir still in the workspace root (err=%v)", err)
 	}
-	if _, err := os.Stat(filepath.Join(root+".backup", "beta", ".project.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(root+".backup", "beta", "project.yaml")); err != nil {
 		t.Errorf("archived project missing: %v", err)
 	}
 	if len(wsp.branches) != 1 || wsp.branches[0] != "beta-branch" {

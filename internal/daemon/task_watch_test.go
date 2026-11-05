@@ -65,7 +65,7 @@ func TestNonTaskYamlInProjectRootIgnored(t *testing.T) {
 	root := t.TempDir()
 	buf, _ := startDaemon(t, root)
 
-	// A yaml file in the project root that isn't .project.yaml and isn't in
+	// A yaml file in the project root that isn't project.yaml and isn't in
 	// tasks/ should not match handlerFor and should not appear in audit.
 	if err := os.WriteFile(filepath.Join(root, "notes.yaml"), []byte("anything: here"), 0o644); err != nil {
 		t.Fatalf("write notes: %v", err)

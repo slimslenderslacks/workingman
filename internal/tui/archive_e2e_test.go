@@ -30,8 +30,7 @@ type archiveE2ELauncher struct {
 }
 
 func (l *archiveE2ELauncher) Launch(_ context.Context, spec agent.Spec) (agent.Session, error) {
-	// Mirror the real TmuxLauncher's "session:window" name shape.
-	s := newE2EFakeSession(agent.DefaultUmbrellaSession + ":" + spec.Name)
+	s := newE2EFakeSession(spec.Name)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.specs = append(l.specs, spec)
@@ -92,7 +91,7 @@ func (l *archiveE2ELauncher) shutdown() {
 // cleanupHarness wires the pieces of the cleanup/archive loop together at the
 // seams the rest of the package's tests already use: a live daemon with
 // fsnotify, a stub wsp manager (real directories, no `wsp` binary), a fake
-// launcher instead of tmux+claude, and a headless TUI model whose projects come
+// launcher instead of a terminal tab running claude, and a headless TUI model whose projects come
 // from a real ScanProjects pass over the orch root. Nothing here shells out or
 // touches the network.
 //
@@ -124,7 +123,7 @@ func newCleanupHarness(t *testing.T, name, branch string) *cleanupHarness {
 	}
 	h.wsp = workspace.NewStub(h.stubRoot)
 	h.wspDir = filepath.Join(h.stubRoot, branch)
-	h.projPath = filepath.Join(h.root, name, ".project.yaml")
+	h.projPath = filepath.Join(h.root, name, "project.yaml")
 
 	a := audit.New(h.audit)
 	d, err := daemon.New([]string{h.root}, a, daemon.WithRunner(&runner.Runner{
@@ -175,7 +174,7 @@ func newCleanupHarness(t *testing.T, name, branch string) *cleanupHarness {
 		t.Fatalf("daemon never observed the new project:\n%s", h.audit.String())
 	}
 
-	h.model = newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	h.model = newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	h.model.projectRoot = h.root
 	h.model.wspRemover = h.wsp
 	step, _ := h.model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -231,7 +230,7 @@ func (h *cleanupHarness) run(t *testing.T, cmd string) {
 // workflow was built for, one seam at a time:
 //
 //	:cleanup writes the request flag → the daemon dispatches an archive agent
-//	for that project → the agent's `archive: true` lands in .project.yaml →
+//	for that project → the agent's `archive: true` lands in project.yaml →
 //	the gallery renders the card with the blue border → `:archive` proceeds,
 //	removes the wsp workspace, and moves the project into the backup root.
 func TestCleanupToArchiveEndToEnd(t *testing.T) {
@@ -353,7 +352,7 @@ func TestCleanupToArchiveEndToEnd(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.root, h.name)); !os.IsNotExist(err) {
 		t.Errorf("project dir still under the orch root (err=%v)", err)
 	}
-	if _, err := os.Stat(filepath.Join(h.root+".backup", h.name, ".project.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(h.root+".backup", h.name, "project.yaml")); err != nil {
 		t.Errorf("archived project missing from the backup root: %v", err)
 	}
 	if _, err := os.Stat(h.wspDir); !os.IsNotExist(err) {

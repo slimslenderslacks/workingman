@@ -8,7 +8,7 @@ import (
 )
 
 // requestReview drives the PR-resolution loop for the work stream identified by
-// projectPath (the path of its .project.yaml). On an idle project not yet
+// projectPath (the path of its project.yaml). On an idle project not yet
 // watching a PR it starts the loop by setting the Review intent flag; on one
 // already watching it requests an immediate reconcile. Either way the daemon
 // finds the project's pull request and manages its review comments and Actions

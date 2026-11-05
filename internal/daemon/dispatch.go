@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 )
 
 // handle is the single entry-point for fsnotify events. It routes by filename:
-// new directories are added to the watch set, .project.yaml events are sent to
+// new directories are added to the watch set, project.yaml events are sent to
 // handleProject, and project.md events are sent to handleProjectSeed. Task
 // files are deliberately *not* watched — task-lifecycle reactions are driven
 // off session-end callbacks (see dispatch_lifecycle.go) to avoid the race
@@ -42,7 +43,7 @@ func (d *Daemon) handle(ev fsnotify.Event) {
 	d.markSnapshotDirty()
 }
 
-// handleProject reads the .project.yaml file, drops the event if the daemon
+// handleProject reads the project.yaml file, drops the event if the daemon
 // wrote it (to break the fsnotify-loop), and routes based on observed state.
 //
 // Wired:
@@ -87,19 +88,19 @@ func (d *Daemon) revisitProject(path string) {
 
 // handleProjectSeed is how a new work stream gets created: a human (or a
 // script) drops `<root>/<project-name>/project.md` — a free-form description
-// of the work — and this turns it into the seed `<root>/<project-name>/.project.yaml`
+// of the work — and this turns it into the seed `<root>/<project-name>/project.yaml`
 // that drives the rest of the project's lifecycle (see dispatchProject's
 // Unpopulated handling). The project's name is always the containing
 // directory's name, never read from the file itself.
 //
-// This is a one-time bootstrap trigger, not a live sync: if .project.yaml
+// This is a one-time bootstrap trigger, not a live sync: if project.yaml
 // already exists next to project.md, the project has already been
 // bootstrapped (or is mid-flight), so the file is left alone — including on a
 // later edit of project.md, which fires its own fsnotify event but is a no-op
 // here.
 func (d *Daemon) handleProjectSeed(path string) {
 	dir := filepath.Dir(path)
-	yamlPath := filepath.Join(dir, ".project.yaml")
+	yamlPath := filepath.Join(dir, project.FileName)
 	if _, err := os.Stat(yamlPath); err == nil {
 		return
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -198,16 +199,17 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 	// A pending seed or intake file on a resting (idle) project is orphaned
 	// work: handleIntakeFile (or, for a hand-written seed, a human editing
 	// tasks/ directly) flips the project to `ready` so planning can pick it
-	// up, but that flip can be skipped (the project slot was busy with a
-	// review/other agent, so the planning launch dedup-skipped) or clobbered
-	// (a review agent's own status write landed after it, resetting back to
-	// idle).
+	// up, but that flip can be clobbered (a review agent's own status write
+	// landed after it, resetting back to idle), or a planning run may have
+	// ended without processing a file it was handed.
 	// Either way the request strands — unplanned work that never runs. Re-arm
 	// the normal path by flipping back to `ready` here; the switch below then
 	// routes to the planning agent, which carries its own crash-loop circuit
 	// breaker. Guarded to idle so a seed/intake file observed mid-flight
-	// (working/ready/blocked) is left to that status's own handling.
-	if (p.Status == project.StatusIdle || p.Status == project.StatusMerged) && (d.hasPendingSeed(path) || hasPendingIntake(path)) {
+	// (working/ready/blocked) is left to that status's own handling, and to no
+	// planner in flight — its afterPlanningSession re-dispatches and re-arms
+	// then, rather than this write racing the planner's own project.yaml write.
+	if (p.Status == project.StatusIdle || p.Status == project.StatusMerged) && !d.planningInFlight(path) && (d.hasPendingSeed(path) || hasPendingIntake(path)) {
 		d.audit.Log("seed_replan", "path", path, "from", string(p.Status))
 		updated := *p
 		updated.Status = project.StatusReady
@@ -222,8 +224,23 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 	}
 	switch p.Status {
 	case project.StatusReady:
-		d.launchProjectRootAgent(path, agent.PlanningAgent, p)
+		d.launchPlanningAgent(path, p)
 	case project.StatusWorking:
+		// Intake that landed while tasks are in flight is planned right away,
+		// in tandem with them: the planner has a session slot of its own (see
+		// planningSessionKey) and the status stays `working`, so task dispatch
+		// below carries on undisturbed. This is also the recovery for intake
+		// that strands on a working project (a daemon restart, or a request
+		// that arrived while a planner was already running — afterPlanningSession
+		// dispatches here, which is the follow-up run); the launch dedups
+		// against a planner already in flight. Only intake no planning run has
+		// been handed yet counts (see unofferedIntake): a file a run was given
+		// and left unprocessed must not relaunch planning on every observation.
+		// It is re-armed once the project comes to rest (seed_replan above).
+		if files := d.unofferedIntake(path); len(files) > 0 {
+			d.audit.Log("intake_plan_while_working", "path", path, "files", fmt.Sprintf("%d", len(files)))
+			d.launchPlanningAgent(path, p)
+		}
 		d.dispatchNextTask(path, p)
 	case project.StatusBlocked:
 		// Could be set by the user, the project agent, or some other agent.
@@ -278,16 +295,18 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 	}
 }
 
-// launchProjectRootAgent starts an agent that runs in the project's control
-// directory (i.e. the dir holding the .project.yaml). The project, planning,
-// and wolf agents all use this path — they do not need a wsp workspace.
+// launchProjectRootAgent starts the project agent in the project's control
+// directory (i.e. the dir holding the project.yaml) — it does not need a wsp
+// workspace. It occupies the project's main session slot (the bare project
+// path). The planning agent also runs in the control dir but has a slot of its
+// own — see launchPlanningAgent.
 //
-// After the agent's session ends the daemon re-runs handleProject on the
-// same file. This is the *only* reliable trigger for the project→planning
-// and planning→working handoffs: the agent's file write almost always
-// arrives while its own session is still in the session map, so the
-// dispatch call it would have caused gets dedup-skipped. Re-handling on
-// session end re-reads whatever the agent left behind and advances state.
+// After the agent's session ends the daemon re-runs dispatch on the same
+// file. This is the *only* reliable trigger for the project→planning
+// handoff: the agent's file write almost always arrives while its own
+// session is still in the session map, so the dispatch call it would have
+// caused gets dedup-skipped. Re-handling on session end re-reads whatever the
+// agent left behind and advances state.
 func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *project.Project) {
 	if d.runner == nil {
 		return
@@ -295,15 +314,6 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 	if d.hasSession(projectPath) {
 		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", kind.String())
 		return
-	}
-	// Only the planning agent has a workspace whose repo set could have
-	// drifted from what it was last provisioned with — sync it (cloning any
-	// newly-added repo into the existing wsp workspace) and collect the
-	// human-readable diff before building its prompt. project/wolf agents
-	// don't have a wsp workspace at all.
-	var projectChanges []string
-	if kind == agent.PlanningAgent {
-		projectChanges = d.syncPlannedRepos(projectPath, p)
 	}
 	root := filepath.Dir(projectPath)
 	plan := runner.Plan{
@@ -313,42 +323,111 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 		TasksDir:    filepath.Join(root, "tasks"),
 		Branch:      p.Branch,
 		Repos:       workspaceReposFor(p),
-		// Only the planning template reads this; the project and wolf agents
-		// ignore it. Forwarded from disk so a re-plan survives a daemon restart
-		// between the cron firing that requested it and the launch.
-		Replan: p.Replan,
-		// Only the planning template reads this either. A fresh scan at
-		// launch time rather than anything tracked in memory, so it survives
-		// a daemon restart between an intake file landing and the launch —
-		// the file itself, not yet renamed to *.processed, is the record.
-		IntakeFiles: pendingIntakeFiles(root),
-		// Only the planning template reads this too — see syncPlannedRepos.
-		ProjectChanges: projectChanges,
 	}
 	err := d.startSession(projectPath, plan, func(waitErr error) {
-		// The planning and project agents each get a circuit breaker: now that
-		// both run under `claude --print` and exit every turn, a session that
-		// ends without advancing the project (planning still status:ready, or
-		// the project agent leaving the file still unpopulated) would be
-		// relaunched unbounded — a crash loop when the sandbox is broken.
-		// afterPlanningSession / afterProjectSession bound the retries and
-		// block the project instead. Wolf just re-evaluates.
-		switch kind {
-		case agent.PlanningAgent:
-			d.afterPlanningSession(projectPath, waitErr)
-		case agent.ProjectAgent:
+		// The project agent gets a circuit breaker: it runs under
+		// `claude --print` and exits every turn, so a session that ends with
+		// the file still unpopulated would be relaunched unbounded — a crash
+		// loop when the sandbox is broken. afterProjectSession bounds the
+		// retries and blocks the project instead.
+		if kind == agent.ProjectAgent {
 			d.afterProjectSession(projectPath, waitErr)
-		default:
-			d.revisitProject(projectPath)
+			return
 		}
+		d.revisitProject(projectPath)
 	})
-	// Wolf agent failure: the project is already blocked, recursing won't
-	// help. Planning and project agent failures should block so the project
-	// doesn't strand — planning in status:ready, the project agent in an
+	// A failure here should block so the project doesn't strand in an
 	// unpopulated seed the daemon would otherwise keep relaunching.
-	if err != nil && (kind == agent.PlanningAgent || kind == agent.ProjectAgent) {
+	if err != nil && kind == agent.ProjectAgent {
 		d.transitionProjectBlocked(projectPath, p,
 			fmt.Sprintf("%s agent failed to start: %v", kind.String(), err))
+	}
+}
+
+// launchPlanningAgent starts the planning agent in the project's control
+// directory, under a session slot of its own (planningSessionKey) rather than
+// the project's main slot.
+//
+// The separate slot is what lets an intake request be planned promptly while
+// the project is `working`: the main slot is held by whichever task or commit
+// agent is running, and sharing it used to dedup-skip the planning launch,
+// stranding the request until the project went idle and something touched the
+// file again. Task and commit agents run in the wsp workspace, not the control
+// dir, and the planner only adds task files (it is told to preserve tasks in
+// flight and write new ones atomically — see planning.tmpl), so the two can
+// work side by side.
+//
+// What must never happen is two planners for one project: they would race on
+// the same task files and project.yaml. beginPlanning reserves the planning
+// slot before runner.Start (which can block for seconds provisioning the
+// worktree) and the reservation is only released by afterPlanningSession, so a
+// second dispatch — another intake file, the planner's own project.yaml write,
+// a cron poke — is a dedup no-op while one is in flight. Intake that arrives in
+// that window is not lost: afterPlanningSession re-checks intake/ and the
+// follow-up run picks it up.
+//
+// Planning only shares the project with a task or commit agent in the main
+// slot (runsAlongsidePlanning). It still waits for a project agent (still
+// populating the file planning reads; its session end dispatches planning) or
+// a review agent (it writes project.yaml status and task files in the same
+// control dir; afterReviewSession re-dispatches if intake is pending), and a
+// cron re-plan always waits, since it may rewrite or delete existing tasks —
+// which must not happen under a live task agent.
+func (d *Daemon) launchPlanningAgent(projectPath string, p *project.Project) {
+	if d.runner == nil {
+		return
+	}
+	if kind, busy := d.sessionKind(projectPath); busy && (!runsAlongsidePlanning(kind) || p.Replan) {
+		d.audit.Log("planning_wait_main_slot", "path", projectPath, "holder", kind.String(), "replan", fmt.Sprintf("%t", p.Replan))
+		return
+	}
+	root := filepath.Dir(projectPath)
+	// A fresh scan at launch time rather than anything tracked in memory, so it
+	// survives a daemon restart between an intake file landing and the launch —
+	// the file itself, not yet renamed to *.processed, is the record.
+	intake := pendingIntakeFiles(root)
+	if !d.beginPlanning(projectPath, intake) {
+		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.PlanningAgent.String())
+		return
+	}
+	// The planning agent's workspace is the one whose repo set could have
+	// drifted from what it was last provisioned with — sync it (cloning any
+	// newly-added repo into the existing wsp workspace) and collect the
+	// human-readable diff before building its prompt.
+	projectChanges := d.syncPlannedRepos(projectPath, p)
+	plan := runner.Plan{
+		Kind:        agent.PlanningAgent,
+		WorkingDir:  root,
+		ProjectPath: projectPath,
+		TasksDir:    filepath.Join(root, "tasks"),
+		Branch:      p.Branch,
+		Repos:       workspaceReposFor(p),
+		// Forwarded from disk so a re-plan survives a daemon restart between
+		// the cron firing that requested it and the launch.
+		Replan:         p.Replan,
+		IntakeFiles:    intake,
+		ProjectChanges: projectChanges,
+	}
+	if len(intake) > 0 {
+		d.audit.Log("planning_intake", "path", projectPath, "status", string(p.Status), "files", fmt.Sprintf("%d", len(intake)))
+	}
+	// Planning gets a circuit breaker: it runs under `claude --print` and exits
+	// every turn, so a session that ends without advancing the project would be
+	// relaunched unbounded — a crash loop when the sandbox is broken.
+	// afterPlanningSession bounds the retries and blocks the project instead;
+	// it is also what releases the reservation taken above.
+	started, err := d.startSessionTracked(planningSessionKey(projectPath), plan, func(waitErr error) {
+		d.afterPlanningSession(projectPath, waitErr)
+	})
+	if !started {
+		// No session, so no session-end callback to release the slot.
+		d.endPlanning(projectPath)
+	}
+	// A planning failure should block so the project doesn't strand in
+	// status:ready (or with its intake never planned).
+	if err != nil {
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("%s agent failed to start: %v", agent.PlanningAgent.String(), err))
 	}
 }
 
@@ -362,9 +441,15 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 // exactly what lets a broken environment (e.g. an acp-kit path that doesn't
 // exist, so the sandbox can't be created) spin the daemon many times a second.
 //
+// It also releases the planning slot (endPlanning) taken by
+// launchPlanningAgent, so at most one planner runs per project.
+//
 // Decision table for a finished planning session:
-//   - project advanced off status:ready → productive; reset the counter and
-//     dispatch whatever the agent left behind.
+//   - project advanced off status:ready (or was never on it — a planner run
+//     alongside tasks on a working project) → productive; reset the counter and
+//     dispatch whatever the agent left behind. That dispatch is also the
+//     follow-up: intake that landed while this run was in flight was not in its
+//     prompt, so a working project with such intake relaunches planning.
 //   - still status:ready, non-nil waitErr → the agent process itself failed to
 //     run (the acp-wrapper exited non-zero, e.g. `sbx create` failed). That is
 //     an environment/config error that relaunching cannot fix, so block
@@ -373,6 +458,10 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 //     Could be transient, so retry up to maxPlanningRetries with backoff, then
 //     block.
 func (d *Daemon) afterPlanningSession(projectPath string, waitErr error) {
+	// Release the planning slot first: everything below may dispatch, and both
+	// a follow-up planning run and the deferred completion/taskgraph checks
+	// (see planningInFlight) need to see the slot free.
+	leftover := d.endPlanning(projectPath)
 	p, err := project.Load(projectPath)
 	if err != nil {
 		// File gone or unreadable: nothing to relaunch or block. Clear any
@@ -391,6 +480,21 @@ func (d *Daemon) afterPlanningSession(projectPath string, waitErr error) {
 		// would make the *next* planning run — an incremental one, triggered by a
 		// human adding a task — re-plan the whole project instead.
 		d.resetPlanningFailures(projectPath)
+		if len(leftover) > 0 {
+			// The run was handed these and neither planned nor renamed them.
+			// Not relaunched from here (that is the loop the circuit breaker
+			// exists to prevent, and on a working project there is no
+			// status:ready to count it against); the files stay on disk and are
+			// re-armed when the project comes to rest (seed_replan).
+			fields := []string{"path", projectPath, "files", strings.Join(leftover, ",")}
+			if waitErr != nil {
+				fields = append(fields, "err", waitErr.Error())
+			}
+			d.audit.Log("planning_intake_unprocessed", fields...)
+		}
+		// Dispatching the new state is also what gives intake that arrived
+		// mid-run its follow-up planning run: a working project with unoffered
+		// intake routes straight back to launchPlanningAgent.
 		d.dispatchProject(projectPath, d.clearReplan(projectPath, p))
 		return
 	}
@@ -421,7 +525,7 @@ func (d *Daemon) afterPlanningSession(projectPath string, waitErr error) {
 // afterPlanningSession.
 //
 // The project agent's job is to turn the project.md-derived description seed
-// into a populated `.project.yaml` (status:ready), or, when the description isn't
+// into a populated `project.yaml` (status:ready), or, when the description isn't
 // enough, to escalate by setting status:blocked with a specific question.
 // Either outcome moves the project off the unpopulated (status:"") state the
 // daemon routes to the project agent. A session that ends with the file still
@@ -461,7 +565,7 @@ func (d *Daemon) afterProjectSession(projectPath string, waitErr error) {
 	if n >= maxProjectRetries {
 		d.resetProjectFailures(projectPath)
 		d.transitionProjectBlocked(projectPath, p,
-			fmt.Sprintf("project agent made no progress after %d attempts; .project.yaml still unpopulated", n))
+			fmt.Sprintf("project agent made no progress after %d attempts; project.yaml still unpopulated", n))
 		return
 	}
 	d.audit.Log("project_retry", "path", projectPath, "attempt", fmt.Sprintf("%d", n))
@@ -505,6 +609,113 @@ func (d *Daemon) resetPlanningFailures(projectPath string) {
 	d.planningMu.Lock()
 	defer d.planningMu.Unlock()
 	delete(d.planningFailures, projectPath)
+}
+
+// planningKeyMarker is the suffix planningSessionKey appends — the same trick as
+// wolfSessionKey/archiveSessionKey, appended to the final path element so
+// filepath.Dir(key) still yields the project directory.
+const planningKeyMarker = "#planning"
+
+// planningSessionKey is the session-map key for a project's planning agent. It
+// keeps the planner out of the main slot task and commit agents hold, so an
+// intake request can be planned while they run (see launchPlanningAgent).
+func planningSessionKey(projectPath string) string {
+	return projectPath + planningKeyMarker
+}
+
+// runsAlongsidePlanning reports whether a main-slot agent of kind may keep
+// running while a planner works on the same project: task and commit agents
+// work in the wsp workspace, not the control dir, and only ever touch their own
+// task file there, which the planner is told to leave alone.
+func runsAlongsidePlanning(kind agent.Kind) bool {
+	return kind == agent.TaskAgent || kind == agent.CommitAgent
+}
+
+// beginPlanning reserves projectPath's planning slot, recording offered as the
+// intake files the run will be handed. It returns false — reserve nothing — if a
+// planner is already dispatched for the project. The reservation spans from
+// before runner.Start to afterPlanningSession, wider than the session's tracked
+// lifetime, so a dispatch landing while the worktree is still being provisioned
+// is deduped too.
+func (d *Daemon) beginPlanning(projectPath string, offered []string) bool {
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	if d.planningBusy[projectPath] {
+		return false
+	}
+	d.planningBusy[projectPath] = true
+	d.planningOffered[projectPath] = offered
+	return true
+}
+
+// endPlanning releases projectPath's planning slot and returns the intake files
+// the run was handed that are still pending (not renamed to *.processed). Those
+// stay recorded as offered so unofferedIntake keeps ignoring them; everything
+// the run did process is dropped, so a later file reusing the name counts as
+// new.
+func (d *Daemon) endPlanning(projectPath string) []string {
+	pending := pendingIntakeFiles(filepath.Dir(projectPath))
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	delete(d.planningBusy, projectPath)
+	var leftover []string
+	for _, f := range d.planningOffered[projectPath] {
+		if slices.Contains(pending, f) {
+			leftover = append(leftover, f)
+		}
+	}
+	if len(leftover) == 0 {
+		delete(d.planningOffered, projectPath)
+	} else {
+		d.planningOffered[projectPath] = leftover
+	}
+	return leftover
+}
+
+// planningInFlight reports whether a planner is dispatched for projectPath.
+// Task dispatch consults it to defer the decisions a half-written plan could
+// get wrong — completing the project, or blocking it on a task graph that
+// doesn't load yet — to afterPlanningSession, which re-dispatches.
+func (d *Daemon) planningInFlight(projectPath string) bool {
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	return d.planningBusy[projectPath]
+}
+
+// unofferedIntake returns projectPath's pending intake files that no planning
+// run has been handed yet (or whose run is still in flight without them). On a
+// working project these are what start a planning run.
+func (d *Daemon) unofferedIntake(projectPath string) []string {
+	pending := pendingIntakeFiles(filepath.Dir(projectPath))
+	if len(pending) == 0 {
+		return nil
+	}
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	offered := d.planningOffered[projectPath]
+	var out []string
+	for _, f := range pending {
+		if !slices.Contains(offered, f) {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// plannerOwesIntake reports whether the planning run in flight for projectPath
+// still has intake files it was handed and hasn't processed. The reaper uses it
+// so a planner working alongside tasks — on a project already `working`, which
+// is otherwise its "done" signal — isn't mistaken for a finished one.
+func (d *Daemon) plannerOwesIntake(projectPath string) bool {
+	pending := pendingIntakeFiles(filepath.Dir(projectPath))
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	for _, f := range d.planningOffered[projectPath] {
+		if slices.Contains(pending, f) {
+			return true
+		}
+	}
+	return false
 }
 
 // backoffPlanning sleeps for a bounded, attempt-scaled delay before the next
@@ -627,7 +838,7 @@ func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) bool 
 		}
 		d.transitionProjectBlocked(projectPath, p, fmt.Sprintf(
 			"cron %q has no stop condition: add `cron_until: <RFC3339 timestamp>` "+
-				"or `cron_max_runs: <int>` to .project.yaml so the schedule can "+
+				"or `cron_max_runs: <int>` to project.yaml so the schedule can "+
 				"unschedule itself", p.Cron))
 		return false
 	}
@@ -876,6 +1087,9 @@ func (d *Daemon) dispatchNextTask(projectPath string, p *project.Project) {
 		return
 	}
 	if g.AllCommitted() {
+		if d.deferToPlanner(projectPath, "complete") {
+			return
+		}
 		d.transitionProjectComplete(projectPath, p)
 		return
 	}
@@ -945,6 +1159,9 @@ func (d *Daemon) loadTaskGraph(projectPath string, p *project.Project) (*taskgra
 	g, err := taskgraph.Load(tasksDir)
 	if err != nil {
 		d.audit.Log("taskgraph_error", "path", projectPath, "err", err.Error())
+		if d.deferToPlanner(projectPath, "taskgraph_error") {
+			return nil, false
+		}
 		d.transitionProjectBlocked(projectPath, p, "taskgraph error: "+err.Error())
 		return nil, false
 	}
@@ -952,6 +1169,22 @@ func (d *Daemon) loadTaskGraph(projectPath string, p *project.Project) (*taskgra
 		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
 	}
 	return g, true
+}
+
+// deferToPlanner reports whether a graph-wide decision — completing the
+// project, or blocking it on a graph that is incomplete or won't load — must
+// wait because a planner is running alongside the project's tasks. Mid-run the
+// planner may have written only some of its new task files (one whose
+// depends_on names a task not written yet fails the load), and a project
+// "completed" under it would go idle while it is still adding work. Nothing
+// strands: afterPlanningSession re-dispatches the project once the planner is
+// done, and the decision is made then against the finished graph.
+func (d *Daemon) deferToPlanner(projectPath, decision string) bool {
+	if !d.planningInFlight(projectPath) {
+		return false
+	}
+	d.audit.Log("dispatch_deferred_planning", "path", projectPath, "decision", decision)
+	return true
 }
 
 // dispatchReadyOrPending launches the next agent for a graph that is NOT fully

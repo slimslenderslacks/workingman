@@ -1000,7 +1000,7 @@ func TestNormalizePersistentValidation(t *testing.T) {
 	}{
 		{"persistent alone is fine", func(c *Config) { c.Persistent = true }, ""},
 		{"persistent with end conditions", func(c *Config) {
-			c.Persistent, c.ProjectPath, c.UnblockGrace, c.IdleTimeout = true, "/p/.project.yaml", time.Minute, time.Hour
+			c.Persistent, c.ProjectPath, c.UnblockGrace, c.IdleTimeout = true, "/p/project.yaml", time.Minute, time.Hour
 		}, ""},
 		{"persistent and exit-when-empty clash", func(c *Config) { c.Persistent, c.ExitWhenEmpty = true, true }, "mutually exclusive"},
 		{"unblock grace needs persistent", func(c *Config) { c.ProjectPath, c.UnblockGrace = "/p", time.Minute }, "only apply to a persistent session"},
@@ -1063,7 +1063,7 @@ func TestUnblockTracker(t *testing.T) {
 }
 
 func TestWatchUnblockedEndsOnceProjectLeavesBlocked(t *testing.T) {
-	path := filepath.Join(t.TempDir(), ".project.yaml")
+	path := filepath.Join(t.TempDir(), "project.yaml")
 	if err := project.SaveAs(path, &project.Project{Branch: "b", Status: project.StatusBlocked, BlockedReason: "x"}, project.WriterAgent); err != nil {
 		t.Fatal(err)
 	}
@@ -1089,7 +1089,7 @@ func TestWatchUnblockedEndsOnceProjectLeavesBlocked(t *testing.T) {
 }
 
 func TestWatchUnblockedTreatsMissingProjectAsUnblocked(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "gone", ".project.yaml")
+	path := filepath.Join(t.TempDir(), "gone", "project.yaml")
 	ended := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1102,7 +1102,7 @@ func TestWatchUnblockedTreatsMissingProjectAsUnblocked(t *testing.T) {
 }
 
 func TestWatchUnblockedStopsWithContext(t *testing.T) {
-	path := filepath.Join(t.TempDir(), ".project.yaml")
+	path := filepath.Join(t.TempDir(), "project.yaml")
 	if err := project.SaveAs(path, &project.Project{Branch: "b", Status: project.StatusBlocked, BlockedReason: "x"}, project.WriterAgent); err != nil {
 		t.Fatal(err)
 	}

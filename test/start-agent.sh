@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercises start-orch.sh --check-agent with a stub `op` and a throwaway key.
+# Exercises start.sh --check-agent with a stub `op` and a throwaway key.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -13,7 +13,7 @@ STUB
 chmod +x "$T/bin/op"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-out="$(PATH="$T/bin:$PATH" TMPDIR="$T" ORCH_SSH_KEY_REF=op://x/y/z "$HERE/start-orch.sh" --check-agent)"
+out="$(PATH="$T/bin:$PATH" TMPDIR="$T" ORCH_SSH_KEY_REF=op://x/y/z "$HERE/start.sh" --check-agent)"
 sock="$(sed -n 's/^SSH_AUTH_SOCK=//p' <<<"$out")"
 pid="$(sed -n 's/^SSH_AGENT_PID=//p' <<<"$out")"
 [ -n "$sock" ] && [ -n "$pid" ] || fail "no sock/pid reported: $out"
@@ -25,6 +25,6 @@ grep -q 'PRIVATE KEY' <<<"$out" && fail "private key leaked"
 
 # Failure path: op fails -> startup aborts, nothing left behind.
 printf '#!/bin/sh\nexit 1\n' > "$T/bin/op"
-if PATH="$T/bin:$PATH" TMPDIR="$T" "$HERE/start-orch.sh" --check-agent >/dev/null 2>&1; then fail "expected abort when op fails"; fi
+if PATH="$T/bin:$PATH" TMPDIR="$T" "$HERE/start.sh" --check-agent >/dev/null 2>&1; then fail "expected abort when op fails"; fi
 [ -z "$(ls -d "$T"/orch-ssh.* 2>/dev/null)" ] || fail "leftover agent dir after failure"
 echo "PASS"

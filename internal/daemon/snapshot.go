@@ -43,7 +43,7 @@ const (
 const defaultAuditEvents = 50
 
 // maxDescriptionLen caps the project description copied into a snapshot; the
-// full text lives in .project.yaml, which the reader can open itself.
+// full text lives in project.yaml, which the reader can open itself.
 const maxDescriptionLen = 400
 
 // Snapshot is the JSON-serializable picture of the daemon's runtime state that
@@ -85,16 +85,15 @@ type DaemonInfo struct {
 	AcpImage         string    `json:"acp_image,omitempty"`
 	AcpWrapper       string    `json:"acp_wrapper,omitempty"`
 	SessionsRoot     string    `json:"sessions_root,omitempty"`
-	TmuxSession      string    `json:"tmux_session,omitempty"`
 	AuditLog         string    `json:"audit_log,omitempty"`
 	StateFile        string    `json:"state_file,omitempty"`
 	Headless         bool      `json:"headless"`
 	Roots            []string  `json:"roots"`
 }
 
-// ProjectSnapshot is one work stream (one .project.yaml under a root).
+// ProjectSnapshot is one work stream (one project.yaml under a root).
 type ProjectSnapshot struct {
-	// WorkStream is the basename of the directory holding .project.yaml — the
+	// WorkStream is the basename of the directory holding project.yaml — the
 	// identifier the TUI and sandbox names use.
 	WorkStream    string `json:"work_stream"`
 	Path          string `json:"path"`
@@ -102,7 +101,7 @@ type ProjectSnapshot struct {
 	BlockedReason string `json:"blocked_reason,omitempty"`
 	Branch        string `json:"branch,omitempty"`
 	Description   string `json:"description,omitempty"`
-	// LoadError is set (and most other fields are empty) when .project.yaml
+	// LoadError is set (and most other fields are empty) when project.yaml
 	// exists but could not be parsed.
 	LoadError string `json:"load_error,omitempty"`
 
@@ -191,8 +190,8 @@ type ReviewPollInfo struct {
 
 // SessionSnapshot is one agent session.
 type SessionSnapshot struct {
-	// Key is the daemon's session-map key (the .project.yaml path, with a
-	// "#wolf"/"#archive" suffix for those kinds). Empty for disk-sourced
+	// Key is the daemon's session-map key (the project.yaml path, with a
+	// "#planning"/"#wolf"/"#archive" suffix for those kinds). Empty for disk-sourced
 	// sessions in an offline snapshot.
 	Key         string `json:"key,omitempty"`
 	Kind        string `json:"kind"`
@@ -206,9 +205,9 @@ type SessionSnapshot struct {
 	// Source is "daemon" (live tracking) or "disk" (ACP session.json).
 	Source      string `json:"source"`
 	SandboxName string `json:"sandbox_name,omitempty"`
-	// TmuxTarget is the tmux session name for non-ACP (legacy/interactive)
-	// sessions.
-	TmuxTarget string `json:"tmux_target,omitempty"`
+	// TabName is the terminal-tab session name for non-ACP sessions (the
+	// --wolf-host wolf, the legacy no-ACP path).
+	TabName string `json:"tab_name,omitempty"`
 	// ACP is set for sessions backed by an acp-wrapper.
 	ACP *ACPInfo `json:"acp,omitempty"`
 }
@@ -251,7 +250,7 @@ func newSnapshotCollector() *snapshotCollector {
 	return &snapshotCollector{cache: map[string]cachedProject{}}
 }
 
-// projects returns a snapshot of every .project.yaml under roots, sorted by
+// projects returns a snapshot of every project.yaml under roots, sorted by
 // path. Projects whose files are unchanged since the last call are served from
 // the cache (the returned values are deep-copied, so callers may attach Live).
 func (c *snapshotCollector) projects(roots []string) []ProjectSnapshot {
@@ -268,7 +267,7 @@ func (c *snapshotCollector) projects(roots []string) []ProjectSnapshot {
 				}
 				return nil
 			}
-			if entry.IsDir() || entry.Name() != ".project.yaml" {
+			if entry.IsDir() || entry.Name() != project.FileName {
 				return nil
 			}
 			if _, dup := seen[p]; dup {
@@ -301,7 +300,7 @@ func (c *snapshotCollector) project(path string) ProjectSnapshot {
 }
 
 // projectSignature fingerprints a project's inputs from stat data alone:
-// mtime+size of .project.yaml and of every tasks/*.yaml.
+// mtime+size of project.yaml and of every tasks/*.yaml.
 func projectSignature(projectPath, tasksDir string) string {
 	var b strings.Builder
 	statSig(&b, projectPath)
@@ -469,7 +468,7 @@ func auditEventsFromLines(lines []string, n int) []AuditEvent {
 
 // OfflineOptions configures BuildOfflineSnapshot.
 type OfflineOptions struct {
-	// Roots are the directories to scan for .project.yaml files. Required.
+	// Roots are the directories to scan for project.yaml files. Required.
 	Roots []string
 	// AuditLog is the audit log whose tail is reported; empty skips events.
 	AuditLog string

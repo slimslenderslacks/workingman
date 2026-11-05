@@ -76,8 +76,8 @@ func (s *Snapshot) WriteText(w io.Writer) error {
 			if ss.ACP.SocketPath != "" {
 				line += " sock=" + ss.ACP.SocketPath
 			}
-		} else if ss.TmuxTarget != "" {
-			line += "  tmux=" + ss.TmuxTarget
+		} else if ss.TabName != "" {
+			line += "  tab=" + ss.TabName
 		}
 		p("%s\n", line)
 	}

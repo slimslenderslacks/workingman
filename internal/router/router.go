@@ -67,7 +67,7 @@ type Session struct {
 	// (channels.ConversationTarget.SessionID); it changes on relaunch.
 	ID string
 	// Ref is what Attach takes: the session directory. Empty means the session
-	// cannot be attached to (a wolf running on the host under tmux).
+	// cannot be attached to (a wolf running on the host in a terminal tab).
 	Ref string
 	// WorkStream labels a wolf's project; unused for the workingman agent.
 	WorkStream string

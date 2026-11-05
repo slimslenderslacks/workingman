@@ -16,7 +16,7 @@ type WolfSession struct {
 	// Key is the daemon's session-map key ("<project path>#wolf"), the same
 	// SessionKey recorded in channels.ConversationTarget.
 	Key string
-	// ProjectPath is the .project.yaml the wolf serves.
+	// ProjectPath is the project.yaml the wolf serves.
 	ProjectPath string
 	// WorkStream is the human label of the project (see workStreamName).
 	WorkStream string
@@ -28,7 +28,7 @@ type WolfSession struct {
 	// has no runner to resolve the sessions root with.
 	Dir string
 	// Attachable is false for a wolf the router cannot tune in to: one running
-	// on the host under tmux (--wolf-host) rather than as an ACP session.
+	// on the host in a terminal tab (--wolf-host) rather than as an ACP session.
 	Attachable bool
 	StartedAt  time.Time
 }

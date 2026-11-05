@@ -4,7 +4,7 @@
 // and an optional right column showing a curated status dashboard for the
 // selected project (toggled by "tr", hidden by default), sized to half the
 // terminal's width. All three reflect live state — projects from the
-// .project.yaml files scanned by WatchProjects, sessions from a channel the
+// project.yaml files scanned by WatchProjects, sessions from a channel the
 // daemon feeds in via its WatchSessions adapter.
 package tui
 
@@ -33,7 +33,6 @@ const (
 	paneProjectDetail
 	paneProjects
 	paneTasks
-	paneAudit
 )
 
 // uiMode is the input mode the TUI is currently capturing keystrokes for.
@@ -63,10 +62,6 @@ type projectsMsg struct {
 
 type sessionsMsg struct {
 	views []SessionView
-}
-
-type auditMsg struct {
-	lines []string
 }
 
 // chordTimeoutMsg fires chordTimeoutDelay after a "t" keypress if no
@@ -101,7 +96,7 @@ type model struct {
 	projCh     <-chan []ProjectView
 	projSel    string // path of the selected project card; empty when unset
 	loaded     bool
-	attacher   tmuxAttacher
+	attacher   tabAttacher
 	statusMsg  string
 
 	// taskSel is the file path of the currently-selected task. Drives the
@@ -111,7 +106,7 @@ type model struct {
 	taskSel string
 
 	// zoomed maximizes the focused pane: when set, View renders only the
-	// focused pane filling the whole body (reclaiming the audit strip too),
+	// focused pane filling the whole body,
 	// and the `z` key toggles it back to the normal stacked layout. Because
 	// the maximized pane is always whichever pane has focus, up/down still
 	// cycle focus while zoomed — moving the maximize to the next pane rather
@@ -127,7 +122,7 @@ type model struct {
 	// command-picker menu (modeCommandPicker).
 	mode         uiMode
 	cmdPickerIdx int
-	// archiveTarget is the .project.yaml path captured when `:archive` opens
+	// archiveTarget is the project.yaml path captured when `:archive` opens
 	// the confirm modal, so the move acts on the project that was selected at
 	// the time even if a background scan reconciles projSel meanwhile.
 	archiveTarget string
@@ -136,18 +131,6 @@ type model struct {
 	// a fake. A nil remover means "no workspace manager wired in" and archive
 	// skips the removal.
 	wspRemover workspaceRemover
-
-	auditLines []string
-	auditCh    <-chan []string
-	// auditCursor is the index into auditLines of the highlighted line, drawn
-	// only while the Audit pane is focused; j/k move it (see moveAuditCursor).
-	// auditScroll is the index of the first visible line, derived from the
-	// cursor so it stays in view. When the cursor sits on the last line the
-	// pane follows the tail — new lines keep the cursor pinned to the bottom
-	// (see the auditMsg handler) so it behaves like `tail -f` until the user
-	// scrolls up.
-	auditCursor int
-	auditScroll int
 
 	// acp holds the ACP-session tab view: one tab per live non-interactive ACP
 	// session, fed by acpCh. showACP toggles the full-window tab view on top of
@@ -197,10 +180,10 @@ type model struct {
 	// unfiltered scan; see visibleProjects.
 	showHidden bool
 
-	// lastCenterFocus remembers which center-column pane (Projects, Tasks, or
-	// Audit) last held focus, so alt-h/alt-l can return focus there when the
-	// user leaves a side column back to the center column. Set in newModel
-	// and kept up to date wherever focus moves onto one of the three (see
+	// lastCenterFocus remembers which center-column pane (Projects or Tasks)
+	// last held focus, so alt-h/alt-l can return focus there when the user
+	// leaves a side column back to the center column. Set in newModel and
+	// kept up to date wherever focus moves onto one of the two (see
 	// focusLeftColumn / focusRightColumn / cycleCenterFocus /
 	// handleCenterClick).
 	lastCenterFocus pane
@@ -218,7 +201,7 @@ type model struct {
 	pendingSeq int
 }
 
-func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh <-chan []string, attacher tmuxAttacher) model {
+func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, attacher tabAttacher) model {
 	// When no sessions source is wired in (standalone tui mode), short-circuit
 	// to the empty state so the pane shows "(none)" instead of an endless
 	// "(loading…)".
@@ -226,7 +209,6 @@ func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh 
 		focus:           paneSessions,
 		projCh:          projCh,
 		sessCh:          sessCh,
-		auditCh:         auditCh,
 		sessLoaded:      sessCh == nil,
 		attacher:        attacher,
 		wspRemover:      workspace.NewWsp(),
@@ -244,9 +226,6 @@ func (m model) Init() tea.Cmd {
 	}
 	if m.sessCh != nil {
 		cmds = append(cmds, waitForSessions(m.sessCh))
-	}
-	if m.auditCh != nil {
-		cmds = append(cmds, waitForAudit(m.auditCh))
 	}
 	if m.acpCh != nil {
 		cmds = append(cmds, waitForACP(m.acpCh))
@@ -277,16 +256,6 @@ func waitForSessions(ch <-chan []SessionView) tea.Cmd {
 	}
 }
 
-func waitForAudit(ch <-chan []string) tea.Cmd {
-	return func() tea.Msg {
-		lines, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return auditMsg{lines: lines}
-	}
-}
-
 func waitForACP(ch <-chan acpTabEvent) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
@@ -314,19 +283,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessLoaded = true
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, waitForSessions(m.sessCh)
-	case auditMsg:
-		// Keep the cursor pinned to the newest line while it's already there so
-		// the pane tails the log; once the user has scrolled up, hold position
-		// (only clamping if lines dropped off the tail window shrank the list).
-		atBottom := m.auditCursor >= len(m.auditLines)-1
-		m.auditLines = msg.lines
-		if atBottom || m.auditCursor > len(m.auditLines)-1 {
-			m.auditCursor = len(m.auditLines) - 1
-		}
-		if m.auditCursor < 0 {
-			m.auditCursor = 0
-		}
-		return m, waitForAudit(m.auditCh)
 	case acpTabEvent:
 		switch msg.kind {
 		case acpTabAdded:
@@ -441,8 +397,8 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "k", "h":
 		// j/k move the selection (or scroll) WITHIN the focused pane; k is the
-		// vim "up" (previous project/task/session, or a line-scroll up in the
-		// Audit pane), h is kept as a horizontal alias. Pane focus itself moves
+		// vim "up" (previous project/task/session), h is kept as a horizontal
+		// alias. Pane focus itself moves
 		// with alt-j/alt-k (see below). Cursor keys are intentionally unbound.
 		m = m.moveSelectionInPane(-1)
 		m.statusMsg = ""
@@ -461,21 +417,20 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		return m, waitForChordTimeout(m.pendingSeq)
 	case "alt+j", "∆":
-		// ⌥j steps focus forward through the three panes stacked in the
-		// center column — Projects -> Tasks -> Audit — wrapping back to
-		// Projects. See cycleCenterFocus for the full reasoning. A no-op
+		// ⌥j steps focus forward through the two panes stacked in the
+		// center column — Projects -> Tasks — wrapping back to Projects. See cycleCenterFocus for the full reasoning. A no-op
 		// while focus is already on a side column, since there's no
 		// "up/down" relationship between those and the center stack.
 		//
 		// "∆" is the glyph a default macOS terminal emits for Option-j when
 		// Option isn't configured as a Meta key — accepting it too means the
 		// binding works out of the box there, while "alt+j" covers terminals
-		// that do send Meta (or tmux with xterm-keys).
+		// that do send Meta.
 		m = m.cycleCenterFocus(1)
 		m.statusMsg = ""
 	case "alt+k", "˚":
-		// ⌥k is the mirror of ⌥j: Audit -> Tasks -> Projects, wrapping back
-		// to Audit. See the "∆" note above for why "˚" (Option-k's glyph) is
+		// ⌥k is the mirror of ⌥j: Tasks -> Projects, wrapping back to
+		// Tasks. See the "∆" note above for why "˚" (Option-k's glyph) is
 		// accepted alongside "alt+k".
 		m = m.cycleCenterFocus(-1)
 		m.statusMsg = ""
@@ -488,7 +443,7 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch m.focus {
 		case paneProjectDetail:
 			m = m.focusCenterColumn()
-		case paneProjects, paneTasks, paneAudit:
+		case paneProjects, paneTasks:
 			m = m.focusLeftColumn()
 		}
 	case "alt+l", "¬":
@@ -497,7 +452,7 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch m.focus {
 		case paneSessions:
 			m = m.focusCenterColumn()
-		case paneProjects, paneTasks, paneAudit:
+		case paneProjects, paneTasks:
 			m = m.focusRightColumn()
 		}
 	case "z":
@@ -550,7 +505,7 @@ func (m model) toggleHiddenProjects() model {
 
 // moveSelectionInPane moves the selection (or scroll position) by delta within
 // the currently focused pane: project in Work Streams, task in Tasks, session
-// in Agent Sessions, or the cursor line in Audit. delta is -1 for the
+// in Agent Sessions. delta is -1 for the
 // previous item (left) and +1 for the next (right). Changing the project
 // reconciles the dependent task/session selections — mirroring the
 // behaviour the up/down keys used to carry before they became pane
@@ -566,84 +521,16 @@ func (m model) moveSelectionInPane(delta int) model {
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 	case paneTasks:
 		m.taskSel = moveTaskSelection(m.selectedProjectTasks(), m.taskSel, delta)
-	case paneAudit:
-		// j/k move the highlighted cursor line through the audit tail; the view
-		// follows it.
-		m = m.moveAuditCursor(delta)
 	}
 	return m
 }
-
-// auditViewport returns the Audit pane's visible row count from the current
-// layout, or ok=false when the pane isn't laid out (too short a terminal, or
-// no audit source wired in). It mirrors renderAudit's frame math (border +
-// title + blank rows) so a cursor/scroll computed here lines up with what's
-// drawn.
-func (m model) auditViewport() (contentRows int, ok bool) {
-	l := m.computeLayout()
-	if l.auditH <= 0 {
-		return 0, false
-	}
-	bs := m.borderStyle(paneAudit)
-	contentRows = l.auditH - bs.GetVerticalFrameSize() - 2 // title + blank
-	if contentRows < 0 {
-		contentRows = 0
-	}
-	return contentRows, true
-}
-
-// moveAuditCursor shifts the Audit pane's cursor line by delta and re-derives
-// the scroll offset so the cursor stays visible. A no-op when the pane isn't
-// laid out or the log is empty.
-func (m model) moveAuditCursor(delta int) model {
-	rows, ok := m.auditViewport()
-	if !ok || len(m.auditLines) == 0 {
-		return m
-	}
-	m.auditCursor, m.auditScroll = reconcileScrollCursor(m.auditCursor+delta, m.auditScroll, len(m.auditLines), rows)
-	return m
-}
-
-// reconcileScrollCursor clamps a cursor line index into [0, n-1] and derives
-// the scroll offset (index of the first visible line) so the cursor sits
-// within a contentRows-tall viewport. n is the total number of display
-// lines. Returns (0, 0) for an empty body. Shared by every pane that scrolls
-// a cursor through a list of lines (currently just Audit).
-func reconcileScrollCursor(cursor, scroll, n, contentRows int) (int, int) {
-	if n == 0 {
-		return 0, 0
-	}
-	if contentRows < 1 {
-		contentRows = 1
-	}
-	if cursor < 0 {
-		cursor = 0
-	}
-	if cursor > n-1 {
-		cursor = n - 1
-	}
-	if cursor < scroll {
-		scroll = cursor
-	}
-	if cursor >= scroll+contentRows {
-		scroll = cursor - contentRows + 1
-	}
-	if maxScroll := n - contentRows; scroll > maxScroll {
-		scroll = maxScroll
-	}
-	if scroll < 0 {
-		scroll = 0
-	}
-	return cursor, scroll
-}
-
-// scrollCursorStyle highlights the current line in a scrollable pane (Audit)
-// as a reversed bar.
-var scrollCursorStyle = lipgloss.NewStyle().Reverse(true)
 
 // handleACPKey processes a keystroke while the full-window ACP tab view is open.
 // alt-j/alt-k (or h/l) switch tabs; esc (or `a`) returns to the normal two-pane
-// UI; q and ctrl+c still quit the whole TUI. Cursor keys are unbound. On a
+// UI; q and ctrl+c still quit the whole TUI. Cursor keys are unbound. j/k
+// scroll the transcript a line, ctrl+f/ctrl+b a page; scrolling up leaves
+// follow ("live") mode for inspection mode, and G (or scrolling back to the
+// bottom) returns to following the newest output. On a
 // conversational tab (the wolf) enter starts composing a message — see
 // handleACPComposeKey. x dismisses the selected tab when its session is dead
 // (failed to start, errored, or disconnected), removing its session directory.
@@ -664,6 +551,18 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.acp.next()
 	case "alt+k", "˚", "h":
 		m.acp.prev()
+	case "j":
+		m.scrollACP(1)
+	case "k":
+		m.scrollACP(-1)
+	case "ctrl+f":
+		m.scrollACP(m.acpPage())
+	case "ctrl+b":
+		m.scrollACP(-m.acpPage())
+	case "G":
+		if t, ok := m.acp.selected(); ok {
+			t.follow()
+		}
 	case "z":
 		m.acpToolsExpanded = !m.acpToolsExpanded
 	case "x":
@@ -694,8 +593,9 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleACPComposeKey handles keys while typing a message into a conversational
 // tab: everything printable is text, enter sends, esc stops typing (the draft is
 // kept), ctrl+u clears it, and alt-j/alt-k still switch tabs. Typing is a
-// separate mode so the view's single-letter commands (q, z, h, l) stay usable on
-// every other tab and when not composing.
+// separate mode so the view's single-letter commands (q, z, h, l, j, k, G) stay
+// usable on every other tab and when not composing; while composing those are
+// text, so only the ctrl+f/ctrl+b page scroll still moves the transcript.
 func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	t, ok := m.acp.selected()
 	if !ok || !t.interactive {
@@ -717,6 +617,12 @@ func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+u":
 		t.draft = ""
+		return m, nil
+	case "ctrl+f":
+		m.scrollACP(m.acpPage())
+		return m, nil
+	case "ctrl+b":
+		m.scrollACP(-m.acpPage())
 		return m, nil
 	}
 	switch msg.Type {
@@ -753,7 +659,7 @@ func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleMouse routes a mouse event to its pane. The body is three columns
 // side by side — sessions (left, optional), the center column stacking
-// projects/tasks/audit, the project detail dashboard (right, optional) — so
+// projects/tasks, the project detail dashboard (right, optional) — so
 // X picks the column first; Y then picks the pane/row within it, via
 // handleCenterClick for the center column's own vertical stack.
 //
@@ -762,9 +668,6 @@ func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 //   - Projects pane (center, top): focus + select the card under the cursor.
 //   - Tasks pane (center, middle): focus + select the task row under the
 //     cursor.
-//   - Audit pane (center, bottom, optional): focus only; alt-j/alt-k also
-//     reach it as part of the center column's focus cycle (see
-//     cycleCenterFocus).
 //   - Project detail column (right, optional): focus only; the body is a
 //     fixed, read-only summary with nothing to select.
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -782,8 +685,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	l := m.computeLayout()
 
-	// Horizontal layout (left → right): sessions, center (projects/tasks/
-	// audit), the detail dashboard. The bands here mirror View()'s
+	// Horizontal layout (left → right): sessions, center (projects/tasks),
+	// the detail dashboard. The bands here mirror View()'s
 	// JoinHorizontal exactly so click routing and rendering can't drift.
 	centerStart := l.leftW
 	rightStart := centerStart + l.centerW
@@ -824,12 +727,11 @@ func (m model) handleDetailClick() (tea.Model, tea.Cmd) {
 }
 
 // handleCenterClick maps a click at (xRel, y) — coordinates relative to the
-// center column's own top-left corner — to whichever of Projects, Tasks, or
-// Audit occupies that row of the column's vertical stack.
+// center column's own top-left corner — to whichever of Projects or Tasks
+// occupies that row of the column's vertical stack.
 func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 	projectsEnd := l.projectsH
 	tasksEnd := projectsEnd + l.tasksH
-	auditEnd := tasksEnd + l.auditH
 
 	if y < projectsEnd {
 		innerW := l.centerW - unfocusedBorder.GetHorizontalFrameSize()
@@ -870,12 +772,6 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if l.auditH > 0 && y < auditEnd {
-		m.focus = paneAudit
-		m.lastCenterFocus = paneAudit
-		m.statusMsg = ""
-		return m, nil
-	}
 	// Click below every pane in the center column (only reachable when the
 	// stack doesn't fill the column, or on a stray row the outer Y bounds
 	// check let through). Focus projects as a safe default so j/k still does
@@ -899,22 +795,22 @@ func taskRowAtY(y, paneTop, count, treeRows int) int {
 	return rel
 }
 
-// attachSelected dispatches the tmux-attach command for the currently
-// selected session row. The actual suspend/resume is owned by bubbletea via
-// tea.ExecProcess; this model just returns the Cmd.
+// attachSelected attaches to the currently selected session row: an ACP
+// session opens on its ACP tab; any other session (the --wolf-host wolf) has
+// its terminal tab focused via the attacher.
 func (m model) attachSelected() (tea.Model, tea.Cmd) {
 	if m.attacher == nil {
-		m.statusMsg = "tmux attach disabled (no attacher wired)"
+		m.statusMsg = "attach disabled (no attacher wired)"
 		return m, nil
 	}
-	target, ok := selectedTmuxTarget(m.sessions, m.sessSel)
+	target, ok := selectedTabName(m.sessions, m.sessSel)
 	if !ok {
 		m.statusMsg = "no session selected"
 		return m, nil
 	}
 	m.statusMsg = ""
-	// An ACP-backed session (planning/task/commit/wolf) has no tmux window to
-	// attach to: its "attach" is the ACP tab view, opened on that session's tab.
+	// An ACP-backed session (planning/task/commit/wolf) has no terminal tab to
+	// switch to: its "attach" is the ACP tab view, opened on that session's tab.
 	// For the wolf this is how a human watches and types into it.
 	if m.acpCh != nil && selectedIsACP(m.sessions, m.sessSel) {
 		m.acp.selectID(target)
@@ -936,10 +832,10 @@ func selectedIsACP(views []SessionView, id string) bool {
 	return false
 }
 
-func selectedTmuxTarget(views []SessionView, id string) (string, bool) {
+func selectedTabName(views []SessionView, id string) (string, bool) {
 	for _, v := range views {
 		if v.ID == id {
-			return v.TmuxTarget, true
+			return v.TabName, true
 		}
 	}
 	return "", false
@@ -1015,23 +911,16 @@ func projectCardAtPoint(xRel, yRel, innerWidth, count int) int {
 	return idx
 }
 
-// cycleCenterFocus steps focus through the three panes stacked in the center
-// column — Projects, Tasks, Audit (see computeLayout/splitCenterColumn) — in
-// the direction given by delta (+1 for alt-j, -1 for alt-k), wrapping at
-// either end. Bound to alt-j/alt-k.
-//
-// Audit used to be excluded from this cycle on the theory that a read-only
-// log tail didn't belong in a cycle meant for picking an item from a list,
-// leaving click (see handleMouse/handleCenterClick) as the only way to focus
-// it. That left no keyboard path onto Audit at all, which is worse than the
-// inconsistency it was meant to avoid, so Audit rejoined the cycle; click
-// remains available as a second way onto any of the three.
+// cycleCenterFocus steps focus through the two panes stacked in the center
+// column — Projects, Tasks (see computeLayout/splitCenterColumn) — in the
+// direction given by delta (+1 for alt-j, -1 for alt-k), wrapping at either
+// end. Bound to alt-j/alt-k.
 //
 // A no-op when focus is on a side column; alt-h/alt-l
 // (focusLeftColumn/focusRightColumn/focusCenterColumn) own moving focus onto
 // and off of the center column.
 func (m model) cycleCenterFocus(delta int) model {
-	order := [...]pane{paneProjects, paneTasks, paneAudit}
+	order := [...]pane{paneProjects, paneTasks}
 	idx := -1
 	for i, p := range order {
 		if p == m.focus {
@@ -1056,7 +945,7 @@ func (m model) focusLeftColumn() model {
 	if !m.leftVisible {
 		return m
 	}
-	if m.focus == paneProjects || m.focus == paneTasks || m.focus == paneAudit {
+	if m.focus == paneProjects || m.focus == paneTasks {
 		m.lastCenterFocus = m.focus
 	}
 	m.focus = paneSessions
@@ -1071,7 +960,7 @@ func (m model) focusRightColumn() model {
 	if !m.rightVisible {
 		return m
 	}
-	if m.focus == paneProjects || m.focus == paneTasks || m.focus == paneAudit {
+	if m.focus == paneProjects || m.focus == paneTasks {
 		m.lastCenterFocus = m.focus
 	}
 	m.focus = paneProjectDetail
@@ -1733,7 +1622,7 @@ func renderProjectCardBody(v ProjectView, width int) string {
 	}
 	name := cardNameStyle.Render(truncate(label, inner))
 
-	// A project whose .project.yaml failed to parse gets an error card instead
+	// A project whose project.yaml failed to parse gets an error card instead
 	// of a normal status/branch/task line: a red badge plus the parse message,
 	// so it stays visible and the user can select it to see the error and go
 	// fix the file directly.
@@ -1817,8 +1706,8 @@ func prURL(pr project.PullRequest) string {
 }
 
 // hyperlink wraps label in an OSC 8 terminal hyperlink escape sequence so
-// terminals that support it (iTerm2, Kitty, WezTerm, Windows Terminal, tmux
-// with passthrough, ...) render label as clickable, opening url. Terminals
+// terminals that support it (Ghostty, iTerm2, Kitty, WezTerm, Windows Terminal,
+// ...) render label as clickable, opening url. Terminals
 // that don't recognize OSC 8 simply show label — the escapes carry no
 // glyphs of their own, so there's no unsupported-terminal fallback to write.
 func hyperlink(url, label string) string {
@@ -1862,16 +1751,6 @@ func truncate(s string, width int) string {
 	}
 	return "…"
 }
-
-// auditPaneHeight is how many rows the audit log pane occupies (including
-// borders + title). Sized so ~6 lines of log fit comfortably without
-// crowding Projects/Tasks stacked above it in the center column.
-const auditPaneHeight = 10
-
-// minAuditH is the floor below which the audit pane inside the center
-// column is dropped entirely rather than rendered too short to be useful:
-// enough for its border rows plus a couple of tail lines.
-const minAuditH = 5
 
 // projectsMinHeight is the floor for the projects pane when the body height
 // is large enough to split. Sized so exactly one row of cards fits cleanly:
@@ -1920,20 +1799,19 @@ const (
 // click-routing math stay in lockstep.
 //
 // The body is three columns side by side: an optional left column (sessions,
-// "tl"), a center column stacking projects, tasks, and the audit log in that
-// order, and an optional right column holding the project detail dashboard
+// "tl"), a center column stacking projects above tasks, and an optional right column holding the project detail dashboard
 // ("tr"), sized to half the terminal's current width. leftW/rightW are 0
 // when the corresponding column is toggled off or the terminal is too
-// narrow to give it room without starving the center column; tasksH/auditH
-// are 0 when the terminal is too short to fit them. bodyH is the full body
+// narrow to give it room without starving the center column; tasksH is 0
+// when the terminal is too short to fit them. bodyH is the full body
 // height (window height minus the footer) shared by all three columns —
 // left/right are sized to it directly, while the center column further
-// divides it into projectsH/tasksH/auditH via splitCenterColumn. The footer
+// divides it into projectsH/tasksH via splitCenterColumn. The footer
 // spans the full width (bodyW) below the body.
 type uiLayout struct {
-	bodyW, bodyH                                int
-	leftW, centerW, rightW                      int
-	projectsH, tasksH, sessionsH, yamlH, auditH int
+	bodyW, bodyH                        int
+	leftW, centerW, rightW              int
+	projectsH, tasksH, sessionsH, yamlH int
 }
 
 func (m model) computeLayout() uiLayout {
@@ -1967,7 +1845,7 @@ func (m model) computeLayout() uiLayout {
 
 	// Sized off the cards actually drawn, not the whole scan — hidden work
 	// streams take no rows, so they must not claim any of the column's height.
-	projH, tasksH, auditH := splitCenterColumn(bodyH, centerW, len(m.visibleProjects()), m.auditCh != nil)
+	projH, tasksH := splitCenterColumn(bodyH, centerW, len(m.visibleProjects()))
 
 	leftH, yamlH := 0, 0
 	if leftW > 0 {
@@ -1987,48 +1865,31 @@ func (m model) computeLayout() uiLayout {
 		tasksH:    tasksH,
 		sessionsH: leftH,
 		yamlH:     yamlH,
-		auditH:    auditH,
 	}
 }
 
 // splitCenterColumn divides the center column's bodyH rows between projects
-// (top), tasks (middle), and audit (bottom, when auditWanted).
+// (top) and tasks (bottom).
 //
-// Sizing strategy, most to least important: projects always gets at least
-// projectsMinHeight, growing to whatever height it needs to render every
-// card without truncation (see desiredProjectsHeight); tasks gets whatever
-// is left down to its own minimum; audit — the newest and least essential
-// addition to the stack — is only given room when projects and tasks can
-// both still fit at their minimums after its cut, and is capped to a third
-// of the column so it can't dominate a tall terminal. When there isn't room
-// for both projects and tasks at their minimums, tasks (and, before it,
-// audit) is dropped and projects takes the rest — the same fallback the
-// detail pane used to get before tasks took its place in the center column.
+// Sizing strategy: projects always gets at least projectsMinHeight, growing
+// to whatever height it needs to render every card without truncation (see
+// desiredProjectsHeight); tasks gets everything left, down to its own
+// minimum. When there isn't room for both at their minimums, tasks is dropped
+// and projects takes the whole column.
 //
 // All clamps prefer fitting within bodyH over hitting the per-pane minimums
 // so the center column's stack never overflows past bodyH.
-func splitCenterColumn(bodyH, centerW, projCount int, auditWanted bool) (proj, tasks, audit int) {
+func splitCenterColumn(bodyH, centerW, projCount int) (proj, tasks int) {
 	if bodyH <= 0 {
-		return 0, 0, 0
+		return 0, 0
 	}
 	desired := desiredProjectsHeight(centerW, projCount)
 	if desired < projectsMinHeight {
 		desired = projectsMinHeight
 	}
 
-	if auditWanted {
-		candidate := auditPaneHeight
-		if candidate > bodyH/3 {
-			candidate = bodyH / 3
-		}
-		if candidate >= minAuditH && bodyH-candidate >= projectsMinHeight+tasksMinHeight {
-			audit = candidate
-		}
-	}
-
-	remaining := bodyH - audit
-	if remaining >= projectsMinHeight+tasksMinHeight {
-		maxProj := remaining - tasksMinHeight
+	if bodyH >= projectsMinHeight+tasksMinHeight {
+		maxProj := bodyH - tasksMinHeight
 		proj = desired
 		if proj > maxProj {
 			proj = maxProj
@@ -2036,15 +1897,10 @@ func splitCenterColumn(bodyH, centerW, projCount int, auditWanted bool) (proj, t
 		if proj < projectsMinHeight {
 			proj = projectsMinHeight
 		}
-		tasks = remaining - proj
-		return proj, tasks, audit
+		return proj, bodyH - proj
 	}
-	// Not enough room for the tasks pane; projects takes everything left.
-	proj = remaining
-	if proj < 1 {
-		proj = 1
-	}
-	return proj, 0, audit
+	// Not enough room for the tasks pane; projects takes everything.
+	return bodyH, 0
 }
 
 // desiredProjectsHeight returns the row count the projects pane would need
@@ -2120,8 +1976,7 @@ func (m model) View() string {
 
 	footer := m.renderFooter()
 
-	// Maximized: the focused pane fills the whole region above the footer,
-	// reclaiming even the audit strip for the most vertical space.
+	// Maximized: the focused pane fills the whole region above the footer.
 	if m.zoomed {
 		const footerH = 1
 		zoomH := m.height - footerH
@@ -2137,9 +1992,6 @@ func (m model) View() string {
 	centerPanes := []string{m.renderProjects(l.centerW, l.projectsH)}
 	if l.tasksH > 0 {
 		centerPanes = append(centerPanes, m.renderTasks(l.centerW, l.tasksH))
-	}
-	if l.auditH > 0 {
-		centerPanes = append(centerPanes, m.renderAudit(l.centerW, l.auditH))
 	}
 	center := lipgloss.JoinVertical(lipgloss.Left, centerPanes...)
 
@@ -2168,8 +2020,6 @@ func (m model) renderFocusedPane(width, height int) string {
 		return m.renderProjectDetail(width, height)
 	case paneSessions:
 		return m.renderSessions(width, height)
-	case paneAudit:
-		return m.renderAudit(width, height)
 	default: // paneProjects
 		return m.renderProjects(width, height)
 	}
@@ -2759,79 +2609,9 @@ func taskStatusStyle(s task.Status) lipgloss.Style {
 	return dimStyle
 }
 
-// renderAudit draws the audit log tail pane that lives at the bottom of the
-// center column, below Projects and Tasks. Lines are shown newest-last
-// (matching `tail -f` semantics) so the eye naturally lands on the most
-// recent event at the bottom of the pane.
-//
-// `height` is the total rows the pane should occupy. lipgloss.Height sets
-// content height (borders add 2), so we subtract the frame size before
-// handing it to .Height().
-func (m model) renderAudit(width, height int) string {
-	bs := m.borderStyle(paneAudit)
-	base := bs.Width(width - bs.GetHorizontalBorderSize())
-	innerHeight := height - base.GetVerticalFrameSize()
-	if innerHeight < 0 {
-		innerHeight = 0
-	}
-	style := base.Height(innerHeight).MaxWidth(width)
-	innerWidth := width - style.GetHorizontalFrameSize()
-	if innerWidth < 0 {
-		innerWidth = 0
-	}
-	maxLines := innerHeight
-	if maxLines < 0 {
-		maxLines = 0
-	}
-
-	var b strings.Builder
-	if len(m.auditLines) == 0 {
-		b.WriteString(dimStyle.Render("(empty)"))
-		return style.Render(clampLines(b.String(), innerHeight))
-	}
-
-	// When focused, draw a cursor line and scroll to keep it visible so j/k can
-	// walk the tail. Otherwise the pane stays display-only, pinning the newest
-	// lines to the bottom the way `tail -f` does.
-	if m.focus == paneAudit {
-		cursor, scroll := reconcileScrollCursor(m.auditCursor, m.auditScroll, len(m.auditLines), maxLines)
-		end := scroll + maxLines
-		if end > len(m.auditLines) {
-			end = len(m.auditLines)
-		}
-		for i := scroll; i < end; i++ {
-			line := truncate(m.auditLines[i], innerWidth)
-			if i == cursor {
-				// Width pads the highlight to a full-width bar so the cursor
-				// line reads clearly regardless of the log line's length.
-				line = scrollCursorStyle.Width(innerWidth).Render(line)
-			} else {
-				line = dimStyle.Render(line)
-			}
-			b.WriteString(line)
-			if i < end-1 {
-				b.WriteString("\n")
-			}
-		}
-		return style.Render(clampLines(b.String(), innerHeight))
-	}
-
-	lines := m.auditLines
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
-	}
-	for i, line := range lines {
-		b.WriteString(dimStyle.Render(truncate(line, innerWidth)))
-		if i < len(lines)-1 {
-			b.WriteString("\n")
-		}
-	}
-	return style.Render(clampLines(b.String(), innerHeight))
-}
-
 // renderFooter draws the bottom hint line. Variants, in precedence order:
 //
-//   - statusMsg set (e.g. tmux-attach failure, "created project foo"): the
+//   - statusMsg set (e.g. tab-attach failure, "created project foo"): the
 //     message replaces the hint so the user can't miss it.
 //   - Work-streams pane focused: the hint advertises `:` — the single entry
 //     point to the command menu — rather than listing every command inline.
@@ -2876,8 +2656,6 @@ func paneName(p pane) string {
 		return "detail"
 	case paneTasks:
 		return "tasks"
-	case paneAudit:
-		return "audit"
 	default: // paneProjects
 		return "work streams"
 	}
@@ -2886,15 +2664,15 @@ func paneName(p pane) string {
 // Run launches the TUI. It scans the given roots for projects and live-updates
 // the gallery as files change; the sessions pane is fed by sessCh, which the
 // caller wires up to a real source (the daemon's WatchSessions) or leaves nil
-// for standalone/demo mode. The audit log pane at the bottom tails auditPath
-// when non-empty. When sessionsRoot is non-empty, Run also watches that ACP
+// for standalone/demo mode. When sessionsRoot is non-empty, Run also watches that ACP
 // sessions root and feeds the `a`-key tab view one tab per live ACP session.
 // Run blocks until the user quits or ctx is cancelled.
 //
-// Mouse cell-motion is enabled so the sessions pane responds to clicks. The
-// tmux-attach plumbing opens a new Terminal.app window via osascript, so the
-// TUI keeps running while the user works in the attached session.
-func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, auditPath, sessionsRoot string, interactive InteractiveLauncher) error {
+// Mouse cell-motion is enabled so the sessions pane responds to clicks.
+// Attaching to a non-ACP session focuses its terminal tab through tabs (nil
+// uses a default terminal.TabLauncher), so the TUI keeps running in its own
+// tab while the user works in the session's.
+func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, sessionsRoot string, interactive InteractiveLauncher, tabs TabFocuser) error {
 	tuiCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -2902,14 +2680,7 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, audit
 	if len(roots) > 0 {
 		ch = WatchProjects(tuiCtx, roots, time.Second)
 	}
-	var auditCh <-chan []string
-	if auditPath != "" {
-		// Keep a deeper tail than the pane shows so the Audit pane's cursor
-		// (j/k) has real scrollback to walk, bounded by TailAudit's byte window.
-		auditCh = TailAudit(tuiCtx, auditPath, 250*time.Millisecond, 200)
-	}
-
-	m := newModel(ch, sessCh, auditCh, newTmuxAttacher())
+	m := newModel(ch, sessCh, newTabAttacher(tabs))
 	// The `:dir`/`:session` commands need a launcher wired to the daemon's
 	// runner (integrated mode). Standalone `orch tui` passes nil and those
 	// commands report they're unavailable.
