@@ -36,7 +36,7 @@ charged against it.
 
 ## SSH agent: commit signing and push (private ssh-agent)
 
-`./start-orch.sh` starts a **private `ssh-agent`** for the daemon, loads the
+`./start.sh` starts a **private `ssh-agent`** for the daemon, loads the
 signing key into it straight from 1Password (never written to disk), and
 exports its `SSH_AUTH_SOCK` so sbx forwards it into every sandbox. The same
 agent serves both commit signing and `git push` over ssh remotes (wsp repos use
@@ -51,8 +51,8 @@ unattended runs would hang.
   **"Personal"** via `op read`. Override the location with `ORCH_SSH_KEY_REF`
   (an `op://` reference to an openssh-format private key).
 - `op` must authenticate **non-interactively** (`OP_SERVICE_ACCOUNT_TOKEN`, or
-  an already-unlocked CLI session); otherwise start-orch fails at startup.
-- The agent's lifetime is tied to `start-orch.sh`: it is killed (and its
+  an already-unlocked CLI session); otherwise start.sh fails at startup.
+- The agent's lifetime is tied to `start.sh`: it is killed (and its
   socket dir removed) when the script exits.
 - If orch is started without it (`SSH_AUTH_SOCK` unset or the macOS launchd
   agent) the daemon logs an `ssh_auth_sock_unusable` audit event: commit
@@ -82,7 +82,13 @@ mkdir -p ~/orch
 ./orch --root ~/orch --audit-log ~/orch/audit.log
 ```
 
-Repeat `--root` for multiple trees. Watch the audit log in another shell:
+Repeat `--root` for multiple trees.
+
+For day-to-day use, run `./start.sh` instead. It rebuilds `orch` and
+`acp-wrapper` from source, starts the private ssh-agent (see above), restarts
+sandboxd bound to it, and then runs the daemon and TUI in the foreground of
+the terminal you launched it from — there is no wrapping tmux session.
+`Ctrl-C` stops orch and tears the private agent down. Watch the audit log in another shell:
 
 ```sh
 tail -f ~/orch/audit.log

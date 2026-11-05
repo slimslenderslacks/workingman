@@ -203,7 +203,7 @@ func PushPreflight(ctx context.Context, run RunFunc, sbxPath, sandbox string) Pu
 	out, err := run(ctx, sbxPath, "exec", sandbox, "--", "ssh-add", "-l")
 	if err != nil || !strings.Contains(string(out), "SHA256:") {
 		return PushResult{Reason: "the SSH agent forwarded into the sandbox has no key (or is unreachable). " +
-			"sandboxd was probably restarted without the private ssh-agent from start-orch.sh; run ./check-signing.sh --yes on the host."}
+			"sandboxd was probably restarted without the private ssh-agent from start.sh; run ./check-signing.sh --yes on the host."}
 	}
 	probe := "ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 git@" + PushHost + " 2>&1"
 	out, _ = run(ctx, sbxPath, "exec", sandbox, "--", "sh", "-c", probe)
@@ -217,7 +217,7 @@ func classifyPushProbe(out string) PushResult {
 		return PushResult{OK: true}
 	case strings.Contains(lower, "permission denied"):
 		return PushResult{Reason: "the forwarded SSH key is not authorised by " + PushHost + " (Permission denied (publickey)). " +
-			"Load a key with push access via ORCH_SSH_KEY_REF in start-orch.sh (check SSO authorisation)."}
+			"Load a key with push access via ORCH_SSH_KEY_REF in start.sh (check SSO authorisation)."}
 	case strings.Contains(lower, "host key verification failed"):
 		return PushResult{Reason: "host key verification failed for " + PushHost + " inside the sandbox; seed known_hosts or allow StrictHostKeyChecking=accept-new."}
 	default:

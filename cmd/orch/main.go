@@ -133,13 +133,13 @@ func runDaemon(args []string) {
 		a.Seed(lines)
 	}
 
-	// Commit signing relies on the private ssh-agent that start-orch.sh starts
+	// Commit signing relies on the private ssh-agent that start.sh starts
 	// and exports as SSH_AUTH_SOCK. We never redirect it: if it is unset or is
 	// the macOS launchd agent (no signing key), warn loudly instead.
 	if sshAgentUnusable(os.Getenv("SSH_AUTH_SOCK")) {
 		a.Log("ssh_auth_sock_unusable",
 			"path", os.Getenv("SSH_AUTH_SOCK"),
-			"detail", "SSH_AUTH_SOCK is unset or the macOS launchd agent; commit signing will fail — start orch via start-orch.sh so it runs with the private ssh-agent")
+			"detail", "SSH_AUTH_SOCK is unset or the macOS launchd agent; commit signing will fail — start orch via start.sh so it runs with the private ssh-agent")
 	}
 
 	wsMgr, err := buildWorkspaceManager(*workspaceMode, *stubRoot)

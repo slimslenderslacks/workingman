@@ -232,7 +232,7 @@ type Config struct {
 	// VM boundary (connect: connection refused) — and overriding SSH_AUTH_SOCK
 	// to that path would only clobber sbx's working socket. So signing relies on
 	// sandboxd being started with the private workingman ssh-agent (started by
-	// start-orch.sh, key loaded from 1Password) as its SSH_AUTH_SOCK, and the wrapper leaves SSH_AUTH_SOCK alone.
+	// start.sh, key loaded from 1Password) as its SSH_AUTH_SOCK, and the wrapper leaves SSH_AUTH_SOCK alone.
 	//
 	// IMPORTANT: SigningKey being non-empty means signing is *configured*, not
 	// that it will *work* — signingPreflight verifies the forwarded agent
@@ -902,7 +902,7 @@ func Run(ctx context.Context, c Config) error {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING signing preflight FAILED — the SSH "+
 			"agent forwarded into sandbox %q has no key. Commit signing is DISABLED for this session "+
 			"so `git commit` still succeeds (UNSIGNED) instead of hard-failing. Likely sandboxd was restarted without "+
-			"the private ssh-agent started by start-orch.sh; run ./check-signing.sh to fix.\n",
+			"the private ssh-agent started by start.sh; run ./check-signing.sh to fix.\n",
 			c.SessionID, c.SandboxName)
 	} else if checked {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: signing preflight OK — forwarded agent holds a key\n", c.SessionID)

@@ -95,4 +95,4 @@ The workingman agent is an always-on assistant, reachable over a messaging chann
 
 # ssh agent
 
-Agents run in sandboxes whose ssh agent is whatever agent sandboxd was started with. The daemon therefore needs a usable, non-interactive `SSH_AUTH_SOCK` (the private agent started by `start-orch.sh`) both for commit signing and for the commit agent's `git push` to ssh remotes. If sandboxd is restarted without it, new sandboxes get an empty agent and push fails.
+Agents run in sandboxes whose ssh agent is whatever agent sandboxd was started with. The daemon therefore needs a usable, non-interactive `SSH_AUTH_SOCK` (the private agent started by `start.sh`) both for commit signing and for the commit agent's `git push` to ssh remotes. If sandboxd is restarted without it, new sandboxes get an empty agent and push fails.

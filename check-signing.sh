@@ -3,7 +3,7 @@
 # sbx sandboxes.
 #
 # Background: the orch commit agent SSH-signs commits using a key held by the
-# private ssh-agent that start-orch.sh starts (key loaded from 1Password via
+# private ssh-agent that start.sh starts (key loaded from 1Password via
 # `op`, never on disk) and exports as SSH_AUTH_SOCK. sbx exposes an agent inside
 # every sandbox at /run/ssh-agent.sock, but only by proxying whatever agent the
 # *sandboxd daemon* was launched with. If Docker Desktop later restarts sandboxd
@@ -13,10 +13,10 @@
 #
 # The private agent socket is taken from SSH_AUTH_SOCK in this shell if it is a
 # live non-system agent, otherwise from the environment of the running
-# start-orch.sh process.
+# start.sh process.
 #
 # It distinguishes the failure modes:
-#   - no private agent / agent has no key -> restart start-orch.sh (no sandboxd
+#   - no private agent / agent has no key -> restart start.sh (no sandboxd
 #     restart helps).
 #   - sandboxd forwarding an empty agent -> restart sandboxd with that socket.
 #
@@ -44,15 +44,15 @@ log()  { printf '%s\n' "$*"; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # --- locate the private agent socket ---------------------------------------
-# Echoes the socket path of the private start-orch.sh agent, or nothing.
+# Echoes the socket path of the private start.sh agent, or nothing.
 detect_agent_sock() {
   local cand pid
   cand="${SSH_AUTH_SOCK:-}"
   if [ -n "$cand" ] && [ -S "$cand" ] && [[ "$cand" != *com.apple.launchd* ]]; then
     printf '%s\n' "$cand"; return
   fi
-  # Fall back to the environment of the running start-orch.sh (ps eww prints it).
-  for pid in $(pgrep -f 'start-orch\.sh' 2>/dev/null || true); do
+  # Fall back to the environment of the running start.sh (ps eww prints it).
+  for pid in $(pgrep -f 'start\.sh' 2>/dev/null || true); do
     cand="$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | sed -n 's/^SSH_AUTH_SOCK=//p' | head -n1)"
     if [ -n "$cand" ] && [ -S "$cand" ] && [[ "$cand" != *com.apple.launchd* ]]; then
       printf '%s\n' "$cand"; return
@@ -88,7 +88,7 @@ restart_sandboxd() {
 # --- preflight ------------------------------------------------------------
 command -v sbx >/dev/null 2>&1 || fail "sbx not found on PATH"
 AGENT_SOCK="$(detect_agent_sock)"
-[ -n "$AGENT_SOCK" ] || fail "no private ssh-agent found: SSH_AUTH_SOCK is unset/the system agent and no running start-orch.sh exports one. Start orch via ./start-orch.sh."
+[ -n "$AGENT_SOCK" ] || fail "no private ssh-agent found: SSH_AUTH_SOCK is unset/the system agent and no running start.sh exports one. Start orch via ./start.sh."
 
 # Does the private agent itself hold the key right now? ssh-add -l exits
 # 0 (has identities), 1 (none — empty), or 2 (cannot connect).
@@ -96,8 +96,8 @@ if SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -l >/dev/null 2>&1; then
   :
 else
   case $? in
-    1) fail "private ssh-agent at $AGENT_SOCK has NO identities — restart start-orch.sh (check 'op' can authenticate non-interactively); a sandboxd restart will not help." ;;
-    *) fail "cannot connect to the private ssh-agent at $AGENT_SOCK — start-orch.sh may have exited (the agent dies with it)." ;;
+    1) fail "private ssh-agent at $AGENT_SOCK has NO identities — restart start.sh (check 'op' can authenticate non-interactively); a sandboxd restart will not help." ;;
+    *) fail "cannot connect to the private ssh-agent at $AGENT_SOCK — start.sh may have exited (the agent dies with it)." ;;
   esac
 fi
 log "private ssh-agent: OK (holds the signing key) at $AGENT_SOCK"

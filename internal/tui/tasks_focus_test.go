@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -56,6 +57,12 @@ func withTaskFixtures(t *testing.T) (m model, firstRowPath, secondRowPath string
 		Status:    task.StatusReady,
 		DependsOn: []string{"alpha"},
 	}); err != nil {
+		t.Fatal(err)
+	}
+	// Pin beta's mtime ahead of alpha's: on coarse-timestamp filesystems the
+	// two writes can land on the same mtime and tie the newest-first sort.
+	later := time.Now().Add(time.Second)
+	if err := os.Chtimes(betaPath, later, later); err != nil {
 		t.Fatal(err)
 	}
 	// Newest file first: beta was written last, so it heads the pane.
