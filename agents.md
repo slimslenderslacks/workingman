@@ -8,7 +8,7 @@ a daemon-owned, always-on observer that answers questions about the orch state
 (§8).
 `design.md` has the original spec; this document describes the agents as
 implemented today, which has moved past that spec in places (most notably: an
-ACP/sandbox launch path superseding the tmux+`sbx exec` path for non-interactive
+ACP/sandbox launch path superseding the terminal-tab+`sbx exec` path for non-interactive
 agents, and a review agent design.md never mentions).
 
 Every agent's role is defined by `agent.Kind` (`internal/agent/agent.go`).
@@ -21,7 +21,7 @@ is no longer exactly that split (see the wolf):
   Runner.startACP`), when the daemon is wired with an `AcpLauncher` (production
   always is). The wrapper creates the sandbox (with `acp-kit` layered on),
   execs the ACP client, and serves `<SessionsRoot>/<id>/agent.sock` for the TUI
-  to stream. There is no tmux window to attach to for these. The wrapper is
+  to stream. There is no terminal tab to switch to for these. The wrapper is
   launched `--exit-when-empty`: it ends when the TUI watcher that drove the one
   prompt disconnects.
 - **Interactive** (wolf) — a human is expected in the loop.
@@ -29,7 +29,8 @@ is no longer exactly that split (see the wolf):
     exit-when-empty; it ends when its work is done, see §5) when an
     `AcpLauncher` is configured, so the TUI, the daemon and messaging channels
     can all tune in to one conversation. `orch --wolf-host` (`Runner.WolfOnHost`)
-    keeps the pre-ACP host/tmux wolf as an escape hatch. `Runner.UsesACP(kind)`
+    keeps the pre-ACP host wolf — in a new terminal tab (`internal/terminal`,
+    docs/terminal-tabs.md) — as an escape hatch. `Runner.UsesACP(kind)`
     is the single place that answers "does this kind run under ACP?".
 
 Every launch, regardless of family, gets the same two-file handoff written
@@ -46,8 +47,9 @@ The initial message piped to `claude` is always the same one-liner
 > Read .orch/instructions.md and .orch/context.yaml, then follow the instructions.
 
 Sandbox names are derived by `runner.SandboxNameFor` (`_` replaced with `-`
-since sbx rejects underscores). Session/tmux/ACP-session names come from
-`runner.sessionName`: `"<kind>-<task-name-or-branch-or-hash>"`.
+since sbx rejects underscores). Session/ACP-session names come from
+`runner.sessionName`: `"<kind>-<task-name-or-branch-or-hash>"`; a terminal tab
+is tracked by that name and titled with the project name (`runner.tabTitle`).
 
 ---
 
@@ -283,11 +285,11 @@ restart finding the file already blocked).
 
 | | ACP wolf (default with `--acp-kit`) | host wolf (`--wolf-host`, or no `--acp-kit`) |
 |---|---|---|
-| process | `acp-wrapper --persistent` host process → sandboxed `claude-acp-client` | tmux window running `claude --dangerously-skip-permissions` |
+| process | `acp-wrapper --persistent` host process → sandboxed `claude-acp-client` | new terminal tab (titled after the project) running `claude --dangerously-skip-permissions` |
 | where it runs | sbx sandbox `<work-stream>-wolf` (`runner.ACPSandboxNameFor`) | directly on the host, no sandbox (`SandboxNameFor` returns `""`) |
-| who can talk to it | anything that can dial `<SessionsRoot>/<id>/agent.sock`: the TUI tab, the daemon, a messaging channel | a human attached to tmux |
+| who can talk to it | anything that can dial `<SessionsRoot>/<id>/agent.sock`: the TUI tab, the daemon, a messaging channel | a human at that terminal tab |
 | survives an `orch` restart | yes (`detachable`; re-adopted under the wolf key by `reconcileSessions`) | no (closed on shutdown, like before) |
-| ends | see "Completion" below | when its tmux window closes |
+| ends | see "Completion" below | when claude in its tab exits (or the tab is closed) |
 
 **Workspace/session.** `WorkingDir` = control dir (like project/planning), so
 no wsp provisioning of its own; `Repos`/`Branch` are still forwarded in case
@@ -341,7 +343,7 @@ blocked reason and failed-task list, and any inherited prior summary/attempted
 list so a second wolf run doesn't re-derive diagnosis from scratch. Sandboxed
 wolves then get an ENVIRONMENT paragraph (what they can't do). Then:
 "investigate…". When it needs the user, the *host* wolf is told to send a macOS
-notification and wait for them to attach to tmux; the *sandboxed* wolf is told
+notification and wait for them to switch to its terminal tab; the *sandboxed* wolf is told
 to ask in the conversation and stop — the message appears in the TUI's wolf tab
 and is relayed to whatever messaging channel is configured (the template stays
 channel-agnostic), and the answer arrives as its next prompt — and to make the
@@ -361,7 +363,7 @@ left behind (bypassing the daemon-write filter, since wolf writes as
 `updated_by: agent`).
 
 How an **ACP wolf ends** (the wrapper owns all of this, so it works headless and
-across daemon restarts; the host wolf just lives until its window closes). The
+across daemon restarts; the host wolf just lives until its terminal tab closes). The
 first turn finishing is *not* an end — the wolf typically finishes its first
 turn by asking the user something. It ends on the first of:
 
@@ -396,15 +398,16 @@ in its prompt; it re-reads `project.yaml`/the blocked-session record if asked.
 
 **TUI.** An ACP wolf appears in the sessions pane with its sandbox name, and
 **enter/click on that row opens the ACP tab view on the wolf's tab**
-(`attachSelected`; there is no tmux window to `tmux attach` to). The wolf's tab
+(`attachSelected`; there is no terminal tab to switch to). The wolf's tab
 is marked *interactive* (`session.json: persistent` → `acpTabEvent.interactive`):
 the watcher (`internal/tui/acpwatch.go`) drives the opening prompt once and then
 **stays connected**, relaying messages typed in the tab (`acpInputs`,
 `servePersistentInput`) as successive turns. In the tab: **enter** starts
 composing, **enter** sends, **esc** stops composing (keeps the draft), **ctrl+u**
 clears, ⌥j/⌥k switch tabs; the usual single-letter commands (q, z, h, l) are
-disabled only while composing. The host wolf (`--wolf-host`) is unchanged: enter
-on its row `tmux attach`es. On any ACP tab whose session is dead (failed to
+disabled only while composing. The host wolf (`--wolf-host`) runs in its own
+terminal tab: enter on its row switches to that tab (where the terminal
+supports it — see docs/terminal-tabs.md). On any ACP tab whose session is dead (failed to
 start, errored, disconnected), **x** dismisses the tab and removes its session
 directory; live and still-starting tabs refuse it.
 
@@ -648,8 +651,8 @@ the stranded-session reaper exempts it (`strandedVerdict` in `reaper.go`).
 
 **Launch/identity.** `runner.Plan{Kind: WorkingmanAgent, WorkingDir: <scratch>,
 SessionName: "workingman-agent", Persistent: true, WritableMounts, ReadOnlyMounts, Observe}`.
-Requires the ACP path (`Runner.Start` refuses otherwise — the tmux path has no
-read-only mounts, and silently launching it with write access would defeat the
+Requires the ACP path (`Runner.Start` refuses otherwise — the terminal-tab path
+has no read-only mounts, and silently launching it with write access would defeat the
 point). The ACP session id and the sbx sandbox are both the fixed name
 `workingman-agent` (`runner.WorkingmanAgentSession` / `WorkingmanAgentSandbox`,
 `ACPSandboxNameFor`), independent of any project path. The daemon tracks it

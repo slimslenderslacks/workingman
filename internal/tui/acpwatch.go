@@ -98,7 +98,7 @@ func realDialer(ctx context.Context, socketPath string) (acpConn, error) {
 }
 
 // defaultACPPrompt is the opening turn the TUI sends to a freshly-connected ACP
-// session — the same instruction the legacy tmux path baked into claude's argv.
+// session — the same instruction the host terminal-tab path bakes into claude's argv.
 // The sandboxed agent reads .orch/instructions.md + context.yaml from its mounted
 // workspace and proceeds. Recording it as a prompt entry is what makes the tab's
 // "prompts sent" half real.

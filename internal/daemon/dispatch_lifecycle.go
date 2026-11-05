@@ -422,7 +422,7 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 		// than exit after the first turn like the one-shot agents. It ends when
 		// the project leaves `blocked` (the wolf resolved it), on the idle
 		// timeout, or when the wolf itself exits — see acpwrapper.Config.Persistent.
-		// Ignored on the host/tmux path, where the claude process is already
+		// Ignored on the host terminal-tab path, where the claude process is already
 		// long-lived.
 		Persistent: true,
 	}

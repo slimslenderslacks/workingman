@@ -247,7 +247,7 @@ func TestLiveSnapshotCarriesInMemoryState(t *testing.T) {
 	}
 	ts, ws := s.Sessions[0], s.Sessions[1]
 	if ts.Key != alpha || ts.Kind != "task" || ts.Task != "build" || ts.WorkStream != "alpha" || ts.ProjectPath != alpha ||
-		ts.TmuxTarget != "orch-task-alpha" || ts.Interactive || ts.Source != "daemon" || ts.StartedAt.IsZero() {
+		ts.TabName != "orch-task-alpha" || ts.Interactive || ts.Source != "daemon" || ts.StartedAt.IsZero() {
 		t.Errorf("task session = %+v", ts)
 	}
 	if ws.Key != wolfSessionKey(alpha) || ws.Kind != "wolf" || ws.ProjectPath != alpha || !ws.Interactive {
@@ -316,8 +316,8 @@ func TestLiveSnapshotACPSessionLocation(t *testing.T) {
 		got.ACP.SocketPath != store.SocketPath("task-alpha-build-1") || got.ACP.Status != "running" {
 		t.Errorf("acp = %+v", got.ACP)
 	}
-	if got.SandboxName != "alpha-build" || got.TmuxTarget != "" {
-		t.Errorf("sandbox=%q tmux=%q", got.SandboxName, got.TmuxTarget)
+	if got.SandboxName != "alpha-build" || got.TabName != "" {
+		t.Errorf("sandbox=%q tab=%q", got.SandboxName, got.TabName)
 	}
 	if !strings.HasPrefix(got.ACP.SessionDir, sessRoot) {
 		t.Errorf("session dir %q not under sessions root %q", got.ACP.SessionDir, sessRoot)

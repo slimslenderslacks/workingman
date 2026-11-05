@@ -316,7 +316,7 @@ func TestRenderArchive(t *testing.T) {
 	for _, unwanted := range []string{
 		"WAIT for a human",
 		"notification",
-		"attach to this session",
+		"switch to this terminal tab",
 	} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("archive template still waits on a human (%q) in:\n%s", unwanted, out)
@@ -458,7 +458,7 @@ func TestRenderWolfHostVsSandboxed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render host: %v", err)
 	}
-	for _, want := range []string{"you run on the host", "send a macOS notification", "attach to this session"} {
+	for _, want := range []string{"you run on the host", "send a macOS notification", "switch to this terminal tab"} {
 		if !strings.Contains(host, want) {
 			t.Errorf("host wolf missing %q in:\n%s", want, host)
 		}
@@ -491,7 +491,7 @@ func TestRenderWolfHostVsSandboxed(t *testing.T) {
 			t.Errorf("sandboxed wolf missing %q in:\n%s", want, boxed)
 		}
 	}
-	for _, bad := range []string{"you run on the host", "send a macOS notification", "attach to this session", "WhatsApp"} {
+	for _, bad := range []string{"you run on the host", "send a macOS notification", "switch to this terminal tab", "WhatsApp"} {
 		if strings.Contains(boxed, bad) {
 			t.Errorf("sandboxed wolf should not say %q:\n%s", bad, boxed)
 		}

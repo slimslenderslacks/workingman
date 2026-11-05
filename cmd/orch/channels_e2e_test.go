@@ -7,7 +7,7 @@ package main
 //	      ──► router ──► acpchat ──► fake ACP agents (wolf, workingman) behind real unix sockets
 //	daemon ──► wolf-start / wolf-end messages ──► real Cloud client ──► fake Graph API (httptest)
 //
-// No sandbox, no tmux and no network beyond loopback: the runner's AcpLauncher
+// No sandbox, no terminal tabs and no network beyond loopback: the runner's AcpLauncher
 // is a fake that serves each agent's session directory itself.
 
 import (
@@ -162,7 +162,7 @@ func newE2EEnvWith(t *testing.T, config func(env *e2eEnv) string) *e2eEnv {
 		return func(p string) string { return workingmanAnswer(env.state, p) }
 	}}
 	r := &runner.Runner{
-		Launcher:     noTmux{},
+		Launcher:     noTabs{},
 		AcpLauncher:  env.launcher,
 		Kit:          "e2e-kit",
 		SessionsRoot: sessionsRoot,
@@ -208,11 +208,11 @@ func (e *e2eEnv) shutdown() {
 	})
 }
 
-// noTmux is the runner's host-side launcher, which no kind in this test uses.
-type noTmux struct{}
+// noTabs is the runner's host-side launcher, which no kind in this test uses.
+type noTabs struct{}
 
-func (noTmux) Launch(context.Context, agent.Spec) (agent.Session, error) {
-	return nil, fmt.Errorf("e2e: unexpected tmux launch")
+func (noTabs) Launch(context.Context, agent.Spec) (agent.Session, error) {
+	return nil, fmt.Errorf("e2e: unexpected terminal-tab launch")
 }
 
 // workingmanAnswer is what the fake workingman agent says: it answers from the

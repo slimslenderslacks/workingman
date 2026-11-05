@@ -2,24 +2,29 @@ package tui
 
 import (
 	"context"
+	"errors"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/slimslenderslacks/work/internal/terminal"
 )
 
-// InteractiveLauncher opens ad-hoc interactive sandbox windows for a work
-// stream: OpenShell backs the `:dir` command (a bash shell in the work stream's
-// workspace) and OpenSession backs `:session` (a persistent, resumable claude
-// session). Both return the tmux target ("session:window") of the window they
-// created or reused so the caller can switch a client to it. Wired from
-// cmd/orch in integrated daemon mode; nil in standalone `orch tui` and most
-// tests, where the commands report that interactive sessions aren't available.
+// InteractiveLauncher opens ad-hoc interactive sandbox sessions for a work
+// stream, each in a new terminal tab titled after the work stream: OpenShell
+// backs the `:dir` command (a bash shell in the work stream's workspace) and
+// OpenSession backs `:session` (a persistent, resumable claude session). Both
+// return the session name of the tab they opened. When the work stream's tab
+// is already open they focus it instead of opening a second one and return a
+// *terminal.AlreadyOpenError alongside the name. Wired from cmd/orch in
+// integrated daemon mode; nil in standalone `orch tui` and most tests, where
+// the commands report that interactive sessions aren't available.
 type InteractiveLauncher interface {
 	OpenShell(ctx context.Context, projectPath string) (string, error)
 	OpenSession(ctx context.Context, projectPath string) (string, error)
 }
 
 // interactiveLaunchedMsg carries the result of an InteractiveLauncher call back
-// into Update so the model can switch to the new window or surface an error.
+// into Update so the model can report the new tab or surface an error.
 type interactiveLaunchedMsg struct {
 	kind   string // "shell" or "session" — for the status message
 	target string
@@ -57,17 +62,24 @@ func (m model) openInteractive(kind string) (tea.Model, tea.Cmd) {
 	}
 }
 
-// handleInteractiveLaunched reports the outcome of a `:dir`/`:session` launch
-// and, on success, switches the attached tmux client straight to the new
-// window (reusing the same attach path as clicking a session row).
+// handleInteractiveLaunched reports the outcome of a `:dir`/`:session` launch.
+// The launcher has already opened (and the terminal focused) the new tab; when
+// the work stream's tab was already open it warns that no second tab was
+// opened and that it switched to the existing one instead.
 func (m model) handleInteractiveLaunched(msg interactiveLaunchedMsg) (tea.Model, tea.Cmd) {
-	if msg.err != nil {
+	var already *terminal.AlreadyOpenError
+	switch {
+	case errors.As(msg.err, &already):
+		m.statusMsg = "⚠ " + msg.kind + " tab for " + already.Title + " is already open — "
+		if already.FocusErr != nil {
+			m.statusMsg += "switch to it yourself (" + already.FocusErr.Error() + ")"
+		} else {
+			m.statusMsg += "switched to it"
+		}
+	case msg.err != nil:
 		m.statusMsg = "open " + msg.kind + ": " + msg.err.Error()
-		return m, nil
-	}
-	m.statusMsg = "opened " + msg.kind + " → " + msg.target
-	if m.attacher != nil && msg.target != "" {
-		return m, m.attacher.Attach(msg.target)
+	default:
+		m.statusMsg = "opened " + msg.kind + " in a new tab → " + msg.target
 	}
 	return m, nil
 }

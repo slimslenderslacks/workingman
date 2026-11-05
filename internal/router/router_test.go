@@ -504,7 +504,7 @@ func TestWolfCommandSelection(t *testing.T) {
 	h.addWolf("alpha")
 	h.addWolf("alphabet")
 	h.addWolf("beta")
-	hostWolf := Session{Key: "k-host#wolf", ID: "wolf-host", WorkStream: "hosty"} // Ref "": tmux wolf
+	hostWolf := Session{Key: "k-host#wolf", ID: "wolf-host", WorkStream: "hosty"} // Ref "": host-tab wolf
 	h.src.mu.Lock()
 	h.src.wolves = append(h.src.wolves, hostWolf)
 	h.src.mu.Unlock()

@@ -85,7 +85,6 @@ type DaemonInfo struct {
 	AcpImage         string    `json:"acp_image,omitempty"`
 	AcpWrapper       string    `json:"acp_wrapper,omitempty"`
 	SessionsRoot     string    `json:"sessions_root,omitempty"`
-	TmuxSession      string    `json:"tmux_session,omitempty"`
 	AuditLog         string    `json:"audit_log,omitempty"`
 	StateFile        string    `json:"state_file,omitempty"`
 	Headless         bool      `json:"headless"`
@@ -206,9 +205,9 @@ type SessionSnapshot struct {
 	// Source is "daemon" (live tracking) or "disk" (ACP session.json).
 	Source      string `json:"source"`
 	SandboxName string `json:"sandbox_name,omitempty"`
-	// TmuxTarget is the tmux session name for non-ACP (legacy/interactive)
-	// sessions.
-	TmuxTarget string `json:"tmux_target,omitempty"`
+	// TabName is the terminal-tab session name for non-ACP sessions (the
+	// --wolf-host wolf, the legacy no-ACP path).
+	TabName string `json:"tab_name,omitempty"`
 	// ACP is set for sessions backed by an acp-wrapper.
 	ACP *ACPInfo `json:"acp,omitempty"`
 }

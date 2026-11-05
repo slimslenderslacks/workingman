@@ -2,12 +2,9 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
@@ -21,12 +18,7 @@ import (
 // pr-push task has no code work, so the daemon sends it straight to the commit
 // agent (which publishes the accumulated commit-only fixes), never a task agent.
 func TestPushTaskDispatchesCommitAgent(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-push-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
 
 	tasksDir := filepath.Join(root, "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
@@ -53,7 +45,7 @@ func TestPushTaskDispatchesCommitAgent(t *testing.T) {
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(t.TempDir()),
-		Launcher:   &agent.TmuxLauncher{Socket: socket, PollInterval: 50 * time.Millisecond},
+		Launcher:   &agent.ProcessLauncher{},
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}

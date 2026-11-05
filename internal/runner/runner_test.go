@@ -49,7 +49,7 @@ func (s *fakeSession) Close() error {
 
 func TestDefaultCommandBuilderModes(t *testing.T) {
 	// Autonomous kinds (project/planning/task/commit/archive) run with --print
-	// so claude executes one turn and exits, closing the tmux window and letting
+	// so claude executes one turn and exits, ending the session and letting
 	// the daemon advance project state. The wolf, the one interactive kind,
 	// omits --print so the human can drive the conversation. Every kind carries
 	// --dangerously-skip-permissions and the initial prompt on argv.
@@ -345,7 +345,7 @@ func TestArchiveAgentTakesACPPath(t *testing.T) {
 	if !r.UsesACP(agent.CommitAgent) {
 		t.Error("commit agent should still use the ACP path")
 	}
-	// Without an ACP launcher it falls back to the legacy tmux path, like
+	// Without an ACP launcher it falls back to the legacy terminal-tab path, like
 	// every other kind.
 	if (&Runner{}).UsesACP(agent.ArchiveAgent) {
 		t.Error("archive agent must not claim ACP without an AcpLauncher")
@@ -353,7 +353,7 @@ func TestArchiveAgentTakesACPPath(t *testing.T) {
 }
 
 // TestProjectAgentIsSandboxed pins the post-redesign behavior: the project
-// agent is autonomous, so on the legacy tmux path it is sandboxed like the
+// agent is autonomous, so on the legacy terminal-tab path it is sandboxed like the
 // planning agent — the sandbox creator is called with "<work-stream>-project"
 // and the command is wrapped in `sbx exec`. (Previously it was interactive and
 // ran in a bare workspace.)

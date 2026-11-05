@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha1"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -10,12 +11,14 @@ import (
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/sbx"
+	"github.com/slimslenderslacks/work/internal/terminal"
 )
 
-// OpenInteractiveShell opens a plain bash shell window on the host (no sandbox)
-// with the working directory set to the work stream's workspace worktree. It
-// returns the tmux target ("session:window") the TUI can switch a client to.
-// Backs the TUI's `:dir` command.
+// OpenInteractiveShell opens a plain bash shell in a new terminal tab on the host
+// (no sandbox) with the working directory set to the work stream's workspace
+// worktree. It returns the session name the TUI can focus the tab by. Backs the
+// TUI's `:dir` command. If the work stream's shell tab is already open it is
+// focused instead, and a *terminal.AlreadyOpenError is returned with the name.
 func (d *Daemon) OpenInteractiveShell(ctx context.Context, projectPath string) (string, error) {
 	return d.openInteractive(ctx, projectPath, false)
 }
@@ -24,17 +27,18 @@ func (d *Daemon) OpenInteractiveShell(ctx context.Context, projectPath string) (
 // interactive claude session in its `session-<work-stream>` sandbox — both the
 // workspace worktree and the orch control dir mounted, no prompt injected. The
 // claude session id is derived deterministically from the work stream name, so
-// closing the window and re-running the command resumes the same conversation.
-// It returns the tmux target the TUI can switch a client to. Backs the TUI's
-// `:session` command.
+// closing the tab and re-running the command resumes the same conversation.
+// It returns the session name the TUI can focus the tab by. Backs the TUI's
+// `:session` command. Like OpenInteractiveShell, an already-open tab is focused
+// and reported with a *terminal.AlreadyOpenError.
 func (d *Daemon) OpenInteractiveSession(ctx context.Context, projectPath string) (string, error) {
 	return d.openInteractive(ctx, projectPath, true)
 }
 
 // openInteractive is the shared body of OpenInteractiveShell/Session. It loads
 // the project to learn its branch + repos, provisions (idempotently) or
-// resolves the workspace worktree, derives the sandbox/window names and the
-// inner command, and delegates the sandbox+tmux launch to the runner.
+// resolves the workspace worktree, derives the sandbox/session names and the
+// inner command, and delegates the sandbox+tab launch to the runner.
 func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claudeSession bool) (string, error) {
 	if d.runner == nil {
 		return "", fmt.Errorf("interactive sessions need a runner (none configured)")
@@ -65,7 +69,7 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 	if claudeSession {
 		name := sanitizeSandboxName("session-" + workStream)
 		// Resolve the host git identity and SSH-signing config so a `:session`
-		// window commits as the user and SSH-signs, just like the ACP commit
+		// tab commits as the user and SSH-signs, just like the ACP commit
 		// agent. Both read from the host git config; Key() is empty unless the
 		// host is fully set up for SSH signing, and the runner preflights the
 		// forwarded agent before actually forcing commit.gpgsign on.
@@ -80,7 +84,8 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 			// Open (or resume) a stable per-work-stream claude conversation. No
 			// prompt is injected — claude opens at its prompt awaiting the user.
 			Inner:      sessionCommand(sessionUUID(workStream)),
-			WindowName: "session-" + workStream,
+			Name:       "session-" + workStream,
+			Title:      workStream,
 			GitName:    gitName,
 			GitEmail:   gitEmail,
 			SigningKey: gitsign.Resolve().Key(),
@@ -89,13 +94,23 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 		// `:dir` is a plain host shell (no sandbox) cd'd to the workspace dir —
 		// SandboxName empty tells the runner to run bash directly on the host.
 		spec = runner.InteractiveSpec{
-			Cwd:        workspaceDir,
-			Inner:      []string{"bash"},
-			WindowName: "shell-" + workStream,
+			Cwd:   workspaceDir,
+			Inner: []string{"bash"},
+			Name:  "shell-" + workStream,
+			Title: workStream,
 		}
 	}
 
 	target, err := d.runner.LaunchInteractive(ctx, spec)
+	var already *terminal.AlreadyOpenError
+	if errors.As(err, &already) {
+		d.audit.Log("interactive_already_open",
+			"work_stream", workStream,
+			"kind", interactiveKindName(claudeSession),
+			"target", target,
+		)
+		return target, err
+	}
 	if err != nil {
 		return "", err
 	}
@@ -131,10 +146,10 @@ func sanitizeSandboxName(name string) string {
 // conversation with that id — it errors ("Session ID <uuid> is already in
 // use") and exits if one already exists. Passing it on every open therefore
 // worked the first time but crashed instantly on every reopen, closing the
-// tmux window. The sandbox's ~/.claude/projects is a persistent volume that
+// tab. The sandbox's ~/.claude/projects is a persistent volume that
 // survives sandbox restarts, so the wrapper checks it: `--resume` when the
 // transcript already exists, `--session-id` (to create with the stable id)
-// when it doesn't. `exec` replaces the shell with claude so the window's
+// when it doesn't. `exec` replaces the shell with claude so the tab's
 // process is claude itself, keeping lifecycle and signals identical to running
 // it directly. The uuid is a v5 UUID (hex + hyphens only), so it's safe to
 // interpolate unquoted into the shell.

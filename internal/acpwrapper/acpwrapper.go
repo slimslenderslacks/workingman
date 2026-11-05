@@ -401,7 +401,7 @@ var claudeEnv = []string{
 // claude-acp-client entrypoint inside the sandbox over `sbx exec`, producing an
 // ACP client on the child's stdio.
 //
-// Unlike the daemon's interactive tmux launches, this is NOT `-it`: ACP is
+// Unlike the daemon's interactive terminal-tab launches, this is NOT `-it`: ACP is
 // newline-delimited JSON-RPC on raw stdio, so a pty would corrupt the protocol
 // stream. `-w` pins the working directory to the primary workspace so the
 // agent's cwd matches the mounted host path.

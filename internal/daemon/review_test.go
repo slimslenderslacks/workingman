@@ -20,7 +20,7 @@ import (
 // newReviewDaemon builds a scheduler-backed, runner-less daemon. Like the cron
 // stop-condition tests, the PR-loop routing decisions live entirely in the
 // dispatch/scheduler path — nothing here launches an agent (launchReviewAgent
-// no-ops without a runner) — so these tests need neither tmux nor Run().
+// no-ops without a runner) — so these tests need neither a launcher nor Run().
 func newReviewDaemon(t *testing.T, root string) (*Daemon, *safeBuf, *scheduler.Scheduler) {
 	t.Helper()
 	buf := &safeBuf{}

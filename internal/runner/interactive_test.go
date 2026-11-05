@@ -6,6 +6,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/slimslenderslacks/work/internal/agent"
+	"github.com/slimslenderslacks/work/internal/terminal"
 )
 
 var errFakeNoKey = errors.New("exit status 1")
@@ -28,7 +31,7 @@ func TestLaunchInteractiveEnsuresSandboxAndWrapsCommand(t *testing.T) {
 		Workspaces:  []string{"/ws/widget", "/orch/widget"},
 		Cwd:         "/ws/widget",
 		Inner:       []string{"claude", "--session-id", "abc"},
-		WindowName:  "session-widget",
+		Name:        "session-widget",
 	})
 	if err != nil {
 		t.Fatalf("LaunchInteractive: %v", err)
@@ -71,9 +74,9 @@ func TestLaunchInteractiveHostShell(t *testing.T) {
 	}
 
 	target, err := r.LaunchInteractive(context.Background(), InteractiveSpec{
-		Cwd:        "/ws/widget",
-		Inner:      []string{"bash"},
-		WindowName: "shell-widget",
+		Cwd:   "/ws/widget",
+		Inner: []string{"bash"},
+		Name:  "shell-widget",
 	})
 	if err != nil {
 		t.Fatalf("LaunchInteractive: %v", err)
@@ -114,7 +117,7 @@ func TestLaunchInteractiveInjectsSigning(t *testing.T) {
 		Workspaces:  []string{"/ws/widget", "/orch/widget"},
 		Cwd:         "/ws/widget",
 		Inner:       []string{"claude", "--session-id", "abc"},
-		WindowName:  "session-widget",
+		Name:        "session-widget",
 		GitName:     "Jim Clark",
 		GitEmail:    "jim@example.com",
 		SigningKey:  "ssh-ed25519 AAAAKEY",
@@ -166,7 +169,7 @@ func TestLaunchInteractiveSigningDegradesWhenAgentEmpty(t *testing.T) {
 		Workspaces:  []string{"/ws/widget"},
 		Cwd:         "/ws/widget",
 		Inner:       []string{"claude"},
-		WindowName:  "session-widget",
+		Name:        "session-widget",
 		GitName:     "Jim Clark",
 		GitEmail:    "jim@example.com",
 		SigningKey:  "ssh-ed25519 AAAAKEY",
@@ -198,15 +201,66 @@ func containsArg(args []string, want string) bool {
 func TestLaunchInteractiveValidates(t *testing.T) {
 	r := &Runner{Launcher: &fakeLauncher{}, Sandbox: func(context.Context, SandboxSpec) error { return nil }}
 	// A sandboxed session (SandboxName set) needs at least one workspace mount.
-	if _, err := r.LaunchInteractive(context.Background(), InteractiveSpec{WindowName: "w", SandboxName: "s", Inner: []string{"claude"}}); err == nil {
+	if _, err := r.LaunchInteractive(context.Background(), InteractiveSpec{Name: "w", SandboxName: "s", Inner: []string{"claude"}}); err == nil {
 		t.Error("expected an error with no workspaces for a sandboxed session")
 	}
 	// Every launch needs a command to run.
-	if _, err := r.LaunchInteractive(context.Background(), InteractiveSpec{WindowName: "w", Cwd: "/ws"}); err == nil {
+	if _, err := r.LaunchInteractive(context.Background(), InteractiveSpec{Name: "w", Cwd: "/ws"}); err == nil {
 		t.Error("expected an error with no inner command")
 	}
 	noLauncher := &Runner{Sandbox: func(context.Context, SandboxSpec) error { return nil }}
-	if _, err := noLauncher.LaunchInteractive(context.Background(), InteractiveSpec{WindowName: "w", Cwd: "/ws", Inner: []string{"bash"}}); err == nil {
+	if _, err := noLauncher.LaunchInteractive(context.Background(), InteractiveSpec{Name: "w", Cwd: "/ws", Inner: []string{"bash"}}); err == nil {
 		t.Error("expected an error with no launcher")
+	}
+}
+
+// TestLaunchInteractivePassesTitle: the tab is titled after the work stream.
+func TestLaunchInteractivePassesTitle(t *testing.T) {
+	launcher := &fakeLauncher{}
+	r := &Runner{Launcher: launcher}
+	if _, err := r.LaunchInteractive(context.Background(), InteractiveSpec{
+		Cwd:   "/ws/widget",
+		Inner: []string{"bash"},
+		Name:  "shell-widget",
+		Title: "widget",
+	}); err != nil {
+		t.Fatalf("LaunchInteractive: %v", err)
+	}
+	if launcher.last.Name != "shell-widget" || launcher.last.Title != "widget" {
+		t.Errorf("spec name/title = %q/%q, want shell-widget/widget", launcher.last.Name, launcher.last.Title)
+	}
+}
+
+// fakeTabOpener is a launcher that reports the session's tab is already open,
+// the way terminal.TabLauncher.Open does.
+type fakeTabOpener struct {
+	fakeLauncher
+	opened []agent.Spec
+}
+
+func (f *fakeTabOpener) Open(_ context.Context, spec agent.Spec) (*terminal.TabSession, error) {
+	f.opened = append(f.opened, spec)
+	return nil, &terminal.AlreadyOpenError{Name: spec.Name, Title: spec.Title}
+}
+
+// TestLaunchInteractiveReportsAlreadyOpen: when the launcher focused an
+// already-open tab instead of opening a new one, LaunchInteractive passes the
+// *terminal.AlreadyOpenError through unwrapped (so the TUI can warn) and still
+// ensures nothing else was launched.
+func TestLaunchInteractiveReportsAlreadyOpen(t *testing.T) {
+	opener := &fakeTabOpener{}
+	r := &Runner{Launcher: opener}
+	_, err := r.LaunchInteractive(context.Background(), InteractiveSpec{
+		Cwd:   "/ws/widget",
+		Inner: []string{"bash"},
+		Name:  "shell-widget",
+		Title: "widget",
+	})
+	var already *terminal.AlreadyOpenError
+	if !errors.As(err, &already) || already.Title != "widget" {
+		t.Fatalf("err = %v, want an AlreadyOpenError for widget", err)
+	}
+	if len(opener.opened) != 1 || opener.last.Name != "" {
+		t.Errorf("Open calls = %v, Launch spec = %+v; want exactly one Open and no Launch", opener.opened, opener.last)
 	}
 }

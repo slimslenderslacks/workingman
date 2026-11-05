@@ -37,11 +37,12 @@ type SessionInfo struct {
 	// same identifier the projects gallery uses for that project, so the
 	// two panes line up visually.
 	Project string
-	// TmuxTarget is the tmux session name. Clicking the row runs
-	// `tmux attach -t <TmuxTarget>` in an external terminal.
-	TmuxTarget string
-	Status     SessionStatus
-	StartedAt  time.Time
+	// TabName is the launcher's session name: the ACP session id for an
+	// ACP-backed session, else the name its terminal tab is tracked by.
+	// Clicking the row opens the ACP tab view or focuses the terminal tab.
+	TabName   string
+	Status    SessionStatus
+	StartedAt time.Time
 	// TaskName is the task this agent is operating on. Populated only for
 	// task and commit agents — empty for project/planning/wolf agents,
 	// which don't own a single task.
@@ -53,7 +54,7 @@ type SessionInfo struct {
 	// only for ACP-routed sessions (the daemon's runner has an AcpLauncher
 	// and Runner.UsesACP(kind) — every kind, with the wolf the exception when
 	// it runs on the host); empty otherwise, because the
-	// legacy tmux + `sbx exec` path treats the sandbox as an implementation
+	// legacy terminal-tab + `sbx exec` path treats the sandbox as an implementation
 	// detail. Matches the name visible in `sbx ls` — underscores already
 	// normalized to hyphens.
 	SandboxName string
@@ -77,7 +78,7 @@ func (d *Daemon) ListSessions() []SessionInfo {
 			ID:          key,
 			AgentName:   entry.kind.String(),
 			Project:     project,
-			TmuxTarget:  entry.sess.Name(),
+			TabName:     entry.sess.Name(),
 			Status:      SessionStatusRunning,
 			StartedAt:   entry.startedAt,
 			TaskName:    entry.taskName,
@@ -159,7 +160,7 @@ func sessionInfoEqual(a, b SessionInfo) bool {
 	return a.ID == b.ID &&
 		a.AgentName == b.AgentName &&
 		a.Project == b.Project &&
-		a.TmuxTarget == b.TmuxTarget &&
+		a.TabName == b.TabName &&
 		a.Status == b.Status &&
 		a.StartedAt.Equal(b.StartedAt) &&
 		a.TaskName == b.TaskName &&

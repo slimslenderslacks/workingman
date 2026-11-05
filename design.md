@@ -42,7 +42,7 @@ A task agent is started in a workspace that has been setup by the deamon.  It ha
 
 # wolf agent
 
-The wolf agent should look at failed or blocked tasks, and project.yaml status to try to determine what is causing an issue. The wolf agent does not block on a tmux session for input — instead it sends a notification out to the user (via macOS `osascript` for now) when it needs human input, and the user can attach to the tmux session to respond.
+The wolf agent should look at failed or blocked tasks, and project.yaml status to try to determine what is causing an issue. The wolf agent does not block on a terminal for input — instead it sends a notification out to the user (via macOS `osascript` for now) when it needs human input, and the user can switch to the wolf's terminal tab (titled after the project) to respond.
 
 # commit agent
 
@@ -79,7 +79,7 @@ The deamon also watches for updates to the task.yaml files. When a task change s
 
 # running agents
 
-Whenever we run an agent, we must create a workspace for the agent to run in. Do this with the cli tool wsp.  Use the project.yaml file to figure out which repos should be added to the workspace.  The name of the workspace is the target branch listed in the project. Run the agent, by starting a claude code process in the workspace dir with --dangerously-skip-permissions flag.  Start the claude code session in a tmux session with a name for the task.  This will allow us to join the session any time the agent appears to be stuck or we just want to watch it work.  When you start the agent, we may want to add task specific skills to the workspaces .claude folder.
+Whenever we run an agent, we must create a workspace for the agent to run in. Do this with the cli tool wsp.  Use the project.yaml file to figure out which repos should be added to the workspace.  The name of the workspace is the target branch listed in the project. Run the agent, by starting a claude code process in the workspace dir with --dangerously-skip-permissions flag.  Start the claude code session in a new tab of the user's terminal (Ghostty; see docs/terminal-tabs.md), titled with the name of the project.  This will allow us to switch to the session any time the agent appears to be stuck or we just want to watch it work.  When you start the agent, we may want to add task specific skills to the workspaces .claude folder.
 
 # TUI
 

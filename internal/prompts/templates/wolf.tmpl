@@ -56,7 +56,8 @@ up, but the orchestrator ends it shortly after the project leaves `blocked`. So
 finish everything you need to write (the durable record below, task and project
 files) BEFORE you move the project out of `blocked`, and make the status change
 your last write.{{else}}send a macOS notification
-with a clear question and wait for them to attach to this session and reply.{{end}}
+with a clear question and wait for them to switch to this terminal tab (it is
+titled after the project) and reply.{{end}}
 
 Durable record — whenever you investigate this blocked project, write or
 update `{{.BlockedSessionPath}}` (next to `project.yaml`) with your current

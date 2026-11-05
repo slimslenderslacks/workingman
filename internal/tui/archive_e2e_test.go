@@ -30,8 +30,7 @@ type archiveE2ELauncher struct {
 }
 
 func (l *archiveE2ELauncher) Launch(_ context.Context, spec agent.Spec) (agent.Session, error) {
-	// Mirror the real TmuxLauncher's "session:window" name shape.
-	s := newE2EFakeSession(agent.DefaultUmbrellaSession + ":" + spec.Name)
+	s := newE2EFakeSession(spec.Name)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.specs = append(l.specs, spec)
@@ -92,7 +91,7 @@ func (l *archiveE2ELauncher) shutdown() {
 // cleanupHarness wires the pieces of the cleanup/archive loop together at the
 // seams the rest of the package's tests already use: a live daemon with
 // fsnotify, a stub wsp manager (real directories, no `wsp` binary), a fake
-// launcher instead of tmux+claude, and a headless TUI model whose projects come
+// launcher instead of a terminal tab running claude, and a headless TUI model whose projects come
 // from a real ScanProjects pass over the orch root. Nothing here shells out or
 // touches the network.
 //

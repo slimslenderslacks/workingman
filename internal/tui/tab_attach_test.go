@@ -1,11 +1,15 @@
 package tui
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/slimslenderslacks/work/internal/terminal"
 )
 
 // runCmd invokes a tea.Cmd to retrieve the message it produces, mirroring
@@ -18,9 +22,20 @@ func runCmd(t *testing.T, c tea.Cmd) tea.Msg {
 	return c()
 }
 
+// fakeFocuser records the session names it was asked to focus.
+type fakeFocuser struct {
+	names []string
+	err   error
+}
+
+func (f *fakeFocuser) Focus(_ context.Context, name string) error {
+	f.names = append(f.names, name)
+	return f.err
+}
+
 func TestAttachReturnsErrorWhenTargetEmpty(t *testing.T) {
-	a := newTmuxAttacher()
-	msg := runCmd(t, a.Attach(""))
+	f := &fakeFocuser{}
+	msg := runCmd(t, newTabAttacher(f).Attach(""))
 	res, ok := msg.(attachResultMsg)
 	if !ok {
 		t.Fatalf("got %T, want attachResultMsg", msg)
@@ -28,87 +43,46 @@ func TestAttachReturnsErrorWhenTargetEmpty(t *testing.T) {
 	if res.err == nil {
 		t.Fatal("expected error for empty target")
 	}
-}
-
-func TestAttachReturnsErrorWhenBinaryMissing(t *testing.T) {
-	a := &defaultTmuxAttacher{
-		binary:       "tmux",
-		lookPath:     func(string) (string, error) { return "", errors.New("not found") },
-		exists:       func(string, string) bool { return true },
-		switchClient: func(string, string) bool { return true },
-	}
-	msg := runCmd(t, a.Attach("orch:task-alpha"))
-	res := msg.(attachResultMsg)
-	if res.err == nil || !strings.Contains(res.err.Error(), "tmux not found") {
-		t.Errorf("err = %v, want 'tmux not found'", res.err)
+	if len(f.names) != 0 {
+		t.Errorf("focused %v for an empty target", f.names)
 	}
 }
 
-func TestAttachReturnsErrorWhenWindowDead(t *testing.T) {
-	a := &defaultTmuxAttacher{
-		binary:       "tmux",
-		lookPath:     func(string) (string, error) { return "/usr/bin/tmux", nil },
-		exists:       func(string, string) bool { return false },
-		switchClient: func(string, string) bool { return true },
+func TestAttachFocusesSessionTab(t *testing.T) {
+	f := &fakeFocuser{}
+	res := runCmd(t, newTabAttacher(f).Attach("wolf-feat/x")).(attachResultMsg)
+	if res.err != nil {
+		t.Errorf("unexpected err: %v", res.err)
 	}
-	msg := runCmd(t, a.Attach("orch:task-ghost"))
-	res := msg.(attachResultMsg)
-	if res.err == nil || !strings.Contains(res.err.Error(), "not alive") {
-		t.Errorf("err = %v, want 'not alive' error", res.err)
+	if len(f.names) != 1 || f.names[0] != "wolf-feat/x" {
+		t.Errorf("focused %v, want [wolf-feat/x]", f.names)
 	}
-	if res.target != "orch:task-ghost" {
+}
+
+func TestAttachReportsClosedTab(t *testing.T) {
+	f := &fakeFocuser{err: fmt.Errorf("no open tab: %w", terminal.ErrTabNotFound)}
+	res := runCmd(t, newTabAttacher(f).Attach("wolf-ghost")).(attachResultMsg)
+	if res.err == nil || !strings.Contains(res.err.Error(), "no longer open") {
+		t.Errorf("err = %v, want a 'no longer open' error", res.err)
+	}
+	if res.target != "wolf-ghost" {
 		t.Errorf("target = %q", res.target)
 	}
 }
 
-func TestAttachSwitchesAttachedClient(t *testing.T) {
-	var switched []string
-	a := &defaultTmuxAttacher{
-		binary:   "tmux",
-		lookPath: func(string) (string, error) { return "/usr/bin/tmux", nil },
-		exists:   func(string, string) bool { return true },
-		switchClient: func(_, target string) bool {
-			switched = append(switched, target)
-			return true
-		},
-	}
-	msg := runCmd(t, a.Attach("orch:task-alpha"))
-	res := msg.(attachResultMsg)
-	if res.err != nil {
-		t.Errorf("unexpected err: %v", res.err)
-	}
-	if len(switched) != 1 || switched[0] != "orch:task-alpha" {
-		t.Errorf("switchClient called with %v, want [orch:task-alpha]", switched)
+func TestAttachExplainsUnsupportedFocus(t *testing.T) {
+	f := &fakeFocuser{err: fmt.Errorf("ghostty on linux: %w", terminal.ErrFocusUnsupported)}
+	res := runCmd(t, newTabAttacher(f).Attach("wolf-alpha")).(attachResultMsg)
+	if res.err == nil || !strings.Contains(res.err.Error(), "switch to its tab yourself") {
+		t.Errorf("err = %v, want a hint to switch manually", res.err)
 	}
 }
 
-func TestAttachWithoutClientReturnsHelpfulError(t *testing.T) {
-	a := &defaultTmuxAttacher{
-		binary:       "tmux",
-		lookPath:     func(string) (string, error) { return "/usr/bin/tmux", nil },
-		exists:       func(string, string) bool { return true },
-		switchClient: func(string, string) bool { return false },
-	}
-	msg := runCmd(t, a.Attach("orch:task-alpha"))
-	res := msg.(attachResultMsg)
-	if res.err == nil {
-		t.Fatalf("expected error explaining how to attach")
-	}
-	if !strings.Contains(res.err.Error(), "tmux attach -t orch") {
-		t.Errorf("error should suggest `tmux attach -t orch`; got %v", res.err)
-	}
-}
-
-func TestUmbrellaFromTargetExtractsSession(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"orch:task-alpha", "orch"},
-		{"customumbrella:task-x", "customumbrella"},
-		{"legacy-target", "orch"}, // falls back to default
-	}
-	for _, c := range cases {
-		if got := umbrellaFromTarget(c.in); got != c.want {
-			t.Errorf("umbrellaFromTarget(%q) = %q, want %q", c.in, got, c.want)
-		}
+func TestAttachWithoutTerminalSurfacesResolveError(t *testing.T) {
+	f := &fakeFocuser{err: errors.New("don't know how to open a terminal tab here")}
+	res := runCmd(t, newTabAttacher(f).Attach("wolf-alpha")).(attachResultMsg)
+	if res.err == nil || !strings.Contains(res.err.Error(), "don't know how") {
+		t.Errorf("err = %v, want the resolve error passed through", res.err)
 	}
 }
 
@@ -131,8 +105,8 @@ func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", AgentName: "task", Project: "alpha", TmuxTarget: "orch:task-alpha"},
-		{ID: "b", AgentName: "task", Project: "bravo", TmuxTarget: "orch:task-bravo"},
+		{ID: "a", AgentName: "task", Project: "alpha", TabName: "task-alpha"},
+		{ID: "b", AgentName: "task", Project: "bravo", TabName: "task-bravo"},
 	}})
 	m = step.(model)
 	// Move selection to b (right moves selection within the sessions pane),
@@ -141,8 +115,8 @@ func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 	m = step2.(model)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	_ = runCmd(t, cmd)
-	if len(att.targets) != 1 || att.targets[0] != "orch:task-bravo" {
-		t.Errorf("targets = %v, want [orch:task-bravo]", att.targets)
+	if len(att.targets) != 1 || att.targets[0] != "task-bravo" {
+		t.Errorf("targets = %v, want [task-bravo]", att.targets)
 	}
 }
 
@@ -150,7 +124,7 @@ func TestEnterIgnoredWhenProjectsFocused(t *testing.T) {
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", TmuxTarget: "orch:task-alpha"},
+		{ID: "a", TabName: "task-alpha"},
 	}})
 	m = step.(model)
 	m = focusProjectsPane(t, m)
@@ -168,7 +142,7 @@ func TestAttachResultErrorSetsStatusMsg(t *testing.T) {
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m = sized.(model)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", TmuxTarget: "orch:task-alpha"},
+		{ID: "a", TabName: "task-alpha"},
 	}})
 	m = step.(model)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -199,8 +173,8 @@ func TestMouseClickAttachesSessionBox(t *testing.T) {
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step.(model)
 	step2, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", TmuxTarget: "orch:task-alpha"},
-		{ID: "b", TmuxTarget: "orch:task-bravo"},
+		{ID: "a", TabName: "task-alpha"},
+		{ID: "b", TabName: "task-bravo"},
 	}})
 	m = step2.(model)
 	// Sessions is the left column, starting at x=0/y=0. Box 0 (first session)
@@ -214,8 +188,8 @@ func TestMouseClickAttachesSessionBox(t *testing.T) {
 	})
 	m = final.(model)
 	_ = runCmd(t, cmd)
-	if len(att.targets) != 1 || att.targets[0] != "orch:task-bravo" {
-		t.Errorf("targets = %v, want [orch:task-bravo]", att.targets)
+	if len(att.targets) != 1 || att.targets[0] != "task-bravo" {
+		t.Errorf("targets = %v, want [task-bravo]", att.targets)
 	}
 	if m.sessSel != "b" {
 		t.Errorf("sessSel = %q, want %q", m.sessSel, "b")
@@ -230,7 +204,7 @@ func TestMouseClickOutsideSessionsColumnDoesNotAttach(t *testing.T) {
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step.(model)
 	step2, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "a", TmuxTarget: "orch:task-alpha"},
+		{ID: "a", TabName: "task-alpha"},
 	}})
 	m = step2.(model)
 	l := m.computeLayout()

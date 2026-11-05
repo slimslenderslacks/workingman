@@ -2,9 +2,7 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,24 +24,15 @@ import (
 // We use no_ready_tasks specifically because it's idempotent — every
 // re-evaluation produces another entry, so we can count occurrences.
 func TestCronReevaluatesProject(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-cron-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
 
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(t.TempDir()),
-		Launcher: &agent.TmuxLauncher{
-			Socket:       socket,
-			PollInterval: 50 * time.Millisecond,
-		},
-		Audit:   a,
-		Command: func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
+		Launcher:   &agent.ProcessLauncher{},
+		Audit:      a,
+		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
 	d, err := New([]string{root}, a,
 		WithRunner(r),
@@ -92,7 +81,7 @@ func TestCronReevaluatesProject(t *testing.T) {
 
 // startCronDaemon runs a daemon with a scheduler and no runner. The
 // stop-condition logic lives entirely in the dispatch/scheduler path — nothing
-// about it launches an agent — so these tests need neither tmux nor a launcher.
+// about it launches an agent — so these tests need no launcher at all.
 func startCronDaemon(t *testing.T, root string) (*safeBuf, *scheduler.Scheduler) {
 	t.Helper()
 	buf := &safeBuf{}
@@ -400,20 +389,14 @@ func TestCronWithoutStopConditionBlocksProject(t *testing.T) {
 }
 
 func TestCronUnregistersOnProjectDone(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-cron-done-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
 
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	sched := scheduler.New()
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(t.TempDir()),
-		Launcher:   &agent.TmuxLauncher{Socket: socket, PollInterval: 50 * time.Millisecond},
+		Launcher:   &agent.ProcessLauncher{},
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "true"} },
 	}

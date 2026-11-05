@@ -4,11 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
@@ -198,16 +196,11 @@ func TestStoppedGuardsSkipReviewSessionEnd(t *testing.T) {
 
 // TestStopKillsRunningTaskSession is the end-to-end proof that `:stop` doesn't
 // just refuse to launch new work — it actually terminates an agent already
-// running. A real tmux launcher runs a long sleep as the "task agent"; once
+// running. A real process launcher runs a long sleep as the "task agent"; once
 // it's up, the project file is flipped to status:stopped exactly as `:stop`
 // would write it, and the daemon must close that session in response.
 func TestStopKillsRunningTaskSession(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-stop-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
 
 	tasksDir := filepath.Join(root, "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
@@ -229,7 +222,7 @@ func TestStopKillsRunningTaskSession(t *testing.T) {
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(t.TempDir()),
-		Launcher:   &agent.TmuxLauncher{Socket: socket, PollInterval: 50 * time.Millisecond},
+		Launcher:   &agent.ProcessLauncher{},
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 30"} },
 	}

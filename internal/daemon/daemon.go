@@ -328,7 +328,7 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 // a crash-adjacent path. It must NOT tear down ACP-backed sessions: an
 // acp-wrapper process is meant to keep running (and its sandbox with it) so a
 // future orch process can reconnect over the session's socket. Only sessions
-// that aren't ACP-backed (the legacy tmux + `sbx exec` path, and interactive
+// that aren't ACP-backed (the legacy terminal-tab + `sbx exec` path, and interactive
 // project/wolf agents) are actually closed here — detachable ones are simply
 // dropped from local tracking, exactly like a deliberate detach.
 func (d *Daemon) shutdown() {
@@ -359,7 +359,7 @@ func (d *Daemon) shutdown() {
 // (project, planning, task, commit, review, archive, and the wolf unless it
 // runs on the host via WolfOnHost), which run as a standalone acp-wrapper host
 // process the daemon does not need to keep alive to keep running. A
-// --wolf-host wolf and the legacy tmux path (no AcpLauncher configured) are
+// --wolf-host wolf and the legacy terminal-tab path (no AcpLauncher configured) are
 // unaffected — those sessions are still closed on shutdown as before.
 //
 // The workingman agent is the exception among the ACP kinds: it is owned by the

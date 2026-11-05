@@ -100,7 +100,7 @@ Optional fields are omitted when empty.
 | `state` | `"running"` or `"stopped"` |
 | `pid`, `started_at` | the daemon process |
 | `workspace_manager` | `--workspace-manager` (`wsp`/`stub`) |
-| `acp_kit`, `acp_image`, `acp_wrapper`, `sessions_root`, `tmux_session` | the matching flags (resolved sessions root) |
+| `acp_kit`, `acp_image`, `acp_wrapper`, `sessions_root` | the matching flags (resolved sessions root) |
 | `audit_log`, `state_file` | absolute paths |
 | `headless` | `--headless` |
 | `roots` | the `--root` list |
@@ -147,10 +147,10 @@ Optional fields are omitted when empty.
 | `kind` | `project`, `planning`, `task`, `commit`, `wolf`, `archive`, `review` |
 | `work_stream`, `project_path`, `task` | what it works on (`task` only for task/commit agents) |
 | `started_at` | when tracking began |
-| `interactive` | only the wolf waits for a human; it is an ACP session too unless `--wolf-host`, in which case it has a `tmux_target` and no `sandbox_name` |
+| `interactive` | only the wolf waits for a human; it is an ACP session too unless `--wolf-host`, in which case it has a `tab_name` and no `sandbox_name` |
 | `source` | `"daemon"` or `"disk"` |
 | `sandbox_name` | the `sbx` sandbox (ACP sessions) |
-| `tmux_target` | tmux session name (non-ACP sessions) |
+| `tab_name` | session name of the terminal tab a non-ACP session runs in (see `docs/terminal-tabs.md`) |
 | `acp` | ACP-backed sessions: `{session_id, session_dir, socket_path, status}`; `socket_path` is `<session_dir>/agent.sock`, `status` is from `session.json` |
 
 ### `audit_events[]`

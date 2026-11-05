@@ -1,51 +1,10 @@
 package agent
 
-import (
-	"fmt"
-	"os"
-	"os/exec"
-)
-
-// ResolveTmux returns the absolute path to a usable tmux binary. It tries
-// exec.LookPath first (which honours the current process PATH), then falls
-// back to common install locations that don't show up when a daemon is
-// launched outside a login shell: NixOS per-user profiles, the current
-// system profile, Homebrew, and /usr/local.
-//
-// Returning an absolute path lets callers shell out to tmux reliably even
-// if their PATH is the bare-bones default macOS gives GUI-launched
-// processes.
-func ResolveTmux() (string, error) {
-	if p, err := exec.LookPath("tmux"); err == nil {
-		return p, nil
-	}
-	for _, candidate := range tmuxCandidatePaths() {
-		info, err := os.Stat(candidate)
-		if err == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("tmux: not found in PATH or known locations")
-}
-
-func tmuxCandidatePaths() []string {
-	user := os.Getenv("USER")
-	paths := []string{
-		"/run/current-system/sw/bin/tmux", // NixOS system profile
-		"/nix/var/nix/profiles/default/bin/tmux",
-		"/opt/homebrew/bin/tmux",
-		"/usr/local/bin/tmux",
-		"/usr/bin/tmux",
-	}
-	if user != "" {
-		paths = append([]string{"/etc/profiles/per-user/" + user + "/bin/tmux"}, paths...)
-	}
-	return paths
-}
+import "os"
 
 // AugmentSearchPath appends every path-segment from `extra` to the current
 // PATH environment variable if it isn't already there. Useful at daemon
-// startup so child processes (the agent's claude session, the tmux server,
+// startup so child processes (the agent's claude session, the sandbox CLI,
 // etc.) can find binaries installed by tools the daemon's launcher didn't
 // know about.
 //

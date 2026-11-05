@@ -38,15 +38,3 @@ func TestAugmentSearchPathSkipsNonExistent(t *testing.T) {
 		t.Errorf("PATH should not contain nonexistent dir; got %q", got)
 	}
 }
-
-func TestResolveTmuxFromCommonPath(t *testing.T) {
-	// Best-effort smoke test: if tmux is installed anywhere ResolveTmux
-	// knows about, it should find it. CI without tmux skips.
-	path, err := ResolveTmux()
-	if err != nil {
-		t.Skip("tmux not installed in any known location")
-	}
-	if path == "" {
-		t.Error("ResolveTmux returned empty path with no error")
-	}
-}

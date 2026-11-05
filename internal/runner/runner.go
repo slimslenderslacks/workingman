@@ -15,6 +15,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,6 +33,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/setup"
 	"github.com/slimslenderslacks/work/internal/task"
+	"github.com/slimslenderslacks/work/internal/terminal"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
@@ -139,8 +141,8 @@ type Plan struct {
 	// one: the acp-wrapper is launched with --persistent (not --exit-when-empty)
 	// so the agent keeps running across client disconnects and ends only when it
 	// exits, its project leaves `blocked` (wolf), or it goes idle. Set by the
-	// daemon for the wolf. Ignored on the legacy tmux path, where the claude
-	// process is already long-lived.
+	// daemon for the wolf. Ignored on the host (terminal tab) path, where the
+	// claude process is already long-lived.
 	Persistent bool
 
 	// WritableMounts, for the workingman agent, are host paths bind-mounted into
@@ -160,8 +162,9 @@ type Plan struct {
 	// .orch/context.yaml. Ignored for every other Kind.
 	Observe Observe
 
-	// SessionName is the tmux session name. If empty, Runner derives one
-	// from Kind and Branch (or Kind and a short hash of WorkingDir).
+	// SessionName is the session name (the key a terminal tab is tracked by).
+	// If empty, Runner derives one from Kind and Branch (or Kind and a short
+	// hash of WorkingDir).
 	SessionName string
 }
 
@@ -196,11 +199,11 @@ const initialPrompt = "Read .orch/instructions.md and .orch/context.yaml, then f
 //
 // Autonomous kinds (project, planning, task, commit, archive) use --print so
 // claude executes one turn — including any tool use needed to complete the task
-// — and exits. That exit closes the tmux window and lets the daemon chain to
-// the next phase.
+// — and exits. That exit ends the session and lets the daemon chain to the
+// next phase.
 //
-// The wolf, the one interactive kind, omits --print: a human attaches via tmux
-// and drives the conversation, so claude must remain at the prompt waiting for
+// The wolf, the one interactive kind, omits --print: on the host path a human
+// drives the conversation in the wolf's terminal tab, so claude must remain at the prompt waiting for
 // guidance on the blocked project.
 //
 // Sandbox wrapping (running claude inside an `sbx exec`) is layered on by
@@ -363,7 +366,7 @@ type Runner struct {
 	// sandboxing entirely — tests that fake the launch command set this to
 	// nil so they don't shell out to sbx.
 	//
-	// This is the legacy tmux + `sbx exec` path. In production it has been
+	// This is the legacy terminal-tab + `sbx exec` path. In production it has been
 	// superseded for non-interactive agents by the ACP path (see AcpLauncher):
 	// when AcpLauncher is set, planning/task/commit agents launch as
 	// acp-wrapper-backed ACP sessions instead and never reach this seam. It is
@@ -372,7 +375,7 @@ type Runner struct {
 	Sandbox SandboxCreator
 
 	// AcpLauncher, when non-nil, switches non-interactive agents
-	// (planning/task/commit/archive) from the tmux + `sbx exec claude -p` path
+	// (planning/task/commit/archive) from the terminal-tab + `sbx exec claude -p` path
 	// to a per-session acp-wrapper host process that backs an ACP claude session.
 	// The wrapper creates the sandbox (with acp-kit layered on), execs the ACP
 	// client, and serves <SessionsRoot>/<id>/agent.sock; the TUI watches the
@@ -385,12 +388,12 @@ type Runner struct {
 	// AcpLauncher configured, the wolf runs as a persistent ACP session in its own
 	// sandbox (so the daemon, the TUI and messaging channels can all tune in to
 	// its conversation). Setting this keeps the pre-ACP behavior instead: the wolf
-	// runs in a tmux window directly on the host, outside any sandbox, with full
-	// host access (sbx, the failed agents' sandboxes, osascript, host credentials)
-	// but no way for anything but a human attached to tmux to talk to it. Use it
+	// runs in a new terminal tab directly on the host, outside any sandbox, with
+	// full host access (sbx, the failed agents' sandboxes, osascript, host
+	// credentials) but no way for anything but a human at that tab to talk to it. Use it
 	// when diagnosing a block needs the host — typically a sandbox/sbx/wsp
 	// problem the sandboxed wolf cannot see. Ignored when AcpLauncher is nil (the
-	// wolf is then always a host tmux window).
+	// wolf is then always a host terminal tab).
 	WolfOnHost bool
 
 	// PersistentUnblockGrace is how long the project must stay out of
@@ -450,12 +453,12 @@ func (r *Runner) signingPreflightRun() gitsign.RunFunc {
 // UsesACP reports whether a Start for kind would take the ACP path (i.e. the
 // agent runs inside an acp-wrapper-managed sandbox). The daemon uses this to
 // decide whether to surface a session's sandbox name to the TUI: only ACP
-// sessions own a stable, user-visible sandbox; the legacy tmux path's sandbox
+// sessions own a stable, user-visible sandbox; the legacy terminal-tab path's sandbox
 // is an implementation detail.
 //
 // The wolf is interactive but conversational, so it is the one interactive kind
 // that also runs under ACP (a persistent session other processes can tune in
-// to) — unless WolfOnHost selects the host/tmux escape hatch. Every other kind,
+// to) — unless WolfOnHost selects the host (terminal tab) escape hatch. Every other kind,
 // the archive agent included, is autonomous and takes the ACP path whenever an
 // AcpLauncher is configured.
 func (r *Runner) UsesACP(kind agent.Kind) bool {
@@ -483,7 +486,7 @@ func projectNameFromPath(projectPath string) string {
 func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	if p.Kind == agent.WorkingmanAgent {
 		// It only makes sense as a persistent ACP session in a sandbox of its
-		// own: the legacy tmux path has no read-only mounts, so refusing is the
+		// own: the legacy terminal-tab path has no read-only mounts, so refusing is the
 		// safe answer rather than silently launching it with write access.
 		if !r.UsesACP(p.Kind) {
 			return nil, fmt.Errorf("runner: the workingman agent needs an ACP launcher (--acp-kit)")
@@ -585,9 +588,10 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	// Runner is configured for it (production). The .orch instructions/context
 	// written above are read by the sandboxed ACP client from the mounted
 	// workspace exactly as before; only the launch mechanism changes — an
-	// acp-wrapper host process instead of a tmux window running
-	// `sbx exec claude -p`. The archive agent always takes the legacy tmux path
-	// below; so does the wolf when WolfOnHost is set (see UsesACP).
+	// acp-wrapper host process instead of a terminal tab running
+	// `sbx exec claude -p`. Without an AcpLauncher every kind takes the legacy
+	// terminal-tab path below; so does the wolf when WolfOnHost is set (see
+	// UsesACP).
 	if useACP {
 		return r.startACP(ctx, p, workingDir, planningWorktree)
 	}
@@ -630,6 +634,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionName(p),
+		Title:     tabTitle(p),
 		Workspace: workingDir,
 		Command:   command,
 	}
@@ -648,14 +653,15 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	return sess, nil
 }
 
-// InteractiveSpec describes an ad-hoc interactive sandbox window opened on the
+// InteractiveSpec describes an ad-hoc interactive sandbox session opened on the
 // user's request from the TUI — the `:dir` shell and the `:session` claude
-// session. Unlike Start's agent launches these have no task/lifecycle and no
-// daemon session tracking: the runner just ensures the sandbox exists, wraps
-// Inner in `sbx exec -it`, and hands the window to the tmux launcher.
+// session — in a terminal tab of its own. Unlike Start's agent launches these
+// have no task/lifecycle and no daemon session tracking: the runner just ensures
+// the sandbox exists, wraps Inner in `sbx exec -it`, and hands the tab to the
+// launcher.
 type InteractiveSpec struct {
 	// SandboxName is the sbx sandbox to create/reuse, deterministic per work
-	// stream so re-opening the window lands in the same sandbox. Empty means
+	// stream so re-opening the tab lands in the same sandbox. Empty means
 	// run the command directly on the host (no sandbox, no `sbx exec`) — that's
 	// how `:dir` opens a plain host shell in the workspace dir.
 	SandboxName string
@@ -668,11 +674,14 @@ type InteractiveSpec struct {
 	// Inner is the command run inside the sandbox, e.g. ["bash"] or
 	// ["claude", "--dangerously-skip-permissions", "--session-id", uuid].
 	Inner []string
-	// WindowName is the tmux window name inside the umbrella session.
-	WindowName string
+	// Name is the session name the tab is tracked by: re-opening a Name whose
+	// tab is still open focuses that tab instead of opening a second one.
+	Name string
+	// Title is the tab title — the work stream's name. Empty means Name.
+	Title string
 	// GitName/GitEmail are the host user's git identity. When both are set and
 	// SandboxName is set, LaunchInteractive injects them as GIT_AUTHOR_*/
-	// GIT_COMMITTER_* into `sbx exec` so commits made in the window are
+	// GIT_COMMITTER_* into `sbx exec` so commits made in the tab are
 	// attributed to the user rather than the sandbox image's baked identity.
 	// Ignored for a host command (empty SandboxName).
 	GitName  string
@@ -686,14 +695,16 @@ type InteractiveSpec struct {
 	SigningKey string
 }
 
-// LaunchInteractive opens an interactive window in the umbrella tmux session
-// and returns the tmux target ("session:window") so the caller can switch a
-// client to it. It is the shared machinery behind the TUI's `:dir` and
-// `:session` commands.
+// LaunchInteractive opens an interactive session in a new terminal tab and
+// returns its session name. It is the shared machinery behind the TUI's `:dir`
+// and `:session` commands. When the launcher reports the session's tab is
+// already open (a *terminal.AlreadyOpenError: it focused that tab instead of
+// opening a second), that error is returned alongside the name so the caller
+// can warn the user.
 //
 // When spec.SandboxName is set (`:session`), it first ensures the sandbox
 // exists (idempotently, via DefaultSandboxCreator — a plain `sbx create claude`
-// with the given mounts, no acp-kit, since the window runs claude directly
+// with the given mounts, no acp-kit, since the tab runs claude directly
 // rather than the ACP bridge) and wraps the command in `sbx exec -it`, which
 // auto-starts the sandbox if it was stopped. Nothing removes these sandboxes,
 // so a `:session` sandbox persists and claude resumes the same conversation on
@@ -703,7 +714,7 @@ type InteractiveSpec struct {
 // host — no sandbox, no `sbx exec` — in spec.Cwd. That's a plain host shell.
 func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (string, error) {
 	if r.Launcher == nil {
-		return "", fmt.Errorf("runner: no tmux launcher configured for interactive sessions")
+		return "", fmt.Errorf("runner: no terminal launcher configured for interactive sessions")
 	}
 	if len(spec.Inner) == 0 {
 		return "", fmt.Errorf("runner: interactive session needs a command to run")
@@ -728,11 +739,11 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 		if sbxBin == "" {
 			sbxBin = "sbx"
 		}
-		// Teach the window to commit as the host user and, when the host signs,
+		// Teach the tab to commit as the host user and, when the host signs,
 		// to SSH-sign — the same env the ACP commit agent injects. Signing is
 		// preflighted first: with commit.gpgsign forced on, a forwarded agent
 		// that holds no key (private ssh-agent empty, sandboxd restarted without it)
-		// would make every `git commit` in this interactive window hard-fail, so
+		// would make every `git commit` in this interactive tab hard-fail, so
 		// a failed preflight degrades to unsigned (signingKey cleared) exactly
 		// like acpwrapper.Run does for the commit agent.
 		signingKey := spec.SigningKey
@@ -759,13 +770,33 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 		command = append([]string{sbxBin}, execArgs...)
 	}
 
-	sess, err := r.Launcher.Launch(ctx, agent.Spec{
-		Name:      spec.WindowName,
+	launch := agent.Spec{
+		Name:      spec.Name,
+		Title:     spec.Title,
 		Workspace: spec.Cwd,
 		Command:   command,
-	})
+	}
+	var sess agent.Session
+	var err error
+	if opener, ok := r.Launcher.(tabOpener); ok {
+		// Open (rather than Launch) surfaces the already-open case.
+		var ts *terminal.TabSession
+		ts, err = opener.Open(ctx, launch)
+		var already *terminal.AlreadyOpenError
+		if errors.As(err, &already) {
+			if r.Audit != nil {
+				r.Audit.Log("interactive_session_focused", "name", spec.Name, "title", already.Title)
+			}
+			return spec.Name, err
+		}
+		if ts != nil {
+			sess = ts
+		}
+	} else {
+		sess, err = r.Launcher.Launch(ctx, launch)
+	}
 	if err != nil {
-		return "", fmt.Errorf("runner: launch interactive window %q: %w", spec.WindowName, err)
+		return "", fmt.Errorf("runner: launch interactive session %q: %w", spec.Name, err)
 	}
 	if r.Audit != nil {
 		sandbox := spec.SandboxName
@@ -773,7 +804,7 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 			sandbox = "(host)"
 		}
 		r.Audit.Log("interactive_session_started",
-			"window", spec.WindowName,
+			"name", spec.Name,
 			"sandbox", sandbox,
 			"cwd", spec.Cwd,
 		)
@@ -788,7 +819,7 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 // itself creates the sandbox with acp-kit, execs the ACP client, and re-writes
 // session.json with the live status once the socket is accepting connections.
 //
-// Unlike the tmux path, this does NOT call r.Sandbox or wrap the command in
+// Unlike the terminal-tab path, this does NOT call r.Sandbox or wrap the command in
 // `sbx exec` — the wrapper owns sandbox creation end-to-end.
 func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorktree string) (agent.Session, error) {
 	sandboxName := ACPSandboxNameFor(p.Kind, p.ProjectPath, p.TaskName)
@@ -1007,8 +1038,8 @@ func (r *Runner) StartFailure(p Plan) string {
 	return rec.Error
 }
 
-// acpSessionID derives the ACP session id from the Plan. It reuses the tmux
-// window-name logic (kind-tail) so the id is stable across daemon restarts —
+// acpSessionID derives the ACP session id from the Plan. It reuses the
+// session-name logic (kind-tail) so the id is stable across daemon restarts —
 // the same task relaunch maps to the same session dir and sandbox, making the
 // launch idempotent — then sanitizes path separators (a branch tail like
 // "feat/x" would otherwise be an illegal multi-segment session id).
@@ -1053,7 +1084,7 @@ func (r *Runner) resolvePlanningWorktree(ctx context.Context, p Plan) (string, e
 	return dir, nil
 }
 
-// sessionName builds the tmux window name in the form "<kind>-<tail>". The
+// sessionName builds the session name in the form "<kind>-<tail>". The
 // tail picks the most specific identifier the Plan carries: a task name
 // when the agent is working a specific task (task / commit agents), the
 // branch otherwise (project / planning / wolf), and as a last resort a
@@ -1061,7 +1092,7 @@ func (r *Runner) resolvePlanningWorktree(ctx context.Context, p Plan) (string, e
 //
 // Preferring TaskName for task-bound kinds is the whole point of this
 // function — without it, every task on the same branch would land in a
-// window called "task-<branch>" and a glance at tmux's status bar wouldn't
+// session called "task-<branch>" and a glance at the sessions pane wouldn't
 // tell you which task is actually running.
 func sessionName(p Plan) string {
 	if p.SessionName != "" {
@@ -1074,9 +1105,24 @@ func sessionName(p Plan) string {
 	if tail == "" {
 		tail = shortID(p.WorkingDir)
 	}
-	// No "orch-" prefix — the umbrella tmux session carries that brand.
-	// Window names show up bare in tmux's status bar.
 	return fmt.Sprintf("%s-%s", p.Kind, tail)
+}
+
+// tabTitle is the terminal tab title for a Plan's session: the work stream's
+// (project's) name, falling back to the session name for a plan with no
+// project.
+func tabTitle(p Plan) string {
+	if name := projectNameFromPath(p.ProjectPath); name != "" {
+		return name
+	}
+	return sessionName(p)
+}
+
+// tabOpener is implemented by terminal.TabLauncher: Open reports, via a
+// *terminal.AlreadyOpenError, that it focused an already-open tab instead of
+// opening a new one.
+type tabOpener interface {
+	Open(ctx context.Context, spec agent.Spec) (*terminal.TabSession, error)
 }
 
 // Pushes reports whether the session this Plan launches will `git push`: a
@@ -1101,7 +1147,7 @@ func (p Plan) Pushes() bool {
 //     in the control dir. It gets its OWN sandbox — distinct from planning's —
 //     so the two agents, which run back-to-back on the same control dir, don't
 //     collide on one sandbox with different mounts.
-//   - Wolf agent → "" (the host/tmux path: runs outside any sandbox so it can
+//   - Wolf agent → "" (the host terminal-tab path: runs outside any sandbox so it can
 //     advise on the project from the host, including for sandbox-related
 //     blocks). The ACP-backed wolf does get a sandbox — see ACPSandboxNameFor.
 //   - Planning → basename of the project's control dir (the dir holding
@@ -1182,7 +1228,7 @@ func durationOrDefault(v, def time.Duration) time.Duration {
 // name WorkingmanAgentSandbox, and the ACP wolf gets "<work-stream>-wolf", a sandbox
 // of its own (distinct from planning's, which may be live alongside it — the wolf
 // runs in tandem with the project's other agents). SandboxNameFor itself keeps
-// returning "" for the wolf because that is the host/tmux path's contract: no
+// returning "" for the wolf because that is the host terminal-tab path's contract: no
 // sandbox. Use this one wherever the session is known to be ACP-backed (see
 // Runner.UsesACP).
 func ACPSandboxNameFor(kind agent.Kind, projectPath, taskName string) string {

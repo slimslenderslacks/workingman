@@ -16,7 +16,7 @@ import (
 // the tests that drive a transition directly instead of waiting for one. No
 // runner is wired up: every assertion here is about what lands in the project
 // file and the scheduler, and launchProjectRootAgent is a no-op without a
-// runner — so these tests need neither tmux nor a sandbox.
+// runner — so these tests need neither a launcher nor a sandbox.
 func startReplanDaemon(t *testing.T, root string) (*Daemon, *safeBuf, *scheduler.Scheduler) {
 	t.Helper()
 	buf := &safeBuf{}

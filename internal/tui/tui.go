@@ -101,7 +101,7 @@ type model struct {
 	projCh     <-chan []ProjectView
 	projSel    string // path of the selected project card; empty when unset
 	loaded     bool
-	attacher   tmuxAttacher
+	attacher   tabAttacher
 	statusMsg  string
 
 	// taskSel is the file path of the currently-selected task. Drives the
@@ -218,7 +218,7 @@ type model struct {
 	pendingSeq int
 }
 
-func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh <-chan []string, attacher tmuxAttacher) model {
+func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, auditCh <-chan []string, attacher tabAttacher) model {
 	// When no sessions source is wired in (standalone tui mode), short-circuit
 	// to the empty state so the pane shows "(none)" instead of an endless
 	// "(loading…)".
@@ -470,7 +470,7 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// "∆" is the glyph a default macOS terminal emits for Option-j when
 		// Option isn't configured as a Meta key — accepting it too means the
 		// binding works out of the box there, while "alt+j" covers terminals
-		// that do send Meta (or tmux with xterm-keys).
+		// that do send Meta.
 		m = m.cycleCenterFocus(1)
 		m.statusMsg = ""
 	case "alt+k", "˚":
@@ -899,22 +899,22 @@ func taskRowAtY(y, paneTop, count, treeRows int) int {
 	return rel
 }
 
-// attachSelected dispatches the tmux-attach command for the currently
-// selected session row. The actual suspend/resume is owned by bubbletea via
-// tea.ExecProcess; this model just returns the Cmd.
+// attachSelected attaches to the currently selected session row: an ACP
+// session opens on its ACP tab; any other session (the --wolf-host wolf) has
+// its terminal tab focused via the attacher.
 func (m model) attachSelected() (tea.Model, tea.Cmd) {
 	if m.attacher == nil {
-		m.statusMsg = "tmux attach disabled (no attacher wired)"
+		m.statusMsg = "attach disabled (no attacher wired)"
 		return m, nil
 	}
-	target, ok := selectedTmuxTarget(m.sessions, m.sessSel)
+	target, ok := selectedTabName(m.sessions, m.sessSel)
 	if !ok {
 		m.statusMsg = "no session selected"
 		return m, nil
 	}
 	m.statusMsg = ""
-	// An ACP-backed session (planning/task/commit/wolf) has no tmux window to
-	// attach to: its "attach" is the ACP tab view, opened on that session's tab.
+	// An ACP-backed session (planning/task/commit/wolf) has no terminal tab to
+	// switch to: its "attach" is the ACP tab view, opened on that session's tab.
 	// For the wolf this is how a human watches and types into it.
 	if m.acpCh != nil && selectedIsACP(m.sessions, m.sessSel) {
 		m.acp.selectID(target)
@@ -936,10 +936,10 @@ func selectedIsACP(views []SessionView, id string) bool {
 	return false
 }
 
-func selectedTmuxTarget(views []SessionView, id string) (string, bool) {
+func selectedTabName(views []SessionView, id string) (string, bool) {
 	for _, v := range views {
 		if v.ID == id {
-			return v.TmuxTarget, true
+			return v.TabName, true
 		}
 	}
 	return "", false
@@ -1817,8 +1817,8 @@ func prURL(pr project.PullRequest) string {
 }
 
 // hyperlink wraps label in an OSC 8 terminal hyperlink escape sequence so
-// terminals that support it (iTerm2, Kitty, WezTerm, Windows Terminal, tmux
-// with passthrough, ...) render label as clickable, opening url. Terminals
+// terminals that support it (Ghostty, iTerm2, Kitty, WezTerm, Windows Terminal,
+// ...) render label as clickable, opening url. Terminals
 // that don't recognize OSC 8 simply show label — the escapes carry no
 // glyphs of their own, so there's no unsupported-terminal fallback to write.
 func hyperlink(url, label string) string {
@@ -2831,7 +2831,7 @@ func (m model) renderAudit(width, height int) string {
 
 // renderFooter draws the bottom hint line. Variants, in precedence order:
 //
-//   - statusMsg set (e.g. tmux-attach failure, "created project foo"): the
+//   - statusMsg set (e.g. tab-attach failure, "created project foo"): the
 //     message replaces the hint so the user can't miss it.
 //   - Work-streams pane focused: the hint advertises `:` — the single entry
 //     point to the command menu — rather than listing every command inline.
@@ -2891,10 +2891,11 @@ func paneName(p pane) string {
 // sessions root and feeds the `a`-key tab view one tab per live ACP session.
 // Run blocks until the user quits or ctx is cancelled.
 //
-// Mouse cell-motion is enabled so the sessions pane responds to clicks. The
-// tmux-attach plumbing opens a new Terminal.app window via osascript, so the
-// TUI keeps running while the user works in the attached session.
-func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, auditPath, sessionsRoot string, interactive InteractiveLauncher) error {
+// Mouse cell-motion is enabled so the sessions pane responds to clicks.
+// Attaching to a non-ACP session focuses its terminal tab through tabs (nil
+// uses a default terminal.TabLauncher), so the TUI keeps running in its own
+// tab while the user works in the session's.
+func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, auditPath, sessionsRoot string, interactive InteractiveLauncher, tabs TabFocuser) error {
 	tuiCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -2909,7 +2910,7 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, audit
 		auditCh = TailAudit(tuiCtx, auditPath, 250*time.Millisecond, 200)
 	}
 
-	m := newModel(ch, sessCh, auditCh, newTmuxAttacher())
+	m := newModel(ch, sessCh, auditCh, newTabAttacher(tabs))
 	// The `:dir`/`:session` commands need a launcher wired to the daemon's
 	// runner (integrated mode). Standalone `orch tui` passes nil and those
 	// commands report they're unavailable.

@@ -109,7 +109,7 @@ func ParseKind(s string) (Kind, bool) {
 // highlight sessions that won't make progress until someone attaches. It does
 // NOT decide the launch path on its own: the wolf is interactive but still runs
 // as a persistent ACP session when an ACP launcher is configured, unless
-// --wolf-host selects the host/tmux escape hatch (see runner.Runner.UsesACP).
+// --wolf-host selects the host escape hatch (a terminal tab on the host) (see runner.Runner.UsesACP).
 func (k Kind) Interactive() bool {
 	return k == WolfAgent
 }
@@ -119,8 +119,11 @@ func (k Kind) Interactive() bool {
 // pass the real `claude --dangerously-skip-permissions ...` invocation
 // without changing the Launcher.
 type Spec struct {
-	Kind      Kind
-	Name      string   // session/tmux name — must be unique per live session
+	Kind Kind
+	Name string // session name — must be unique per live session
+	// Title is the human-facing label of the session — the terminal tab title
+	// for launchers that open one (the work stream's name). Empty means Name.
+	Title     string
 	Workspace string   // working directory for the command
 	Command   []string // command + args
 }

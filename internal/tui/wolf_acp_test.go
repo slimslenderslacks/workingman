@@ -195,9 +195,9 @@ func TestWolfTabViewNeverExceedsHeight(t *testing.T) {
 	}
 }
 
-// The wolf has no tmux window under ACP: selecting its row in the sessions pane
+// The wolf has no terminal tab under ACP: selecting its row in the sessions pane
 // opens the ACP view on its tab (where it can be watched and typed into) rather
-// than trying `tmux attach` on an ACP session id.
+// than trying to focus a terminal tab by an ACP session id.
 func TestEnterOnACPSessionOpensItsTab(t *testing.T) {
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
@@ -208,7 +208,7 @@ func TestEnterOnACPSessionOpensItsTab(t *testing.T) {
 		m = step.(model)
 	}
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "/orch/alpha/project.yaml#wolf", AgentName: "wolf", Project: "alpha", TmuxTarget: "wolf-alpha", Interactive: true, SandboxName: "alpha-wolf"},
+		{ID: "/orch/alpha/project.yaml#wolf", AgentName: "wolf", Project: "alpha", TabName: "wolf-alpha", Interactive: true, SandboxName: "alpha-wolf"},
 	}})
 	m = step.(model)
 	m.focus = paneSessions
@@ -217,7 +217,7 @@ func TestEnterOnACPSessionOpensItsTab(t *testing.T) {
 	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = step.(model)
 	if len(att.targets) != 0 {
-		t.Errorf("ACP session was tmux-attached: %v", att.targets)
+		t.Errorf("ACP session was tab-attached: %v", att.targets)
 	}
 	if !m.showACP {
 		t.Fatal("enter on an ACP session should open the ACP view")
@@ -227,14 +227,14 @@ func TestEnterOnACPSessionOpensItsTab(t *testing.T) {
 	}
 }
 
-// The host/tmux wolf (--wolf-host) has no sandbox name, so it still attaches
-// through tmux exactly as before.
-func TestEnterOnHostWolfStillAttachesViaTmux(t *testing.T) {
+// The host wolf (--wolf-host) has no sandbox name, so attaching focuses the
+// terminal tab it runs in.
+func TestEnterOnHostWolfFocusesItsTab(t *testing.T) {
 	att := &fakeAttacher{}
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	m.acpCh = make(chan acpTabEvent)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "/orch/alpha/project.yaml#wolf", AgentName: "wolf", Project: "alpha", TmuxTarget: "orch:wolf-alpha", Interactive: true},
+		{ID: "/orch/alpha/project.yaml#wolf", AgentName: "wolf", Project: "alpha", TabName: "wolf-alpha", Interactive: true},
 	}})
 	m = step.(model)
 	m.focus = paneSessions
@@ -242,8 +242,8 @@ func TestEnterOnHostWolfStillAttachesViaTmux(t *testing.T) {
 
 	step, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = step.(model)
-	if cmd == nil || len(att.targets) != 1 || att.targets[0] != "orch:wolf-alpha" {
-		t.Errorf("host wolf should tmux-attach; targets=%v", att.targets)
+	if cmd == nil || len(att.targets) != 1 || att.targets[0] != "wolf-alpha" {
+		t.Errorf("host wolf should focus its tab; targets=%v", att.targets)
 	}
 	if m.showACP {
 		t.Error("host wolf must not open the ACP view")

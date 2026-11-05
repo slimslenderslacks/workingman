@@ -38,7 +38,6 @@ type RuntimeInfo struct {
 	AcpImage         string
 	AcpWrapper       string
 	SessionsRoot     string
-	TmuxSession      string
 	AuditLog         string
 	Headless         bool
 }
@@ -341,7 +340,6 @@ func (d *Daemon) daemonInfo() *DaemonInfo {
 		AcpImage:         info.AcpImage,
 		AcpWrapper:       info.AcpWrapper,
 		SessionsRoot:     root,
-		TmuxSession:      info.TmuxSession,
 		AuditLog:         info.AuditLog,
 		StateFile:        d.snapshot.path,
 		Headless:         info.Headless,
@@ -394,7 +392,7 @@ func (d *Daemon) liveSessionSnapshots() []SessionSnapshot {
 				s.ACP.SocketPath = store.SocketPath(id)
 			}
 		} else {
-			s.TmuxTarget = entry.sess.Name()
+			s.TabName = entry.sess.Name()
 		}
 		out = append(out, s)
 	}

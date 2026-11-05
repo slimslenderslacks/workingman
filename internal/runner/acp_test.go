@@ -58,9 +58,9 @@ func TestACPLaunchPlanningAgent(t *testing.T) {
 	sessionsRoot := t.TempDir()
 
 	acp := &fakeLauncher{}
-	tmux := &fakeLauncher{}
+	tabs := &fakeLauncher{}
 	r := &Runner{
-		Launcher:       tmux,
+		Launcher:       tabs,
 		AcpLauncher:    acp,
 		Kit:            "/kits/acp-kit",
 		SessionsRoot:   sessionsRoot,
@@ -77,9 +77,9 @@ func TestACPLaunchPlanningAgent(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// The tmux launcher must not be used for a non-interactive ACP launch.
-	if tmux.last.Name != "" {
-		t.Errorf("tmux launcher was used for an ACP agent: %+v", tmux.last)
+	// The tab launcher must not be used for a non-interactive ACP launch.
+	if tabs.last.Name != "" {
+		t.Errorf("tab launcher was used for an ACP agent: %+v", tabs.last)
 	}
 
 	cmd := acp.last.Command
@@ -495,7 +495,7 @@ func TestACPLaunchForwardsModel(t *testing.T) {
 // runner launches it through acp-wrapper — one-shot (--exit-when-empty, not
 // --persistent), in its own "<work-stream>-archive" sandbox, with both the wsp
 // worktree (where its git work happens) and the orch dir (where it writes
-// `archive: true`) mounted. The tmux launcher must not be touched.
+// `archive: true`) mounted. The tab launcher must not be touched.
 func TestACPLaunchArchiveAgent(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
@@ -506,10 +506,10 @@ func TestACPLaunchArchiveAgent(t *testing.T) {
 	sessionsRoot := t.TempDir()
 
 	acp := &fakeLauncher{}
-	tmux := &fakeLauncher{}
+	tabs := &fakeLauncher{}
 	r := &Runner{
 		Workspaces:   workspace.NewStub(wsRoot),
-		Launcher:     tmux,
+		Launcher:     tabs,
 		AcpLauncher:  acp,
 		Kit:          "kit-ref",
 		SessionsRoot: sessionsRoot,
@@ -526,8 +526,8 @@ func TestACPLaunchArchiveAgent(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if tmux.last.Name != "" {
-		t.Errorf("tmux launcher was used for the archive agent: %+v", tmux.last)
+	if tabs.last.Name != "" {
+		t.Errorf("tab launcher was used for the archive agent: %+v", tabs.last)
 	}
 	cmd := acp.last.Command
 	if len(cmd) == 0 || cmd[0] != "acp-wrapper" {
@@ -575,18 +575,22 @@ func TestACPLaunchArchiveAgent(t *testing.T) {
 	}
 }
 
-// TestWolfOnHostUsesTmux: the --wolf-host escape hatch keeps the wolf on the
-// legacy host/tmux path, unsandboxed, even when an AcpLauncher is configured.
-func TestWolfOnHostUsesTmux(t *testing.T) {
-	workingDir := t.TempDir()
+// TestWolfOnHostUsesTerminalTab: the --wolf-host escape hatch keeps the wolf on
+// the host terminal-tab path, unsandboxed, even when an AcpLauncher is
+// configured, in a tab titled after the project.
+func TestWolfOnHostUsesTerminalTab(t *testing.T) {
+	workingDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(workingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	projectPath := filepath.Join(workingDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	tmux := &fakeLauncher{}
+	tabs := &fakeLauncher{}
 	r := &Runner{
-		Launcher:     tmux,
+		Launcher:     tabs,
 		AcpLauncher:  &failLauncher{t: t},
 		WolfOnHost:   true,
 		Kit:          "kit",
@@ -597,12 +601,19 @@ func TestWolfOnHostUsesTmux(t *testing.T) {
 		Kind:        agent.WolfAgent,
 		WorkingDir:  workingDir,
 		ProjectPath: projectPath,
-		Persistent:  true, // meaningless on the tmux path; must be ignored
+		Branch:      "feat/x",
+		Persistent:  true, // meaningless on the terminal-tab path; must be ignored
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if tmux.last.Command[0] != "claude" {
-		t.Errorf("host wolf should use the tmux launcher with the built command, got %v", tmux.last.Command)
+	if tabs.last.Command[0] != "claude" {
+		t.Errorf("host wolf should use the tab launcher with the built command, got %v", tabs.last.Command)
+	}
+	if tabs.last.Title != "myproj" {
+		t.Errorf("tab title = %q, want the project name myproj", tabs.last.Title)
+	}
+	if tabs.last.Name != "wolf-feat/x" {
+		t.Errorf("session name = %q, want wolf-feat/x", tabs.last.Name)
 	}
 	instructions, err := os.ReadFile(filepath.Join(workingDir, ".orch", "instructions.md"))
 	if err != nil {
@@ -668,10 +679,10 @@ func TestACPLaunchWolfPersistent(t *testing.T) {
 	sessionsRoot := t.TempDir()
 
 	acp := &fakeLauncher{}
-	tmux := &fakeLauncher{}
+	tabs := &fakeLauncher{}
 	r := &Runner{
 		Workspaces:   workspace.NewStub(wsRoot),
-		Launcher:     tmux,
+		Launcher:     tabs,
 		AcpLauncher:  acp,
 		Kit:          "kit-ref",
 		SessionsRoot: sessionsRoot,
@@ -687,8 +698,8 @@ func TestACPLaunchWolfPersistent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if tmux.last.Name != "" {
-		t.Errorf("tmux launcher was used for the ACP wolf: %+v", tmux.last)
+	if tabs.last.Name != "" {
+		t.Errorf("tab launcher was used for the ACP wolf: %+v", tabs.last)
 	}
 
 	cmd := acp.last.Command

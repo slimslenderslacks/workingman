@@ -131,15 +131,15 @@ func TestLaunchWolfAgentUnderACPIsPersistent(t *testing.T) {
 	}
 }
 
-// TestLaunchWolfAgentOnHostStaysOnTmux verifies the --wolf-host escape hatch:
+// TestLaunchWolfAgentOnHostUsesTerminalTab verifies the --wolf-host escape hatch:
 // even with an AcpLauncher configured, WolfOnHost keeps the wolf on the host
-// tmux path (no ACP wrapper, no sandbox, host-flavored prompt).
-func TestLaunchWolfAgentOnHostStaysOnTmux(t *testing.T) {
+// terminal-tab path (no ACP wrapper, no sandbox, host-flavored prompt).
+func TestLaunchWolfAgentOnHostUsesTerminalTab(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	acp := &recordingLauncher{}
-	tmux := &recordingLauncher{}
+	tabs := &recordingLauncher{}
 	d.runner = &runner.Runner{
-		Launcher:     tmux,
+		Launcher:     tabs,
 		AcpLauncher:  acp,
 		WolfOnHost:   true,
 		Kit:          "kit",
@@ -156,8 +156,8 @@ func TestLaunchWolfAgentOnHostStaysOnTmux(t *testing.T) {
 	if got := acp.launched(); len(got) != 0 {
 		t.Errorf("WolfOnHost must not use the ACP launcher, got %+v", got)
 	}
-	if got := tmux.launched(); len(got) != 1 || got[0].Command[0] != "claude" {
-		t.Fatalf("wolf should launch once on the tmux path, got %+v", got)
+	if got := tabs.launched(); len(got) != 1 || got[0].Command[0] != "claude" {
+		t.Fatalf("wolf should launch once on the terminal-tab path, got %+v", got)
 	}
 	instructions, err := os.ReadFile(filepath.Join(filepath.Dir(projectPath), ".orch", "instructions.md"))
 	if err != nil {

@@ -465,7 +465,7 @@ func TestCleanupDispatchesArchiveAgentUnderACP(t *testing.T) {
 	d.dispatchProject(projectPath, p)
 
 	if n := len(lch.launched()); n != 0 {
-		t.Errorf("tmux launcher used %d times for an ACP archive launch, want 0", n)
+		t.Errorf("tab launcher used %d times for an ACP archive launch, want 0", n)
 	}
 	specs := acp.launched()
 	if len(specs) != 1 || specs[0].Kind != agent.ArchiveAgent {

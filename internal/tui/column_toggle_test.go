@@ -327,7 +327,7 @@ func TestMouseClickInHiddenLeftColumnFallsThroughToCenter(t *testing.T) {
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	m.leftVisible = false
-	step, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a", TmuxTarget: "orch:task-alpha"}}})
+	step, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a", TabName: "task-alpha"}}})
 	m = step.(model)
 
 	// A click at the x-coordinate that would have been inside the sessions

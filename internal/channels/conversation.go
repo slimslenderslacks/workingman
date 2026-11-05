@@ -29,8 +29,8 @@ type ConversationTarget struct {
 	// SessionKey is the daemon's session-map key for the session (for a wolf,
 	// "<project path>#wolf").
 	SessionKey string `json:"session_key"`
-	// SessionID is the launcher's name for the live session (the tmux
-	// session / ACP session name), which changes on every relaunch and so
+	// SessionID is the launcher's name for the live session (the terminal
+	// tab session / ACP session name), which changes on every relaunch and so
 	// tells a stale entry from the current session.
 	SessionID string `json:"session_id,omitempty"`
 }

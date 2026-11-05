@@ -12,7 +12,7 @@ import (
 )
 
 // stubSession is a controllable agent.Session for tests. Wait blocks until
-// Close (or ctx cancellation). It avoids any tmux/process dependency so the
+// Close (or ctx cancellation). It avoids any terminal/process dependency so the
 // session-data tests can run unit-fast on every platform.
 type stubSession struct {
 	name string
@@ -96,8 +96,8 @@ func TestListSessionsReturnsTrackedSessions(t *testing.T) {
 	if got[0].Project != "alpha" {
 		t.Errorf("got[0].Project = %q, want %q", got[0].Project, "alpha")
 	}
-	if got[0].TmuxTarget != "orch-task-alpha" {
-		t.Errorf("got[0].TmuxTarget = %q", got[0].TmuxTarget)
+	if got[0].TabName != "orch-task-alpha" {
+		t.Errorf("got[0].TabName = %q", got[0].TabName)
 	}
 	if got[0].Status != SessionStatusRunning {
 		t.Errorf("got[0].Status = %q, want %q", got[0].Status, SessionStatusRunning)
@@ -251,7 +251,7 @@ func TestListSessionsPopulatesSandboxNameForACPSessions(t *testing.T) {
 }
 
 // TestListSessionsLeavesWolfSandboxEmptyOnHost covers the --wolf-host escape
-// hatch: with WolfOnHost the wolf is a host tmux window with no sandbox, so no
+// hatch: with WolfOnHost the wolf is a host terminal tab with no sandbox, so no
 // sandbox name is surfaced even though the runner has an AcpLauncher. The
 // archive agent is unaffected by that flag — it runs under ACP either way, so
 // its sandbox name IS surfaced, keyed off the "#archive" session key.
@@ -287,7 +287,7 @@ func TestListSessionsLeavesWolfSandboxEmptyOnHost(t *testing.T) {
 
 func TestListSessionsLeavesSandboxNameEmptyWithoutACP(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	// Runner with no AcpLauncher — the legacy tmux+sbx-exec path. Sandbox
+	// Runner with no AcpLauncher — the legacy terminal-tab+sbx-exec path. Sandbox
 	// is an implementation detail under that path, so the daemon shouldn't
 	// surface it.
 	d.runner = &runner.Runner{}

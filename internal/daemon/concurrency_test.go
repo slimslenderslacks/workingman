@@ -98,7 +98,7 @@ func seedWorkingProject(t *testing.T, dir, branch, taskName string) string {
 }
 
 // concurrencyTestDaemon builds a daemon wired the same way archiveTestDaemon
-// does (real runner.Start path, no sandbox/tmux) but with a caller-supplied
+// does (real runner.Start path, no sandbox/terminal) but with a caller-supplied
 // workspace.Manager so tests can control provisioning delay.
 func concurrencyTestDaemon(t *testing.T, mgr workspace.Manager) (*Daemon, *safeBuf) {
 	t.Helper()

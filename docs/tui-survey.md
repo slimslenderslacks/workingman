@@ -1,5 +1,10 @@
 # TUI Survey: Orch Daemon
 
+> **Historical.** This survey predates the TUI. Its tmux material (the
+> `TmuxLauncher`, `tmux attach` on click) no longer applies: orch has no tmux
+> dependency, and sessions that need a TTY open in a new terminal tab — see
+> [terminal-tabs.md](terminal-tabs.md).
+
 Survey of the existing orch daemon to identify where a TUI subsystem can be
 wired in. The planned TUI has a left-hand column listing active agent sessions
 (clicking launches an external tmux session attached to that agent) and a main

@@ -29,7 +29,12 @@ charged against it.
 ## Prerequisites
 
 - Go 1.22+
-- `tmux` — every agent runs in a detached tmux session you can attach to
+- A terminal orch can open tabs in — [Ghostty](https://ghostty.org) (macOS via
+  AppleScript, Linux via `ghostty +new-tab`), WezTerm or kitty. Sessions that
+  need a human at a TTY (the `--wolf-host` wolf, the TUI's `:dir`/`:session`)
+  open in a new tab titled after the project. orch detects the terminal it runs
+  in; otherwise set `terminal: ghostty` in `~/.config/workingman/settings.yaml`.
+  See [docs/terminal-tabs.md](docs/terminal-tabs.md).
 - `claude` (claude-code CLI) — the actual agent worker
 - `wsp` — multi-repo workspace manager. Repos must be registered (`wsp registry add ...`) before the planning step finishes. If you don't have wsp set up, run with `--workspace-manager=stub` instead.
 - macOS for `osascript` notifications (optional; wolf still launches without them)
@@ -87,7 +92,7 @@ Repeat `--root` for multiple trees.
 For day-to-day use, run `./start.sh` instead. It rebuilds `orch` and
 `acp-wrapper` from source, starts the private ssh-agent (see above), restarts
 sandboxd bound to it, and then runs the daemon and TUI in the foreground of
-the terminal you launched it from — there is no wrapping tmux session.
+the terminal you launched it from.
 `Ctrl-C` stops orch and tears the private agent down. Watch the audit log in another shell:
 
 ```sh
@@ -103,17 +108,11 @@ mkdir -p ~/orch/my-feature
 touch ~/orch/my-feature/project.yaml
 ```
 
-The daemon logs `project_empty` and launches the **project agent** in a
-tmux session. Attach to it:
-
-```sh
-tmux list-sessions          # find the session name (orch-project-<hash>)
-tmux attach -t orch-project-<hash>
-```
-
-The agent reads `.orch/instructions.md` and interviews you about the
-project. When it's done it writes the `project.yaml` itself with
-`status: ready`. Detach (`Ctrl-b d`) any time — the session keeps running.
+The daemon logs `project_empty` and launches the **project agent**. It is
+autonomous (an ACP session — press `a` in the TUI to watch it): it reads the
+seed `description:`, fills in the rest of `project.yaml` and sets
+`status: ready`, or blocks the project (summoning the wolf) when the
+description isn't enough to go on.
 
 ### 2. Planning
 
@@ -143,7 +142,9 @@ a wolf agent launches.
 
 ### 4. Stop
 
-`Ctrl-C` the daemon. In-flight sessions are closed; tmux sessions go away.
+`Ctrl-C` the daemon. ACP sessions keep running for the next orch to reconnect
+to; sessions in terminal tabs (the `--wolf-host` wolf) are closed, which closes
+their tabs.
 
 ## Stub mode (no wsp / no repos)
 
@@ -180,14 +181,15 @@ daemon ignores its own fsnotify events.
 ## Observability
 
 - **Audit log** (`--audit-log`): one line per event. `tail -f` it.
-- **Tmux sessions**: `tmux list-sessions` shows the agents that still run in
-  tmux (the wolf with `--wolf-host` or without `--acp-kit`).
-  Attach with `tmux attach -t <name>` to drive one.
+- **Terminal tabs**: agents that run on the host rather than under ACP (the wolf
+  with `--wolf-host`, every agent without `--acp-kit`) each get a terminal tab
+  titled after their project. Enter on the session row in the TUI switches to
+  it. See [docs/terminal-tabs.md](docs/terminal-tabs.md).
 - **ACP sessions** (`--acp-kit`): planning/task/commit/review/archive agents
   and, by default, the wolf run as ACP sessions. Press `a` in the TUI for the tab view
   (or enter on a session row); the wolf's tab is interactive — press enter to
-  type to it. `--wolf-host` runs the wolf on the host in tmux instead (full
-  host access, but only reachable via tmux).
+  type to it. `--wolf-host` runs the wolf on the host in a terminal tab instead
+  (full host access, but only reachable from that tab).
 - **Workingman agent** (`--workingman-agent`, needs `--acp-kit`): an always-on
   assistant in its own sandbox that answers questions about the orch state
   (projects, tasks, the wolf, the logs) for a human on a messaging channel, and,

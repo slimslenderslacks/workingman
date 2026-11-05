@@ -2,9 +2,7 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,33 +19,22 @@ import (
 // TestProjectAgentEndToEnd is the step-4b deliverable: write an empty
 // project.yaml inside a watched root and verify the full pipeline runs —
 // daemon detects it, runner drops .orch/{context.yaml,instructions.md} into
-// the working dir, tmux launcher starts a session, and the session ends
+// the working dir, the process launcher starts a session, and the session ends
 // cleanly.
 //
 // The Runner's CommandBuilder returns `sleep 1` so no claude binary is
 // needed to exercise the plumbing.
 func TestProjectAgentEndToEnd(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
 	stubRoot := t.TempDir()
-	socket := fmt.Sprintf("orch-e2e-%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	})
 
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(stubRoot),
-		Launcher: &agent.TmuxLauncher{
-			Socket:       socket,
-			PollInterval: 50 * time.Millisecond,
-		},
-		Audit:   a,
-		Command: func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
+		Launcher:   &agent.ProcessLauncher{},
+		Audit:      a,
+		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
 
 	d, err := New([]string{root}, a, WithRunner(r))
@@ -96,26 +83,15 @@ func TestProjectAgentEndToEnd(t *testing.T) {
 }
 
 func TestStatusReadyTriggersPlanningAgent(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-plan-%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	})
 
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{
 		// Workspaces left nil: planning agent must NOT need a wsp workspace.
-		Launcher: &agent.TmuxLauncher{
-			Socket:       socket,
-			PollInterval: 50 * time.Millisecond,
-		},
-		Audit:   a,
-		Command: func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
+		Launcher: &agent.ProcessLauncher{},
+		Audit:    a,
+		Command:  func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
 	d, err := New([]string{root}, a, WithRunner(r))
 	if err != nil {
@@ -177,15 +153,7 @@ func TestStatusReadyTriggersPlanningAgent(t *testing.T) {
 // that lets the planning agent read the file itself rather than the daemon
 // pre-digesting it into a task seed.
 func TestPlanningAgentSeesPendingIntakeFiles(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-intake-%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	})
 
 	if err := os.MkdirAll(filepath.Join(root, "intake"), 0o755); err != nil {
 		t.Fatalf("mkdir intake: %v", err)
@@ -198,7 +166,7 @@ func TestPlanningAgentSeesPendingIntakeFiles(t *testing.T) {
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{
-		Launcher: &agent.TmuxLauncher{Socket: socket, PollInterval: 50 * time.Millisecond},
+		Launcher: &agent.ProcessLauncher{},
 		Audit:    a,
 		Command:  func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
@@ -274,13 +242,7 @@ func TestPlanningAgentSeesPendingIntakeFiles(t *testing.T) {
 // session ended, missing the prefixed file and treating the task as deleted.
 // With the Path fix, the daemon uses the actual loaded path throughout.
 func TestNumericPrefixTaskFilenames(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-prefix-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
 
 	tasksDir := filepath.Join(root, "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
@@ -307,7 +269,7 @@ func TestNumericPrefixTaskFilenames(t *testing.T) {
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(t.TempDir()),
-		Launcher:   &agent.TmuxLauncher{Socket: socket, PollInterval: 50 * time.Millisecond},
+		Launcher:   &agent.ProcessLauncher{},
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
@@ -343,13 +305,7 @@ func TestNumericPrefixTaskFilenames(t *testing.T) {
 }
 
 func TestResumeStuckSuccessTask(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-resume-%d", time.Now().UnixNano())
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
 
 	// Pre-seed: project status=working; task A at status=success
 	// (commit never ran); task B at status=ready depending on A.
@@ -376,7 +332,7 @@ func TestResumeStuckSuccessTask(t *testing.T) {
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(t.TempDir()),
-		Launcher:   &agent.TmuxLauncher{Socket: socket, PollInterval: 50 * time.Millisecond},
+		Launcher:   &agent.ProcessLauncher{},
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
@@ -401,10 +357,6 @@ func TestResumeStuckSuccessTask(t *testing.T) {
 }
 
 func TestStartupScanDispatchesExistingProject(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
 	// Seed the project file *before* starting the daemon.
 	projectPath := filepath.Join(root, "project.yaml")
@@ -417,19 +369,12 @@ func TestStartupScanDispatchesExistingProject(t *testing.T) {
 		t.Fatalf("seed project: %v", err)
 	}
 
-	socket := fmt.Sprintf("orch-startup-%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	})
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{
-		Launcher: &agent.TmuxLauncher{
-			Socket:       socket,
-			PollInterval: 50 * time.Millisecond,
-		},
-		Audit:   a,
-		Command: func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
+		Launcher: &agent.ProcessLauncher{},
+		Audit:    a,
+		Command:  func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
 	d, err := New([]string{root}, a, WithRunner(r))
 	if err != nil {
@@ -450,26 +395,15 @@ func TestStartupScanDispatchesExistingProject(t *testing.T) {
 }
 
 func TestProjectAgentHandoffToPlanning(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-handoff-%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	})
 
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{
 		// Planning agent runs in project root, no workspace manager needed.
-		Launcher: &agent.TmuxLauncher{
-			Socket:       socket,
-			PollInterval: 50 * time.Millisecond,
-		},
-		Audit:   a,
-		Command: func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
+		Launcher: &agent.ProcessLauncher{},
+		Audit:    a,
+		Command:  func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
 	d, err := New([]string{root}, a, WithRunner(r))
 	if err != nil {
@@ -510,25 +444,14 @@ func TestProjectAgentHandoffToPlanning(t *testing.T) {
 }
 
 func TestDuplicateEmptyEventDoesNotLaunchTwice(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-
 	root := t.TempDir()
-	socket := fmt.Sprintf("orch-dup-%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
-	})
 
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{
 		Workspaces: workspace.NewStub(t.TempDir()),
-		Launcher: &agent.TmuxLauncher{
-			Socket:       socket,
-			PollInterval: 50 * time.Millisecond,
-		},
-		Audit: a,
+		Launcher:   &agent.ProcessLauncher{},
+		Audit:      a,
 		// Long sleep so the first session is definitely still alive when we
 		// touch the file again.
 		Command: func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 30"} },

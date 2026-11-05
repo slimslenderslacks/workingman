@@ -100,7 +100,7 @@ func (r *Router) conversation(ctx context.Context, tgt target) (*conv, error) {
 }
 
 // OpeningPrompt is the first turn of an agent session: the same one-liner the
-// TUI's watcher and the tmux path send, pointing the sandboxed agent at its
+// TUI's watcher and the host terminal-tab path send, pointing the sandboxed agent at its
 // handoff files.
 const OpeningPrompt = "Read .orch/instructions.md and .orch/context.yaml, then follow the instructions."
 

@@ -19,8 +19,8 @@ const termGrace = 3 * time.Second
 // ProcessLauncher runs each Spec as a plain host child process. It is the
 // launch mechanism for non-interactive ACP agents: their acp-wrapper process
 // runs on the host (creating the sandbox, exec'ing the ACP client, serving
-// agent.sock) rather than living in a tmux window. Unlike TmuxLauncher there
-// is no terminal to attach to — the session is observed by the TUI over ACP,
+// agent.sock) rather than living in a terminal tab. Unlike the terminal tab
+// launcher there is no terminal to attach to — the session is observed by the TUI over ACP,
 // and the child's stderr is forwarded to Stderr (if set) for diagnostics.
 type ProcessLauncher struct {
 	// Stderr, when non-nil, receives the child's stderr. Leave nil to discard
@@ -33,7 +33,7 @@ type ProcessLauncher struct {
 // Launch starts spec.Command as a host process in spec.Workspace and returns a
 // Session backed by it. The process is detached from the launch ctx: its
 // lifetime is owned by the returned Session (Wait observes its exit; Close
-// tears it down), matching TmuxLauncher's window semantics where ctx scopes
+// tears it down), matching the terminal tab launcher's semantics where ctx scopes
 // only the launch call, not the running agent.
 func (l *ProcessLauncher) Launch(_ context.Context, spec Spec) (Session, error) {
 	if spec.Name == "" {

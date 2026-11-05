@@ -101,7 +101,7 @@ the daemon's own messages **to** the owner. `orch signal setup` writes both.
    dedicated number instead, register it: `signal-cli -a +15551234567 register`
    (then `verify`; see the signal-cli README).
 
-3. **Run the daemon** and leave it running (tmux, launchd, systemd…):
+3. **Run the daemon** and leave it running (a terminal tab, launchd, systemd…):
 
    ```sh
    signal-cli -a +15551234567 daemon --http 127.0.0.1:8080
