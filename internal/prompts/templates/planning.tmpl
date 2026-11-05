@@ -6,7 +6,7 @@ Read the project description and existing tasks:
   tasks dir:    {{.TasksDir}}
 
 {{if .ProjectChanges}}
-IMPORTANT — this project's `.project.yaml` changed since you (or an earlier
+IMPORTANT — this project's `project.yaml` changed since you (or an earlier
 planning run) last worked on it. Here is what changed:
 
 {{range .ProjectChanges}}  - {{.}}
@@ -205,7 +205,7 @@ blocked). Rules apply in declaration order. Example:
       resource: "api.github.com"
 
 You may freely add, remove, or edit task files and you may edit
-`.project.yaml` as well — but only those files. When you are finished, set
+`project.yaml` as well — but only those files. When you are finished, set
 the project status to `working` and write the file with `updated_by: agent`.
 The daemon will then pick up ready tasks and dispatch them to task agents.
 

@@ -24,7 +24,7 @@ func TestLaunchWolfAgentReadsBackPriorBlockedSession(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	prior := &project.BlockedSession{
 		BlockedReason: `task "add-healthz" failed after 3 attempts`,
@@ -79,7 +79,7 @@ func TestLaunchWolfAgentWithNoPriorBlockedSession(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	p := &project.Project{Branch: "feat/x", Status: project.StatusBlocked}
 	d.launchWolfAgent(projectPath, p, "first failure")

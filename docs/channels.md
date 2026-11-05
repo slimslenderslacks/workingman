@@ -430,7 +430,7 @@ default is fail-closed.
   are mounted `:ro` (the mount enforces it — the prompt does not; an audit-log
   directory inside a root is covered by the root's writable mount instead). It
   has no GitHub or other secrets and no extra network policy. It edits
-  `.project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md`, but
+  `project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md`, but
   only on request and after confirming the change with the human — the prompt is
   the guard there. Anyone who can message it can therefore change project
   state (but nothing on the host: no push, no wsp, no `:archive`), so keep the

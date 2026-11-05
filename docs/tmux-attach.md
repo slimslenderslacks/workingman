@@ -33,7 +33,7 @@ go build -o orch ./cmd/orch
    ./orch --root /tmp/orch-roots
    ```
 
-   (Use any `--root` containing a `.project.yaml`; the goal is just to start
+   (Use any `--root` containing a `project.yaml`; the goal is just to start
    the daemon so the embedded TUI mounts. For a true end-to-end run, point
    `--root` at a directory the daemon will populate with a real agent.)
 

@@ -10,7 +10,7 @@ Workspace: {{.Workspace}}
 SCOPE — operate ONLY on THIS project. Every file you read or write must live
 under the workspace above ({{.Workspace}}) or be this project's own
 {{.ProjectPath}}. Sibling projects under the orch root are strictly off-limits:
-never read, edit, or copy from another project's `.project.yaml`, and never use
+never read, edit, or copy from another project's `project.yaml`, and never use
 one as a template. The only project file you may modify is {{.ProjectPath}}.
 
 The workspace is a wsp workspace and may hold several repos — one directory per

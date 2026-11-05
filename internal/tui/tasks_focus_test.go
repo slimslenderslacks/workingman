@@ -35,7 +35,7 @@ func withTaskFixtures(t *testing.T) (m model, firstRowPath, secondRowPath string
 	if err := os.MkdirAll(filepath.Join(pDir, "tasks"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projectPath := filepath.Join(pDir, ".project.yaml")
+	projectPath := filepath.Join(pDir, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "proj description",
 		Branch:      "feat/x",

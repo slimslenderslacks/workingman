@@ -8,7 +8,7 @@ import "time"
 // daemon internals so it can be tested in isolation.
 type SessionView struct {
 	// ID is the stable key used to track selection across refreshes. The
-	// daemon hands back the absolute path of the project's .project.yaml,
+	// daemon hands back the absolute path of the project's project.yaml,
 	// but the tui treats it as an opaque string.
 	ID         string
 	AgentName  string

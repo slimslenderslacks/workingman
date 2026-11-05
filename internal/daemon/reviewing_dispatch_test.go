@@ -30,7 +30,7 @@ func TestIdleWatchingRoutesPendingTasksBeforePR(t *testing.T) {
 	t.Run("ready task takes priority and keeps watching", func(t *testing.T) {
 		root := t.TempDir()
 		d, _, sched := newReviewDaemon(t, root)
-		projectPath := filepath.Join(root, ".project.yaml")
+		projectPath := filepath.Join(root, "project.yaml")
 		tasksDir := filepath.Join(root, "tasks")
 		if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
@@ -63,7 +63,7 @@ func TestIdleWatchingRoutesPendingTasksBeforePR(t *testing.T) {
 	t.Run("all committed falls through to the PR poll", func(t *testing.T) {
 		root := t.TempDir()
 		d, _, sched := newReviewDaemon(t, root)
-		projectPath := filepath.Join(root, ".project.yaml")
+		projectPath := filepath.Join(root, "project.yaml")
 		tasksDir := filepath.Join(root, "tasks")
 		if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
@@ -112,7 +112,7 @@ func TestIdleRoutesPendingTasksWithoutReopening(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			d, _, _ := newReviewDaemon(t, root)
-			projectPath := filepath.Join(root, ".project.yaml")
+			projectPath := filepath.Join(root, "project.yaml")
 			tasksDir := filepath.Join(root, "tasks")
 			if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 				t.Fatalf("mkdir: %v", err)
@@ -157,7 +157,7 @@ func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			d, buf, _ := newReviewDaemon(t, root)
-			projectPath := filepath.Join(root, ".project.yaml")
+			projectPath := filepath.Join(root, "project.yaml")
 			tasksDir := filepath.Join(root, "tasks")
 			if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 				t.Fatalf("mkdir: %v", err)
@@ -193,7 +193,7 @@ func TestRestingProjectWithPendingSeedReArmsPlanning(t *testing.T) {
 	t.Run("no seed leaves idle untouched", func(t *testing.T) {
 		root := t.TempDir()
 		d, _, sched := newReviewDaemon(t, root)
-		projectPath := filepath.Join(root, ".project.yaml")
+		projectPath := filepath.Join(root, "project.yaml")
 		tasksDir := filepath.Join(root, "tasks")
 		if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
@@ -237,7 +237,7 @@ func TestIdleWatchingProjectDispatchesReadyTaskAgent(t *testing.T) {
 	mustSaveTask(t, filepath.Join(tasksDir, "landed.yaml"), &task.Task{Name: "landed", Status: task.StatusCommitted})
 	mustSaveTask(t, filepath.Join(tasksDir, "manual-fix.yaml"), &task.Task{Name: "manual-fix", Status: task.StatusReady})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "reviewing dispatch",
 		Branch:      "feat/reviewing",

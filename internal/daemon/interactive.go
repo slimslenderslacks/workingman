@@ -73,7 +73,7 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 		spec = runner.InteractiveSpec{
 			SandboxName: name,
 			// Mount both the worktree and the orch control dir, like the task
-			// agents, so the session can see the code and the .project.yaml /
+			// agents, so the session can see the code and the project.yaml /
 			// tasks. cwd is the worktree.
 			Workspaces: []string{workspaceDir, orchDir},
 			Cwd:        workspaceDir,

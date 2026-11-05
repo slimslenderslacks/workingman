@@ -208,11 +208,11 @@ func TestEnterOnACPSessionOpensItsTab(t *testing.T) {
 		m = step.(model)
 	}
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "/orch/alpha/.project.yaml#wolf", AgentName: "wolf", Project: "alpha", TmuxTarget: "wolf-alpha", Interactive: true, SandboxName: "alpha-wolf"},
+		{ID: "/orch/alpha/project.yaml#wolf", AgentName: "wolf", Project: "alpha", TmuxTarget: "wolf-alpha", Interactive: true, SandboxName: "alpha-wolf"},
 	}})
 	m = step.(model)
 	m.focus = paneSessions
-	m.sessSel = "/orch/alpha/.project.yaml#wolf"
+	m.sessSel = "/orch/alpha/project.yaml#wolf"
 
 	step, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = step.(model)
@@ -234,11 +234,11 @@ func TestEnterOnHostWolfStillAttachesViaTmux(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), nil, att)
 	m.acpCh = make(chan acpTabEvent)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
-		{ID: "/orch/alpha/.project.yaml#wolf", AgentName: "wolf", Project: "alpha", TmuxTarget: "orch:wolf-alpha", Interactive: true},
+		{ID: "/orch/alpha/project.yaml#wolf", AgentName: "wolf", Project: "alpha", TmuxTarget: "orch:wolf-alpha", Interactive: true},
 	}})
 	m = step.(model)
 	m.focus = paneSessions
-	m.sessSel = "/orch/alpha/.project.yaml#wolf"
+	m.sessSel = "/orch/alpha/project.yaml#wolf"
 
 	step, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = step.(model)

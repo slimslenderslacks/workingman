@@ -105,7 +105,7 @@ type Session struct {
 	// the whole log.
 	PromptCount int `json:"prompt_count,omitempty"`
 
-	// ProjectPath is the absolute path to the .project.yaml driving this
+	// ProjectPath is the absolute path to the project.yaml driving this
 	// session. Every ACP-routed kind (project, planning, task, commit) belongs
 	// to exactly one project and is tracked by the daemon under this same
 	// path, so a restarting daemon uses it to reconcile its in-memory session

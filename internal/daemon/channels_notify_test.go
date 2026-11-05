@@ -57,7 +57,7 @@ type channelHarness struct {
 
 // newChannelHarness builds a daemon with a real Registry over a fake channel
 // routed for the `wolf` topic. A project directory "myproj" with a blocked
-// .project.yaml exists under a temp root.
+// project.yaml exists under a temp root.
 func newChannelHarness(t *testing.T, copts ...ChannelOption) *channelHarness {
 	t.Helper()
 	buf := &safeBuf{}
@@ -91,7 +91,7 @@ func newChannelHarness(t *testing.T, copts ...ChannelOption) *channelHarness {
 	}
 	t.Cleanup(func() { _ = d.watcher.Close() })
 
-	projectPath := filepath.Join(t.TempDir(), "myproj", ".project.yaml")
+	projectPath := filepath.Join(t.TempDir(), "myproj", "project.yaml")
 	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestWolfStartRateLimitedPerWorkStream(t *testing.T) {
 	eventually(t, "third start message", func() bool { return len(h.fake.Sent()) == 3 })
 
 	// A different work stream has its own budget.
-	other := filepath.Join(t.TempDir(), "otherproj", ".project.yaml")
+	other := filepath.Join(t.TempDir(), "otherproj", "project.yaml")
 	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestChannelsDisabledRegression(t *testing.T) {
 		Launcher: spawningLauncher{},
 		Command:  func(agent.Kind, string) []string { return []string{"true"} },
 	}
-	projectPath := filepath.Join(t.TempDir(), "myproj", ".project.yaml")
+	projectPath := filepath.Join(t.TempDir(), "myproj", "project.yaml")
 	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
 		t.Fatal(err)
 	}

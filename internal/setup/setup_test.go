@@ -14,7 +14,7 @@ func TestApplyWritesContextAndInstructions(t *testing.T) {
 	ctx := Context{
 		Kind:        "project",
 		Workspace:   ws,
-		ProjectPath: filepath.Join(ws, ".project.yaml"),
+		ProjectPath: filepath.Join(ws, "project.yaml"),
 	}
 	if err := Apply(ws, ctx, "do the thing\n", nil); err != nil {
 		t.Fatalf("Apply: %v", err)

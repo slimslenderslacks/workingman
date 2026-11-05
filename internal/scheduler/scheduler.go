@@ -1,5 +1,5 @@
 // Package scheduler wraps robfig/cron with a small key/spec model the daemon
-// can use to (re)register a project's cron schedule each time a .project.yaml
+// can use to (re)register a project's cron schedule each time a project.yaml
 // is observed. Register is idempotent on (key, spec) so the daemon's
 // handleProject can call it on every observed update without churning the
 // cron table.

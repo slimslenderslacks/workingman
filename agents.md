@@ -57,19 +57,19 @@ since sbx rejects underscores). Session/tmux/ACP-session names come from
 
 **Trigger.** `internal/daemon/dispatch.go: dispatchProject` calls
 `launchProjectRootAgent(path, agent.ProjectAgent, p)` whenever it observes an
-"unpopulated" `.project.yaml` (`p.Unpopulated()`) — either the legacy
+"unpopulated" `project.yaml` (`p.Unpopulated()`) — either the legacy
 zero-byte file, or a `:new`-seeded file that has only `description:` set.
 
 **Workspace/session.** No wsp workspace: `WorkingDir` is set directly to the
-control directory holding `.project.yaml` (`filepath.Dir(projectPath)`), so
+control directory holding `project.yaml` (`filepath.Dir(projectPath)`), so
 `Runner.resolveWorkingDir` skips workspace provisioning entirely. Sandbox name
 is `"<work-stream>-project"` (`runner.SandboxNameFor`) — deliberately distinct
 from planning's sandbox, since project and planning run back-to-back in the
 same control dir and would otherwise collide on one sandbox with different
 mounts. Runs via the ACP path (autonomous, `claude --print`).
 
-**Reads/writes.** Reads the seed `description:` in `.project.yaml`. Writes the
-fully populated `.project.yaml` — `repos`/`new_repos`, `branch`, optionally
+**Reads/writes.** Reads the seed `description:` in `project.yaml`. Writes the
+fully populated `project.yaml` — `repos`/`new_repos`, `branch`, optionally
 `cron`/`cron_until`/`cron_max_runs`, `review`/`no_review` — with
 `status: ready` and `updated_by: agent` on success, or `status: blocked` with
 a specific `blocked_reason` when the description is genuinely insufficient
@@ -124,8 +124,8 @@ sandbox workspace, so the planner can read real source to inform task
 breakdown without cloning (the sandbox has no GitHub credentials). That path
 is surfaced to the template as `{{.Worktree}}`.
 
-**Reads/writes.** Reads `.project.yaml` and existing `tasks/*.yaml`. May
-freely add/remove/edit files under `tasks/*.yaml` and edit `.project.yaml` —
+**Reads/writes.** Reads `project.yaml` and existing `tasks/*.yaml`. May
+freely add/remove/edit files under `tasks/*.yaml` and edit `project.yaml` —
 nothing else. Finishes by setting `status: working` with `updated_by: agent`.
 
 **Prompt structure (`planning.tmpl`).** Three main parts:
@@ -190,7 +190,7 @@ somewhere that exists inside the sandbox).
 **Reads/writes.** Reads its own `TaskPath` (task yaml) and the project file.
 Does the actual code work in the workspace. Writes only `status:
 success|failed` (+ `failure_reason` on failure) back to its task file — it
-must NOT commit, push, or touch `.project.yaml`; that's the commit agent's and
+must NOT commit, push, or touch `project.yaml`; that's the commit agent's and
 daemon's job.
 
 **Prompt structure (`task.tmpl`).** Short and direct — this is the exact text
@@ -303,7 +303,7 @@ daemon, the TUI and a messaging channel has to be a long-lived ACP session, and
 ACP sessions are sandboxed (the wrapper owns sandbox creation). To keep it
 useful it is given:
 
-- **Mounts:** the control dir (primary/cwd — it holds `.project.yaml`,
+- **Mounts:** the control dir (primary/cwd — it holds `project.yaml`,
   `tasks/`, `blocked-session.yaml` and `.orch/`, i.e. everything the wolf
   writes) and, when the project has `Repos`+`Branch`, the project's wsp
   worktree as a second mount (provisioned idempotently by
@@ -331,9 +331,9 @@ tasks' `failure_reason`/`blocked_reason` (`FailedTasks`, paths gathered by
 `failedOrBlockedTaskPaths`), and any prior durable diagnosis at
 `project.BlockedSessionPath`. Writes/updates that same blocked-session record
 (`blocked_reason`, `summary`, `attempted`) every time it investigates, and
-ultimately updates `.project.yaml`/task files to move the project out of
+ultimately updates `project.yaml`/task files to move the project out of
 `blocked`. Scoped strictly to this one project's files — never another
-project's `.project.yaml`.
+project's `project.yaml`.
 
 **Prompt structure (`wolf.tmpl`).** Opens with scope rules (only this
 project's files; "you run on the host" vs "you run inside a sandbox …"), the
@@ -356,7 +356,7 @@ intact). Ends with the fixed status enums for both project and task.
 **Completion signal / lifecycle.** No enforced schema — the wolf just edits
 whatever files resolve the block. Whatever ends the session, the daemon's
 `launchWolfAgent` `onEnd` callback calls `revisitProject`, which re-reads
-`.project.yaml` from scratch and re-routes based on whatever status the wolf
+`project.yaml` from scratch and re-routes based on whatever status the wolf
 left behind (bypassing the daemon-write filter, since wolf writes as
 `updated_by: agent`).
 
@@ -392,7 +392,7 @@ A second block arriving while a wolf is still inside its unblock grace dedups
 against the live session (`launchWolfAgent` → `session_skip_duplicate`): the
 old conversation continues (its wrapper sees `blocked` again and does not end),
 so the user keeps talking to the same wolf — which has the *old* block's context
-in its prompt; it re-reads `.project.yaml`/the blocked-session record if asked.
+in its prompt; it re-reads `project.yaml`/the blocked-session record if asked.
 
 **TUI.** An ACP wolf appears in the sessions pane with its sandbox name, and
 **enter/click on that row opens the ACP tab view on the wolf's tab**
@@ -531,7 +531,7 @@ on) a `.gitignore` proposal for anything that "doesn't belong" (build
 artifacts, editor scratch, caches); (3) one commit if
 needed; (4) push decision tree keyed strictly off the three shell variables
 above, with an explicit "no workarounds" list; (5) report outcome by editing
-`.project.yaml` (`archive: true` on full success, left unset with a clear
+`project.yaml` (`archive: true` on full success, left unset with a clear
 explanation of what's outstanding otherwise). Explicitly forbids any other
 pre-commit work (no tests/lint/formatting/refactors).
 
@@ -580,11 +580,11 @@ sharing the project's *main* session slot (not a side key like wolf/archive),
 so it cannot run concurrently with a task/commit/planning agent for the same
 project.
 
-**Reads/writes.** Reads `.project.yaml` (`description`, `repos`, `branch`,
+**Reads/writes.** Reads `project.yaml` (`description`, `repos`, `branch`,
 `review`, prior `pull_requests:`) and existing task files' `status`/`source`.
 Uses the `github` MCP exclusively for PR access — explicitly forbidden from
 running `gh`, `git push`, or cloning anything. Writes only within the control
-dir: new task files (fix tasks and push tasks) and `.project.yaml` (the
+dir: new task files (fix tasks and push tasks) and `project.yaml` (the
 `pull_requests:` list and `status:`). Never touches source, never commits.
 
 **Prompt structure (`review.tmpl`).** A five-step reconcile procedure per
@@ -636,7 +636,7 @@ WhatsApp or Signal — about the orch state: which projects are open, which task
 running/blocked/failed and why, what the wolf is doing, what happened recently
 in the audit log. On request (and after confirming) it also **changes** that
 state, by editing the files under the orch roots exactly as a human would —
-every TUI `:` command is a `.project.yaml` edit, so it can stop/start, summon
+every TUI `:` command is a `project.yaml` edit, so it can stop/start, summon
 the wolf, kick a review, request a cleanup, retry a task, unblock a project,
 queue intake work or start a new project. It is autonomous-ACP (nobody drives its prompt by hand;
 `Interactive()` is false) but **persistent**, using the same
@@ -661,7 +661,7 @@ snapshot gives it no work stream / project path. `session.json` carries
 **Mounts (read-only enforced by the mount).** The scratch dir is the agent's
 cwd and holds the usual `.orch/` handoff files. Every orch `--root` is a
 second, **writable** workspace (`Plan.WritableMounts`): the agent edits
-`.project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md` there.
+`project.yaml` / `tasks/*.yaml` and creates `project.md` / `intake/*.md` there.
 The guard on *what* it edits is the prompt (see below), not the mount. All other
 observed paths are a separate `--workspace <path>:ro` (sbx's read-only
 bind-mount syntax, understood by `acp-wrapper --workspace`):
@@ -693,7 +693,7 @@ writable root, so the prompt, not the mount, keeps the agent off the logs.
 
 **Prompt structure (`workingman.tmpl`).** It states the agent observes and, on
 request, edits the orch roots; lays out the orch directory (per work stream:
-`project.md`, `.project.yaml`, `tasks/`, `intake/*.md` / `*.processed`,
+`project.md`, `project.yaml`, `tasks/`, `intake/*.md` / `*.processed`,
 `blocked-session.yaml`, `last-planned.yaml`, `.orch/`) and every log at its real
 path — the audit log and its siblings `daemon.log`, `acp-wrapper.log`,
 `channels.log`, `whatsapp-bridge.log`, the state dir's

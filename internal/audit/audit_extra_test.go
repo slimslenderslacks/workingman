@@ -45,7 +45,7 @@ func TestRedact(t *testing.T) {
 
 func TestRedactKeepsOrdinaryText(t *testing.T) {
 	for _, in := range []string{
-		"2026-10-02T10:00:00Z session_ended key=/x/.project.yaml name=task-1",
+		"2026-10-02T10:00:00Z session_ended key=/x/project.yaml name=task-1",
 		"commit 9315099abcdef0123456789abcdef0123456789a pushed",
 		"status=blocked reason=\"task failed 3 times\"",
 		"https://github.com/NousResearch/hermes-agent/pull/12",
@@ -74,7 +74,7 @@ func TestParseLineRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	l := New(&buf)
 	l.now = func() time.Time { return time.Date(2026, 5, 12, 18, 4, 0, 0, time.UTC) }
-	l.Log("session_ended", "key", "/a b/.project.yaml", "err", `exit "1" now`, "empty", "", "plain", "x=y")
+	l.Log("session_ended", "key", "/a b/project.yaml", "err", `exit "1" now`, "empty", "", "plain", "x=y")
 	ev, ok := ParseLine(buf.String())
 	if !ok {
 		t.Fatalf("not parsed: %q", buf.String())
@@ -82,7 +82,7 @@ func TestParseLineRoundTrip(t *testing.T) {
 	if ev.Name != "session_ended" || !ev.Time.Equal(time.Date(2026, 5, 12, 18, 4, 0, 0, time.UTC)) {
 		t.Errorf("ev = %+v", ev)
 	}
-	want := map[string]string{"key": "/a b/.project.yaml", "err": `exit "1" now`, "empty": "", "plain": "x=y"}
+	want := map[string]string{"key": "/a b/project.yaml", "err": `exit "1" now`, "empty": "", "plain": "x=y"}
 	for k, v := range want {
 		if ev.Fields[k] != v {
 			t.Errorf("field %s = %q, want %q", k, ev.Fields[k], v)

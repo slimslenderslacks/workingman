@@ -1,6 +1,6 @@
 # orch — autonomous claude-code project daemon
 
-`orch` watches one or more directories for `.project.yaml` files and runs
+`orch` watches one or more directories for `project.yaml` files and runs
 claude-code agents (project, planning, task, commit, wolf, archive) through a
 state machine until the project is done — or blocked, in which case you get a
 macOS notification and a wolf-agent session to drop into.
@@ -22,7 +22,7 @@ cycle's tasks for context, then deleting, reusing, or replacing them and leaving
 what survives in `ready` for the task agents. A firing on a project with work in
 flight (`working`) or one that needs attention (`blocked`) just re-evaluates it,
 as before. Every schedule needs an explicit stop condition (`cron_until:` or
-`cron_max_runs:`) — see [Example `.project.yaml`](#example-projectyaml).
+`cron_max_runs:`) — see [Example `project.yaml`](#example-projectyaml).
 `cron_max_runs` counts cycles, not wake-ups: a firing that starts no cycle isn't
 charged against it.
 
@@ -69,8 +69,13 @@ go build -o orch ./cmd/orch
 ## Start the daemon
 
 Pick a directory tree where you'll keep your project files. `orch` watches
-this tree recursively; any subdirectory with a `.project.yaml` becomes a
+this tree recursively; any subdirectory with a `project.yaml` becomes a
 project.
+
+Older versions of `orch` named this file `.project.yaml`. At startup the
+daemon renames any legacy `.project.yaml` it finds under a root to
+`project.yaml` (logged as `project_file_migrated`); a directory that already
+has a `project.yaml` is left untouched.
 
 ```sh
 mkdir -p ~/orch
@@ -89,7 +94,7 @@ tail -f ~/orch/audit.log
 
 ```sh
 mkdir -p ~/orch/my-feature
-touch ~/orch/my-feature/.project.yaml
+touch ~/orch/my-feature/project.yaml
 ```
 
 The daemon logs `project_empty` and launches the **project agent** in a
@@ -101,7 +106,7 @@ tmux attach -t orch-project-<hash>
 ```
 
 The agent reads `.orch/instructions.md` and interviews you about the
-project. When it's done it writes the `.project.yaml` itself with
+project. When it's done it writes the `project.yaml` itself with
 `status: ready`. Detach (`Ctrl-b d`) any time — the session keeps running.
 
 ### 2. Planning
@@ -109,7 +114,7 @@ project. When it's done it writes the `.project.yaml` itself with
 The moment the project file is saved with `status: ready`, the daemon
 launches the **planning agent** in the same directory. It writes
 `tasks/*.yaml` (one file per task, with `depends_on` edges), then flips
-`.project.yaml` to `status: working` and exits.
+`project.yaml` to `status: working` and exits.
 
 ### 3. Tasks
 
@@ -118,7 +123,7 @@ launches the **planning agent** in the same directory. It writes
 1. Build the task DAG from `tasks/*.yaml`.
 2. Pick the first ready task (no uncommitted deps).
 3. Provision a wsp workspace at `~/dev/workspaces/<branch>/` with the repos
-   from `.project.yaml`.
+   from `project.yaml`.
 4. Launch a **task agent** in that workspace.
 5. When the task agent exits with `status: success`, launch a **commit agent**
    in the same workspace.
@@ -163,7 +168,7 @@ In the project root:
 tasks/*.yaml         # written by the planning agent; observed in audit
 ```
 
-Daemon-owned writes carry `updated_by: daemon` in `.project.yaml` so the
+Daemon-owned writes carry `updated_by: daemon` in `project.yaml` so the
 daemon ignores its own fsnotify events.
 
 ## Observability
@@ -307,7 +312,7 @@ The security model matches WhatsApp: only allowlisted numbers reach an agent, an
 the signal-cli data directory (account keys, `~/.local/share/signal-cli/` by
 default) must be kept private. Both channels can be enabled at once.
 
-## Example `.project.yaml`
+## Example `project.yaml`
 
 ```yaml
 description: |
@@ -379,7 +384,7 @@ stays settled and still satisfies anything that depends on it.
 agent through `.orch/context.yaml`, and clears it once a planning session has
 moved the project off `ready`. Agents should not write it.
 
-See `examples/.project.yaml` and `examples/tasks/*.yaml` for the full
+See `examples/project.yaml` and `examples/tasks/*.yaml` for the full
 schemas.
 
 ## Hiding work streams
@@ -410,7 +415,7 @@ currently set. A gallery that is empty only because everything in it is hidden
 says so (`(none visible — 3 hidden; tp to show)`) rather than looking like the
 work streams vanished.
 
-Unlike `:cleanup` and `:review`, `:hide`/`:show` write `.project.yaml` as
+Unlike `:cleanup` and `:review`, `:hide`/`:show` write `project.yaml` as
 `updated_by: daemon`. The request flags are written as the agent *so that* the
 daemon's fsnotify handler acts on them; hiding must do the opposite — written
 as the agent it would be routed like any other project change, which on a
@@ -426,7 +431,7 @@ A finished project is retired in two steps — a **cleanup** that leaves every
 repo clean, committing and pushing only what needs it, then an **archive**
 that moves the project out of
 the watched root. Both are driven from the TUI's `:` command menu on the work
-streams pane, and both are recorded on `.project.yaml` by two independent
+streams pane, and both are recorded on `project.yaml` by two independent
 boolean flags (neither one is a `status:`, so a project keeps whatever status
 it already had):
 
@@ -464,7 +469,7 @@ TUI's tab view like any other ACP agent. In every repo of the workspace it:
 There are no other pre-commit steps: no tests, no lint, no formatting, no
 scratch-file cleanup. A repo that needed neither a commit nor a push is a
 success. On success the agent sets `archive: true` on
-`.project.yaml` and leaves `status:` untouched. If it can't finish, it leaves
+`project.yaml` and leaves `status:` untouched. If it can't finish, it leaves
 `archive` unset and says what's outstanding — its final message is the whole
 report, so read the session tab when a cleanup doesn't flip the flag.
 
@@ -483,7 +488,7 @@ already cleaned up (`archive: true`) is refused outright — its next step is
 
 ### `:archive`
 
-`:archive` only archives a project whose `.project.yaml` carries
+`:archive` only archives a project whose `project.yaml` carries
 `archive: true`. Anything else is refused on the status line with "has not been
 cleaned up — run :cleanup first", and nothing moves. When the guard passes and
 you confirm, the archive:
@@ -504,7 +509,7 @@ wins over the blue, so the cursor never disappears onto a blue card. See
 Doing it by hand instead:
 
 ```sh
-rm ~/orch/my-feature/.project.yaml
+rm ~/orch/my-feature/project.yaml
 rm -rf ~/orch/my-feature/{tasks,.orch}
 wsp rm feat/healthz-probe
 ```
@@ -543,5 +548,5 @@ selected, so moving the cursor never reflows the gallery.
 
 The green border tracks the same stop condition the daemon unschedules on
 (`cron_until` / `cron_max_runs` vs. `cron_runs`, see
-[Example `.project.yaml`](#example-projectyaml)), so it clears itself on the
+[Example `project.yaml`](#example-projectyaml)), so it clears itself on the
 gallery's next refresh once a schedule expires — no file edit needed.

@@ -184,7 +184,7 @@ func waitSignal(t *testing.T, env *e2eEnv, cli *fakeSignalCLI, substr string) si
 
 func blockProject(t *testing.T, env *e2eEnv) {
 	t.Helper()
-	projectPath := filepath.Join(env.root, "alpha", ".project.yaml")
+	projectPath := filepath.Join(env.root, "alpha", "project.yaml")
 	blocked := &project.Project{Description: "e2e", Branch: "feat/alpha", Status: project.StatusBlocked, BlockedReason: "need a decision on the schema"}
 	if err := project.SaveAs(projectPath, blocked, project.WriterAgent); err != nil {
 		t.Fatal(err)

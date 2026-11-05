@@ -51,7 +51,7 @@ func argValues(args []string, flag string) []string {
 
 func TestACPLaunchPlanningAgent(t *testing.T) {
 	workingDir := t.TempDir()
-	projectPath := filepath.Join(workingDir, ".project.yaml")
+	projectPath := filepath.Join(workingDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestACPLaunchPlanningAgent(t *testing.T) {
 func TestACPLaunchTaskAgentMountsOrchDir(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestACPLaunchTaskAgentMountsOrchDir(t *testing.T) {
 func TestACPLaunchPlanningAgentMountsWorktree(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestACPLaunchPlanningAgentNoRepoSingleMount(t *testing.T) {
 	// single-mount layout.
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestACPLaunchPlanningAgentNoRepoSingleMount(t *testing.T) {
 func TestACPLaunchTaskAgentForwardsStaticMCPs(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestACPLaunchForwardsTemplateImageForEveryKind(t *testing.T) {
 	for _, kind := range []agent.Kind{agent.TaskAgent, agent.CommitAgent} {
 		t.Run(kind.String(), func(t *testing.T) {
 			orchDir := t.TempDir()
-			projectPath := filepath.Join(orchDir, ".project.yaml")
+			projectPath := filepath.Join(orchDir, "project.yaml")
 			if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -354,7 +354,7 @@ func TestACPLaunchForwardsTemplateImageForEveryKind(t *testing.T) {
 func TestACPLaunchTaskAgentForwardsPolicies(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestACPLaunchTaskAgentForwardsPolicies(t *testing.T) {
 func TestACPLaunchTaskAgentForwardsSandboxCleanupFlags(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +458,7 @@ func TestACPLaunchForwardsModel(t *testing.T) {
 	} {
 		t.Run(tc.model, func(t *testing.T) {
 			orchDir := t.TempDir()
-			projectPath := filepath.Join(orchDir, ".project.yaml")
+			projectPath := filepath.Join(orchDir, "project.yaml")
 			if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -499,7 +499,7 @@ func TestACPLaunchForwardsModel(t *testing.T) {
 func TestACPLaunchArchiveAgent(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +579,7 @@ func TestACPLaunchArchiveAgent(t *testing.T) {
 // legacy host/tmux path, unsandboxed, even when an AcpLauncher is configured.
 func TestWolfOnHostUsesTmux(t *testing.T) {
 	workingDir := t.TempDir()
-	projectPath := filepath.Join(workingDir, ".project.yaml")
+	projectPath := filepath.Join(workingDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +637,7 @@ func TestUsesACPWolf(t *testing.T) {
 }
 
 func TestACPSandboxNameFor(t *testing.T) {
-	projectPath := "/orch/my_proj/.project.yaml"
+	projectPath := "/orch/my_proj/project.yaml"
 	if got := ACPSandboxNameFor(agent.WolfAgent, projectPath, ""); got != "my-proj-wolf" {
 		t.Errorf("wolf sandbox = %q, want my-proj-wolf", got)
 	}
@@ -661,7 +661,7 @@ func TestACPSandboxNameFor(t *testing.T) {
 func TestACPLaunchWolfPersistent(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +753,7 @@ func TestACPLaunchWolfPersistent(t *testing.T) {
 // corresponding end condition, positive is passed through.
 func TestACPLaunchWolfKnobs(t *testing.T) {
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +795,7 @@ func (brokenWorkspaces) Create(context.Context, string, []workspace.Repo) (strin
 // not fail the launch.
 func TestACPLaunchWolfSurvivesWorktreeFailure(t *testing.T) {
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -826,7 +826,7 @@ func TestACPLaunchWolfSurvivesWorktreeFailure(t *testing.T) {
 // persistent-only flags.
 func TestACPLaunchTaskStaysOneShot(t *testing.T) {
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -854,7 +854,7 @@ func TestACPLaunchTaskStaysOneShot(t *testing.T) {
 
 func TestACPRequiresKit(t *testing.T) {
 	workingDir := t.TempDir()
-	projectPath := filepath.Join(workingDir, ".project.yaml")
+	projectPath := filepath.Join(workingDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -890,7 +890,7 @@ func (f *failLauncher) Launch(context.Context, agent.Spec) (agent.Session, error
 // route to the git host's ssh port, so probing there aborted every commit.
 func TestACPLaunchForwardsPushOnlyForPushingSessions(t *testing.T) {
 	orchDir := t.TempDir()
-	projectPath := filepath.Join(orchDir, ".project.yaml")
+	projectPath := filepath.Join(orchDir, "project.yaml")
 	if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}

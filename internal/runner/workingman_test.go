@@ -93,11 +93,11 @@ func TestWorkingmanSandboxNamesAreProjectIndependent(t *testing.T) {
 		t.Errorf("ACPSandboxNameFor = %q, want workingman-agent", got)
 	}
 	// A stray project path must not leak into the name.
-	if got := ACPSandboxNameFor(agent.WorkingmanAgent, "/orch/myproj/.project.yaml", ""); got != "workingman-agent" {
+	if got := ACPSandboxNameFor(agent.WorkingmanAgent, "/orch/myproj/project.yaml", ""); got != "workingman-agent" {
 		t.Errorf("ACPSandboxNameFor with a project path = %q, want workingman-agent", got)
 	}
 	// The legacy (non-ACP) derivation has no sandbox for it.
-	if got := SandboxNameFor(agent.WorkingmanAgent, "/orch/myproj/.project.yaml", ""); got != "" {
+	if got := SandboxNameFor(agent.WorkingmanAgent, "/orch/myproj/project.yaml", ""); got != "" {
 		t.Errorf("SandboxNameFor = %q, want \"\"", got)
 	}
 }

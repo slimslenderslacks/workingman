@@ -251,7 +251,7 @@ func renderProjectDetailRecent(lines []string, width int) []string {
 
 // recentProjectTransitions returns the audit lines that plausibly belong to
 // project v: those whose path= value falls inside the project's own
-// directory (covers .project.yaml, tasks/*.yaml, intake/*.md, and
+// directory (covers project.yaml, tasks/*.yaml, intake/*.md, and
 // last-planned.yaml events) or whose task= value names one of the project's
 // own tasks (covers task-scoped events, which the daemon logs without a
 // path= at all — see internal/daemon/dispatch_lifecycle.go's task_observed

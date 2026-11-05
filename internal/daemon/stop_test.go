@@ -28,7 +28,7 @@ import (
 func TestDispatchStoppedUnregistersSchedules(t *testing.T) {
 	root := t.TempDir()
 	d, buf, sched := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	if err := sched.Register(projectPath, "@every 1m", func() {}); err != nil {
 		t.Fatalf("register cron: %v", err)
@@ -62,7 +62,7 @@ func TestDispatchStoppedUnregistersSchedules(t *testing.T) {
 func TestDispatchStoppedIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 	d, _, sched := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	p := &project.Project{Description: "x", Branch: "b", Status: project.StatusStopped, StoppedFrom: project.StatusIdle}
 	d.dispatchProject(projectPath, p)
@@ -81,7 +81,7 @@ func TestDispatchStoppedIsIdempotent(t *testing.T) {
 func TestStoppedGuardsSkipTaskSessionEnd(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	tasksDir := filepath.Join(root, "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -127,7 +127,7 @@ func TestStoppedGuardsSkipTaskSessionEnd(t *testing.T) {
 func TestStoppedGuardsSkipCommitSessionEnd(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	tasksDir := filepath.Join(root, "tasks")
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -167,7 +167,7 @@ func TestStoppedGuardsSkipCommitSessionEnd(t *testing.T) {
 func TestStoppedGuardsSkipReviewSessionEnd(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := newReviewDaemon(t, root)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b",
@@ -215,7 +215,7 @@ func TestStopKillsRunningTaskSession(t *testing.T) {
 	}
 	mustSaveTask(t, filepath.Join(tasksDir, "manual-fix.yaml"), &task.Task{Name: "manual-fix", Status: task.StatusReady})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "stop kills sessions",
 		Branch:      "feat/stop",

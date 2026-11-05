@@ -18,7 +18,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
-// TestHappyPathFullProject walks a populated .project.yaml all the way from
+// TestHappyPathFullProject walks a populated project.yaml all the way from
 // status:working through the task→commit→committed→next chain and finally
 // to status:done. Two tasks (the second depending on the first) make sure
 // the DAG re-evaluation after each commit actually picks the next ready
@@ -79,7 +79,7 @@ func TestHappyPathFullProject(t *testing.T) {
 	mustSaveTask(t, task1Path, &task.Task{Name: "first", Status: task.StatusReady})
 	mustSaveTask(t, task2Path, &task.Task{Name: "second", Status: task.StatusReady, DependsOn: []string{"first"}})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "test project",
 		Branch:      "feat/happy",

@@ -38,7 +38,7 @@ func TestWolfRunsInTandemWithMainSession(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projectPath := filepath.Join(projectDir, ".project.yaml")
+	projectPath := filepath.Join(projectDir, "project.yaml")
 
 	// Occupy the project's main slot with a running task session, exactly the
 	// situation `:wolf` must not be blocked by.
@@ -95,7 +95,7 @@ func TestLaunchWolfAgentUnderACPIsPersistent(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	projectPath := filepath.Join(root, "myproj", ".project.yaml")
+	projectPath := filepath.Join(root, "myproj", "project.yaml")
 	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestLaunchWolfAgentOnHostStaysOnTmux(t *testing.T) {
 		Command:      func(agent.Kind, string) []string { return []string{"claude", "hi"} },
 	}
 
-	projectPath := filepath.Join(t.TempDir(), "myproj", ".project.yaml")
+	projectPath := filepath.Join(t.TempDir(), "myproj", "project.yaml")
 	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
 		t.Fatal(err)
 	}

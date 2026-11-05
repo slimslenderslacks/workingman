@@ -62,7 +62,7 @@ func TestCronFiringRequestsReplanOnDoneProject(t *testing.T) {
 	root := t.TempDir()
 	_, buf, _ := startReplanDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "nightly triage",
 		Branch:      "feat/triage",
@@ -107,7 +107,7 @@ func TestCronFiringSkipsProjectsWithWorkInFlight(t *testing.T) {
 	root := t.TempDir()
 	_, buf, _ := startReplanDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "mid-flight",
 		Branch:      "feat/inflight",
@@ -149,7 +149,7 @@ func TestCronSkippedFiringIsNotCounted(t *testing.T) {
 	root := t.TempDir()
 	_, buf, sched := startReplanDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "busy through its window",
 		Branch:      "feat/uncounted",
@@ -202,7 +202,7 @@ func TestCronFiringSkipsProjectBeingArchived(t *testing.T) {
 			root := t.TempDir()
 			_, buf, _ := startReplanDaemon(t, root)
 
-			projectPath := filepath.Join(root, ".project.yaml")
+			projectPath := filepath.Join(root, "project.yaml")
 			p := &project.Project{
 				Description: "winding down",
 				Branch:      "feat/done",
@@ -241,7 +241,7 @@ func TestProjectDoneKeepsLiveCronSchedule(t *testing.T) {
 	root := t.TempDir()
 	d, buf, sched := startReplanDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "recurring",
 		Branch:      "feat/recurring",
@@ -277,7 +277,7 @@ func TestProjectDoneUnregistersExpiredCron(t *testing.T) {
 	root := t.TempDir()
 	d, buf, sched := startReplanDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	live := &project.Project{
 		Description: "last cycle",
 		Branch:      "feat/last",
@@ -314,7 +314,7 @@ func TestReplanClearedWhenPlanningAdvancesProject(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := startReplanDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	// The state a planning agent leaves behind at the end of a re-plan cycle:
 	// advanced to working, with the request it consumed still set.
 	if err := project.SaveAs(projectPath, &project.Project{
@@ -350,7 +350,7 @@ func TestReplanSurvivesUnproductivePlanningSession(t *testing.T) {
 	root := t.TempDir()
 	d, buf, _ := startReplanDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "planning made no progress",
 		Branch:      "feat/stuck",

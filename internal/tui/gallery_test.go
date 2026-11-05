@@ -98,7 +98,7 @@ func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{
 			Name:   "alpha",
-			Path:   "/x/alpha/.project.yaml",
+			Path:   "/x/alpha/project.yaml",
 			Status: project.StatusWorking,
 			Tasks: []TaskView{
 				{Name: "register-repo", Status: task.StatusCommitted},
@@ -126,7 +126,7 @@ func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{
 			Name:   "alpha",
-			Path:   "/x/alpha/.project.yaml",
+			Path:   "/x/alpha/project.yaml",
 			Status: project.StatusWorking,
 			Tasks: []TaskView{
 				{
@@ -179,12 +179,12 @@ func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
 		{
-			Name: "alpha", Path: "/x/alpha/.project.yaml",
+			Name: "alpha", Path: "/x/alpha/project.yaml",
 			Status: project.StatusWorking,
 			Tasks:  []TaskView{{Name: "alpha-only", Status: task.StatusReady}},
 		},
 		{
-			Name: "bravo", Path: "/x/bravo/.project.yaml",
+			Name: "bravo", Path: "/x/bravo/project.yaml",
 			Status: project.StatusWorking,
 			Tasks:  []TaskView{{Name: "bravo-only", Status: task.StatusReady}},
 		},
@@ -214,7 +214,7 @@ func TestRenderTasksEmptyState(t *testing.T) {
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: []ProjectView{
-		{Name: "empty", Path: "/x/empty/.project.yaml", Status: project.StatusReady},
+		{Name: "empty", Path: "/x/empty/project.yaml", Status: project.StatusReady},
 	}})
 	m = step.(model)
 	if !strings.Contains(m.View(), "(none)") {
@@ -232,7 +232,7 @@ func TestProjectsPaneSpillsOverMultipleRows(t *testing.T) {
 	for _, name := range []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"} {
 		views = append(views, ProjectView{
 			Name:   name,
-			Path:   "/x/" + name + "/.project.yaml",
+			Path:   "/x/" + name + "/project.yaml",
 			Status: project.StatusReady,
 		})
 	}

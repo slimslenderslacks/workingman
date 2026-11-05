@@ -24,7 +24,7 @@ type ConversationTarget struct {
 	// WorkStream is the human label of the project / work stream, the same
 	// "<work-stream>" shown in the notification text.
 	WorkStream string `json:"work_stream,omitempty"`
-	// ProjectPath is the absolute path of the .project.yaml the session serves.
+	// ProjectPath is the absolute path of the project.yaml the session serves.
 	ProjectPath string `json:"project_path,omitempty"`
 	// SessionKey is the daemon's session-map key for the session (for a wolf,
 	// "<project path>#wolf").

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
+	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
@@ -82,7 +83,7 @@ func (d *Daemon) reconcileSessions() {
 			continue
 		}
 
-		projectPath := rec.ProjectPath
+		projectPath := project.CanonicalPath(rec.ProjectPath)
 		sess := newReconciledSession(rec.ID, store, nil)
 		onEnd := func(error) { d.revisitProject(projectPath) }
 		// The wolf and the archive agent each live in a slot of their own (see

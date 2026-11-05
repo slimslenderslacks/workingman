@@ -31,8 +31,8 @@ var templatesFS embed.FS
 type Data struct {
 	Kind          agent.Kind
 	Workspace     string   // absolute path to the workspace root
-	ProjectPath   string   // absolute path to .project.yaml
-	ProjectName   string   // work-stream name: basename of the dir holding .project.yaml
+	ProjectPath   string   // absolute path to project.yaml
+	ProjectName   string   // work-stream name: basename of the dir holding project.yaml
 	TasksDir      string   // absolute path to the tasks/ directory
 	Branch        string   // target branch (also the workspace name)
 	TaskPath      string   // for TaskAgent: path to this task's yaml
@@ -53,7 +53,7 @@ type Data struct {
 
 	Replan         bool     // for PlanningAgent: re-plan the existing tasks (a cron cycle) instead of preserving them
 	IntakeFiles    []string // for PlanningAgent: absolute paths to pending intake/*.md files awaiting tasks
-	ProjectChanges []string // for PlanningAgent: human-readable .project.yaml changes since the last successful plan
+	ProjectChanges []string // for PlanningAgent: human-readable project.yaml changes since the last successful plan
 	Worktree       string   // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
 
 	// PushBranch, for the CommitAgent, tells it to push the branch after

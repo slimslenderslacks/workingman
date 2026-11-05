@@ -81,7 +81,7 @@ func TestTaskFailureRetries(t *testing.T) {
 		Attempts: 0,
 	})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "test",
 		Branch:      "feat/retry",
@@ -145,7 +145,7 @@ func TestTaskFailureExhaustsRetriesAndBlocks(t *testing.T) {
 		Attempts: 3,
 	})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "test",
 		Branch:      "feat/doomed",
@@ -258,7 +258,7 @@ func TestTaskAgentStartFailureBlocksProject(t *testing.T) {
 	taskPath := filepath.Join(tasksDir, "the-task.yaml")
 	mustSaveTask(t, taskPath, &task.Task{Name: "the-task", Status: task.StatusReady})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "test",
 		Branch:      "feat/no-repos",
@@ -308,7 +308,7 @@ func TestTaskBlockedStatusBlocksProject(t *testing.T) {
 		Status: task.StatusReady,
 	})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "test",
 		Branch:      "feat/self-block",

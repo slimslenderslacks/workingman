@@ -114,7 +114,7 @@ func (a *wolfAnnouncement) wasAnnounced() bool {
 }
 
 // workStreamName is the human label of the work stream: the directory holding
-// the .project.yaml, matching SessionInfo.Project.
+// the project.yaml, matching SessionInfo.Project.
 func workStreamName(projectPath string) string {
 	return filepath.Base(filepath.Dir(projectPath))
 }

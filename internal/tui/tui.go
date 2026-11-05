@@ -4,7 +4,7 @@
 // and an optional right column showing a curated status dashboard for the
 // selected project (toggled by "tr", hidden by default), sized to half the
 // terminal's width. All three reflect live state — projects from the
-// .project.yaml files scanned by WatchProjects, sessions from a channel the
+// project.yaml files scanned by WatchProjects, sessions from a channel the
 // daemon feeds in via its WatchSessions adapter.
 package tui
 
@@ -127,7 +127,7 @@ type model struct {
 	// command-picker menu (modeCommandPicker).
 	mode         uiMode
 	cmdPickerIdx int
-	// archiveTarget is the .project.yaml path captured when `:archive` opens
+	// archiveTarget is the project.yaml path captured when `:archive` opens
 	// the confirm modal, so the move acts on the project that was selected at
 	// the time even if a background scan reconciles projSel meanwhile.
 	archiveTarget string
@@ -1733,7 +1733,7 @@ func renderProjectCardBody(v ProjectView, width int) string {
 	}
 	name := cardNameStyle.Render(truncate(label, inner))
 
-	// A project whose .project.yaml failed to parse gets an error card instead
+	// A project whose project.yaml failed to parse gets an error card instead
 	// of a normal status/branch/task line: a red badge plus the parse message,
 	// so it stays visible and the user can select it to see the error and go
 	// fix the file directly.

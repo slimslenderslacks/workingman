@@ -8,7 +8,7 @@ import (
 )
 
 // requestHide sets `hide: true` on the work stream identified by projectPath
-// (the path of its .project.yaml) so the gallery stops drawing a card for it,
+// (the path of its project.yaml) so the gallery stops drawing a card for it,
 // and returns the project's display name for the confirmation message.
 //
 // Unlike every other TUI command, this writes as `daemon` rather than `agent`.

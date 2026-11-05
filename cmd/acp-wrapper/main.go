@@ -128,7 +128,7 @@ func main() {
 	unblockGrace := fs.Duration("unblock-grace", 0, "with --persistent and --project-path: end the session once the project has not been status:blocked for this long (0 disables)")
 	idleTimeout := fs.Duration("idle-timeout", 0, "with --persistent: end the session after this long with no ACP traffic in either direction (0 disables)")
 	taskPath := fs.String("task-path", "", "path to the task's YAML file; when set, its final status is re-read on exit to decide whether to keep the sandbox for debugging")
-	projectPath := fs.String("project-path", "", "path to the .project.yaml driving this session; recorded into session.json so a restarting daemon can reconcile session tracking")
+	projectPath := fs.String("project-path", "", "path to the project.yaml driving this session; recorded into session.json so a restarting daemon can reconcile session tracking")
 	kind := fs.String("kind", "", "agent.Kind string (project, planning, task, commit, archive, ...) this session is running; recorded into session.json alongside --project-path")
 	push := fs.Bool("push", false, "this session will `git push` (a commit agent on a push task, or the archive agent): verify the forwarded ssh agent can reach and authenticate to the git host before starting, and abort with an actionable error if not")
 	saveSandbox := fs.Bool("save-sandbox", false, "keep the sandbox when the agent exits instead of removing it with `sbx rm --force` (the task's save_sandbox override)")

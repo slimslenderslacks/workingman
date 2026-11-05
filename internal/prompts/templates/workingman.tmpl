@@ -21,8 +21,8 @@ dir, the log dir, the sessions root — is READ-ONLY to you: mounted read-only
 {{end}}
   <root>/<work-stream>/                      one work stream; its name IS the directory name
     project.md                               the free-form request that created the project (only
-                                             read once, to seed .project.yaml; editing it later does nothing)
-    .project.yaml                            the project: status, description, repos, branch, review/cron
+                                             read once, to seed project.yaml; editing it later does nothing)
+    project.yaml                            the project: status, description, repos, branch, review/cron
                                              settings, blocked_reason, request flags (see below)
     tasks/<name>.yaml                        one file per task: status, attempts, failure_reason,
                                              blocked_reason, depends_on, summary, commits, ...
@@ -97,7 +97,7 @@ ACP sessions root (read-only) — one directory per agent session, named by sess
 
 ### The state machines, condensed
 
-Project status (`.project.yaml` `status:`):
+Project status (`project.yaml` `status:`):
 - (empty) unpopulated seed → the project agent fills it in → `ready`, or
   `blocked` if the description isn't actionable.
 - `ready` → the planning agent writes `tasks/*.yaml` → `working`.
@@ -165,7 +165,7 @@ The rules, for every change:
   for a yes. Never change anything on a guess or on your own initiative.
 - Stay inside one work stream at a time, and only touch the files the change
   needs.
-- Every `.project.yaml` and `tasks/*.yaml` you write MUST end with
+- Every `project.yaml` and `tasks/*.yaml` you write MUST end with
   `updated_by: agent`. The daemon ignores writes marked `updated_by: daemon` (it
   takes them for its own) — leaving that value in place means your edit is
   silently never acted on.
@@ -174,7 +174,7 @@ The rules, for every change:
   exactly as it was. Valid YAML, same keys.
 - Write atomically, new files included: write the content to a temp file in
   the same directory whose name doesn't match a watched pattern (e.g.
-  `.project.yaml.tmp`, `tasks/<name>.yaml.tmp`, `intake/<request>.md.tmp`), then
+  `project.yaml.tmp`, `tasks/<name>.yaml.tmp`, `intake/<request>.md.tmp`), then
   `mv` it into place. The daemon must never read a half-written file.
 - Use only the status values listed above; anything else is rejected and the
   edit silently doesn't take effect.
@@ -194,7 +194,7 @@ The rules, for every change:
   verify: re-read the snapshot / audit log a little later (a `project_updated
   ... writer=agent` line means it was seen) and report if nothing happened.
 
-The TUI's `:` commands are all just edits to `.project.yaml`, so you can do any
+The TUI's `:` commands are all just edits to `project.yaml`, so you can do any
 of them for the human:
 - stop: set `stopped_from:` to the current status, then `status: stopped`
   (refuse if it is already stopped — that would lose the status to restore).
@@ -235,7 +235,7 @@ Other common changes:
 - Start a new project: create `<root>/<project-name>/project.md` in a NEW
   directory — free-form markdown with the repositories involved (org/name), the
   goal, and any branch, schedule or PR expectations. The project agent turns it
-  into `.project.yaml` without interviewing anyone, so include everything it
+  into `project.yaml` without interviewing anyone, so include everything it
   needs, especially which repos.
 
 Names you create are kebab-case (lowercase letters, digits, hyphens): a new

@@ -13,7 +13,7 @@ conclude the project.
 You have the `github` MCP attached. Use it for everything about the PR — do NOT
 run `gh`, `git push`, or clone anything. You only write files under this
 project's control dir ({{.Workspace}}): new task files in the tasks dir, and
-`.project.yaml`. You never edit source, commit, or push — the task and commit
+`project.yaml`. You never edit source, commit, or push — the task and commit
 agents do that on the tasks you create.
 
 SCOPE — operate ONLY on this project. The only project file you may modify is
@@ -21,7 +21,7 @@ SCOPE — operate ONLY on this project. The only project file you may modify is
 
 ## Step 1 — read the project
 
-Read `.project.yaml` for the project goal (`description`), its `repos`, its
+Read `project.yaml` for the project goal (`description`), its `repos`, its
 `branch`, the `review` flag, and any prior `pull_request:` record. Read the
 existing task files in the tasks dir — in particular each task's `status:` and
 its `source:` block (present on tasks you created on earlier polls). You will
@@ -61,7 +61,7 @@ you watch them all at once. For EACH repo the project lists:
         either, there is genuinely nothing to publish yet — leave it for a
         future poll once a task commits.
 
-Write the full set of PRs found across all repos back into `.project.yaml` —
+Write the full set of PRs found across all repos back into `project.yaml` —
 one list entry per PR (open, merged, or closed since last poll):
 
   pull_requests:

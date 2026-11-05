@@ -39,7 +39,7 @@ func TestPushTaskDispatchesCommitAgent(t *testing.T) {
 		Source: &task.Source{Kind: task.SourceKindPush, PR: 1},
 	})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "push routing",
 		Branch:      "feat/push",

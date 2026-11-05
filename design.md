@@ -1,4 +1,4 @@
-We're going to create an agent orchestrator in golang. The daemon is configured with a list of root directories that it watches recursively. If any watched directory contains an empty .project.yaml then our daemon should detect that empty .project.yaml file and start an interactive project agent to help you populate that .project.yaml file with a set of information including:
+We're going to create an agent orchestrator in golang. The daemon is configured with a list of root directories that it watches recursively. If any watched directory contains an empty project.yaml then our daemon should detect that empty project.yaml file and start an interactive project agent to help you populate that project.yaml file with a set of information including:
 
 * a description of the project
 * the collection of github repos that might be necessary to complete the project
@@ -11,11 +11,11 @@ We're going to create an agent orchestrator in golang. The daemon is configured 
 
 Neither `cleanup` nor `archive` is a status: the status enum is fixed (ready, working, blocked, done) and a project keeps whatever status it had while it is being cleaned up.
 
-When this project agent is launched, the first task of the project agent is to work with the user to populate the .project.yaml file. We should have a daemon process that uses fsnotify to detect the new .project.yaml file, and then start an interactive agent to populate that file.
+When this project agent is launched, the first task of the project agent is to work with the user to populate the project.yaml file. We should have a daemon process that uses fsnotify to detect the new project.yaml file, and then start an interactive agent to populate that file.
 
-Once the agent has completed this task, it should update the .project.yaml with any updates that have been completed during the agent session and always put the project into the status ready.  
+Once the agent has completed this task, it should update the project.yaml with any updates that have been completed during the agent session and always put the project into the status ready.  
 
-Anytime the daemon detects that a .project.yaml file has been updated, the daemon should start up a background agent that looks read the .project.yaml file. 
+Anytime the daemon detects that a project.yaml file has been updated, the daemon should start up a background agent that looks read the project.yaml file. 
 
 If the `cleanup` flag is set then it should start an archive agent, ahead of any status routing — a cleanup can be requested from any status, and the status's own agent must not run at the same time (it would be committing into the very workspace the archive agent is trying to leave clean).
 If the status is ready then it should start an planning agent 
@@ -34,7 +34,7 @@ A planning agent breaks a project into a set of tasks.  This agent should write 
 * the reason that the task is blocked
 * description of the task that needs to be completed
 
-While writing out tasks, the agent can read the .project.yaml file and any existing tasks already in the ./tasks/*.yaml directory. The agent should make any changes it likes to the .project.yaml or any of the ./tasks. It should constrain itself to only making updates to .project.yaml or task files. When complete, it should change the project status to working.
+While writing out tasks, the agent can read the project.yaml file and any existing tasks already in the ./tasks/*.yaml directory. The agent should make any changes it likes to the project.yaml or any of the ./tasks. It should constrain itself to only making updates to project.yaml or task files. When complete, it should change the project status to working.
 
 # task agent
 
@@ -42,7 +42,7 @@ A task agent is started in a workspace that has been setup by the deamon.  It ha
 
 # wolf agent
 
-The wolf agent should look at failed or blocked tasks, and .project.yaml status to try to determine what is causing an issue. The wolf agent does not block on a tmux session for input — instead it sends a notification out to the user (via macOS `osascript` for now) when it needs human input, and the user can attach to the tmux session to respond.
+The wolf agent should look at failed or blocked tasks, and project.yaml status to try to determine what is causing an issue. The wolf agent does not block on a tmux session for input — instead it sends a notification out to the user (via macOS `osascript` for now) when it needs human input, and the user can attach to the tmux session to respond.
 
 # commit agent
 
@@ -50,7 +50,7 @@ The commit agent is given a task when a change is complete in a wsp workspace. C
 
 # archive agent
 
-The archive agent (the "cleanup" agent) prepares a finished project to be archived. It is dispatched by the daemon when it observes `cleanup: true` on a `.project.yaml`, and it runs autonomously — a one-shot ACP session in a sandbox of its own (`<work-stream>-archive`), with the project's wsp workspace and its orch control directory mounted. Its job is to leave every repo clean, committing and pushing only what actually needs it — a repo with nothing to commit and nothing to publish is finished as-is. For each repo in that workspace it:
+The archive agent (the "cleanup" agent) prepares a finished project to be archived. It is dispatched by the daemon when it observes `cleanup: true` on a `project.yaml`, and it runs autonomously — a one-shot ACP session in a sandbox of its own (`<work-stream>-archive`), with the project's wsp workspace and its orch control directory mounted. Its job is to leave every repo clean, committing and pushing only what actually needs it — a repo with nothing to commit and nothing to publish is finished as-is. For each repo in that workspace it:
 
 * checks for uncommitted changes;
 * classifies them — anything that plainly does not belong in the repo (build artifacts, editor scratch files, local caches) is neither committed nor deleted, and the agent never edits `.gitignore` on its own authority. Nobody is attached to the session, so it does not ask and does not wait: it leaves that repo alone and reports the exact `.gitignore` edit it would have made as an outstanding item in its final message;
@@ -69,9 +69,9 @@ Because it is the agent that publishes a finished work stream, the daemon grants
 
 # daemon
 
-If the daemon detects that the .project.yaml file is updated and the status is ready that we need another phase of planning from the planning agent. If status is working then the daemon must build the task graph and if there is a task that is ready to be worked on then give it to a task agent. If all tasks are complete, then the project should transition to the done status. All project status updates should be logged to logs/audit.log
+If the daemon detects that the project.yaml file is updated and the status is ready that we need another phase of planning from the planning agent. If status is working then the daemon must build the task graph and if there is a task that is ready to be worked on then give it to a task agent. If all tasks are complete, then the project should transition to the done status. All project status updates should be logged to logs/audit.log
 
-The daemon also reads the cron schedule from `.project.yaml` and, on each firing, wakes the project. A firing on an idle project — `done`, or `ready` — starts a fresh cycle: the daemon writes `status: ready` with `replan: true` and logs `cron_replan_requested`, which routes to the planning agent with instructions to re-plan rather than preserve. A firing on a `working` or `blocked` project only re-evaluates its status as if `.project.yaml` had been updated (logged `cron_replan_skipped`): re-planning a project whose tasks are in flight would rewrite the graph out from under running task agents, and re-planning a blocked one would bury the failure the wolf needs to see. Because `done` is the resting state between cycles rather than the end of a recurring work stream, reaching it does not unschedule the cron; only the stop condition does. `cron_max_runs` counts cycles rather than wake-ups: only a firing that started one increments `cron_runs` (a skip logs `cron_run_not_counted`), and the schedule is retired after the last counted cycle has done its work, not instead of it — so `cron_max_runs: N` yields N cycles. The cost of that definition is that a project which never returns to idle can keep waking up past N; `cron_until` is the wall-clock bound for that case. The daemon clears `replan` once a planning session has moved the project off `ready`, so the next ordinary planning run (a human adding one task through the UI) is additive again. The planning agent writes task dependencies into each task file; the daemon computes the ready set from that DAG.
+The daemon also reads the cron schedule from `project.yaml` and, on each firing, wakes the project. A firing on an idle project — `done`, or `ready` — starts a fresh cycle: the daemon writes `status: ready` with `replan: true` and logs `cron_replan_requested`, which routes to the planning agent with instructions to re-plan rather than preserve. A firing on a `working` or `blocked` project only re-evaluates its status as if `project.yaml` had been updated (logged `cron_replan_skipped`): re-planning a project whose tasks are in flight would rewrite the graph out from under running task agents, and re-planning a blocked one would bury the failure the wolf needs to see. Because `done` is the resting state between cycles rather than the end of a recurring work stream, reaching it does not unschedule the cron; only the stop condition does. `cron_max_runs` counts cycles rather than wake-ups: only a firing that started one increments `cron_runs` (a skip logs `cron_run_not_counted`), and the schedule is retired after the last counted cycle has done its work, not instead of it — so `cron_max_runs: N` yields N cycles. The cost of that definition is that a project which never returns to idle can keep waking up past N; `cron_until` is the wall-clock bound for that case. The daemon clears `replan` once a planning session has moved the project off `ready`, so the next ordinary planning run (a human adding one task through the UI) is additive again. The planning agent writes task dependencies into each task file; the daemon computes the ready set from that DAG.
 
 The daemon also owns the cleanup request's lifecycle. When it observes `cleanup: true` it launches the archive agent under a session key of its own — separate from the project's main session slot — and logs `archive_dispatch`; a second request while that run is in flight is deduped (`session_skip_duplicate`), so one `:cleanup` produces exactly one archive session. When the session ends the daemon clears `cleanup` (writing as `daemon`, so the clear cannot retrigger dispatch), leaves the agent's `archive` value exactly as it found it, logs `cleanup_flag_cleared`, and resumes normal status routing. A run that ended without `archive: true` is logged as `archive_incomplete` and otherwise left alone — not finishing is not a reason to block the project, and the request is not retried; the user re-issues `:cleanup`.
 
@@ -79,7 +79,7 @@ The deamon also watches for updates to the task.yaml files. When a task change s
 
 # running agents
 
-Whenever we run an agent, we must create a workspace for the agent to run in. Do this with the cli tool wsp.  Use the .project.yaml file to figure out which repos should be added to the workspace.  The name of the workspace is the target branch listed in the project. Run the agent, by starting a claude code process in the workspace dir with --dangerously-skip-permissions flag.  Start the claude code session in a tmux session with a name for the task.  This will allow us to join the session any time the agent appears to be stuck or we just want to watch it work.  When you start the agent, we may want to add task specific skills to the workspaces .claude folder.
+Whenever we run an agent, we must create a workspace for the agent to run in. Do this with the cli tool wsp.  Use the project.yaml file to figure out which repos should be added to the workspace.  The name of the workspace is the target branch listed in the project. Run the agent, by starting a claude code process in the workspace dir with --dangerously-skip-permissions flag.  Start the claude code session in a tmux session with a name for the task.  This will allow us to join the session any time the agent appears to be stuck or we just want to watch it work.  When you start the agent, we may want to add task specific skills to the workspaces .claude folder.
 
 # TUI
 
@@ -91,7 +91,7 @@ The gallery renders a project with `archive: true` inside a blue border, so a wo
 
 # workingman agent
 
-The workingman agent is an always-on assistant, reachable over a messaging channel, that answers questions about orch state. When asked, and after confirming with the human, it also changes that state by editing files in the orch roots — `.project.yaml`, `tasks/*.yaml`, and new `<root>/<project>/project.md` / `<root>/<project>/intake/<task>.md` files — always writing as `updated_by: agent`. The snapshot, logs and sessions stay read-only to it.
+The workingman agent is an always-on assistant, reachable over a messaging channel, that answers questions about orch state. When asked, and after confirming with the human, it also changes that state by editing files in the orch roots — `project.yaml`, `tasks/*.yaml`, and new `<root>/<project>/project.md` / `<root>/<project>/intake/<task>.md` files — always writing as `updated_by: agent`. The snapshot, logs and sessions stay read-only to it.
 
 # ssh agent
 

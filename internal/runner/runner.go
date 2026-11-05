@@ -2,7 +2,7 @@
 // Given a Plan (which Kind of agent, where, on what), Runner:
 //
 //  1. Resolves the working directory: for ProjectAgent the plan supplies it
-//     directly (the dir holding the empty .project.yaml); for every other
+//     directly (the dir holding the empty project.yaml); for every other
 //     Kind it asks workspace.Manager to provision one.
 //  2. Renders the kind-specific instructions text via the prompts package.
 //  3. Hands off to setup.Apply to drop .orch/context.yaml,
@@ -99,7 +99,7 @@ type Plan struct {
 	IntakeFiles []string
 
 	// ProjectChanges is a human-readable line per intent field (description,
-	// repos/new_repos, branch, cron) that changed in .project.yaml since the
+	// repos/new_repos, branch, cron) that changed in project.yaml since the
 	// planning agent last successfully ran — see
 	// project.PlannedSnapshot.Describe. Only the planning template reads it.
 	// Any newly-added repos it describes have already been cloned into the
@@ -145,7 +145,7 @@ type Plan struct {
 
 	// WritableMounts, for the workingman agent, are host paths bind-mounted into
 	// its sandbox READ-WRITE next to its scratch directory (WorkingDir): the orch
-	// roots, where it edits .project.yaml / tasks/*.yaml and creates
+	// roots, where it edits project.yaml / tasks/*.yaml and creates
 	// project.md / intake/*.md on a human's request. Ignored for every other
 	// Kind. See workingmanWorkspaces.
 	WritableMounts []string
@@ -170,7 +170,7 @@ type Plan struct {
 // Plan.WritableMounts; the rest read-only, see Plan.ReadOnlyMounts), at the same
 // absolute host path the daemon uses.
 type Observe struct {
-	Roots        []string // orch roots (--root): <root>/<work-stream>/{.project.yaml,tasks/}
+	Roots        []string // orch roots (--root): <root>/<work-stream>/{project.yaml,tasks/}
 	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
 	AuditLog     string   // the audit log file; empty when unknown
 	SessionsRoot string   // ACP sessions root: <root>/<id>/{session.json,stream.log}
@@ -233,7 +233,7 @@ type SandboxSpec struct {
 // SandboxCreator ensures a sandbox described by spec exists.
 //
 // Task/commit agents need two mounts: the worktree (for code) and the
-// project's orch dir (for `.project.yaml` and `tasks/*.yaml`, which live
+// project's orch dir (for `project.yaml` and `tasks/*.yaml`, which live
 // outside the worktree).
 //
 // Must be idempotent: the daemon re-dispatches across restarts. The default
@@ -470,7 +470,7 @@ func (r *Runner) UsesACP(kind agent.Kind) bool {
 
 // Start is non-blocking: it returns the Session once the launcher accepts it.
 // The caller owns Wait/Close on the returned Session.
-// projectNameFromPath returns the work-stream name for a .project.yaml path:
+// projectNameFromPath returns the work-stream name for a project.yaml path:
 // the basename of the directory that holds it (which is also the sandbox
 // prefix and the TUI display name). Empty when projectPath is empty.
 func projectNameFromPath(projectPath string) string {
@@ -1097,7 +1097,7 @@ func (p Plan) Pushes() bool {
 //
 //   - Project agent → "<work-stream>-project" where work-stream is the
 //     basename of the project's control dir. The project agent is autonomous
-//     (runs under ACP like planning) and reads the seed / writes .project.yaml
+//     (runs under ACP like planning) and reads the seed / writes project.yaml
 //     in the control dir. It gets its OWN sandbox — distinct from planning's —
 //     so the two agents, which run back-to-back on the same control dir, don't
 //     collide on one sandbox with different mounts.
@@ -1105,7 +1105,7 @@ func (p Plan) Pushes() bool {
 //     advise on the project from the host, including for sandbox-related
 //     blocks). The ACP-backed wolf does get a sandbox — see ACPSandboxNameFor.
 //   - Planning → basename of the project's control dir (the dir holding
-//     .project.yaml). Workspace = control dir.
+//     project.yaml). Workspace = control dir.
 //   - Task / commit → "<work-stream>-<task-name>" where work-stream is the
 //     basename of the project's control dir. Each task gets its OWN sandbox
 //     so its `--static-mcp` set can differ from siblings; the commit agent
@@ -1228,13 +1228,13 @@ func (r *Runner) resolveWolfWorktree(ctx context.Context, p Plan) string {
 //
 // Task/commit agents need TWO mounts: the worktree (where the code lives
 // and where the agent does `git` work) and the project's orch dir (which
-// holds `.project.yaml` and `tasks/*.yaml`). Without the second mount, the
+// holds `project.yaml` and `tasks/*.yaml`). Without the second mount, the
 // task agent's status writeback to `tasks/<name>.yaml` fails because the
 // directory simply doesn't exist inside the sandbox.
 //
 // The archive agent needs the same two mounts and for the same reason: it does
 // its git work in the wsp workspace but writes `archive: true` back to
-// `.project.yaml` in the orch dir.
+// `project.yaml` in the orch dir.
 //
 // Planning's primary mount is the project's orch dir (where .orch/ lives).
 // When planningWorktree is non-empty, it is mounted as a second workspace so
@@ -1252,7 +1252,7 @@ func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath, planningWorktre
 	case agent.PlanningAgent, agent.WolfAgent:
 		// The wolf, like planning, runs in the control dir and optionally mounts
 		// the project's source worktree as a second workspace (see
-		// resolveWolfWorktree). The control dir already holds .project.yaml,
+		// resolveWolfWorktree). The control dir already holds project.yaml,
 		// tasks/ and the blocked-session record, so it needs no extra orch mount.
 		if planningWorktree == "" || planningWorktree == workingDir {
 			return []string{workingDir}

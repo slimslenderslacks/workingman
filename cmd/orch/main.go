@@ -399,7 +399,7 @@ func redirectStdlibLog(w io.Writer) func() {
 func runTUI(args []string) {
 	fs := flag.NewFlagSet("orch tui", flag.ExitOnError)
 	var roots rootsFlag
-	fs.Var(&roots, "root", "directory to scan for .project.yaml files (repeatable)")
+	fs.Var(&roots, "root", "directory to scan for project.yaml files (repeatable)")
 	auditPath := fs.String("audit-log", "", "path to an audit log file to tail in the bottom pane (optional)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)

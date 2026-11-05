@@ -16,7 +16,7 @@ func TestIdleStatusValidAndRoundTrips(t *testing.T) {
 	if !StatusIdle.Valid() {
 		t.Fatalf("StatusIdle must be Valid()")
 	}
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	if err := SaveAs(dst, &Project{
 		Description: "pr project",
 		Branch:      "feat/pr",
@@ -44,7 +44,7 @@ func TestIdleStatusValidAndRoundTrips(t *testing.T) {
 func TestLegacyStatusAliasesLoadAsIdle(t *testing.T) {
 	for _, legacy := range []string{"done", "reviewing"} {
 		t.Run(legacy, func(t *testing.T) {
-			dst := filepath.Join(t.TempDir(), ".project.yaml")
+			dst := filepath.Join(t.TempDir(), "project.yaml")
 			body := "description: p\nbranch: b\nstatus: " + legacy + "\nupdated_by: agent\n"
 			if err := os.WriteFile(dst, []byte(body), 0o644); err != nil {
 				t.Fatal(err)
@@ -65,7 +65,7 @@ func TestLegacyStatusAliasesLoadAsIdle(t *testing.T) {
 // watched: WatchingPR() is derived from review/pull_requests, which the
 // legacy alias must not disturb.
 func TestLegacyStatusAliasPreservesWatchingData(t *testing.T) {
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	body := "description: p\nbranch: b\nstatus: reviewing\n" +
 		"pull_requests:\n  - repo: docker/gateway\n    number: 1\n    state: open\n" +
 		"updated_by: agent\n"
@@ -128,7 +128,7 @@ func TestWatchingPR(t *testing.T) {
 // (including several PRs, one per repo) and that both stay out of the YAML when
 // unset (omitempty keeps existing files byte-identical).
 func TestReviewFieldsRoundTrip(t *testing.T) {
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	if err := SaveAs(dst, &Project{
 		Description: "pr project",
 		Branch:      "feat/pr",
@@ -160,7 +160,7 @@ func TestReviewFieldsRoundTrip(t *testing.T) {
 	}
 
 	// Unset case: neither key appears on disk.
-	bare := filepath.Join(t.TempDir(), ".project.yaml")
+	bare := filepath.Join(t.TempDir(), "project.yaml")
 	if err := SaveAs(bare, &Project{Description: "x", Branch: "b", Status: StatusIdle}, WriterAgent); err != nil {
 		t.Fatalf("SaveAs bare: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestReviewFieldsRoundTrip(t *testing.T) {
 }
 
 func TestMergedStatusRoundTripAndNotWatched(t *testing.T) {
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	in := &Project{
 		Description: "p", Branch: "b", Status: StatusMerged, Review: true,
 		PullRequests: []PullRequest{{Repo: "docker/gateway", Number: 1, State: "merged"}},

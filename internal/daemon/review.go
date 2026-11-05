@@ -198,7 +198,7 @@ func (d *Daemon) dispatchReviewAgent(projectPath string, p *project.Project) {
 // launchReviewAgent starts the review agent in the project's control directory
 // with the github MCP attached. Like the planning agent it runs autonomously
 // (ACP, `claude --print`) and needs no wsp workspace: it reads the project goal
-// from .project.yaml, reaches the PR through the MCP, and writes new task files
+// from project.yaml, reaches the PR through the MCP, and writes new task files
 // and status back into the control dir. On session end afterReviewSession
 // inspects what the reconciler decided and routes accordingly.
 func (d *Daemon) launchReviewAgent(projectPath string, p *project.Project) {

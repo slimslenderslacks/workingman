@@ -89,7 +89,7 @@ func seedWorkingProject(t *testing.T, dir, branch, taskName string) string {
 		&task.Task{Name: taskName, Status: task.StatusReady}); err != nil {
 		t.Fatalf("save task: %v", err)
 	}
-	projectPath := filepath.Join(dir, ".project.yaml")
+	projectPath := filepath.Join(dir, "project.yaml")
 	p := &project.Project{Branch: branch, Status: project.StatusWorking}
 	if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
@@ -204,7 +204,7 @@ func TestSameProjectEventsStillProcessInOrder(t *testing.T) {
 	runDaemon(t, d, buf)
 
 	root := d.roots[0]
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Branch: "dup-branch",
 		Status: project.StatusReady,

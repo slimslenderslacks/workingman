@@ -25,7 +25,7 @@ func TestIntakeFileFlipsProjectReady(t *testing.T) {
 	if err := mkdirAll(sub); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	projectPath := filepath.Join(sub, ".project.yaml")
+	projectPath := filepath.Join(sub, "project.yaml")
 	existing := &project.Project{
 		Description: "ship the widget", Branch: "feat/widget",
 		Status: project.StatusBlocked, BlockedReason: "waiting on something unrelated",
@@ -36,7 +36,7 @@ func TestIntakeFileFlipsProjectReady(t *testing.T) {
 	// Let the project's own observation (project_updated, plus whatever the
 	// blocked-status switch does) fully settle on its own event chain before
 	// the intake dir even exists — otherwise creating intake/ races that
-	// chain's in-flight write to the same .project.yaml on a separate
+	// chain's in-flight write to the same project.yaml on a separate
 	// directory-keyed goroutine (see dispatchEvent's per-directory chaining).
 	if ok, snap := waitFor(t, buf, "project_updated"); !ok {
 		t.Fatalf("project never observed.\naudit:\n%s", snap)
@@ -91,7 +91,7 @@ func TestIntakeFileInNewDirIsPickedUp(t *testing.T) {
 	if err := mkdirAll(filepath.Join(sub, "intake")); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	projectPath := filepath.Join(sub, ".project.yaml")
+	projectPath := filepath.Join(sub, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b", Status: project.StatusIdle,
 	}, project.WriterAgent); err != nil {
@@ -107,7 +107,7 @@ func TestIntakeFileInNewDirIsPickedUp(t *testing.T) {
 }
 
 // TestIntakeFileWithoutProjectIsIgnored guards against an intake/ dir that
-// doesn't sit next to a .project.yaml — there is no project to queue work
+// doesn't sit next to a project.yaml — there is no project to queue work
 // against, so the file must be left alone rather than crashing or creating
 // a project out of thin air (that's project.md's job, not intake's).
 func TestIntakeFileWithoutProjectIsIgnored(t *testing.T) {
@@ -141,7 +141,7 @@ func TestIntakeFileEmptyIsIgnored(t *testing.T) {
 	if err := mkdirAll(filepath.Join(sub, "intake")); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	projectPath := filepath.Join(sub, ".project.yaml")
+	projectPath := filepath.Join(sub, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b", Status: project.StatusIdle,
 	}, project.WriterAgent); err != nil {
@@ -234,7 +234,7 @@ func TestHasPendingIntakeReArmsRestingProject(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			projectPath := filepath.Join(root, ".project.yaml")
+			projectPath := filepath.Join(root, "project.yaml")
 			if err := mkdirAll(filepath.Join(root, "intake")); err != nil {
 				t.Fatalf("mkdir: %v", err)
 			}

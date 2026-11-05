@@ -17,7 +17,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/scheduler"
 )
 
-// Daemon watches a list of root directories for changes to .project.yaml and
+// Daemon watches a list of root directories for changes to project.yaml and
 // (eventually) tasks/*.yaml files, and dispatches work to claude-code agents.
 //
 // When constructed without WithRunner the daemon is observation-only: it
@@ -107,7 +107,7 @@ const (
 	// error) blocks immediately and does not consume a retry.
 	maxPlanningRetries = 3
 	// maxProjectRetries is the same tolerance for the project agent: how many
-	// consecutive cycles that left .project.yaml unpopulated the daemon
+	// consecutive cycles that left project.yaml unpopulated the daemon
 	// tolerates before blocking (which summons the wolf). A hard launch
 	// failure blocks immediately and does not consume a retry.
 	maxProjectRetries = 3
@@ -157,7 +157,7 @@ func WithNotifier(n notify.Sender) Option {
 }
 
 // WithScheduler enables cron-driven re-evaluation of projects. The daemon
-// registers each .project.yaml's cron field on observation; on firing it
+// registers each project.yaml's cron field on observation; on firing it
 // re-runs handleProject as if a fresh fsnotify event had arrived.
 func WithScheduler(s *scheduler.Scheduler) Option {
 	return func(d *Daemon) { d.scheduler = s }
@@ -233,6 +233,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.scheduler.Start()
 	}
 	for _, r := range d.roots {
+		// Before the watch is installed, so the renames aren't seen as events.
+		migrated, err := project.MigrateLegacy(r)
+		for _, p := range migrated {
+			d.audit.Log("project_file_migrated", "path", p)
+		}
+		if err != nil {
+			d.audit.Log("project_file_migrate_error", "root", r, "err", err.Error())
+		}
 		if err := d.addTree(r); err != nil {
 			return fmt.Errorf("daemon: watch %s: %w", r, err)
 		}
@@ -269,7 +277,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			// Ordering guarantee: events are dispatched concurrently across
 			// directories, but two events for the same directory (e.g. two
-			// rapid-fire writes to one project's .project.yaml) still run in
+			// rapid-fire writes to one project's project.yaml) still run in
 			// the order they were received here. See dispatchEvent.
 			d.dispatchEvent(ev)
 		case err, ok := <-d.watcher.Errors:

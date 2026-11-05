@@ -349,7 +349,7 @@ func TestChannelsEndToEnd(t *testing.T) {
 
 	// (a) A project becomes blocked → the wolf starts → one "wolf is running"
 	// message reaches the owner, exactly once.
-	projectPath := filepath.Join(env.root, "alpha", ".project.yaml")
+	projectPath := filepath.Join(env.root, "alpha", "project.yaml")
 	blocked := &project.Project{Description: "e2e", Branch: "feat/alpha", Status: project.StatusBlocked, BlockedReason: "need a decision on the schema"}
 	if err := project.SaveAs(projectPath, blocked, project.WriterAgent); err != nil {
 		t.Fatal(err)

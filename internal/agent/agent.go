@@ -98,7 +98,7 @@ func ParseKind(s string) (Kind, bool) {
 // Interactive reports whether this Kind expects a human in the loop. Exactly
 // one does: the wolf agent, which asks for guidance when a project is blocked.
 // Every other kind is autonomous — it runs one turn and exits without
-// prompting. The project agent generates `.project.yaml` from the user's seed
+// prompting. The project agent generates `project.yaml` from the user's seed
 // description and, when the description is insufficient, escalates by blocking
 // the project (which summons the wolf) rather than interviewing the user
 // itself. The archive agent used to wait for a human to approve a `.gitignore`

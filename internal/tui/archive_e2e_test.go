@@ -124,7 +124,7 @@ func newCleanupHarness(t *testing.T, name, branch string) *cleanupHarness {
 	}
 	h.wsp = workspace.NewStub(h.stubRoot)
 	h.wspDir = filepath.Join(h.stubRoot, branch)
-	h.projPath = filepath.Join(h.root, name, ".project.yaml")
+	h.projPath = filepath.Join(h.root, name, "project.yaml")
 
 	a := audit.New(h.audit)
 	d, err := daemon.New([]string{h.root}, a, daemon.WithRunner(&runner.Runner{
@@ -231,7 +231,7 @@ func (h *cleanupHarness) run(t *testing.T, cmd string) {
 // workflow was built for, one seam at a time:
 //
 //	:cleanup writes the request flag → the daemon dispatches an archive agent
-//	for that project → the agent's `archive: true` lands in .project.yaml →
+//	for that project → the agent's `archive: true` lands in project.yaml →
 //	the gallery renders the card with the blue border → `:archive` proceeds,
 //	removes the wsp workspace, and moves the project into the backup root.
 func TestCleanupToArchiveEndToEnd(t *testing.T) {
@@ -353,7 +353,7 @@ func TestCleanupToArchiveEndToEnd(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.root, h.name)); !os.IsNotExist(err) {
 		t.Errorf("project dir still under the orch root (err=%v)", err)
 	}
-	if _, err := os.Stat(filepath.Join(h.root+".backup", h.name, ".project.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(h.root+".backup", h.name, "project.yaml")); err != nil {
 		t.Errorf("archived project missing from the backup root: %v", err)
 	}
 	if _, err := os.Stat(h.wspDir); !os.IsNotExist(err) {

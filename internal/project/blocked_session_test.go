@@ -8,7 +8,7 @@ import (
 )
 
 func TestBlockedSessionPath(t *testing.T) {
-	got := BlockedSessionPath("/orch/myproj/.project.yaml")
+	got := BlockedSessionPath("/orch/myproj/project.yaml")
 	want := "/orch/myproj/blocked-session.yaml"
 	if got != want {
 		t.Errorf("BlockedSessionPath = %q, want %q", got, want)

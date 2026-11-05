@@ -62,7 +62,7 @@ func TestCronReevaluatesProject(t *testing.T) {
 	}
 
 	// Project in status=working with no tasks dir → no_ready_tasks every pass.
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "cron test",
 		Branch:      "feat/cron",
@@ -140,7 +140,7 @@ func TestCronMaxRunsUnschedulesAfterFiring(t *testing.T) {
 	root := t.TempDir()
 	buf, sched := startCronDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "one-shot cron",
 		Branch:      "feat/cron-max-runs",
@@ -204,7 +204,7 @@ func TestCronMaxRunsYieldsThatManyCycles(t *testing.T) {
 	root := t.TempDir()
 	buf, sched := startCronDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "two cycles",
 		Branch:      "feat/cron-two-cycles",
@@ -253,7 +253,7 @@ func TestCronFiringWithBudgetAlreadySpentDoesNoWork(t *testing.T) {
 	root := t.TempDir()
 	d, buf, sched := startReplanDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "budget spent",
 		Branch:      "feat/cron-spent",
@@ -308,7 +308,7 @@ func TestCronUntilExpiredNeverRegisters(t *testing.T) {
 	buf, sched := startCronDaemon(t, root)
 
 	past := time.Now().Add(-time.Hour)
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "expired cron",
 		Branch:      "feat/cron-until",
@@ -354,7 +354,7 @@ func TestCronWithoutStopConditionBlocksProject(t *testing.T) {
 	root := t.TempDir()
 	buf, sched := startCronDaemon(t, root)
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "endless cron",
 		Branch:      "feat/cron-forever",
@@ -430,7 +430,7 @@ func TestCronUnregistersOnProjectDone(t *testing.T) {
 		t.Fatalf("daemon never ready: %s", snap)
 	}
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "cron-then-done",
 		Branch:      "feat/cron-done",

@@ -69,8 +69,8 @@ func newTestDaemon(t *testing.T) (*Daemon, context.CancelFunc) {
 func TestListSessionsReturnsTrackedSessions(t *testing.T) {
 	d, _ := newTestDaemon(t)
 
-	keyA := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
-	keyB := filepath.Join(t.TempDir(), "bravo", ".project.yaml")
+	keyA := filepath.Join(t.TempDir(), "alpha", "project.yaml")
+	keyB := filepath.Join(t.TempDir(), "bravo", "project.yaml")
 
 	sa := newStubSession("orch-task-alpha")
 	if !d.trackSession(keyA, sa, agent.TaskAgent, "alpha-task", nil) {
@@ -120,7 +120,7 @@ func TestListSessionsReturnsTrackedSessions(t *testing.T) {
 
 func TestListSessionsRemovesEndedSessions(t *testing.T) {
 	d, _ := newTestDaemon(t)
-	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
+	key := filepath.Join(t.TempDir(), "alpha", "project.yaml")
 	s := newStubSession("orch-task-alpha")
 	if !d.trackSession(key, s, agent.TaskAgent, "", nil) {
 		t.Fatal("trackSession returned false")
@@ -156,7 +156,7 @@ func TestWatchSessionsEmitsUpdates(t *testing.T) {
 		t.Fatal("no initial snapshot")
 	}
 
-	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
+	key := filepath.Join(t.TempDir(), "alpha", "project.yaml")
 	s := newStubSession("orch-task-alpha")
 	if !d.trackSession(key, s, agent.TaskAgent, "", nil) {
 		t.Fatal("trackSession returned false")
@@ -218,8 +218,8 @@ func TestListSessionsPopulatesSandboxNameForACPSessions(t *testing.T) {
 	// here since trackSession is driven directly with stub sessions.
 	d.runner = &runner.Runner{AcpLauncher: stubLauncher{}}
 
-	taskKey := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
-	wolfKey := filepath.Join(t.TempDir(), "bravo", ".project.yaml")
+	taskKey := filepath.Join(t.TempDir(), "alpha", "project.yaml")
+	wolfKey := filepath.Join(t.TempDir(), "bravo", "project.yaml")
 
 	taskSess := newStubSession("orch-task-alpha")
 	if !d.trackSession(taskKey, taskSess, agent.TaskAgent, "scaffold", nil) {
@@ -259,8 +259,8 @@ func TestListSessionsLeavesWolfSandboxEmptyOnHost(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	d.runner = &runner.Runner{AcpLauncher: stubLauncher{}, WolfOnHost: true}
 
-	wolfKey := filepath.Join(t.TempDir(), "bravo", ".project.yaml")
-	archiveKey := archiveSessionKey(filepath.Join(t.TempDir(), "charlie", ".project.yaml"))
+	wolfKey := filepath.Join(t.TempDir(), "bravo", "project.yaml")
+	archiveKey := archiveSessionKey(filepath.Join(t.TempDir(), "charlie", "project.yaml"))
 	wolfSess := newStubSession("wolf-bravo")
 	archiveSess := newStubSession("archive-charlie")
 	if !d.trackSession(wolfKey, wolfSess, agent.WolfAgent, "", nil) ||
@@ -292,7 +292,7 @@ func TestListSessionsLeavesSandboxNameEmptyWithoutACP(t *testing.T) {
 	// surface it.
 	d.runner = &runner.Runner{}
 
-	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
+	key := filepath.Join(t.TempDir(), "alpha", "project.yaml")
 	sess := newStubSession("orch-task-alpha")
 	if !d.trackSession(key, sess, agent.TaskAgent, "scaffold", nil) {
 		t.Fatal("trackSession returned false")

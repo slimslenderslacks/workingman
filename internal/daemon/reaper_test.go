@@ -60,7 +60,7 @@ func TestStrandedReasonTaskStages(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			projectDir := t.TempDir()
-			key := filepath.Join(projectDir, ".project.yaml")
+			key := filepath.Join(projectDir, "project.yaml")
 			writeTaskFile(t, projectDir, "t1", tc.taskStatus)
 
 			e := sessionEntry{
@@ -89,7 +89,7 @@ func TestReapStrandedSessionRunsOnEnd(t *testing.T) {
 	d.sessionIdleTimeout = time.Millisecond // make the idle path fire immediately
 
 	projectDir := t.TempDir()
-	key := filepath.Join(projectDir, ".project.yaml")
+	key := filepath.Join(projectDir, "project.yaml")
 	// No tasks dir → stageComplete is false, so reaping is driven purely by the
 	// idle bound.
 

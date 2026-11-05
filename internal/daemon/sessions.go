@@ -26,14 +26,14 @@ const (
 // WatchSessions; callers never build this struct directly.
 type SessionInfo struct {
 	// ID is the daemon's stable key for the session — the absolute path of
-	// the .project.yaml driving it (the workingman agent, which has no
+	// the project.yaml driving it (the workingman agent, which has no
 	// project, uses the fixed key "workingman-agent"). Used by the TUI to diff snapshots and
 	// route clicks.
 	ID string
 	// AgentName is the agent.Kind string ("project", "planning", "task",
 	// "wolf", "commit"). Surfaced verbatim in the sessions pane.
 	AgentName string
-	// Project is the basename of the dir holding the .project.yaml — the
+	// Project is the basename of the dir holding the project.yaml — the
 	// same identifier the projects gallery uses for that project, so the
 	// two panes line up visually.
 	Project string

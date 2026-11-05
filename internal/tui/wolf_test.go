@@ -55,7 +55,7 @@ func TestSummonWolfPreservesExistingReason(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, ".project.yaml")
+	path := filepath.Join(dir, "project.yaml")
 	yaml := "description: p\nbranch: b\nstatus: blocked\nblocked_reason: task foo crashed\nupdated_by: daemon\n"
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)

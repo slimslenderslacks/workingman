@@ -10,7 +10,7 @@ import (
 
 // BlockedSession is the durable "why blocked / how to get unblocked" record
 // the wolf agent maintains for a project, stored at the path returned by
-// BlockedSessionPath (a `blocked-session.yaml` file next to `.project.yaml`
+// BlockedSessionPath (a `blocked-session.yaml` file next to `project.yaml`
 // and `tasks/`).
 //
 // Project.BlockedReason is overwritten by the daemon on every new block, so
@@ -36,7 +36,7 @@ type BlockedSession struct {
 }
 
 // BlockedSessionPath returns the path to the blocked-session record that
-// belongs next to the .project.yaml at projectPath.
+// belongs next to the project.yaml at projectPath.
 func BlockedSessionPath(projectPath string) string {
 	return filepath.Join(filepath.Dir(projectPath), "blocked-session.yaml")
 }

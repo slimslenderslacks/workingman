@@ -19,7 +19,7 @@ import (
 )
 
 // handle is the single entry-point for fsnotify events. It routes by filename:
-// new directories are added to the watch set, .project.yaml events are sent to
+// new directories are added to the watch set, project.yaml events are sent to
 // handleProject, and project.md events are sent to handleProjectSeed. Task
 // files are deliberately *not* watched — task-lifecycle reactions are driven
 // off session-end callbacks (see dispatch_lifecycle.go) to avoid the race
@@ -42,7 +42,7 @@ func (d *Daemon) handle(ev fsnotify.Event) {
 	d.markSnapshotDirty()
 }
 
-// handleProject reads the .project.yaml file, drops the event if the daemon
+// handleProject reads the project.yaml file, drops the event if the daemon
 // wrote it (to break the fsnotify-loop), and routes based on observed state.
 //
 // Wired:
@@ -87,19 +87,19 @@ func (d *Daemon) revisitProject(path string) {
 
 // handleProjectSeed is how a new work stream gets created: a human (or a
 // script) drops `<root>/<project-name>/project.md` — a free-form description
-// of the work — and this turns it into the seed `<root>/<project-name>/.project.yaml`
+// of the work — and this turns it into the seed `<root>/<project-name>/project.yaml`
 // that drives the rest of the project's lifecycle (see dispatchProject's
 // Unpopulated handling). The project's name is always the containing
 // directory's name, never read from the file itself.
 //
-// This is a one-time bootstrap trigger, not a live sync: if .project.yaml
+// This is a one-time bootstrap trigger, not a live sync: if project.yaml
 // already exists next to project.md, the project has already been
 // bootstrapped (or is mid-flight), so the file is left alone — including on a
 // later edit of project.md, which fires its own fsnotify event but is a no-op
 // here.
 func (d *Daemon) handleProjectSeed(path string) {
 	dir := filepath.Dir(path)
-	yamlPath := filepath.Join(dir, ".project.yaml")
+	yamlPath := filepath.Join(dir, project.FileName)
 	if _, err := os.Stat(yamlPath); err == nil {
 		return
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -279,7 +279,7 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 }
 
 // launchProjectRootAgent starts an agent that runs in the project's control
-// directory (i.e. the dir holding the .project.yaml). The project, planning,
+// directory (i.e. the dir holding the project.yaml). The project, planning,
 // and wolf agents all use this path — they do not need a wsp workspace.
 //
 // After the agent's session ends the daemon re-runs handleProject on the
@@ -421,7 +421,7 @@ func (d *Daemon) afterPlanningSession(projectPath string, waitErr error) {
 // afterPlanningSession.
 //
 // The project agent's job is to turn the project.md-derived description seed
-// into a populated `.project.yaml` (status:ready), or, when the description isn't
+// into a populated `project.yaml` (status:ready), or, when the description isn't
 // enough, to escalate by setting status:blocked with a specific question.
 // Either outcome moves the project off the unpopulated (status:"") state the
 // daemon routes to the project agent. A session that ends with the file still
@@ -461,7 +461,7 @@ func (d *Daemon) afterProjectSession(projectPath string, waitErr error) {
 	if n >= maxProjectRetries {
 		d.resetProjectFailures(projectPath)
 		d.transitionProjectBlocked(projectPath, p,
-			fmt.Sprintf("project agent made no progress after %d attempts; .project.yaml still unpopulated", n))
+			fmt.Sprintf("project agent made no progress after %d attempts; project.yaml still unpopulated", n))
 		return
 	}
 	d.audit.Log("project_retry", "path", projectPath, "attempt", fmt.Sprintf("%d", n))
@@ -627,7 +627,7 @@ func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) bool 
 		}
 		d.transitionProjectBlocked(projectPath, p, fmt.Sprintf(
 			"cron %q has no stop condition: add `cron_until: <RFC3339 timestamp>` "+
-				"or `cron_max_runs: <int>` to .project.yaml so the schedule can "+
+				"or `cron_max_runs: <int>` to project.yaml so the schedule can "+
 				"unschedule itself", p.Cron))
 		return false
 	}

@@ -162,7 +162,7 @@ type harness struct {
 var agentSess = Session{Key: "workingman-agent", ID: "workingman-agent-1", Ref: "/sessions/workingman-agent-1"}
 
 func wolfSess(ws string) Session {
-	return Session{Key: "/orch/" + ws + "/.project.yaml#wolf", ID: "wolf-" + ws + "-1", Ref: "/sessions/wolf-" + ws + "-1", WorkStream: ws}
+	return Session{Key: "/orch/" + ws + "/project.yaml#wolf", ID: "wolf-" + ws + "-1", Ref: "/sessions/wolf-" + ws + "-1", WorkStream: ws}
 }
 
 // newHarness builds a router over a started channeltest channel. The workingman

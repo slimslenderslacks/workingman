@@ -19,7 +19,7 @@ import (
 )
 
 // TestProjectAgentEndToEnd is the step-4b deliverable: write an empty
-// .project.yaml inside a watched root and verify the full pipeline runs —
+// project.yaml inside a watched root and verify the full pipeline runs —
 // daemon detects it, runner drops .orch/{context.yaml,instructions.md} into
 // the working dir, tmux launcher starts a session, and the session ends
 // cleanly.
@@ -66,7 +66,7 @@ func TestProjectAgentEndToEnd(t *testing.T) {
 		t.Fatalf("daemon never ready: %s", snap)
 	}
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := writeFile(projectPath, nil); err != nil {
 		t.Fatalf("write empty project: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestProjectAgentEndToEnd(t *testing.T) {
 		t.Fatalf("no session_started.\naudit:\n%s", snap)
 	}
 
-	// The session ran in the dir holding .project.yaml (project agent runs
+	// The session ran in the dir holding project.yaml (project agent runs
 	// without a wsp workspace) — so .orch/ should be alongside it.
 	for _, want := range []string{"context.yaml", "instructions.md"} {
 		p := filepath.Join(root, ".orch", want)
@@ -134,7 +134,7 @@ func TestStatusReadyTriggersPlanningAgent(t *testing.T) {
 	}
 
 	// Populated, ready-to-plan project — written by the (notional) project agent.
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "test project",
 		Branch:      "feat/healthz-probe",
@@ -215,7 +215,7 @@ func TestPlanningAgentSeesPendingIntakeFiles(t *testing.T) {
 		t.Fatalf("daemon never ready: %s", snap)
 	}
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "widget", Branch: "feat/widget", Status: project.StatusReady,
 		Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
@@ -257,7 +257,7 @@ func TestPlanningAgentSeesPendingIntakeFiles(t *testing.T) {
 // still in the session map; the planning launch attempt got dedup-skipped.
 // The fix is to re-run handleProject as the project agent's onEnd.
 // TestStartupScanDispatchesExistingProject is the regression for restart
-// reliability: a populated .project.yaml with status=ready already on disk
+// reliability: a populated project.yaml with status=ready already on disk
 // when the daemon starts must trigger planning without anyone touching the
 // file afterwards. Without the startup scan, fsnotify never fires (the file
 // is unchanged) and the project is stranded until the user manually saves it.
@@ -293,7 +293,7 @@ func TestNumericPrefixTaskFilenames(t *testing.T) {
 		Status: task.StatusSuccess, // pending commit
 	})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "prefix test",
 		Branch:      "feat/prefix",
@@ -362,7 +362,7 @@ func TestResumeStuckSuccessTask(t *testing.T) {
 	mustSaveTask(t, taskA, &task.Task{Name: "first", Status: task.StatusSuccess})
 	mustSaveTask(t, taskB, &task.Task{Name: "second", Status: task.StatusReady, DependsOn: []string{"first"}})
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "resume test",
 		Branch:      "feat/resume",
@@ -407,7 +407,7 @@ func TestStartupScanDispatchesExistingProject(t *testing.T) {
 
 	root := t.TempDir()
 	// Seed the project file *before* starting the daemon.
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "pre-existing",
 		Branch:      "feat/startup",
@@ -484,7 +484,7 @@ func TestProjectAgentHandoffToPlanning(t *testing.T) {
 		t.Fatalf("daemon never ready: %s", snap)
 	}
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := writeFile(projectPath, nil); err != nil {
 		t.Fatalf("write empty: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestDuplicateEmptyEventDoesNotLaunchTwice(t *testing.T) {
 		t.Fatalf("daemon never ready: %s", snap)
 	}
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	if err := writeFile(projectPath, nil); err != nil {
 		t.Fatalf("write empty project: %v", err)
 	}

@@ -10,8 +10,8 @@ import (
 func mergedModel(t *testing.T, status project.Status) model {
 	t.Helper()
 	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
-	m.projects = []ProjectView{{Name: "p", Path: "/x/p/.project.yaml", Status: status}}
-	m.projSel = "/x/p/.project.yaml"
+	m.projects = []ProjectView{{Name: "p", Path: "/x/p/project.yaml", Status: status}}
+	m.projSel = "/x/p/project.yaml"
 	return focusProjectsPane(t, m)
 }
 

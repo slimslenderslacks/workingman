@@ -80,7 +80,7 @@ func TestRestartDoesNotCloseDetachableSession(t *testing.T) {
 	// Daemon.detachable / Runner.UsesACP.
 	d.runner = &runner.Runner{AcpLauncher: stubLauncher{}}
 
-	key := filepath.Join(t.TempDir(), "alpha", ".project.yaml")
+	key := filepath.Join(t.TempDir(), "alpha", "project.yaml")
 	s := newSelfClosingStubSession("orch-task-alpha")
 	if !d.trackSession(key, s, agent.TaskAgent, "", nil) {
 		t.Fatal("trackSession returned false")
@@ -116,7 +116,7 @@ func TestReconcileSessionsDiscoversOnDiskSession(t *testing.T) {
 	root := t.TempDir()
 	sessionsRoot := t.TempDir()
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "test",
 		Branch:      "feat/x",
@@ -195,7 +195,7 @@ func TestReconcileSessionsAdoptsWolfUnderWolfKey(t *testing.T) {
 	root := t.TempDir()
 	sessionsRoot := t.TempDir()
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{Description: "test", Branch: "feat/x", Status: project.StatusIdle}
 	if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
@@ -257,7 +257,7 @@ func TestReconcileSessionsAdoptsArchiveUnderArchiveKey(t *testing.T) {
 	root := t.TempDir()
 	sessionsRoot := t.TempDir()
 
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "test",
 		Branch:      "feat/x",

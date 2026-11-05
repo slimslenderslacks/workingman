@@ -12,7 +12,7 @@ import (
 )
 
 func TestLoadExample(t *testing.T) {
-	p, err := Load("../../examples/.project.yaml")
+	p, err := Load("../../examples/project.yaml")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -42,14 +42,14 @@ func TestLoadExample(t *testing.T) {
 }
 
 func TestSaveForcesDaemonWriter(t *testing.T) {
-	src, err := Load("../../examples/.project.yaml")
+	src, err := Load("../../examples/project.yaml")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if src.UpdatedBy != WriterAgent {
 		t.Fatalf("precondition: example must be writer=agent, got %q", src.UpdatedBy)
 	}
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	if err := Save(dst, src); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -71,8 +71,8 @@ func TestSaveForcesDaemonWriter(t *testing.T) {
 }
 
 func TestSaveAsAgent(t *testing.T) {
-	src, _ := Load("../../examples/.project.yaml")
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	src, _ := Load("../../examples/project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	if err := SaveAs(dst, src, WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestCreatedAtRoundTripAndOmitEmpty(t *testing.T) {
 }
 
 func TestBaseBranchRoundTrip(t *testing.T) {
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	src := &Project{
 		Description: "x",
 		Branch:      "feat/y",
@@ -143,14 +143,14 @@ func TestBaseBranchRoundTrip(t *testing.T) {
 }
 
 func TestEmptyFile(t *testing.T) {
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	if err := Save(dst, &Project{}); err != nil {
 		// Save of an empty Project writes a non-empty YAML; create the
 		// true-empty case by truncating.
 		t.Fatalf("Save empty: %v", err)
 	}
 	// Now create a truly empty file.
-	empty := filepath.Join(t.TempDir(), ".project.yaml")
+	empty := filepath.Join(t.TempDir(), "project.yaml")
 	if err := writeEmpty(empty); err != nil {
 		t.Fatalf("writeEmpty: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestArchiveFlagLoad(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dst := filepath.Join(t.TempDir(), ".project.yaml")
+			dst := filepath.Join(t.TempDir(), "project.yaml")
 			if err := os.WriteFile(dst, []byte(tc.yaml), 0o644); err != nil {
 				t.Fatalf("write: %v", err)
 			}
@@ -281,7 +281,7 @@ func TestArchiveFlagLoad(t *testing.T) {
 func TestArchiveOmitEmpty(t *testing.T) {
 	// A project without the flag must re-save without adding an `archive:`
 	// key, so files predating the flag stay byte-identical.
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	if err := SaveAs(dst, &Project{
 		Description: "x", Branch: "feat/y", Status: StatusWorking,
 	}, WriterAgent); err != nil {
@@ -297,7 +297,7 @@ func TestArchiveOmitEmpty(t *testing.T) {
 }
 
 func TestArchiveRoundTrip(t *testing.T) {
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	src := &Project{
 		Description: "x",
 		Branch:      "feat/y",
@@ -366,7 +366,7 @@ func TestCleanupFlagLoad(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dst := filepath.Join(t.TempDir(), ".project.yaml")
+			dst := filepath.Join(t.TempDir(), "project.yaml")
 			if err := os.WriteFile(dst, []byte(tc.yaml), 0o644); err != nil {
 				t.Fatalf("write: %v", err)
 			}
@@ -389,7 +389,7 @@ func TestCleanupFlagLoad(t *testing.T) {
 func TestCleanupOmitEmpty(t *testing.T) {
 	// No request → no `cleanup:` key, so files that have never had a cleanup
 	// requested stay byte-identical.
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	if err := SaveAs(dst, &Project{
 		Description: "x", Branch: "feat/y", Status: StatusWorking,
 	}, WriterAgent); err != nil {
@@ -407,7 +407,7 @@ func TestCleanupOmitEmpty(t *testing.T) {
 func TestCleanupRoundTrip(t *testing.T) {
 	// The `:cleanup` write: flag set, saved as the agent so the daemon's
 	// own-write filter doesn't swallow the fsnotify event.
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	src := &Project{
 		Description: "x",
 		Branch:      "feat/y",
@@ -568,7 +568,7 @@ func TestCronStopCondition(t *testing.T) {
 func TestCronFieldsRoundTripAndOmitEmpty(t *testing.T) {
 	// A project without the new fields must not grow the keys, so files
 	// predating them stay byte-identical.
-	bare := filepath.Join(t.TempDir(), ".project.yaml")
+	bare := filepath.Join(t.TempDir(), "project.yaml")
 	if err := SaveAs(bare, &Project{
 		Description: "x", Branch: "feat/y", Status: StatusWorking, Cron: "@every 1h",
 	}, WriterAgent); err != nil {
@@ -584,7 +584,7 @@ func TestCronFieldsRoundTripAndOmitEmpty(t *testing.T) {
 		}
 	}
 
-	dst := filepath.Join(t.TempDir(), ".project.yaml")
+	dst := filepath.Join(t.TempDir(), "project.yaml")
 	until := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	src := &Project{
 		Description: "x",
@@ -634,7 +634,7 @@ func TestEmptyIgnoresNewReposPresence(t *testing.T) {
 // file truncated, because an empty file reads as "unpopulated" and dispatches a
 // project agent.
 func TestSaveAsNeverExposesPartialFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), ".project.yaml")
+	path := filepath.Join(t.TempDir(), "project.yaml")
 	p := &Project{Description: "d", Branch: "b", Status: StatusIdle}
 	if err := SaveAs(path, p, WriterAgent); err != nil {
 		t.Fatal(err)
@@ -665,5 +665,44 @@ func TestSaveAsNeverExposesPartialFile(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Dir(path))
 	if len(entries) != 1 {
 		t.Errorf("temp files left behind: %v", entries)
+	}
+}
+
+func TestMigrateLegacyRenamesHiddenProjectFile(t *testing.T) {
+	root := t.TempDir()
+	legacyDir := filepath.Join(root, "old")
+	bothDir := filepath.Join(root, "both")
+	for _, d := range []string{legacyDir, bothDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, LegacyFileName), []byte("status: ready\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bothDir, LegacyFileName), []byte("status: ready\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bothDir, FileName), []byte("status: working\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := MigrateLegacy(root)
+	if err != nil {
+		t.Fatalf("MigrateLegacy: %v", err)
+	}
+	want := filepath.Join(legacyDir, FileName)
+	if len(migrated) != 1 || migrated[0] != want {
+		t.Fatalf("migrated = %v, want [%s]", migrated, want)
+	}
+	if _, err := os.Stat(filepath.Join(legacyDir, LegacyFileName)); !os.IsNotExist(err) {
+		t.Errorf("legacy file still present after migration: %v", err)
+	}
+	p, err := Load(filepath.Join(bothDir, FileName))
+	if err != nil || p.Status != "working" {
+		t.Errorf("existing %s was clobbered: %+v, %v", FileName, p, err)
+	}
+	if got := CanonicalPath(filepath.Join(legacyDir, LegacyFileName)); got != want {
+		t.Errorf("CanonicalPath = %q, want %q", got, want)
 	}
 }

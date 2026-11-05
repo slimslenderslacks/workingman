@@ -66,7 +66,7 @@ func TestEndToEndDaemonAndTUI(t *testing.T) {
 
 	// Drop a populated, status:ready project. The daemon dispatches a
 	// planning agent for that state, which the fake launcher captures.
-	projectPath := filepath.Join(root, ".project.yaml")
+	projectPath := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "smoke",
 		Branch:      "feat/smoke",

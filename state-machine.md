@@ -24,7 +24,7 @@ Source of truth for the transition logic — `internal/daemon/dispatch.go`,
 
 ```mermaid
 stateDiagram-v2
-    [*] --> unpopulated: project.md dropped\n(daemon seeds .project.yaml)
+    [*] --> unpopulated: project.md dropped\n(daemon seeds project.yaml)
     unpopulated --> ready: project agent populates the file
     unpopulated --> blocked: project agent fails/escalates
 
@@ -117,7 +117,7 @@ A new project starts by dropping a `project.md` file (a free-form
 description of the work) into `<root>/<project-name>/`. The daemon's
 `handleIntakeFile`'s sibling, `handleProjectSeed`
 (`internal/daemon/dispatch.go`), notices it and converts its content into a
-description-only `.project.yaml` seed — a file with `description:` set but no
+description-only `project.yaml` seed — a file with `description:` set but no
 `status:`, i.e. `Unpopulated()`. From there `dispatchProject` checks
 `p.Unpopulated()` first and launches the **project agent**
 (`launchProjectRootAgent`). The project agent's job is to turn that seed into
@@ -146,7 +146,7 @@ working` when done.
 
 Before that launch, `syncPlannedRepos` (`internal/daemon/repo_sync.go`) runs
 once: it loads `last-planned.yaml` (`project.PlannedSnapshot`, a sidecar file
-next to `.project.yaml` — see `internal/project/planned_snapshot.go`), the
+next to `project.yaml` — see `internal/project/planned_snapshot.go`), the
 daemon's record of the project's intent fields (`description`, `repos`,
 `new_repos`, `branch`, `cron`) as of the last successful plan, and diffs it
 against the live file:
@@ -344,7 +344,7 @@ session-dedup no-op announce nothing) the daemon sends, asynchronously,
 the message id is recorded so a *reply* reaches that wolf's conversation. When
 the wolf session ends — the same `onEnd` that triggers `revisitProject` — it
 sends `🐺 wolf finished for <work-stream>: project now <status>` (status re-read
-from `.project.yaml`), but only if the start message went out. At most one start
+from `project.yaml`), but only if the start message went out. At most one start
 message goes out per work stream per `notify.wolf_start_interval` (default 10m),
 so a block → wolf → re-block loop cannot spam the chat. The existing macOS
 "Project blocked" notification is unchanged.
@@ -622,7 +622,7 @@ agent.
 ## 3. The cleanup / archive side-flow (orthogonal to status)
 
 `cleanup: true` and `archive: true`/`false` are independent boolean flags on
-`.project.yaml`, **not** part of the status enum — a project keeps whatever
+`project.yaml`, **not** part of the status enum — a project keeps whatever
 status it had (working, blocked, idle) while a cleanup runs
 (`internal/project/project.go`, `Project.Cleanup`/`Archive` doc comments).
 `dispatchProject` (`internal/daemon/dispatch.go`) checks `p.Cleanup` **ahead
@@ -646,7 +646,7 @@ The contract, end to end:
 2. `launchArchiveAgent` reserves a cleanup-in-flight guard
    (`beginCleanup`/`endCleanup`, keyed by project path) spanning from launch
    until the request flag is cleared — deliberately wider than the session's
-   own lifetime, because a `.project.yaml` event from the agent's own
+   own lifetime, because a `project.yaml` event from the agent's own
    `archive: true` write can arrive in the gap between the session ending and
    the flag being cleared; without the wider guard that late event would
    dispatch a second archive agent. The archive agent runs under its own

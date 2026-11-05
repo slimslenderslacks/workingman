@@ -134,7 +134,7 @@ type Config struct {
 	// UnblockGrace, in persistent mode with a ProjectPath, ends the session once
 	// the project file has not been `status: blocked` for this long (continuously
 	// — a re-block inside the grace resets the clock). It is how an ACP wolf
-	// "finishes": the wolf resolves the block by editing .project.yaml, then the
+	// "finishes": the wolf resolves the block by editing project.yaml, then the
 	// wrapper closes the conversation after a short grace that lets the wolf
 	// finish its closing message. Living in the wrapper (not the daemon) means it
 	// still works after a daemon restart, which cannot signal an adopted session.
@@ -160,7 +160,7 @@ type Config struct {
 	// tracking.
 	TaskPath string
 
-	// ProjectPath is the host path to the .project.yaml driving this session,
+	// ProjectPath is the host path to the project.yaml driving this session,
 	// and Kind is the agent.Kind string ("project", "planning", "task",
 	// "commit", "archive", …) running it. ProjectPath affects nothing about the
 	// sandbox or the ACP client; both are recorded into session.json so a

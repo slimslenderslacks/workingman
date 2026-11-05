@@ -96,7 +96,7 @@ func TestProjectAgentWriteIsObserved(t *testing.T) {
 	root := t.TempDir()
 	buf, _ := startDaemon(t, root)
 
-	path := filepath.Join(root, ".project.yaml")
+	path := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "test",
 		Branch:      "feat/x",
@@ -122,7 +122,7 @@ func TestDaemonWriteIsIgnored(t *testing.T) {
 	root := t.TempDir()
 	buf, _ := startDaemon(t, root)
 
-	path := filepath.Join(root, ".project.yaml")
+	path := filepath.Join(root, "project.yaml")
 	p := &project.Project{Branch: "x", Status: project.StatusReady}
 	if err := project.Save(path, p); err != nil { // forces UpdatedBy=daemon
 		t.Fatalf("Save: %v", err)
@@ -139,7 +139,7 @@ func TestEmptyFileLogged(t *testing.T) {
 	root := t.TempDir()
 	buf, _ := startDaemon(t, root)
 
-	path := filepath.Join(root, ".project.yaml")
+	path := filepath.Join(root, "project.yaml")
 	if err := writeFile(path, nil); err != nil {
 		t.Fatalf("write empty: %v", err)
 	}
@@ -149,14 +149,14 @@ func TestEmptyFileLogged(t *testing.T) {
 }
 
 // TestSeedFileRoutesToProjectAgent covers the project.md-derived seed: a
-// .project.yaml that already carries a description but no status yet. It is
+// project.yaml that already carries a description but no status yet. It is
 // not Empty() (the description is set), so it must be caught by the broader
 // Unpopulated() check and routed to the project agent just like a blank file.
 func TestSeedFileRoutesToProjectAgent(t *testing.T) {
 	root := t.TempDir()
 	buf, _ := startDaemon(t, root)
 
-	path := filepath.Join(root, ".project.yaml")
+	path := filepath.Join(root, "project.yaml")
 	seed := &project.Project{Description: "build a widget in acme/widgets on branch feat/widget"}
 	if err := project.SaveAs(path, seed, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs seed: %v", err)
@@ -181,7 +181,7 @@ func TestNewDirectoryIsPickedUp(t *testing.T) {
 		t.Fatalf("daemon never watched new dir.\naudit:\n%s", snap)
 	}
 
-	path := filepath.Join(sub, ".project.yaml")
+	path := filepath.Join(sub, "project.yaml")
 	p := &project.Project{Branch: "x", Status: project.StatusReady}
 	if err := project.SaveAs(path, p, project.WriterAgent); err != nil {
 		t.Fatalf("SaveAs: %v", err)
@@ -195,7 +195,7 @@ func TestDaemonStampsCreatedAtOnFirstObservation(t *testing.T) {
 	root := t.TempDir()
 	buf, _ := startDaemon(t, root)
 
-	path := filepath.Join(root, ".project.yaml")
+	path := filepath.Join(root, "project.yaml")
 	p := &project.Project{
 		Description: "x", Branch: "feat/y", Status: project.StatusReady,
 	}
@@ -219,7 +219,7 @@ func TestDaemonStampsCreatedAtOnFirstObservation(t *testing.T) {
 }
 
 // TestNewDirWithFileIsPickedUp exercises mkdir + write an empty
-// .project.yaml back-to-back. The directory watch is installed after the
+// project.yaml back-to-back. The directory watch is installed after the
 // file already exists on disk, so without the post-watch scan the file's
 // Create event is missed and the project agent never fires.
 func TestNewDirWithFileIsPickedUp(t *testing.T) {
@@ -230,19 +230,19 @@ func TestNewDirWithFileIsPickedUp(t *testing.T) {
 	if err := mkdirAll(sub); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	path := filepath.Join(sub, ".project.yaml")
+	path := filepath.Join(sub, "project.yaml")
 	if err := writeFile(path, nil); err != nil {
 		t.Fatalf("writeFile: %v", err)
 	}
 
 	if ok, snap := waitFor(t, buf, "project_unpopulated"); !ok {
-		t.Fatalf("daemon did not observe empty .project.yaml in new dir.\naudit:\n%s", snap)
+		t.Fatalf("daemon did not observe empty project.yaml in new dir.\naudit:\n%s", snap)
 	}
 }
 
 // TestProjectSeedFileCreatesUnpopulatedYAML is the primary project.md
 // bootstrap path: dropping project.md into an already-watched project
-// directory writes a description-only .project.yaml, which the daemon then
+// directory writes a description-only project.yaml, which the daemon then
 // routes as unpopulated (see handleProjectSeed and dispatchProject's
 // Unpopulated handling) just as the old `:new` seed did.
 func TestProjectSeedFileCreatesUnpopulatedYAML(t *testing.T) {
@@ -266,10 +266,10 @@ func TestProjectSeedFileCreatesUnpopulatedYAML(t *testing.T) {
 		t.Fatalf("daemon never created a seed from project.md.\naudit:\n%s", snap)
 	}
 	if ok, snap := waitFor(t, buf, "project_unpopulated"); !ok {
-		t.Fatalf("seed .project.yaml not routed as unpopulated.\naudit:\n%s", snap)
+		t.Fatalf("seed project.yaml not routed as unpopulated.\naudit:\n%s", snap)
 	}
 
-	p, err := project.Load(filepath.Join(sub, ".project.yaml"))
+	p, err := project.Load(filepath.Join(sub, "project.yaml"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -304,9 +304,9 @@ func TestProjectSeedFileInNewDirIsPickedUp(t *testing.T) {
 }
 
 // TestProjectSeedIgnoredOnceYAMLExists guards the one-time-bootstrap
-// contract: once .project.yaml exists, project.md is historical scaffolding
+// contract: once project.yaml exists, project.md is historical scaffolding
 // — further writes to it (or its initial arrival after a manually-created
-// .project.yaml) must not touch the project file.
+// project.yaml) must not touch the project file.
 func TestProjectSeedIgnoredOnceYAMLExists(t *testing.T) {
 	root := t.TempDir()
 	buf, _ := startDaemon(t, root)
@@ -315,7 +315,7 @@ func TestProjectSeedIgnoredOnceYAMLExists(t *testing.T) {
 	if err := mkdirAll(sub); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	yamlPath := filepath.Join(sub, ".project.yaml")
+	yamlPath := filepath.Join(sub, "project.yaml")
 	existing := &project.Project{
 		Description: "already bootstrapped", Branch: "feat/widget", Status: project.StatusWorking,
 	}
@@ -332,7 +332,7 @@ func TestProjectSeedIgnoredOnceYAMLExists(t *testing.T) {
 	// Give fsnotify time to deliver — we expect no seed write.
 	time.Sleep(250 * time.Millisecond)
 	if strings.Contains(buf.String(), "project_seed_created") {
-		t.Errorf("project.md should be ignored once .project.yaml exists.\naudit:\n%s", buf.String())
+		t.Errorf("project.md should be ignored once project.yaml exists.\naudit:\n%s", buf.String())
 	}
 
 	reloaded, err := project.Load(yamlPath)
@@ -362,8 +362,8 @@ func TestProjectSeedEmptyFileIgnored(t *testing.T) {
 	if ok, snap := waitFor(t, buf, "project_seed_empty"); !ok {
 		t.Fatalf("blank project.md should be logged and skipped.\naudit:\n%s", snap)
 	}
-	if _, err := project.Load(filepath.Join(sub, ".project.yaml")); err == nil {
-		t.Errorf(".project.yaml should not have been created from a blank project.md")
+	if _, err := project.Load(filepath.Join(sub, "project.yaml")); err == nil {
+		t.Errorf("project.yaml should not have been created from a blank project.md")
 	}
 }
 

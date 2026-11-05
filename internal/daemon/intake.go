@@ -22,7 +22,7 @@ import (
 // again (see planning.tmpl).
 func (d *Daemon) handleIntakeFile(path string) {
 	projectDir := filepath.Dir(filepath.Dir(path)) // .../<project>/intake/<file> -> .../<project>
-	projectPath := filepath.Join(projectDir, ".project.yaml")
+	projectPath := filepath.Join(projectDir, project.FileName)
 	if _, err := os.Stat(projectPath); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			d.audit.Log("intake_no_project", "path", path)
