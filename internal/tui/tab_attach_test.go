@@ -103,7 +103,7 @@ func (f *fakeAttacher) Attach(target string) tea.Cmd {
 
 func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), nil, att)
+	m := newModel(nil, make(<-chan []SessionView), att)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
 		{ID: "a", AgentName: "task", Project: "alpha", TabName: "task-alpha"},
 		{ID: "b", AgentName: "task", Project: "bravo", TabName: "task-bravo"},
@@ -122,7 +122,7 @@ func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 
 func TestEnterIgnoredWhenProjectsFocused(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), nil, att)
+	m := newModel(nil, make(<-chan []SessionView), att)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
 		{ID: "a", TabName: "task-alpha"},
 	}})
@@ -137,7 +137,7 @@ func TestEnterIgnoredWhenProjectsFocused(t *testing.T) {
 
 func TestAttachResultErrorSetsStatusMsg(t *testing.T) {
 	att := &fakeAttacher{result: attachResultMsg{err: errors.New("boom")}}
-	m := newModel(nil, make(<-chan []SessionView), nil, att)
+	m := newModel(nil, make(<-chan []SessionView), att)
 	// Width/height are needed so View() renders the footer.
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 	m = sized.(model)
@@ -158,7 +158,7 @@ func TestAttachResultErrorSetsStatusMsg(t *testing.T) {
 }
 
 func TestAttachResultSuccessClearsStatusMsg(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.statusMsg = "leftover"
 	final, _ := m.Update(attachResultMsg{target: "x"})
 	m = final.(model)
@@ -169,7 +169,7 @@ func TestAttachResultSuccessClearsStatusMsg(t *testing.T) {
 
 func TestMouseClickAttachesSessionBox(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), nil, att)
+	m := newModel(nil, make(<-chan []SessionView), att)
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step.(model)
 	step2, _ := m.Update(sessionsMsg{views: []SessionView{
@@ -200,7 +200,7 @@ func TestMouseClickOutsideSessionsColumnDoesNotAttach(t *testing.T) {
 	// Sessions is the left column; a click further right lands in the center
 	// (projects/YAML) column and must not attach anything.
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), nil, att)
+	m := newModel(nil, make(<-chan []SessionView), att)
 	step, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = step.(model)
 	step2, _ := m.Update(sessionsMsg{views: []SessionView{

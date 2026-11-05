@@ -91,7 +91,7 @@ func TestInteractiveCommandsRequireLauncher(t *testing.T) {
 }
 
 func TestInteractiveCommandsRequireSelection(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.interactive = &fakeInteractive{}
 	m = focusProjectsPane(t, m)
 	m, cmd := runProjectCommand(t, m, "session")
@@ -105,7 +105,7 @@ func TestInteractiveCommandsRequireSelection(t *testing.T) {
 
 func TestInteractiveLaunchedReportsNewTab(t *testing.T) {
 	attacher := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), nil, attacher)
+	m := newModel(nil, make(<-chan []SessionView), attacher)
 	next, cmd := m.handleInteractiveLaunched(interactiveLaunchedMsg{kind: "session", target: "session-widget"})
 	m = next.(model)
 	// The launcher already opened (and the terminal focused) the new tab, so
@@ -121,7 +121,7 @@ func TestInteractiveLaunchedReportsNewTab(t *testing.T) {
 // When the work stream's tab is already open the launcher focuses it instead
 // of opening a second one; the TUI must say so with a warning.
 func TestInteractiveLaunchedWarnsWhenTabAlreadyOpen(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	next, _ := m.handleInteractiveLaunched(interactiveLaunchedMsg{
 		kind:   "session",
 		target: "session-widget",
@@ -139,7 +139,7 @@ func TestInteractiveLaunchedWarnsWhenTabAlreadyOpen(t *testing.T) {
 }
 
 func TestInteractiveLaunchedWarnsWhenAlreadyOpenTabCannotBeFocused(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	next, _ := m.handleInteractiveLaunched(interactiveLaunchedMsg{
 		kind: "shell",
 		err: &terminal.AlreadyOpenError{Name: "shell-widget", Title: "widget",
@@ -154,7 +154,7 @@ func TestInteractiveLaunchedWarnsWhenAlreadyOpenTabCannotBeFocused(t *testing.T)
 }
 
 func TestInteractiveLaunchedSurfacesError(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	next, cmd := m.handleInteractiveLaunched(interactiveLaunchedMsg{kind: "shell", err: errors.New("boom")})
 	m = next.(model)
 	if cmd != nil {
@@ -166,7 +166,7 @@ func TestInteractiveLaunchedSurfacesError(t *testing.T) {
 }
 
 func TestCommandPickerNavigation(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m = focusProjectsPane(t, m)
 	m = openCommandPicker(t, m)
 	// j moves down, k moves back up; clamped at the ends.
@@ -189,7 +189,7 @@ func TestCommandPickerNavigation(t *testing.T) {
 }
 
 func TestCommandPickerModalRenders(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = sized.(model)
 	m = focusProjectsPane(t, m)

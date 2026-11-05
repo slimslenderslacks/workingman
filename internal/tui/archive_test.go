@@ -365,7 +365,7 @@ func TestArchiveProjectRejectsOutsideRoot(t *testing.T) {
 
 func TestArchiveCommandOpensConfirmModal(t *testing.T) {
 	root := t.TempDir()
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.projectRoot = root
 	m.wspRemover = &fakeWspRemover{}
 	m.projSel = writeProject(t, root, "alpha", "alpha", true)
@@ -396,7 +396,7 @@ func TestArchiveCommandOpensConfirmModal(t *testing.T) {
 func TestArchiveCommandRefusesUncleanedProject(t *testing.T) {
 	root := t.TempDir()
 	wsp := &fakeWspRemover{}
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.projectRoot = root
 	m.wspRemover = wsp
 	m.projSel = writeProject(t, root, "messy", "messy", false)
@@ -429,7 +429,7 @@ func TestArchiveCommandRefusesUncleanedProject(t *testing.T) {
 func TestArchiveConfirmArchivesAndRemovesWorkspace(t *testing.T) {
 	root := t.TempDir()
 	wsp := &fakeWspRemover{}
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.projectRoot = root
 	m.wspRemover = wsp
 	m.projSel = writeProject(t, root, "beta", "beta-branch", true)

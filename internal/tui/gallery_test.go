@@ -90,7 +90,7 @@ func TestRenderProjectGridReflowsByWidth(t *testing.T) {
 }
 
 func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	// Wide enough that the tasks right column has room for full task names
 	// alongside the sessions left column and the projects/YAML center column.
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
@@ -118,7 +118,7 @@ func TestRenderTasksShowsNamesAndStatus(t *testing.T) {
 }
 
 func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	// Wide enough that the tasks right column has room for full task names
 	// alongside the sessions left column and the projects/YAML center column.
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 220, Height: 40})
@@ -172,7 +172,7 @@ func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
 }
 
 func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	// Wide enough that the tasks right column has room for full task names
 	// alongside the sessions left column and the projects/YAML center column.
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
@@ -208,7 +208,7 @@ func TestRenderTasksSwapsOnProjectSelection(t *testing.T) {
 }
 
 func TestRenderTasksEmptyState(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	// Wide enough that the tasks right column has room alongside the
 	// sessions left column and the projects/YAML center column.
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
@@ -237,7 +237,7 @@ func TestProjectsPaneSpillsOverMultipleRows(t *testing.T) {
 		})
 	}
 
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 80})
 	m = sized.(model)
 	step, _ := m.Update(projectsMsg{views: views})
@@ -553,7 +553,7 @@ func TestRenderArchivedProjectCardStaysIntact(t *testing.T) {
 // center column (see cycleCenterFocus), so the model must already be
 // focused there for the glyphs to have any effect.
 func TestOptionGlyphSwitchesPane(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.focus = paneProjects
 	start := m.focus
 	// "˚" (⌥k) advances focus like alt+k.
@@ -575,7 +575,7 @@ func TestOptionGlyphSwitchesPane(t *testing.T) {
 // ⌥h/⌥l (no Meta), so those glyphs must switch columns just like
 // "alt+h"/"alt+l".
 func TestOptionGlyphSwitchesColumn(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.focus = paneProjects // default focus (paneSessions) is already the alt-h target
 	m.rightVisible = true  // right column is hidden by default; show it so ¬ has somewhere to land
 

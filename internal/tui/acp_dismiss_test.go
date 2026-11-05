@@ -12,7 +12,7 @@ import (
 // tab and removes its session directory, but refuses a live or still-starting
 // one.
 func TestACPDismissDeadTab(t *testing.T) {
-	m := newModel(nil, nil, nil, nil)
+	m := newModel(nil, nil, nil)
 	m.acpCh = make(chan acpTabEvent) // non-nil so the view can open
 	m.width, m.height = 100, 30
 	var removed []string

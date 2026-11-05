@@ -180,7 +180,10 @@ daemon ignores its own fsnotify events.
 
 ## Observability
 
-- **Audit log** (`--audit-log`): one line per event. `tail -f` it.
+- **Audit log** (`--audit-log`, default `logs/audit.log` relative to where
+  `orch` runs; `~/orch/audit.log` with `./start.sh`): one line per event.
+  The TUI doesn't display it — `tail -f` it in a separate terminal.
+  `daemon.log`, `channels.log` and `acp-wrapper.log` are written beside it.
 - **Terminal tabs**: agents that run on the host rather than under ACP (the wolf
   with `--wolf-host`, every agent without `--acp-kit`) each get a terminal tab
   titled after their project. Enter on the session row in the TUI switches to

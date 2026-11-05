@@ -174,7 +174,7 @@ func newCleanupHarness(t *testing.T, name, branch string) *cleanupHarness {
 		t.Fatalf("daemon never observed the new project:\n%s", h.audit.String())
 	}
 
-	h.model = newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	h.model = newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	h.model.projectRoot = h.root
 	h.model.wspRemover = h.wsp
 	step, _ := h.model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})

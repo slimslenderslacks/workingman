@@ -40,7 +40,7 @@ func TestCommandPickerWolfBlocksProjectAndSummons(t *testing.T) {
 }
 
 func TestCommandPickerWolfWithoutSelectionSurfacesError(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m = focusProjectsPane(t, m)
 	m, _ = runProjectCommand(t, m, "wolf")
 

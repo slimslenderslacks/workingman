@@ -95,7 +95,7 @@ func TestEndToEndDaemonAndTUI(t *testing.T) {
 	defer tuiCancel()
 
 	prog := tea.NewProgram(
-		newModel(projects, sessions, nil, att),
+		newModel(projects, sessions, att),
 		tea.WithInput(nil),
 		tea.WithOutput(outBuf),
 		tea.WithContext(tuiCtx),

@@ -50,7 +50,7 @@ func TestTasksPaneScrollsToSelection(t *testing.T) {
 			Status: "ready",
 		}
 	}
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m.width = 120
 	m.projects = []ProjectView{{Name: "p", Path: "/p", Status: "working", Tasks: tasks}}
 	m.projSel = "/p"
@@ -77,7 +77,7 @@ func TestSessionsPaneScrollsToSelection(t *testing.T) {
 			Status:    "running",
 		}
 	}
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m.width = 120
 	m.sessLoaded = true
 	m.sessions = sessions

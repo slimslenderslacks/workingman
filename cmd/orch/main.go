@@ -306,7 +306,7 @@ func runDaemon(args []string) {
 		}
 	}
 
-	tuiErr := tui.Run(ctx, roots, sessCh, *auditPath, acpSessionsRoot, interactiveLauncher{d}, tabs)
+	tuiErr := tui.Run(ctx, roots, sessCh, acpSessionsRoot, interactiveLauncher{d}, tabs)
 
 	// TUI exited — either the user quit or ctx was already cancelled. Cancel
 	// to be sure, then wait for the daemon to wind down so its shutdown
@@ -399,7 +399,9 @@ func runTUI(args []string) {
 	fs := flag.NewFlagSet("orch tui", flag.ExitOnError)
 	var roots rootsFlag
 	fs.Var(&roots, "root", "directory to scan for project.yaml files (repeatable)")
-	auditPath := fs.String("audit-log", "", "path to an audit log file to tail in the bottom pane (optional)")
+	// The TUI no longer shows an audit pane (tail -f the daemon's --audit-log
+	// instead); the flag is still accepted so existing invocations don't break.
+	_ = fs.String("audit-log", "", "deprecated and ignored: the TUI no longer shows the audit log; tail -f it instead")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -413,7 +415,7 @@ func runTUI(args []string) {
 	// mode wires the daemon's WatchSessions into the TUI).
 	// Standalone tui has no daemon/runner, so :dir and :session are unavailable
 	// (nil launcher). Run `orch --root=...` for the integrated experience.
-	if err := tui.Run(ctx, roots, nil, *auditPath, "", nil, nil); err != nil {
+	if err := tui.Run(ctx, roots, nil, "", nil, nil); err != nil {
 		log.Fatal(err)
 	}
 }

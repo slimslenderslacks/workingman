@@ -12,7 +12,7 @@ import (
 // (persistent) tab, plus the messages the model "sent" through acpSend.
 func wolfModel(t *testing.T) (model, *[]string) {
 	t.Helper()
-	m := newModel(nil, nil, nil, nil)
+	m := newModel(nil, nil, nil)
 	m.acpCh = make(chan acpTabEvent) // non-nil so the view can open
 	m.width, m.height = 100, 30
 	var sent []string
@@ -136,7 +136,7 @@ func TestWolfTabCtrlUClearsAndPasteIsSingleLine(t *testing.T) {
 // A one-shot (non-interactive) tab is still read-only: enter does nothing and
 // its single-letter commands keep working.
 func TestOneShotTabIsNotTypeable(t *testing.T) {
-	m := newModel(nil, nil, nil, nil)
+	m := newModel(nil, nil, nil)
 	m.acpCh = make(chan acpTabEvent)
 	m.width, m.height = 100, 30
 	step, _ := m.Update(acpTabEvent{kind: acpTabAdded, id: "task-x", title: "task-x"})
@@ -200,7 +200,7 @@ func TestWolfTabViewNeverExceedsHeight(t *testing.T) {
 // than trying to focus a terminal tab by an ACP session id.
 func TestEnterOnACPSessionOpensItsTab(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), nil, att)
+	m := newModel(nil, make(<-chan []SessionView), att)
 	m.acpCh = make(chan acpTabEvent)
 	m.width, m.height = 120, 30
 	for _, id := range []string{"task-first", "wolf-alpha"} {
@@ -231,7 +231,7 @@ func TestEnterOnACPSessionOpensItsTab(t *testing.T) {
 // terminal tab it runs in.
 func TestEnterOnHostWolfFocusesItsTab(t *testing.T) {
 	att := &fakeAttacher{}
-	m := newModel(nil, make(<-chan []SessionView), nil, att)
+	m := newModel(nil, make(<-chan []SessionView), att)
 	m.acpCh = make(chan acpTabEvent)
 	step, _ := m.Update(sessionsMsg{views: []SessionView{
 		{ID: "/orch/alpha/project.yaml#wolf", AgentName: "wolf", Project: "alpha", TabName: "wolf-alpha", Interactive: true},

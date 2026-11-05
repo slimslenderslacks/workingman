@@ -23,7 +23,7 @@ func readFileString(t *testing.T, path string) string {
 // one hidden — enough to tell "filtered out" apart from "list truncated".
 func hideGalleryModel(t *testing.T) model {
 	t.Helper()
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m.width, m.height = 200, 40
 	m.loaded = true
 	m.projects = []ProjectView{
@@ -206,7 +206,7 @@ func TestCommandPickerShowClearsFlag(t *testing.T) {
 
 func TestHideAndShowWithoutSelectionSurfaceErrors(t *testing.T) {
 	for _, cmd := range []string{"hide", "show"} {
-		m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+		m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 		m = focusProjectsPane(t, m)
 		next, _ := m.dispatchProjectCommand(cmd)
 		if got := next.(model).statusMsg; !strings.Contains(got, "no work stream") {
@@ -331,7 +331,7 @@ func TestProjectsSnapshotReconcileDropsHiddenSelection(t *testing.T) {
 // TestGalleryExplainsAnEmptyPaneCausedByHiding keeps an all-hidden root from
 // reading as "every work stream is gone".
 func TestGalleryExplainsAnEmptyPaneCausedByHiding(t *testing.T) {
-	m := newModel(nil, nil, nil, &fakeAttacher{})
+	m := newModel(nil, nil, &fakeAttacher{})
 	m.width, m.height = 200, 40
 	m.loaded = true
 	m.projects = []ProjectView{
@@ -350,7 +350,7 @@ func TestGalleryExplainsAnEmptyPaneCausedByHiding(t *testing.T) {
 }
 
 func TestFooterAdvertisesHiddenToggle(t *testing.T) {
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 250, Height: 40})
 	m = sized.(model)
 	if view := m.View(); !strings.Contains(view, "tp: show hidden") {
@@ -379,7 +379,7 @@ func TestTChordFallsThroughWithHiddenToggleAdded(t *testing.T) {
 
 func TestProjectDetailFlagsHiddenWorkStream(t *testing.T) {
 	v := ProjectView{Name: "bravo", Path: "/bravo", Status: project.StatusIdle, Hidden: true}
-	body := renderProjectDetailBody(v, nil, 80)
+	body := renderProjectDetailBody(v, 80)
 	if !strings.Contains(body, "hidden from the gallery") {
 		t.Errorf("detail pane should flag a hidden work stream; got:\n%s", body)
 	}

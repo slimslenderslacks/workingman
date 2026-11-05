@@ -72,7 +72,7 @@ func selectProject(t *testing.T, root, name string) (model, string) {
 	if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m := newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	m.projectRoot = root
 	m.projects = []ProjectView{{Name: name, Path: path, Status: project.StatusIdle}}
 	m.projSel = path

@@ -68,7 +68,7 @@ func withTaskFixtures(t *testing.T) (m model, firstRowPath, secondRowPath string
 	// Newest file first: beta was written last, so it heads the pane.
 	firstRowPath, secondRowPath = betaPath, alphaPath
 
-	m = newModel(nil, make(<-chan []SessionView), nil, &fakeAttacher{})
+	m = newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 60})
 	m = sized.(model)
 	views, err := ScanProjects([]string{root})
@@ -87,7 +87,7 @@ func withTaskFixtures(t *testing.T) (m model, firstRowPath, secondRowPath string
 func focusPane(t *testing.T, m model, target pane) model {
 	t.Helper()
 	m.focus = target
-	if target == paneProjects || target == paneTasks || target == paneAudit {
+	if target == paneProjects || target == paneTasks {
 		m.lastCenterFocus = target
 	}
 	return m
@@ -107,13 +107,11 @@ func TestTaskViewCarriesPathFromDisk(t *testing.T) {
 	}
 }
 
-// TestAltJKCyclesCenterColumnPanesIncludingAudit covers the reworked alt-j/
-// alt-k scope: now that Audit stacks in the center column too, alt-j/alt-k
-// cycles through all three center-column panes — Projects, Tasks, Audit —
-// wrapping at either end, restoring the keyboard path onto Audit. It still
-// doesn't reach the side columns (Sessions, the detail dashboard) — alt-h/
-// alt-l own those.
-func TestAltJKCyclesCenterColumnPanesIncludingAudit(t *testing.T) {
+// TestAltJKCyclesCenterColumnPanes covers the alt-j/alt-k scope: it cycles
+// through the center column's two panes — Projects, Tasks — wrapping at
+// either end. It doesn't reach the side columns (Sessions, the detail
+// dashboard) — alt-h/alt-l own those.
+func TestAltJKCyclesCenterColumnPanes(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
 	m = focusPane(t, m, paneProjects)
 
@@ -128,26 +126,20 @@ func TestAltJKCyclesCenterColumnPanesIncludingAudit(t *testing.T) {
 
 	step, _ = m.Update(altJ)
 	m = step.(model)
-	if m.focus != paneAudit {
-		t.Fatalf("alt-j from tasks: focus = %v, want paneAudit", m.focus)
-	}
-
-	step, _ = m.Update(altJ)
-	m = step.(model)
 	if m.focus != paneProjects {
-		t.Fatalf("alt-j from audit: focus = %v, want paneProjects (wraps)", m.focus)
+		t.Fatalf("alt-j from tasks: focus = %v, want paneProjects (wraps)", m.focus)
 	}
 
 	// alt-k walks the same cycle in reverse.
 	step, _ = m.Update(altK)
 	m = step.(model)
-	if m.focus != paneAudit {
-		t.Fatalf("alt-k from projects: focus = %v, want paneAudit (wraps back)", m.focus)
+	if m.focus != paneTasks {
+		t.Fatalf("alt-k from projects: focus = %v, want paneTasks (wraps back)", m.focus)
 	}
 	step, _ = m.Update(altK)
 	m = step.(model)
-	if m.focus != paneTasks {
-		t.Fatalf("alt-k from audit: focus = %v, want paneTasks", m.focus)
+	if m.focus != paneProjects {
+		t.Fatalf("alt-k from tasks: focus = %v, want paneProjects", m.focus)
 	}
 
 	// A no-op on the side columns.
@@ -166,7 +158,7 @@ func TestAltJKCyclesCenterColumnPanesIncludingAudit(t *testing.T) {
 // to the right — passing through the center column rather than jumping
 // straight between the two side columns, and stopping (never wrapping) once
 // focus reaches whichever end column is visible. Returning to the center
-// column restores whichever of Projects/Tasks/Audit was last focused there.
+// column restores whichever of Projects/Tasks was last focused there.
 func TestAltHAltLStepOneColumnAtATime(t *testing.T) {
 	m, _, _ := withTaskFixtures(t)
 	m.rightVisible = true
