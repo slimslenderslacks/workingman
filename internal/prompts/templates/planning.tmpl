@@ -105,7 +105,12 @@ the next firing.
 {{else}}
 IMPORTANT — incremental task requests. You may be re-invoked on a project that
 already has tasks, to incorporate new work a human queued by dropping a
-markdown file into the project's `intake/` directory.
+markdown file into the project's `intake/` directory. Intake is planned as soon
+as it arrives, so this can happen while the project is `working` — task and
+commit agents may be running right now, and the daemon keeps dispatching ready
+tasks while you work. That is expected: only add task files, never touch a
+task that is `running` or `success` (an agent owns it), and write each new task
+file complete in one go (a `ready` task can be picked up the moment it lands).
 
 {{if .IntakeFiles}}
 You have pending intake requests waiting right now:
@@ -208,6 +213,11 @@ You may freely add, remove, or edit task files and you may edit
 `project.yaml` as well — but only those files. When you are finished, set
 the project status to `working` and write the file with `updated_by: agent`.
 The daemon will then pick up ready tasks and dispatch them to task agents.
+Re-read `project.yaml` right before that final write and change only
+`status:` (and `updated_by:`): other agents and the daemon may have updated it
+while you worked. If it has meanwhile become `blocked` (a task running
+alongside you failed), leave `status:` and `blocked_reason:` exactly as they
+are — your new tasks are still picked up once the block is resolved.
 
 Both the project's `status:` and each task's `status:` are fixed enums
 (invalid values are rejected by the daemon's YAML loader and your save

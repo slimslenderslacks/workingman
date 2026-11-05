@@ -191,7 +191,7 @@ type ReviewPollInfo struct {
 // SessionSnapshot is one agent session.
 type SessionSnapshot struct {
 	// Key is the daemon's session-map key (the project.yaml path, with a
-	// "#wolf"/"#archive" suffix for those kinds). Empty for disk-sourced
+	// "#planning"/"#wolf"/"#archive" suffix for those kinds). Empty for disk-sourced
 	// sessions in an offline snapshot.
 	Key         string `json:"key,omitempty"`
 	Kind        string `json:"kind"`

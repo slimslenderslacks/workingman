@@ -30,7 +30,7 @@ stateDiagram-v2
 
     ready --> working: planning agent writes tasks
 
-    working --> working: task dispatch loop\n(see task status machine)
+    working --> working: task dispatch loop\n(see task status machine);\nnew intake → planner runs\nalongside the tasks
     working --> idle: all tasks committed
 
     idle --> working: unresolved review comment\nor failed check → new task\n(only when watching a PR)
@@ -140,7 +140,7 @@ circuit breaker:
 ### ready → working (planning)
 
 `dispatchProject`'s `switch p.Status` routes `StatusReady` to
-`launchProjectRootAgent(..., agent.PlanningAgent, ...)`. The planning agent
+`launchPlanningAgent`. The planning agent
 writes `tasks/*.yaml` and is expected to flip the project to `status:
 working` when done.
 
@@ -176,7 +176,33 @@ The daemon also scans `<project>/intake/*.md` (`pendingIntakeFiles`,
 `runner.Plan.IntakeFiles` — see [`ready → working`, intake requests
 below](#intake-requests-and-task-seeds) for the full contract.
 
-`afterPlanningSession` (`internal/daemon/dispatch.go`) is the mirror-image
+The planning agent is launched by `launchPlanningAgent` and tracked under a
+session key of its own, `planningSessionKey = projectPath + "#planning"`, not
+the project's main slot (the bare project path task/commit/project/review
+agents share). Two in-memory guards on `planningMu` go with it:
+
+- `planningBusy` — the **one-planner-per-project** reservation. `beginPlanning`
+  takes it *before* `runner.Start` (worktree provisioning can block for
+  seconds) and only `afterPlanningSession` (via `endPlanning`) releases it, so
+  any dispatch in that window — another intake file, the planner's own
+  `project.yaml` write, a cron poke — logs `session_skip_duplicate` instead of
+  starting a second planner. `reconcileSessions` re-takes it for a planning
+  session adopted after a daemon restart.
+- `planningOffered` — the intake files the current/last run was handed, so the
+  daemon can tell intake that arrived mid-run (owed a follow-up run) from intake
+  a run was given and left unprocessed (must not loop planning).
+
+The separate slot is what lets planning run while tasks are in flight (see
+[intake while working](#intake-while-the-project-is-working)). Planning still
+waits for the main slot when it is held by a **project** agent (still
+populating the file) or a **review** agent (writes the same control dir), and
+a **cron re-plan** (`replan: true`) always waits for it to be empty — a re-plan
+may delete or rewrite tasks, which must not happen under a live task agent.
+Those waits log `planning_wait_main_slot`; the holder's own session end
+re-dispatches the project.
+
+`afterPlanningSession` (`internal/daemon/dispatch.go`) first releases the
+planning reservation, then acts as the mirror-image
 circuit breaker of `afterProjectSession`, with the same three-way decision
 table and its own counter, `maxPlanningRetries` (3), backed by
 `backoffPlanning` (delay = `attempt * planningBackoffStep`, capped at
@@ -189,8 +215,17 @@ satisfied the replan request.
 
 A human queues new work into an existing project by dropping a markdown file
 into `<project>/intake/`. `handleIntakeFile` (`internal/daemon/intake.go`)
-flips the project to `status: ready` (clearing any `blocked_reason`) so
-planning runs; the planning agent itself reads each pending file directly
+gets a planner onto it immediately, whatever the project's status:
+
+- **working** — the status is left alone and the project is dispatched
+  directly; planning launches beside the running tasks (next subsection).
+- **idle / merged / blocked / ready** — flips the project to `status: ready`
+  (clearing any `blocked_reason`), which routes to planning.
+- **a planner is already running** — nothing is written and no second planner
+  starts (`intake_queued … deferred=planning_in_flight`); the follow-up run
+  after the current one ends picks the file up.
+
+The planning agent itself reads each pending file directly
 (via `.IntakeFiles`, listed in its prompt) and is responsible for creating the
 task(s) it describes and renaming the file to `*.processed` once done, so it
 is never offered again. This is deliberately simpler than the old
@@ -203,9 +238,51 @@ A hand-written **task seed** (a task file with a blank `name:` but a filled-in
 (`internal/taskgraph/graph.go`) excludes it from the graph entirely (it has no
 name and no place in the DAG yet) but counts it via
 `HasPendingSeed()`/`hasPendingIntake()`, which `dispatchProject` uses to
-re-arm planning for an **idle** project whose intake/seed-triggered `ready`
-flip was skipped or clobbered while another agent held the project slot (the
-orphan-recovery check, right before the main status switch).
+re-arm planning for an **idle**/**merged** project whose intake/seed-triggered
+`ready` flip was clobbered (e.g. by a review agent's own status write) or whose
+planning run left a file unprocessed (the orphan-recovery check, logged
+`seed_replan`, right before the main status switch).
+
+#### Intake while the project is working
+
+Previously intake on a `working` project stranded: the `ready` flip routed to a
+planning launch that shared the main session slot with the running task/commit
+agent, got dedup-skipped, and the planner's eventual `working` write — or the
+task loop's own — meant nothing re-checked intake until the project went idle
+and the file was touched again. Now:
+
+1. `dispatchProject`'s `working` branch checks `unofferedIntake` (pending
+   intake no planning run has been handed) and, if there is any, logs
+   `intake_plan_while_working` and calls `launchPlanningAgent` **before**
+   `dispatchNextTask`. The planner runs in its own slot; running task/commit
+   sessions are not touched, and ready tasks keep being dispatched. The
+   project stays `working` throughout (the planner writes `working` again when
+   it finishes, as `planning.tmpl` already instructs).
+2. Intake landing while a planner is running is not handed to it. When the
+   run ends, `afterPlanningSession` sees the project off `ready` (productive)
+   and re-dispatches it; the `working` branch finds the new, unoffered file
+   and starts the **follow-up run**. On a `ready` project the normal retry
+   path covers it, and on an idle one `seed_replan`.
+3. A file a run *was* handed but left unprocessed is logged as
+   `planning_intake_unprocessed` and is **not** relaunched on a working project
+   — that would be the unbounded loop the circuit breaker exists to prevent
+   (there is no `status: ready` cycle to count against). It is re-armed once
+   the project comes to rest (`seed_replan`), which goes through the normal
+   breaker.
+4. While a planner is in flight, task dispatch defers the graph-wide decisions
+   a half-written plan could get wrong (`dispatch_deferred_planning`):
+   completing the project when every task is committed, blocking on a
+   task-graph load error (a new task whose `depends_on` names one not written
+   yet), and blocking on "no ready tasks remain". `afterPlanningSession`'s
+   re-dispatch makes those calls against the finished graph.
+5. The review agent stands aside while a planner is in flight
+   (`dispatchReviewAgent`/`onReviewPoll`), and `afterReviewSession` re-runs
+   dispatch on a clean pass if intake is pending, so intake that landed
+   mid-review is not left to the next file touch either.
+6. The reaper's stage-complete check for a planner on a project that was
+   already `working` also requires that the intake it was handed is
+   processed (`plannerOwesIntake`), so a planner mid-run alongside tasks is
+   not mistaken for a finished one.
 
 ### working → task dispatch loop → idle
 

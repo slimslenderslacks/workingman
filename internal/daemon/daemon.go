@@ -47,6 +47,20 @@ type Daemon struct {
 	planningMu       sync.Mutex
 	planningFailures map[string]int // keyed by project file path
 	projectFailures  map[string]int // keyed by project file path
+	// planningBusy (also guarded by planningMu) marks a project whose planning
+	// agent has been dispatched and whose session-end callback has not run yet.
+	// It is set before runner.Start — which can take real seconds provisioning
+	// the worktree — so a second dispatch in that window cannot start a second
+	// planner; the session map alone only covers the tracked lifetime. See
+	// beginPlanning / planningInFlight.
+	planningBusy map[string]bool // keyed by project file path
+	// planningOffered (also guarded by planningMu) is the intake file list the
+	// most recent planning run for a project was handed at launch. It is what
+	// separates a request that arrived mid-run, which is owed a follow-up run
+	// (see unofferedIntake), from one a run was given and left unprocessed,
+	// which must not relaunch planning in a loop. Kept after the run ends; the
+	// next launch overwrites it.
+	planningOffered map[string][]string // keyed by project file path
 
 	// cleanupMu guards cleanupInFlight, the set of projects whose archive
 	// (cleanup) agent has been dispatched and whose `cleanup: true` request
@@ -193,6 +207,8 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		sessions:           map[string]sessionEntry{},
 		planningFailures:   map[string]int{},
 		projectFailures:    map[string]int{},
+		planningBusy:       map[string]bool{},
+		planningOffered:    map[string][]string{},
 		cleanupInFlight:    map[string]bool{},
 		reviewFixCycles:    map[string]int{},
 		reviewErrors:       map[string]int{},
@@ -451,4 +467,13 @@ func (d *Daemon) hasSession(key string) bool {
 	defer d.sessionsMu.Unlock()
 	_, ok := d.sessions[key]
 	return ok
+}
+
+// sessionKind returns the kind of the session tracked under key, and whether
+// there is one.
+func (d *Daemon) sessionKind(key string) (agent.Kind, bool) {
+	d.sessionsMu.Lock()
+	defer d.sessionsMu.Unlock()
+	e, ok := d.sessions[key]
+	return e.kind, ok
 }

@@ -190,18 +190,14 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		}
 	}
 
-	root := filepath.Dir(projectPath)
-	tasksDir := filepath.Join(root, "tasks")
-	g, err := taskgraph.Load(tasksDir)
-	if err != nil {
-		d.audit.Log("taskgraph_error", "path", projectPath, "err", err.Error())
-		d.transitionProjectBlocked(projectPath, p, "taskgraph error: "+err.Error())
+	g, ok := d.loadTaskGraph(projectPath, p)
+	if !ok {
 		return
 	}
-	for _, w := range g.Warnings() {
-		d.audit.Log("taskgraph_repair", "path", projectPath, "warning", w)
-	}
 	if g.AllCommitted() {
+		if d.deferToPlanner(projectPath, "complete") {
+			return
+		}
 		d.transitionProjectComplete(projectPath, p)
 		return
 	}
@@ -213,7 +209,11 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 	ready := g.Ready()
 	if len(ready) == 0 {
 		// No ready tasks but not all committed — something is stuck (a
-		// failed task with no retry budget, or a graph oddity). Block.
+		// failed task with no retry budget, or a graph oddity). Block —
+		// unless a planner is still writing the graph.
+		if d.deferToPlanner(projectPath, "no_ready_tasks") {
+			return
+		}
 		d.transitionProjectBlocked(projectPath, p,
 			"no ready tasks remain but project is not fully committed")
 		return

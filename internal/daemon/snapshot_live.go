@@ -348,7 +348,7 @@ func (d *Daemon) daemonInfo() *DaemonInfo {
 }
 
 // splitSessionKey separates a session-map key into its project path and the
-// agent-slot marker ("" for the shared slot, "wolf", "archive").
+// agent-slot marker ("" for the shared slot, "planning", "wolf", "archive").
 func splitSessionKey(key string) (projectPath, marker string) {
 	if i := strings.LastIndexByte(key, '#'); i >= 0 {
 		return key[:i], key[i+1:]

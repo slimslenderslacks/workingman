@@ -111,14 +111,33 @@ blocked → wolf).
 **Kind:** `agent.PlanningAgent`. **Template:** `planning.tmpl`. **Interactive:** no.
 
 **Trigger.** `dispatchProject`'s `switch p.Status` routes `status: ready` to
-`launchProjectRootAgent(path, agent.PlanningAgent, p)`. This also fires after
+`launchPlanningAgent(path, p)`. This also fires after
 a cron cycle re-arms a project (`requestCronReplan` sets `status: ready` +
-`Replan: true`) and after a `:task` seed re-arms a resting `done`/`reviewing`
-project (`hasPendingSeed`).
+`Replan: true`), after a pending intake file or task seed re-arms a resting
+`idle`/`merged` project (`seed_replan`), and — new — on a **`working`**
+project with intake no planning run has been handed yet (`unofferedIntake`):
+`handleIntakeFile` dispatches a working project directly instead of flipping
+it to `ready`, and the planner runs alongside its tasks. Intake that lands
+while a planner is already running gets a follow-up run once that one ends
+(`afterPlanningSession` re-dispatches), never a second concurrent planner.
 
 **Workspace/session.** Also runs with `WorkingDir` pinned to the control
 directory (no wsp workspace of its own) — sandbox name is the bare
-work-stream basename (`SandboxNameFor`, case `PlanningAgent`). But unlike
+work-stream basename (`SandboxNameFor`, case `PlanningAgent`). It is tracked
+under a **dedicated planning slot**, `planningSessionKey = projectPath +
+"#planning"`, rather than the main slot task/commit agents hold, so a planner
+can run while a task/commit agent is mid-flight. Design choice: task and commit
+agents work in the wsp workspace and only touch their own task file, while the
+planner only adds task files in the control dir, so they do not conflict;
+sharing one slot is what used to strand intake on a working project. The
+one-planner rule is enforced by an in-memory reservation (`beginPlanning` /
+`endPlanning`, `planningBusy`) taken before `runner.Start` and released in
+`afterPlanningSession`, re-taken by `reconcileSessions` for an adopted planner.
+Planning still waits for the main slot when it holds a project or review agent
+(both write the control dir), and a cron re-plan waits for it to be empty (a
+re-plan may delete tasks). While a planner is in flight, task dispatch defers
+project completion and graph-error/no-ready-task blocks to
+`afterPlanningSession`, and review dispatch stands aside. But unlike
 project/wolf, planning *also* provisions the project's wsp worktree
 (`Runner.resolvePlanningWorktree`, idempotent — the later task agent's own
 `Create` call returns the same directory) and mounts it as a **second**
@@ -160,11 +179,16 @@ nothing else. Finishes by setting `status: working` with `updated_by: agent`.
    right after `sbx create`) fields, plus the fixed status enums for both
    project and task, and `model: default` on every new task.
 
-**Completion signal / lifecycle.** `afterPlanningSession` mirrors the project
+**Completion signal / lifecycle.** `afterPlanningSession` releases the planning
+slot, then mirrors the project
 agent's circuit breaker (`maxPlanningRetries`, backoff, block on hard failure
 or exhausted retries). Productive exit is "no longer `status: ready`" — the
 daemon resets the counter, clears `Replan` (`clearReplan`, written as
-`daemon`), and re-dispatches (`working` → first ready task).
+`daemon`), and re-dispatches (`working` → first ready task, plus a follow-up
+planning run for intake that arrived mid-run). An intake file the run was
+handed but left unprocessed is logged (`planning_intake_unprocessed`) and not
+relaunched on a working project — it is re-armed through the breaker once the
+project comes to rest.
 
 ---
 
@@ -295,8 +319,8 @@ restart finding the file already blocked).
 no wsp provisioning of its own; `Repos`/`Branch` are still forwarded in case
 the wolf needs to look at source. It is tracked under a session key distinct
 from the project's main slot (`wolfSessionKey = projectPath + "#wolf"`), so it
-can run *in tandem* with a task/commit/planning session rather than waiting
-for that slot to free up. `Plan.Persistent` is set for every wolf launch; it
+can run *in tandem* with a task/commit session (or a planner, which has a slot
+of its own too) rather than waiting for that slot to free up. `Plan.Persistent` is set for every wolf launch; it
 only has an effect on the ACP path.
 
 **Host access: what the ACP wolf gets and loses.** The decision (goal 3): the
@@ -580,9 +604,10 @@ wsp workspace of its own), plus `Repos`/`Branch` forwarded, and
 `api.githubcopilot.com`) so the sandbox can reach GitHub's API through the
 attached `github` MCP. `SandboxNameFor` gives it its own sandbox,
 `"<work-stream>-review"`. Runs on the ACP path (autonomous, `claude --print`),
-sharing the project's *main* session slot (not a side key like wolf/archive),
-so it cannot run concurrently with a task/commit/planning agent for the same
-project.
+sharing the project's *main* session slot (not a side key like
+wolf/archive/planning), so it cannot run concurrently with a task/commit agent
+for the same project; it also stands aside while a planner is in flight
+(`planningInFlight`), since both write the control dir.
 
 **Reads/writes.** Reads `project.yaml` (`description`, `repos`, `branch`,
 `review`, prior `pull_requests:`) and existing task files' `status`/`source`.
