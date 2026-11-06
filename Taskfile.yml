@@ -38,6 +38,17 @@ tasks:
       - go vet ./...
       - go test -race -count=1 ./...
 
+  docs:
+    desc: Regenerate docs/packages.md from the internal packages' doc.go comments
+    cmds:
+      - go run ./internal/tools/pkgdoc
+
+  docs:check:
+    desc: Fail if docs/packages.md is out of date with the package comments
+    cmds:
+      - task: docs
+      - git diff --exit-code -- docs/packages.md
+
   clean:
     desc: Remove built binaries
     cmds:
