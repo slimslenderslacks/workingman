@@ -1,7 +1,7 @@
 // Package agent defines the process model for orch's claude-code sessions:
 // agent kinds, the launch spec, and the Launcher and Session interfaces.
 //
-// Role: daemon
+// Role: daemon (the TUI links it only indirectly, via internal/terminal)
 //
 // An agent has a [Kind] (project, planning, task, commit, wolf, archive,
 // review, workingman; see agents.md for what each one does). The daemon picks a

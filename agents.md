@@ -1,5 +1,11 @@
 # Agents
 
+> **Package map:** [docs/packages.md](docs/packages.md) is the generated index of
+> every `internal/` package — its role (daemon / tui / shared / wrapper),
+> synopsis, exported types and the import graph. Read it first to find your way
+> around the code; [docs/package-docs.md](docs/package-docs.md) explains the
+> `doc.go` convention that feeds it.
+
 The orchestrator launches eight kinds of `claude` sessions. Seven run over a
 project's lifecycle: **project → planning → task → commit**, with **wolf**,
 **archive**, and **review** stepping in for blocks, cleanup, and PR watching

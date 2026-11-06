@@ -16,35 +16,35 @@ no doc.go or no valid `Role:` line yet.
 
 | Package | Role | Synopsis | Interfaces | Key types |
 |---|---|---|---|---|
-| `internal/acpchat` | TODO | Package acpchat is the reusable "tune in" primitive: it lets the daemon join the ACP conversation of an agent that is ALREADY RUNNING — the wolf, or the workingman agent — send it text as a prompt, collect the reply, and watch what the agent says to other clients, all while a TUI stays attached to the same session. (TODO: move package comment to doc.go) | — | `AskOption`, `Conversation`, `Event`, `EventKind`, `Options`, `PermissionDecision`, `PermissionOption`, `PermissionRequest`, `ProgressFunc` |
-| `internal/acpclient` | TODO | Package acpclient is the workingman TUI's side of an ACP session: it dials a session's agent.sock (the unix-domain socket the acp-wrapper bridge exposes at ~/.workingman/sessions/<id>/agent.sock), speaks the Agent Client Protocol over it, sends prompts to the sandboxed Claude agent, and decodes the streamed assistant output for incremental display. (TODO: move package comment to doc.go) | — | `Client`, `ConfigOption`, `ConfigValue`, `Event`, `EventKind`, `Options`, `PlanEntry`, `RequestHandler`, `State` |
-| `internal/acpwrapper` | TODO | Package acpwrapper implements the `acp-wrapper` binary's core: it creates an sbx claude sandbox with the acp-kit ACP bridge layered on, execs acp-kit's `claude-acp-client` entrypoint inside that sandbox (which speaks the Agent Client Protocol over the child process's stdio), and exposes a per-session unix-domain socket (`agent.sock`) that the workingman TUI connects to. (TODO: move package comment to doc.go) | — | `Config` |
-| `internal/agent` | TODO | Package agent owns the process model for the orchestrator's claude-code sessions: an Agent has a Kind, a Spec describes how to launch one, and a Session is the live handle the daemon holds until the work finishes. (TODO: move package comment to doc.go) | `Launcher`, `Session` | `Kind`, `ProcessLauncher`, `Spec` |
-| `internal/audit` | TODO | TODO | — | `Event`, `Logger` |
-| `internal/channels` | TODO | Package channels is the messaging-channel foundation for the workingman daemon: a Channel interface that concrete transports (WhatsApp, …) implement, a Registry that owns the configured channels and fans messages out to them, a YAML config loader with topic routes, and a notify adapter so the daemon can notify channels through its existing notify.Sender plumbing. (TODO: move package comment to doc.go) | `Channel`, `Chunker`, `ConversationIndex`, `Typer` | `ChannelConfig`, `Config`, `ConversationTarget`, `CredentialRef`, `Credentials`, `Factory`, `FileConversationIndex`, `InboundHandler`, `InboundMessage`, `Notifier`, `NotifyConfig`, `OutboundMessage`, `Registry`, `Route`, `RouterConfig`, `Secret`, `SendResult` |
-| `internal/channels/channeltest` | TODO | Package channeltest provides an in-memory fake channels.Channel for tests of code that sends to, or receives from, a channel. (TODO: move package comment to doc.go) | — | `Fake` |
-| `internal/channels/signal` | TODO | Package signal is the Signal channel: a channels.Channel that talks to a signal-cli daemon running in HTTP mode (`signal-cli -a +15551234567 daemon --http 127.0.0.1:8080`). | — | `AccessConfig`, `AccessPolicy`, `Channel`, `Config`, `Decision`, `Inbound`, `Info`, `Options`, `Reason` |
-| `internal/channels/signal/setup` | TODO | Package setup reads and writes the Signal channel's section of channels.yaml for `orch signal setup`, `status` and `test`. (TODO: move package comment to doc.go) | — | `Current`, `SaveResult`, `Store`, `Update` |
-| `internal/channels/whatsapp` | TODO | Package whatsapp holds the WhatsApp-specific pieces of the messaging channels: today, the identity helpers and the AccessPolicy that decides which inbound messages may reach the daemon's agents. | `Resolver` | `AccessConfig`, `AccessPolicy`, `Backend`, `BridgeChannel`, `BridgeOptions`, `Channel`, `ChannelOption`, `CloudClient`, `CloudConfig`, `CloudOption`, `Decision`, `DirResolver`, `FactoryDeps`, `GraphError`, `Inbound`, `Kind`, `Mode`, `Option`, `PairOptions`, `PhoneNumberInfo`, `Reason`, `RetryPolicy`, `StaticResolver`, `WebhookConfig` |
-| `internal/channels/whatsapp/bridge` | TODO | Package bridge runs and talks to the vendored Baileys WhatsApp bridge: the "personal number, QR pairing, no public webhook" WhatsApp backend. | `Process` | `APIError`, `Backoff`, `Client`, `Event`, `Health`, `Launch`, `ReadKey`, `SendResult`, `Starter`, `Supervisor`, `SupervisorStatus` |
-| `internal/channels/whatsapp/setup` | TODO | Package setup holds the non-interactive core of `orch whatsapp setup`: the field validators (ported from hermes-agent's hermes_cli/setup_whatsapp_cloud.py), the read/merge/write of the whatsapp section of channels.yaml and its 0600 secrets file, secret masking, and the text that tells the user what to paste into Meta's developer console. | — | `Cred`, `Current`, `Guide`, `SaveResult`, `Store`, `Update`, `WebhookSettings` |
-| `internal/daemon` | TODO | TODO | `ChannelSender` | `ACPInfo`, `AuditEvent`, `ChannelOption`, `Daemon`, `DaemonInfo`, `OfflineOptions`, `Option`, `ProjectLive`, `ProjectSnapshot`, `PullRequestSummary`, `ReviewPollInfo`, `RuntimeInfo`, `SessionInfo`, `SessionSnapshot`, `SessionStatus`, `Snapshot`, `TaskSnapshot`, `WolfSession`, `WorkingmanAgentConfig`, `WorkingmanAgentSession` |
-| `internal/gitsign` | TODO | Package gitsign is the single source of truth for teaching a sandboxed agent to commit as the host user and to SSH-sign those commits. (TODO: move package comment to doc.go) | — | `Config`, `PushResult`, `RunFunc` |
-| `internal/notify` | TODO | Package notify is the user-notification escape hatch for agents that need human attention — currently the wolf agent when a project becomes blocked. (TODO: move package comment to doc.go) | `Sender`, `TopicSender` | `Async`, `Call`, `Multi`, `Noop`, `Osascript`, `Recorder` |
-| `internal/policy` | TODO | Package policy defines per-task sandbox policy rules and helpers to apply them via the sbx CLI. (TODO: move package comment to doc.go) | — | `Action`, `Kind`, `Rule` |
-| `internal/project` | TODO | TODO | — | `BlockedSession`, `PlannedSnapshot`, `Project`, `PullRequest`, `Repo`, `Status`, `Writer` |
-| `internal/prompts` | TODO | Package prompts renders the per-Kind instruction text the orchestrator gives a freshly launched claude session. (TODO: move package comment to doc.go) | — | `Data` |
-| `internal/router` | TODO | Package router connects inbound channel messages (WhatsApp, …) to agent conversations and sends the replies back. (TODO: move package comment to doc.go) | `Agent`, `Auditor`, `Outbound`, `Source` | `Attacher`, `Config`, `Router`, `Session` |
-| `internal/runner` | TODO | Package runner is the glue between the daemon and the agent process model. (TODO: move package comment to doc.go) | — | `CommandBuilder`, `InteractiveSpec`, `Observe`, `Plan`, `Runner`, `SandboxCreator`, `SandboxSpec` |
-| `internal/sbx` | TODO | Package sbx wraps the parts of the sbx sandbox CLI's stable `sbx ls --json` read interface that more than one package needs to query. (TODO: move package comment to doc.go) | — | `Sandbox` |
-| `internal/scheduler` | TODO | Package scheduler wraps robfig/cron with a small key/spec model the daemon can use to (re)register a project's cron schedule each time a project.yaml is observed. (TODO: move package comment to doc.go) | — | `Scheduler` |
-| `internal/session` | TODO | Package session defines the on-disk layout that lets non-interactive ACP claude sessions survive a TUI restart. (TODO: move package comment to doc.go) | — | `Session`, `Status`, `Store` |
-| `internal/setup` | TODO | Package setup prepares a workspace for an agent: writes the structured context file the agent reads at startup, writes the rendered instructions, and installs any task-specific skills into the workspace's .claude/skills/ directory. (TODO: move package comment to doc.go) | — | `Context`, `Skill` |
-| `internal/task` | TODO | TODO | — | `Commit`, `Source`, `Status`, `Task` |
-| `internal/taskgraph` | TODO | Package taskgraph turns a directory of tasks/*.yaml files into a queryable DAG. (TODO: move package comment to doc.go) | — | `Graph` |
-| `internal/terminal` | TODO | Package terminal opens sessions in a new tab of the user's terminal emulator. (TODO: move package comment to doc.go) | `Launcher` | `AlreadyOpenError`, `Ghostty`, `Kitty`, `Runner`, `Settings`, `Tab`, `TabLauncher`, `TabRef`, `TabSession`, `WezTerm` |
-| `internal/tui` | TODO | Package tui hosts the orch terminal UI. (TODO: move package comment to doc.go) | `InteractiveLauncher`, `TabFocuser` | `ProjectView`, `SessionView`, `TaskView` |
-| `internal/workspace` | TODO | Package workspace owns the multi-repo directory each agent runs in. (TODO: move package comment to doc.go) | `Manager` | `Repo`, `StubManager`, `WspManager` |
+| `internal/acpchat` | daemon | Package acpchat lets the daemon join the ACP conversation of an agent that is already running, send it prompts and watch what it says, while a TUI stays attached to the same session. | — | `AskOption`, `Conversation`, `Event`, `EventKind`, `Options`, `PermissionDecision`, `PermissionOption`, `PermissionRequest`, `ProgressFunc` |
+| `internal/acpclient` | shared | Package acpclient is the client side of an ACP session: it dials a session's agent.sock, speaks the Agent Client Protocol over it, and decodes the streamed agent output into Events. | — | `Client`, `ConfigOption`, `ConfigValue`, `Event`, `EventKind`, `Options`, `PlanEntry`, `RequestHandler`, `State` |
+| `internal/acpwrapper` | wrapper | Package acpwrapper is the core of the acp-wrapper binary: it runs a Claude ACP agent inside an sbx sandbox and serves it to clients over a per-session unix socket, agent.sock. | — | `Config` |
+| `internal/agent` | daemon | Package agent defines the process model for orch's claude-code sessions: agent kinds, the launch spec, and the Launcher and Session interfaces. | `Launcher`, `Session` | `Kind`, `ProcessLauncher`, `Spec` |
+| `internal/audit` | daemon | Package audit writes and reads the daemon's append-only audit log of timestamped key=value events, and redacts secrets from text before it is published. | — | `Event`, `Logger` |
+| `internal/channels` | daemon | Package channels is the messaging-channel foundation for the workingman daemon: the Channel interface transports implement, the Registry that runs them, and the channels.yaml config they are built from. | `Channel`, `Chunker`, `ConversationIndex`, `Typer` | `ChannelConfig`, `Config`, `ConversationTarget`, `CredentialRef`, `Credentials`, `Factory`, `FileConversationIndex`, `InboundHandler`, `InboundMessage`, `Notifier`, `NotifyConfig`, `OutboundMessage`, `Registry`, `Route`, `RouterConfig`, `Secret`, `SendResult` |
+| `internal/channels/channeltest` | daemon | Package channeltest provides an in-memory fake channels.Channel for tests of code that sends to, or receives from, a channel. | — | `Fake` |
+| `internal/channels/signal` | daemon | Package signal is the Signal channel: a channels.Channel that talks to a signal-cli daemon running in HTTP mode. | — | `AccessConfig`, `AccessPolicy`, `Channel`, `Config`, `Decision`, `Inbound`, `Info`, `Options`, `Reason` |
+| `internal/channels/signal/setup` | daemon | Package setup reads and writes the Signal channel's section of channels.yaml for `orch signal setup`, `status` and `test`. | — | `Current`, `SaveResult`, `Store`, `Update` |
+| `internal/channels/whatsapp` | daemon | Package whatsapp is the WhatsApp messaging channel: the Cloud API and Baileys bridge backends, plus the identity helpers and AccessPolicy they share. | `Resolver` | `AccessConfig`, `AccessPolicy`, `Backend`, `BridgeChannel`, `BridgeOptions`, `Channel`, `ChannelOption`, `CloudClient`, `CloudConfig`, `CloudOption`, `Decision`, `DirResolver`, `FactoryDeps`, `GraphError`, `Inbound`, `Kind`, `Mode`, `Option`, `PairOptions`, `PhoneNumberInfo`, `Reason`, `RetryPolicy`, `StaticResolver`, `WebhookConfig` |
+| `internal/channels/whatsapp/bridge` | daemon | Package bridge runs and talks to the vendored Baileys WhatsApp bridge: the "personal number, QR pairing, no public webhook" WhatsApp backend. | `Process` | `APIError`, `Backoff`, `Client`, `Event`, `Health`, `Launch`, `ReadKey`, `SendResult`, `Starter`, `Supervisor`, `SupervisorStatus` |
+| `internal/channels/whatsapp/setup` | daemon | Package setup holds the non-interactive core of `orch whatsapp setup`, `status` and `test`. | — | `Cred`, `Current`, `Guide`, `SaveResult`, `Store`, `Update`, `WebhookSettings` |
+| `internal/daemon` | daemon | Package daemon is the orch control loop: it watches the orch roots, drives each project and task through its state machine, and launches the agent sessions that do the work. | `ChannelSender` | `ACPInfo`, `AuditEvent`, `ChannelOption`, `Daemon`, `DaemonInfo`, `OfflineOptions`, `Option`, `ProjectLive`, `ProjectSnapshot`, `PullRequestSummary`, `ReviewPollInfo`, `RuntimeInfo`, `SessionInfo`, `SessionSnapshot`, `SessionStatus`, `Snapshot`, `TaskSnapshot`, `WolfSession`, `WorkingmanAgentConfig`, `WorkingmanAgentSession` |
+| `internal/gitsign` | shared | Package gitsign makes a sandboxed agent commit as the host user, SSH-sign those commits, and check that the SSH agent forwarded into the sandbox can sign and push. | — | `Config`, `PushResult`, `RunFunc` |
+| `internal/notify` | daemon | Package notify is the daemon's user-notification interface: how an agent that needs human attention reaches a person. | `Sender`, `TopicSender` | `Async`, `Call`, `Multi`, `Noop`, `Osascript`, `Recorder` |
+| `internal/policy` | shared | Package policy defines the per-task sandbox policy rules (allow or deny one network or filesystem resource pattern) and turns them into `sbx policy` commands. | — | `Action`, `Kind`, `Rule` |
+| `internal/project` | shared | Package project is the data model and on-disk format of a work stream's project.yaml, plus the two sidecar records the daemon and the wolf agent keep next to it. | — | `BlockedSession`, `PlannedSnapshot`, `Project`, `PullRequest`, `Repo`, `Status`, `Writer` |
+| `internal/prompts` | daemon | Package prompts renders the per-kind instruction text that orch writes to .orch/instructions.md for a newly launched agent. | — | `Data` |
+| `internal/router` | daemon | Package router connects inbound channel messages (WhatsApp, Signal) to agent conversations and sends the replies back. | `Agent`, `Auditor`, `Outbound`, `Source` | `Attacher`, `Config`, `Router`, `Session` |
+| `internal/runner` | daemon | Package runner turns the daemon's request to launch an agent (a Plan) into a running session: it prepares the workspace, writes the .orch handoff, and starts the agent over ACP or in a terminal tab. | — | `CommandBuilder`, `InteractiveSpec`, `Observe`, `Plan`, `Runner`, `SandboxCreator`, `SandboxSpec` |
+| `internal/sbx` | shared | Package sbx holds the shared helpers for the sbx sandbox CLI: sandbox-name rules and the `sbx ls --json` existence check. | — | `Sandbox` |
+| `internal/scheduler` | daemon | Package scheduler runs the daemon's timed callbacks (project cron schedules and PR review polls) on robfig/cron, keyed by a caller-chosen string. | — | `Scheduler` |
+| `internal/session` | shared | Package session defines the on-disk record (session.json and agent.sock under ~/.workingman/sessions/<id>/) that lets ACP agent sessions outlive the TUI and the daemon that started them. | — | `Session`, `Status`, `Store` |
+| `internal/setup` | daemon | Package setup writes the .orch handoff files and installs skills in an agent's working directory before the agent is launched. | — | `Context`, `Skill` |
+| `internal/task` | shared | Package task is the data model and on-disk format of one tasks/*.yaml file, including the task-name rules that keep a task's sandbox name legal. | — | `Commit`, `Source`, `Status`, `Task` |
+| `internal/taskgraph` | daemon | Package taskgraph loads a project's tasks/*.yaml files into an immutable, validated dependency graph that the daemon queries to decide what to dispatch next. | — | `Graph` |
+| `internal/terminal` | shared | Package terminal opens sessions in new tabs of the user's terminal emulator (Ghostty, WezTerm or kitty) and tracks those tabs across orch restarts. | `Launcher` | `AlreadyOpenError`, `Ghostty`, `Kitty`, `Runner`, `Settings`, `Tab`, `TabLauncher`, `TabRef`, `TabSession`, `WezTerm` |
+| `internal/tui` | tui | Package tui is the orch terminal UI: a bubbletea program that shows live agent sessions, the work-stream (project) gallery and its tasks, and lets the user steer work streams by writing their project.yaml files. | `InteractiveLauncher`, `TabFocuser` | `ProjectView`, `SessionView`, `TaskView` |
+| `internal/workspace` | shared | Package workspace provisions and tears down the multi-repo directory each agent runs in, with the wsp CLI behind a small Manager interface. | `Manager` | `Repo`, `StubManager`, `WspManager` |
 
 ## Dependency graph
 
@@ -57,10 +57,8 @@ graph LR
     cmd_acp_wrapper["cmd/acp-wrapper"]
     cmd_orch["cmd/orch"]
   end
-  subgraph grp_TODO["TODO"]
+  subgraph grp_daemon["daemon"]
     internal_acpchat["acpchat"]
-    internal_acpclient["acpclient"]
-    internal_acpwrapper["acpwrapper"]
     internal_agent["agent"]
     internal_audit["audit"]
     internal_channels["channels"]
@@ -71,22 +69,30 @@ graph LR
     internal_channels_whatsapp_bridge["channels/whatsapp/bridge"]
     internal_channels_whatsapp_setup["channels/whatsapp/setup"]
     internal_daemon["daemon"]
-    internal_gitsign["gitsign"]
     internal_notify["notify"]
-    internal_policy["policy"]
-    internal_project["project"]
     internal_prompts["prompts"]
     internal_router["router"]
     internal_runner["runner"]
-    internal_sbx["sbx"]
     internal_scheduler["scheduler"]
-    internal_session["session"]
     internal_setup["setup"]
-    internal_task["task"]
     internal_taskgraph["taskgraph"]
-    internal_terminal["terminal"]
+  end
+  subgraph grp_tui["tui"]
     internal_tui["tui"]
+  end
+  subgraph grp_shared["shared"]
+    internal_acpclient["acpclient"]
+    internal_gitsign["gitsign"]
+    internal_policy["policy"]
+    internal_project["project"]
+    internal_sbx["sbx"]
+    internal_session["session"]
+    internal_task["task"]
+    internal_terminal["terminal"]
     internal_workspace["workspace"]
+  end
+  subgraph grp_wrapper["wrapper"]
+    internal_acpwrapper["acpwrapper"]
   end
 
   cmd_acp_wrapper --> internal_acpwrapper
@@ -172,8 +178,14 @@ graph LR
 
   classDef entry fill:#e8e8e8,stroke:#555,stroke-width:2px,color:#000
   class cmd_acp_wrapper,cmd_orch entry
-  classDef TODO fill:#fff,stroke:#c0392b,stroke-dasharray:4 3,color:#000
-  class internal_acpchat,internal_acpclient,internal_acpwrapper,internal_agent,internal_audit,internal_channels,internal_channels_channeltest,internal_channels_signal,internal_channels_signal_setup,internal_channels_whatsapp,internal_channels_whatsapp_bridge,internal_channels_whatsapp_setup,internal_daemon,internal_gitsign,internal_notify,internal_policy,internal_project,internal_prompts,internal_router,internal_runner,internal_sbx,internal_scheduler,internal_session,internal_setup,internal_task,internal_taskgraph,internal_terminal,internal_tui,internal_workspace TODO
+  classDef daemon fill:#dbe9ff,stroke:#2f6fd6,color:#000
+  class internal_acpchat,internal_agent,internal_audit,internal_channels,internal_channels_channeltest,internal_channels_signal,internal_channels_signal_setup,internal_channels_whatsapp,internal_channels_whatsapp_bridge,internal_channels_whatsapp_setup,internal_daemon,internal_notify,internal_prompts,internal_router,internal_runner,internal_scheduler,internal_setup,internal_taskgraph daemon
+  classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
+  class internal_tui tui
+  classDef shared fill:#fff1cc,stroke:#c99a06,color:#000
+  class internal_acpclient,internal_gitsign,internal_policy,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace shared
+  classDef wrapper fill:#f3e2fb,stroke:#8e44ad,color:#000
+  class internal_acpwrapper wrapper
 ```
 
 ## Dependencies
