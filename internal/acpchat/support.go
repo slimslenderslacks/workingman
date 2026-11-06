@@ -110,15 +110,27 @@ const (
 )
 
 // Event is one thing observed on the conversation.
+// Kind says which of the other fields are set; see the EventKind constants.
 type Event struct {
-	Kind           EventKind
-	Own            bool
-	Text           string
-	StopReason     string
-	SessionID      string
+	Kind EventKind
+	// Own is true when the event belongs to a turn this Conversation's Ask
+	// started, false for a turn another client (the TUI) started.
+	Own bool
+	// Text is the assistant text chunk (EventText) or the whole cleaned reply
+	// (EventTurnEnd).
+	Text string
+	// StopReason is why the turn ended (EventTurnEnd), e.g. "end_turn".
+	StopReason string
+	// SessionID is the ACP session id now being followed (EventReconnected,
+	// EventSessionChanged).
+	SessionID string
+	// SessionChanged is true on EventReconnected when the session had been
+	// restarted under the same id.
 	SessionChanged bool
-	Permission     *PermissionRequest
-	Err            error
+	// Permission is the request the agent raised (EventPermission).
+	Permission *PermissionRequest
+	// Err is the cause on EventGone (wraps ErrSessionGone).
+	Err error
 }
 
 // Events returns the stream of what happens on the conversation, including
