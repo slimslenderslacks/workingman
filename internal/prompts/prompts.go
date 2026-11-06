@@ -1,15 +1,3 @@
-// Package prompts renders the per-Kind instruction text the orchestrator
-// gives a freshly launched claude session.
-//
-// Each agent receives two things in its workspace:
-//
-//  1. .orch/context.yaml — structured data (paths, branch, current task, ...)
-//  2. .orch/instructions.md — rendered from the templates here
-//
-// The initial message piped to claude is short and just points it at those
-// two files. The templates therefore carry the role-specific *behaviour*
-// (what to do, what files to touch, when to exit) while context.yaml carries
-// the role-specific *data*.
 package prompts
 
 import (

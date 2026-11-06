@@ -1,6 +1,3 @@
-// Package agent owns the process model for the orchestrator's claude-code
-// sessions: an Agent has a Kind, a Spec describes how to launch one, and a
-// Session is the live handle the daemon holds until the work finishes.
 package agent
 
 import "context"
@@ -137,6 +134,10 @@ type Session interface {
 	Close() error
 }
 
+// Launcher starts a session from a Spec. The ctx scopes only the launch call,
+// not the running agent: the returned Session owns the agent's lifetime.
+// Implemented by ProcessLauncher (host child processes, for ACP agents) and
+// terminal.TabLauncher (terminal tabs); internal/runner holds one of each.
 type Launcher interface {
 	Launch(ctx context.Context, spec Spec) (Session, error)
 }

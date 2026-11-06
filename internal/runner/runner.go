@@ -1,16 +1,3 @@
-// Package runner is the glue between the daemon and the agent process model.
-// Given a Plan (which Kind of agent, where, on what), Runner:
-//
-//  1. Resolves the working directory: for ProjectAgent the plan supplies it
-//     directly (the dir holding the empty project.yaml); for every other
-//     Kind it asks workspace.Manager to provision one.
-//  2. Renders the kind-specific instructions text via the prompts package.
-//  3. Hands off to setup.Apply to drop .orch/context.yaml,
-//     .orch/instructions.md, and any skills into the working directory.
-//  4. Builds an agent.Spec and asks the agent.Launcher to start the session.
-//
-// The CommandBuilder seam lets tests swap claude-code for `sleep` without
-// changing any of the orchestration logic.
 package runner
 
 import (
@@ -354,6 +341,11 @@ const (
 	DefaultPersistentIdleTimeout = 24 * time.Hour
 )
 
+// Runner launches agents for the daemon. Its fields are configuration, set
+// once by cmd/orch before the daemon starts: the workspace manager, the two
+// launchers (Launcher for terminal tabs, AcpLauncher for acp-wrapper
+// processes), and the acp-wrapper settings. Nil seams fall back to defaults
+// or disable that step; see each field.
 type Runner struct {
 	Workspaces workspace.Manager
 	Launcher   agent.Launcher
@@ -471,8 +463,6 @@ func (r *Runner) UsesACP(kind agent.Kind) bool {
 	return !kind.Interactive()
 }
 
-// Start is non-blocking: it returns the Session once the launcher accepts it.
-// The caller owns Wait/Close on the returned Session.
 // projectNameFromPath returns the work-stream name for a project.yaml path:
 // the basename of the directory that holds it (which is also the sandbox
 // prefix and the TUI display name). Empty when projectPath is empty.
@@ -483,6 +473,10 @@ func projectNameFromPath(projectPath string) string {
 	return filepath.Base(filepath.Dir(projectPath))
 }
 
+// Start prepares the working directory for p (workspace, .orch handoff,
+// skills) and launches the agent, over ACP when UsesACP(p.Kind) and otherwise
+// through Launcher. It is non-blocking: it returns the Session once the
+// launcher accepts it. The caller owns Wait/Close on the returned Session.
 func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	if p.Kind == agent.WorkingmanAgent {
 		// It only makes sense as a persistent ACP session in a sandbox of its

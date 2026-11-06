@@ -1,16 +1,3 @@
-// Package terminal opens sessions in a new tab of the user's terminal emulator.
-// A session that needs a human at a real TTY (the --wolf-host wolf, the TUI's
-// `:dir` shell and `:session` claude session) is started in its own terminal
-// tab, titled after its work stream.
-//
-// Launcher is the small seam the rest of orch talks to ("open a tab titled X
-// running Y", "focus tab X"); Ghostty, WezTerm and kitty implement it, and
-// tests stub it. Resolve picks the implementation: the terminal orch is
-// running in when it can be detected, else the `terminal:` setting in
-// ~/.config/workingman/settings.yaml, else an error explaining how to set it.
-// TabLauncher (tabs.go) layers session tracking on top: it adapts a Launcher
-// to agent.Launcher and refuses to open a second tab for a session whose tab
-// is still open, focusing the existing one instead.
 package terminal
 
 import (
