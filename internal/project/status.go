@@ -2,14 +2,22 @@ package project
 
 import "fmt"
 
+// Status is a project's lifecycle state as written in project.yaml. The empty
+// value means the project is unpopulated (see Project.Unpopulated); any other
+// value outside the constants below is rejected on load. The transitions are
+// described in state-machine.md.
 type Status string
 
 const (
+	// StatusReady means the project is populated and waiting for the planning
+	// agent to (re)plan its tasks.
 	StatusReady Status = "ready"
 	// StatusWorking means the planning agent is running or the task graph has
 	// dispatchable work in flight. Not a resting state — the daemon is
 	// actively driving it forward.
 	StatusWorking Status = "working"
+	// StatusBlocked means the daemon gave up on progress (see
+	// Project.BlockedReason) and has handed the project to the wolf agent.
 	StatusBlocked Status = "blocked"
 	// StatusIdle is the project's one resting state: nothing is currently
 	// dispatchable. It covers what used to be two separate statuses:
@@ -53,6 +61,7 @@ const (
 	StatusMerged Status = "merged"
 )
 
+// Valid reports whether s is one of the defined, non-empty statuses.
 func (s Status) Valid() bool {
 	switch s {
 	case StatusReady, StatusWorking, StatusBlocked, StatusIdle, StatusStopped, StatusMerged:
@@ -73,6 +82,8 @@ var legacyStatusAliases = map[string]Status{
 	"reviewing": StatusIdle,
 }
 
+// UnmarshalYAML accepts the empty status, the defined statuses and the legacy
+// aliases, and rejects anything else.
 func (s *Status) UnmarshalYAML(unmarshal func(any) error) error {
 	var raw string
 	if err := unmarshal(&raw); err != nil {

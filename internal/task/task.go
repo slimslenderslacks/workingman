@@ -12,6 +12,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Status is a task's lifecycle state: ready → running (task agent) →
+// success | failed | blocked, and success → committed (commit agent). Any other
+// value is rejected on load.
 type Status string
 
 const (
@@ -122,6 +125,7 @@ func SlugifyFor(s, workStream string) string {
 	return slug
 }
 
+// Valid reports whether s is one of the defined statuses.
 func (s Status) Valid() bool {
 	switch s {
 	case StatusReady, StatusRunning, StatusSuccess, StatusFailed, StatusBlocked, StatusCommitted:
@@ -130,6 +134,7 @@ func (s Status) Valid() bool {
 	return false
 }
 
+// UnmarshalYAML rejects any value that is not a defined Status.
 func (s *Status) UnmarshalYAML(unmarshal func(any) error) error {
 	var raw string
 	if err := unmarshal(&raw); err != nil {
@@ -143,6 +148,10 @@ func (s *Status) UnmarshalYAML(unmarshal func(any) error) error {
 	return nil
 }
 
+// Task is the parsed contents of one tasks/*.yaml file: the unit of work the
+// planning agent creates, a task agent carries out and the commit agent
+// lands. A blank Name with a description is a pending seed waiting for the
+// planning agent to name it (see taskgraph.Load).
 type Task struct {
 	Name          string   `yaml:"name"`
 	Description   string   `yaml:"description"`
@@ -274,6 +283,8 @@ func (t *Task) IsPushTask() bool {
 	return t.Source != nil && t.Source.Kind == SourceKindPush
 }
 
+// Load reads and parses the task file at path, records path in Task.Path, and
+// backfills an empty Model to ModelDefault.
 func Load(path string) (*Task, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

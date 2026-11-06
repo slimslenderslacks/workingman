@@ -1,15 +1,3 @@
-// Package setup prepares a workspace for an agent: writes the structured
-// context file the agent reads at startup, writes the rendered instructions,
-// and installs any task-specific skills into the workspace's .claude/skills/
-// directory.
-//
-// Every file setup produces lives under one of two top-level directories
-// inside the workspace:
-//
-//	.orch/                        # orchestrator-owned state
-//	  context.yaml                # structured data (paths, branch, kind, ...)
-//	  instructions.md             # rendered prompt text
-//	.claude/skills/<name>/        # one directory per installed skill
 package setup
 
 import (

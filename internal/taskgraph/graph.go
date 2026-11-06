@@ -1,12 +1,3 @@
-// Package taskgraph turns a directory of tasks/*.yaml files into a queryable
-// DAG. It is a pure-function snapshot of disk state: Load reads everything
-// in, validates it, and returns an immutable Graph. The daemon calls Load
-// each time it wants a fresh view (after a tasks/*.yaml fsnotify event) and
-// uses Ready() / AllCommitted() to decide what to do next.
-//
-// Validation is strict: any unknown dependency, dependency cycle, or
-// duplicate task name aborts Load with an error. The daemon should surface
-// those errors via the audit log and (probably) move the project to blocked.
 package taskgraph
 
 import (

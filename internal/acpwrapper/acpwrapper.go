@@ -1,18 +1,3 @@
-// Package acpwrapper implements the `acp-wrapper` binary's core: it creates an
-// sbx claude sandbox with the acp-kit ACP bridge layered on, execs acp-kit's
-// `claude-acp-client` entrypoint inside that sandbox (which speaks the Agent
-// Client Protocol over the child process's stdio), and exposes a per-session
-// unix-domain socket (`agent.sock`) that the workingman TUI connects to. The
-// socket bridges a connecting TUI to the sandboxed ACP client's stdio so the
-// TUI can send prompts and watch streamed ACP responses.
-//
-// This package owns the entrypoint scaffolding, config parsing, sandbox launch
-// and acp-kit exec, plus the socket-bridge wiring. It records each session as
-// session.json next to the socket (via the session package) so a restarting TUI
-// can rediscover and reconnect to it. The richer bridging semantics (framing,
-// multiplexing several reconnecting TUIs, resuming a stream) are layered on by
-// dependent tasks; this package defines where those artifacts live and the
-// seams they hook into.
 package acpwrapper
 
 import (

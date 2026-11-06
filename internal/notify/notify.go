@@ -1,9 +1,3 @@
-// Package notify is the user-notification escape hatch for agents that need
-// human attention — currently the wolf agent when a project becomes blocked.
-//
-// Sender is intentionally a one-method interface so production can use the
-// Osascript implementation, tests can use a Recorder, and any future
-// channels (Slack, ntfy, …) plug in without touching the daemon.
 package notify
 
 import (
@@ -13,6 +7,11 @@ import (
 	"sync"
 )
 
+// Sender delivers a titled, human-facing notification. It is the one method
+// the daemon calls (via WithNotifier) when an agent needs attention;
+// implementations include Osascript, Noop, Recorder, Multi, Async and
+// channels.Notifier. Implementations should not block for long: wrap slow
+// destinations in Async.
 type Sender interface {
 	Send(title, message string) error
 }

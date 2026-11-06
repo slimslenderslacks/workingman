@@ -25,3 +25,6 @@ jobs:
 
       - name: task test
         run: task test
+
+      - name: task docs:check
+        run: task docs:check

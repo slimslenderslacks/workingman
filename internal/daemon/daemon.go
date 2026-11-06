@@ -17,13 +17,17 @@ import (
 	"github.com/slimslenderslacks/work/internal/scheduler"
 )
 
-// Daemon watches a list of root directories for changes to project.yaml and
-// (eventually) tasks/*.yaml files, and dispatches work to claude-code agents.
+// Daemon watches a list of root directories for changes to project.yaml,
+// project.md, intake/*.md and tasks/*.yaml files, advances each project and
+// task through its state machine, and dispatches the work to agent sessions.
+// Build one with New and drive it with Run; the exported methods (ListSessions,
+// WatchSessions, WolfSessions, Snapshot, ...) are read-only views that are safe
+// to call from other goroutines while Run is going.
 //
 // When constructed without WithRunner the daemon is observation-only: it
 // records what it *would* dispatch in the audit log but does not launch any
-// agents. WithRunner wires it to runner.Runner so the unpopulated-project path
-// actually starts a ProjectAgent session.
+// agents. WithRunner wires it to runner.Runner so dispatch actually starts
+// agent sessions.
 type Daemon struct {
 	roots     []string
 	audit     *audit.Logger
@@ -157,6 +161,7 @@ type sessionEntry struct {
 	taskName  string
 }
 
+// Option configures a Daemon at construction; pass any number to New.
 type Option func(*Daemon)
 
 // WithRunner makes the daemon dispatch real agent sessions via r.
@@ -188,6 +193,10 @@ func WithSessionIdleTimeout(timeout time.Duration) Option {
 	}
 }
 
+// New returns a Daemon watching roots that logs to a (both required). It
+// applies opts, then validates the workingman-agent scratch dir and the state
+// file (both must lie outside every root). Nothing is watched or dispatched
+// until Run.
 func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 	if len(roots) == 0 {
 		return nil, fmt.Errorf("daemon: at least one root is required")

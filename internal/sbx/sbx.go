@@ -1,9 +1,3 @@
-// Package sbx wraps the parts of the sbx sandbox CLI's stable `sbx ls --json`
-// read interface that more than one package needs to query. It exists so that
-// "does a sandbox by this name still exist" has exactly one implementation
-// shared by the TUI's ACP watcher (internal/tui/acpwatch.go) and the daemon's
-// session reconciliation (internal/daemon/reconcile.go), instead of each
-// growing its own copy of the same exec+JSON-decode logic.
 package sbx
 
 import (

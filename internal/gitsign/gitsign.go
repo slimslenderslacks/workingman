@@ -1,13 +1,3 @@
-// Package gitsign is the single source of truth for teaching a sandboxed agent
-// to commit as the host user and to SSH-sign those commits. Both the ACP commit
-// path (internal/acpwrapper) and the interactive `:session` path (the daemon's
-// runner) need the exact same three things — the host git identity, the SSH
-// signing config, and a runtime preflight that the forwarded agent actually
-// holds a key — so they live here rather than being copied into each caller.
-//
-// The env injection is delivered as `sbx exec -e` flags: git identity as
-// GIT_AUTHOR_*/GIT_COMMITTER_*, and signing as GIT_CONFIG_COUNT/KEY_n/VALUE_n
-// so it applies to every git invocation without writing a .git/config.
 package gitsign
 
 import (

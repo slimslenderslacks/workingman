@@ -1,31 +1,3 @@
-// Package router connects inbound channel messages (WhatsApp, …) to agent
-// conversations and sends the replies back. It is the "ear" of the daemon's
-// messaging channels: a Router is installed as the channels.InboundHandler and
-// decides, per message, whether the text is a router command, a reply to a wolf
-// notification, a message for the wolf the chat is bound to, or — by default —
-// a question for the workingman agent.
-//
-// The routing rules (documented for users in docs/channels.md):
-//
-//  1. A reply-to a known notification goes to THAT wolf session as a prompt;
-//     the wolf's answer comes back labelled "[wolf <work-stream>]".
-//  2. Slash commands are answered by the router itself, with no LLM:
-//     /help, /status, /wolf [work-stream], /agent, /who.
-//  3. Otherwise the chat is bound to the workingman agent (the default) or to
-//     the wolf chosen with /wolf, until /agent or the wolf session ends.
-//  4. While a chat is bound to a wolf it also sees what the wolf says to other
-//     clients (the TUI user), and the wolf's permission requests are put to the
-//     chat, whose next message answers them; unanswered ones time out rejected.
-//  5. Each chat is served one message at a time through a bounded queue, with
-//     acks for queueing and slow turns, a turn timeout, an immediate reply when
-//     the workingman agent is down, and secrets redacted from every reply.
-//  6. Everything is audit-logged under a hashed chat reference, never the text.
-//
-// Senders are NOT authorised here: a channel applies its access policy before
-// it calls the handler, so only approved senders ever reach the Router.
-//
-// The Router depends on interfaces only (Source, Outbound, Agent), so it has no
-// import of the daemon package; cmd/orch adapts the daemon to Source.
 package router
 
 import (
@@ -84,14 +56,19 @@ type Source interface {
 	Status() string
 }
 
-// Outbound is the channel registry as the router uses it. *channels.Registry
+// Outbound is the channel registry as the router uses it: Send delivers a
+// reply to a chat, and Get looks a channel up to check for the optional
+// channels.Chunker and channels.Typer capabilities. *channels.Registry
 // implements it.
 type Outbound interface {
 	Send(ctx context.Context, channel string, msg channels.OutboundMessage) (string, error)
 	Get(name string) (channels.Channel, bool)
 }
 
-// Agent is one attached ACP conversation. *acpchat.Conversation implements it.
+// Agent is one attached ACP conversation. Ask runs one prompt turn and returns
+// the reply; Events streams everything the agent says (including turns other
+// clients start) and its permission requests; Close detaches.
+// *acpchat.Conversation implements it.
 type Agent interface {
 	Ask(ctx context.Context, text string, opts ...acpchat.AskOption) (string, error)
 	Events() <-chan acpchat.Event

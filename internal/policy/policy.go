@@ -1,8 +1,3 @@
-// Package policy defines per-task sandbox policy rules and helpers to apply
-// them via the sbx CLI. A rule controls one allow/deny decision for a single
-// resource pattern within either the network or filesystem domain. Tasks
-// declare rules in their YAML; the runner and acp-wrapper apply them with
-// `sbx policy ...` immediately after `sbx create`, before any `sbx exec`.
 package policy
 
 import (

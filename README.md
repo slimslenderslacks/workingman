@@ -5,6 +5,12 @@ claude-code agents (project, planning, task, commit, wolf, archive) through a
 state machine until the project is done — or blocked, in which case you get a
 macOS notification and a wolf-agent session to drop into.
 
+> **Package map:** [docs/packages.md](docs/packages.md) is the generated index of
+> every `internal/` package — its role (daemon / tui / shared / wrapper),
+> synopsis, exported types and the import graph. Read it first to find your way
+> around the code; [docs/package-docs.md](docs/package-docs.md) explains the
+> `doc.go` convention that feeds it.
+
 ```
 status: ready    → planning agent (writes tasks/*.yaml, sets status: working)
 status: working  → task agent → commit agent → next task → ... → status: done

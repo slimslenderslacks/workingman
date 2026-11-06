@@ -1,5 +1,3 @@
-// Package channeltest provides an in-memory fake channels.Channel for tests
-// of code that sends to, or receives from, a channel.
 package channeltest
 
 import (

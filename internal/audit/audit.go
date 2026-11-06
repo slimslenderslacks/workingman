@@ -27,6 +27,7 @@ type Logger struct {
 	onLog  func()
 }
 
+// New returns a Logger that appends to w.
 func New(w io.Writer) *Logger {
 	return &Logger{w: w, now: time.Now}
 }
