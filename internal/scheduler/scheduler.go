@@ -1,12 +1,3 @@
-// Package scheduler wraps robfig/cron with a small key/spec model the daemon
-// can use to (re)register a project's cron schedule each time a project.yaml
-// is observed. Register is idempotent on (key, spec) so the daemon's
-// handleProject can call it on every observed update without churning the
-// cron table.
-//
-// Supported spec syntax includes the standard 5-field cron expression plus
-// robfig's @every shortcut (e.g. "@every 5m") — both are useful: 5-field for
-// production, @every for fast-cycle tests.
 package scheduler
 
 import (
@@ -17,6 +8,9 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+// Scheduler maps string keys to cron entries so a caller can re-register a
+// key's schedule whenever it changes without duplicating entries. The zero
+// value is not usable; create one with New.
 type Scheduler struct {
 	cron *cron.Cron
 
@@ -25,6 +19,7 @@ type Scheduler struct {
 	specs   map[string]string
 }
 
+// New returns a Scheduler with no entries. It fires nothing until Start.
 func New() *Scheduler {
 	return &Scheduler{
 		cron:    cron.New(),
