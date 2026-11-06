@@ -1,5 +1,3 @@
-// Package setup reads and writes the Signal channel's section of
-// channels.yaml for `orch signal setup`, `status` and `test`.
 package setup
 
 import (

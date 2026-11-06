@@ -1,11 +1,3 @@
-// Package channels is the messaging-channel foundation for the workingman
-// daemon: a Channel interface that concrete transports (WhatsApp, …) implement,
-// a Registry that owns the configured channels and fans messages out to them,
-// a YAML config loader with topic routes, and a notify adapter so the daemon
-// can notify channels through its existing notify.Sender plumbing.
-//
-// Nothing in this package talks to a network. Concrete channels live in
-// sub-packages and plug in through a Factory registered per channel type.
 package channels
 
 import (
