@@ -1,11 +1,3 @@
-// Package tui hosts the orch terminal UI. The body is three columns: an
-// optional left column listing agent sessions (toggled by "tl"), a center
-// column stacking the projects gallery and the selected project's tasks,
-// and an optional right column showing a curated status dashboard for the
-// selected project (toggled by "tr", hidden by default), sized to half the
-// terminal's width. All three reflect live state — projects from the
-// project.yaml files scanned by WatchProjects, sessions from a channel the
-// daemon feeds in via its WatchSessions adapter.
 package tui
 
 import (
