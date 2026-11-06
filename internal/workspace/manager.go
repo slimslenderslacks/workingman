@@ -1,10 +1,3 @@
-// Package workspace owns the multi-repo directory each agent runs in.
-//
-// The production implementation will shell out to `wsp new`, which creates a
-// directory at ~/dev/workspaces/<branch>/ holding clones of the requested
-// repos all on the same feature branch. The interface defined here mirrors
-// the wsp surface so that swapping the stub for the real driver is a one-line
-// change inside the daemon wiring.
 package workspace
 
 import (
@@ -54,6 +47,9 @@ func (r Repo) DirName() string {
 	return path.Base(r.Identity)
 }
 
+// Manager provisions and removes the per-branch multi-repo workspaces agents
+// run in. WspManager is the production implementation and StubManager the
+// test/dev one; cmd/orch chooses between them with --workspace-manager.
 type Manager interface {
 	// Create provisions a workspace named branch containing repos. The branch
 	// name is also used as the workspace name and the per-repo feature branch,

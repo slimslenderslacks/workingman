@@ -19,6 +19,10 @@ const FileName = "project.yaml"
 // renames any it finds to FileName at startup (see MigrateLegacy).
 const LegacyFileName = ".project.yaml"
 
+// Writer is the updated_by marker on project.yaml: who last wrote the file.
+// The daemon ignores fsnotify events for files whose UpdatedBy is
+// WriterDaemon, so a write the daemon must react to has to be saved as
+// WriterAgent (see SaveAs).
 type Writer string
 
 const (
@@ -26,10 +30,13 @@ const (
 	WriterDaemon Writer = "daemon"
 )
 
+// Valid reports whether w is a recognised Writer.
 func (w Writer) Valid() bool {
 	return w == WriterAgent || w == WriterDaemon
 }
 
+// Repo is one entry under a project's `repos:` or `new_repos:` list, naming a
+// GitHub repository as org/name.
 type Repo struct {
 	Org  string `yaml:"org"`
 	Name string `yaml:"name"`
@@ -80,6 +87,12 @@ func (r *Repo) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// Project is the parsed contents of a work stream's project.yaml: the goal and
+// repos the project agent fills in, the Status the daemon routes on, cron
+// settings, request flags set by the TUI or daemon (Cleanup, Replan,
+// ReviewNow), and the pull requests the review agent watches. Every writer
+// marshals the whole struct, so fields round-trip even when a writer doesn't
+// use them.
 type Project struct {
 	Description string `yaml:"description"`
 	Repos       []Repo `yaml:"repos"`
@@ -415,6 +428,9 @@ func hasOpenPR(prs []PullRequest) bool {
 	return false
 }
 
+// Load reads and parses the project file at path. An empty file loads as an
+// empty (unpopulated) Project rather than an error; a missing file returns an
+// error satisfying errors.Is(err, fs.ErrNotExist).
 func Load(path string) (*Project, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -437,6 +453,9 @@ func Save(path string, p *Project) error {
 	return SaveAs(path, p, WriterDaemon)
 }
 
+// SaveAs atomically writes p to path with UpdatedBy set to by. Use
+// WriterAgent for a write the daemon must notice (for example a TUI request
+// flag); Save is SaveAs with WriterDaemon.
 func SaveAs(path string, p *Project, by Writer) error {
 	if !by.Valid() {
 		return fmt.Errorf("invalid writer %q", by)

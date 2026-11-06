@@ -1,20 +1,3 @@
-// Package session defines the on-disk layout that lets non-interactive ACP
-// claude sessions survive a TUI restart. Each session owns a directory under a
-// sessions root (default ~/.workingman/sessions):
-//
-//	~/.workingman/sessions/<id>/session.json   session metadata (this package)
-//	~/.workingman/sessions/<id>/agent.sock     the ACP bridge socket (acp-wrapper)
-//
-// acp-wrapper is the writer: it records a session when it launches the sandbox,
-// updates the status as the session progresses, and removes the directory when
-// the sandbox exits. The TUI is the reader: on startup it Lists the sessions
-// root to discover ongoing sessions and reconnects to each agent.sock to resume
-// watching the stream. The metadata in session.json is exactly what the reader
-// needs to reconnect without the writer being alive to ask.
-//
-// Writes are atomic (write-temp-then-rename) so a reader that Lists the
-// directory while the writer is mid-update never observes a half-written or
-// truncated session.json.
 package session
 
 import (

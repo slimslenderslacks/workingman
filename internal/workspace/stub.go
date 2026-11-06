@@ -19,6 +19,7 @@ type StubManager struct {
 	Root string
 }
 
+// NewStub returns a StubManager that creates workspaces under root.
 func NewStub(root string) *StubManager {
 	return &StubManager{Root: root}
 }

@@ -29,6 +29,7 @@ type WspManager struct {
 	GH string
 }
 
+// NewWsp returns a WspManager that uses wsp and gh from PATH.
 func NewWsp() *WspManager { return &WspManager{} }
 
 func (m *WspManager) binary() string {
