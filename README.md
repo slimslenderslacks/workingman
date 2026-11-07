@@ -32,6 +32,23 @@ as before. Every schedule needs an explicit stop condition (`cron_until:` or
 `cron_max_runs` counts cycles, not wake-ups: a firing that starts no cycle isn't
 charged against it.
 
+## Running in the background (macOS)
+
+`orch service install --root <dir> [-- <daemon flags>]` writes a launchd
+LaunchAgent (`~/Library/LaunchAgents/com.workingman.orch.plist`) that runs
+`orch --headless --require-ac` at login and restarts it if it dies; logs go to
+`~/.workingman/logs` (`--log-dir`). `orch service status` / `uninstall` check
+and remove it.
+
+`--require-ac` (on for the service, off for a plain `orch`; a no-op off macOS)
+polls `pmset -g batt` every 30s. **On battery the daemon pauses rather than
+exiting**: no new agents are dispatched (running sessions are left alone), and
+each cron firing is recorded as a missed tick instead of firing, so sleepy-head
+reports it like a tick lost to sleep. Back on AC, deferred projects are
+re-dispatched. Pausing was chosen over exit-and-restart because it needs no
+power-aware launchd keepalive and keeps state, sessions and channels alive. An
+unreadable `pmset` result keeps the previous state.
+
 ## Prerequisites
 
 - Go 1.22+

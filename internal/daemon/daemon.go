@@ -12,6 +12,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/notify"
+	"github.com/slimslenderslacks/work/internal/power"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
@@ -117,6 +118,14 @@ type Daemon struct {
 	cronStatePath   string
 	clock           func() time.Time
 	sleepCheckEvery time.Duration
+
+	// power gates dispatching on AC power (nil = no gate); see power_gate.go.
+	power           power.Source
+	powerCheckEvery time.Duration
+	powerMu         sync.Mutex
+	powerPaused     bool
+	powerDeferred   map[string]bool
+	powerRevisit    func(string) // test hook; nil = revisitProject
 
 	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
 	// unless WithStateFile configured a path.
@@ -236,6 +245,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 		clock:              time.Now,
 		sleepCheckEvery:    cronSleepCheckEvery,
+		powerCheckEvery:    defaultPowerCheckEvery,
 	}
 	d.snapshot.startedAt = time.Now()
 	d.snapshot.pid = os.Getpid()
@@ -276,6 +286,11 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 func (d *Daemon) Run(ctx context.Context) error {
 	d.ctx = ctx
 	defer d.shutdown()
+	if d.power != nil {
+		// Synchronously first, so a daemon started on battery never dispatches.
+		d.checkPower(ctx)
+		go d.powerWatchLoop(ctx)
+	}
 	if d.scheduler != nil {
 		// Before Start: count the ticks missed while the daemon was down. They
 		// are recorded, never fired.

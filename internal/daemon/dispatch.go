@@ -138,6 +138,11 @@ func (d *Daemon) handleProjectSeed(path string) {
 // daemon-write filter (otherwise our own created_at stamp save, also
 // written as `daemon`, would silence every subsequent cron firing).
 func (d *Daemon) dispatchProject(path string, p *project.Project) {
+	// On battery nothing new starts; the project is re-dispatched on AC.
+	if d.deferForPower(path) {
+		d.audit.Log("power_deferred", "path", path)
+		return
+	}
 	// `:stop` outranks everything else — cleanup, cron, the status switch. A
 	// stopped project gets no further routing until `:start` restores its prior
 	// status; this call is what actually kills whatever agents were running for
@@ -891,6 +896,12 @@ func (d *Daemon) onCronFired(projectPath string) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			d.audit.Log("project_load_error", "path", projectPath, "err", err.Error())
 		}
+		return
+	}
+	if d.PowerPaused() {
+		// Not fired: counted as missed so sleepy-head reports it.
+		d.recordMissedTick(projectPath, d.clock())
+		d.audit.Log("cron_skipped_battery", "path", projectPath, "spec", p.Cron)
 		return
 	}
 	d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
