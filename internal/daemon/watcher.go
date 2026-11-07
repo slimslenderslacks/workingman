@@ -114,6 +114,9 @@ func (d *Daemon) handlerFor(path string) eventHandler {
 	if base == project.FileName {
 		return d.handleProject
 	}
+	if base == CatchupMarker {
+		return d.handleCatchup
+	}
 	if base == "project.md" {
 		return d.handleProjectSeed
 	}

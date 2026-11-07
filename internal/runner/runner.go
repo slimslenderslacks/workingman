@@ -149,6 +149,12 @@ type Plan struct {
 	// .orch/context.yaml. Ignored for every other Kind.
 	Observe Observe
 
+	// BehindProjects and ReplanInstruction, for the sleepy-head agent, are the
+	// cron projects that missed ticks and the text telling it how to trigger a
+	// one-time catch-up of one. Ignored for every other Kind.
+	BehindProjects    []prompts.BehindProject
+	ReplanInstruction string
+
 	// SessionName is the session name (the key a terminal tab is tracked by).
 	// If empty, Runner derives one from Kind and Branch (or Kind and a short
 	// hash of WorkingDir).
@@ -544,6 +550,8 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		SnapshotFile:            p.Observe.SnapshotFile,
 		AuditLog:                p.Observe.AuditLog,
 		SessionsRoot:            p.Observe.SessionsRoot,
+		BehindProjects:          p.BehindProjects,
+		ReplanInstruction:       p.ReplanInstruction,
 	}
 	instructions, err := prompts.Render(p.Kind, data)
 	if err != nil {

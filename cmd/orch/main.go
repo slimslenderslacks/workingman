@@ -42,6 +42,7 @@ func (r *rootsFlag) Set(s string) error {
 const usageHeader = `usage: orch --root <dir> [flags]        run the daemon, with the TUI unless --headless
        orch tui --root <dir>            run only the TUI over a directory
        orch status [--json]             print the running daemon's state snapshot
+       orch catchup <project-path>      fire a behind project's schedule once, now (used by sleepy-head)
        orch whatsapp <subcommand>       set up and check the WhatsApp channel (see docs/channels.md)
        orch signal <subcommand>         set up and check the Signal channel (see docs/channels.md)
        orch service install|uninstall|status   run the daemon in the background via launchd (macOS)
@@ -69,6 +70,9 @@ func main() {
 	}
 	if len(args) > 0 && args[0] == "status" {
 		os.Exit(runStatus(args[1:], os.Stdout, os.Stderr))
+	}
+	if len(args) > 0 && args[0] == "catchup" {
+		os.Exit(runCatchup(args[1:], os.Stdout, os.Stderr))
 	}
 	if len(args) > 0 && args[0] == "help" {
 		fmt.Fprint(os.Stdout, usageHeader)

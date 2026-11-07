@@ -324,6 +324,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// can't delay it (nor it them).
 	d.beginWorkingmanAgent(ctx)
 	d.startupScan()
+	d.launchSleepyHead()
 	go d.reapLoop(ctx)
 	if d.snapshot.path != "" {
 		// Publish immediately so a reader never sees a stale file from a
