@@ -25,6 +25,9 @@
 // itself (status transitions) and ignores the fsnotify events its own writes
 // cause.
 //
+// Run as a launchd service (see `orch service install`) the daemon lives in the
+// background and gates itself on AC power; see the README.
+//
 // Without [WithRunner] the daemon only observes: it audit-logs what it would
 // dispatch but launches nothing.
 //
@@ -43,6 +46,15 @@
 //     lead to commit, retry or block; commit results lead to the next task or
 //     project completion. Also the idle/blocked transitions, the wolf agent
 //     and the archive (cleanup) agent.
+//   - cron_missed.go: sleep-aware cron. Persists when each schedule last
+//     fired ([WithCronState]), counts ticks lost to daemon downtime or host
+//     sleep into one [MissedSchedule] per project, and never fires them itself.
+//   - sleepy_head.go: when schedules were missed, opens the interactive
+//     sleepy-head agent once at startup to report them; `orch catchup` drops a
+//     marker that [RequestCatchup] writes and the daemon turns into exactly one
+//     cron firing per approved project.
+//   - power_gate.go: with `--require-ac`, pauses dispatch while on battery
+//     (running sessions are left alone) and records cron firings as missed.
 //   - intake.go: intake/*.md requests, which get a planner onto new work
 //     whatever the project is doing.
 //   - repo_sync.go: before each planning run, clones repos added since the

@@ -49,6 +49,32 @@ re-dispatched. Pausing was chosen over exit-and-restart because it needs no
 power-aware launchd keepalive and keeps state, sessions and channels alive. An
 unreadable `pmset` result keeps the previous state.
 
+### Missed schedules and sleepy-head
+
+robfig/cron keeps no history, so a tick that passes while the daemon is down or
+the laptop is asleep is simply gone. The daemon therefore records when each cron
+project last fired (`cron_state.json` in the orch state directory, outside the watched roots) and
+collapses the ticks that went by unobserved into one **missed-schedule** record
+per project (tick count, last fire, most recent missed tick). It looks at
+startup, and while running it notices a wall-clock jump (lid closed) and counts
+the ticks that sleep swallowed. Nothing is fired for missed ticks automatically.
+
+When the daemon starts and any project is behind, it opens one interactive
+**sleepy-head** agent in a terminal tab (like the wolf; also announced on the
+messaging channels). It reports which projects are behind and offers to catch
+them up. For each project you approve it runs
+
+```
+orch catchup <path/to/project.yaml>
+```
+
+which drops a `catchup-request` marker beside the project file. The running
+daemon consumes the marker and fires that project's cron callback **once**,
+however many ticks were missed, so the planner re-plans a single time. The
+request is ignored if the project is no longer behind (so repeating it can't
+double-fire), and on battery it is deferred. `cron_max_runs` is only charged if
+the firing really started a cycle.
+
 ## Prerequisites
 
 - Go 1.22+
