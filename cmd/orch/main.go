@@ -207,6 +207,7 @@ func runDaemon(args []string) {
 	dopts := []daemon.Option{
 		daemon.WithRunner(r),
 		daemon.WithScheduler(scheduler.New()),
+		daemon.WithCronState(filepath.Join(stateDir, "cron_state.json")),
 	}
 	dopts = append(dopts, ch.options(a)...)
 	stateFilePath, err := resolveStateFile(*stateFile, *sessionsRoot)

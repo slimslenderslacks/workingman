@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/robfig/cron/v3"
 )
@@ -89,4 +90,25 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// TicksBetween counts the ticks of spec that fall in the half-open interval
+// (after, upTo], using the same parser Register does. It returns the count and
+// the latest such tick (zero when there are none). Counting stops at limit
+// (when positive) so a dense schedule such as "@every 1s" measured across a
+// long gap cannot spin; the returned count is then a lower bound, and last is
+// the limit'th tick rather than the true latest.
+func TicksBetween(spec string, after, upTo time.Time, limit int) (count int, last time.Time, err error) {
+	sched, err := cron.ParseStandard(spec)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("scheduler: parse %q: %w", spec, err)
+	}
+	for t := sched.Next(after); !t.IsZero() && !t.After(upTo); t = sched.Next(t) {
+		count++
+		last = t
+		if limit > 0 && count >= limit {
+			break
+		}
+	}
+	return count, last, nil
 }

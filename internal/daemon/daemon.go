@@ -109,6 +109,15 @@ type Daemon struct {
 	// See reaper.go.
 	sessionIdleTimeout time.Duration
 
+	// cronHistory is the persisted per-project cron history (last fire, missed
+	// ticks); see cron_missed.go. cronStatePath is its file ("" = memory only),
+	// clock is the time source (tests replace it), sleepCheckEvery the
+	// wall-clock sampling period of the sleep watcher.
+	cronHistory     *cronState
+	cronStatePath   string
+	clock           func() time.Time
+	sleepCheckEvery time.Duration
+
 	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
 	// unless WithStateFile configured a path.
 	snapshot snapshotState
@@ -225,6 +234,8 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		reviewBackoff:      map[string]int{},
 		dispatchChains:     map[string]chan struct{}{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
+		clock:              time.Now,
+		sleepCheckEvery:    cronSleepCheckEvery,
 	}
 	d.snapshot.startedAt = time.Now()
 	d.snapshot.pid = os.Getpid()
@@ -236,6 +247,17 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 	if err := d.resolveWorkingman(); err != nil {
 		w.Close()
 		return nil, fmt.Errorf("daemon: %w", err)
+	}
+	if d.cronStatePath != "" {
+		if err := validateStateFile(d.cronStatePath, roots); err != nil {
+			w.Close()
+			return nil, fmt.Errorf("daemon: %w", err)
+		}
+	}
+	hist, herr := loadCronState(d.cronStatePath)
+	d.cronHistory = hist // usable (empty) even when the file was unreadable
+	if herr != nil {
+		a.Log("cron_state_load_error", "path", d.cronStatePath, "err", herr.Error())
 	}
 	if d.snapshot.path != "" {
 		if err := validateStateFile(d.snapshot.path, roots); err != nil {
@@ -255,7 +277,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.ctx = ctx
 	defer d.shutdown()
 	if d.scheduler != nil {
+		// Before Start: count the ticks missed while the daemon was down. They
+		// are recorded, never fired.
+		d.detectMissedAtStartup()
 		d.scheduler.Start()
+		go d.sleepWatchLoop(ctx)
 	}
 	for _, r := range d.roots {
 		// Before the watch is installed, so the renames aren't seen as events.

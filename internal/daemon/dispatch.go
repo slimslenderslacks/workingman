@@ -844,9 +844,11 @@ func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) bool 
 	}
 	if reason := p.CronStopReason(); reason != "" {
 		d.scheduler.Unregister(projectPath)
+		d.untrackCron(projectPath)
 		d.audit.Log("cron_unscheduled", "path", projectPath, "spec", p.Cron, "reason", reason)
 		return true
 	}
+	d.trackCron(projectPath)
 	err := d.scheduler.Register(projectPath, p.Cron, func() { d.onCronFired(projectPath) })
 	if err != nil {
 		d.audit.Log("cron_register_error", "path", projectPath, "spec", p.Cron, "err", err.Error())
@@ -892,6 +894,7 @@ func (d *Daemon) onCronFired(projectPath string) {
 		return
 	}
 	d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
+	d.recordCronFire(projectPath, d.clock())
 
 	// Entry check: the budget on disk may already be spent (a restart that
 	// re-registered from a stale read, or a schedule left over from before the

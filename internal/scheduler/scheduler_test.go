@@ -127,3 +127,39 @@ func TestEmptyKeyOrSpecRejected(t *testing.T) {
 		t.Error("empty spec should error")
 	}
 }
+
+func TestTicksBetween(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name      string
+		spec      string
+		after     time.Time
+		upTo      time.Time
+		limit     int
+		wantCount int
+		wantLast  time.Time
+	}{
+		{"hourly over 3.5h", "0 * * * *", base, base.Add(3*time.Hour + 30*time.Minute), 0, 3, base.Add(3 * time.Hour)},
+		{"after is exclusive", "0 * * * *", base, base.Add(time.Hour), 0, 1, base.Add(time.Hour)},
+		{"upTo inclusive, none before", "0 * * * *", base, base.Add(59 * time.Minute), 0, 0, time.Time{}},
+		{"limit caps the count", "@every 1m", base, base.Add(time.Hour), 5, 5, base.Add(5 * time.Minute)},
+		{"empty interval", "0 * * * *", base, base, 0, 0, time.Time{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n, last, err := TicksBetween(tc.spec, tc.after, tc.upTo, tc.limit)
+			if err != nil {
+				t.Fatalf("TicksBetween: %v", err)
+			}
+			if n != tc.wantCount || !last.Equal(tc.wantLast) {
+				t.Errorf("got (%d, %v), want (%d, %v)", n, last, tc.wantCount, tc.wantLast)
+			}
+		})
+	}
+}
+
+func TestTicksBetweenInvalidSpec(t *testing.T) {
+	if _, _, err := TicksBetween("nonsense", time.Now(), time.Now().Add(time.Hour), 0); err == nil {
+		t.Fatal("expected error for invalid spec")
+	}
+}
