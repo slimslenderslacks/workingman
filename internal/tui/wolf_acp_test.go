@@ -79,12 +79,27 @@ func TestWolfTabComposeAndSend(t *testing.T) {
 	if got, _ := m.acp.selected(); got.draft != "" {
 		t.Errorf("draft after send = %q, want empty", got.draft)
 	}
-	if !m.acpComposing {
-		t.Error("composing should continue after a send so a chat can flow")
+	if m.acpComposing {
+		t.Error("a send should return to normal mode")
+	}
+	if out := m.View(); !strings.Contains(out, "enter to message this session") {
+		t.Errorf("normal mode should show the enter hint; got:\n%s", out)
 	}
 
-	// An empty draft sends nothing.
+	// Enter re-enters prompt-entry mode without sending anything.
 	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.acpComposing {
+		t.Fatal("enter in normal mode should re-enter prompt-entry mode")
+	}
+	if len(*sent) != 1 {
+		t.Errorf("re-entering sent a message: %v", *sent)
+	}
+
+	// An empty draft sends nothing and stays in prompt-entry mode.
+	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.acpComposing {
+		t.Error("empty enter should stay in prompt-entry mode")
+	}
 	if len(*sent) != 1 {
 		t.Errorf("empty enter sent a message: %v", *sent)
 	}

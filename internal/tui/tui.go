@@ -583,7 +583,7 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleACPComposeKey handles keys while typing a message into a conversational
-// tab: everything printable is text, enter sends, esc stops typing (the draft is
+// tab: everything printable is text, enter sends (and leaves typing mode), esc stops typing (the draft is
 // kept), ctrl+u clears it, and alt-j/alt-k still switch tabs. Typing is a
 // separate mode so the view's single-letter commands (q, z, h, l, j, k, G) stay
 // usable on every other tab and when not composing; while composing those are
@@ -633,6 +633,8 @@ func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		t.draft = ""
+		// A sent message returns to normal mode; enter starts the next one.
+		m.acpComposing = false
 	case tea.KeyBackspace:
 		if r := []rune(t.draft); len(r) > 0 {
 			t.draft = string(r[:len(r)-1])

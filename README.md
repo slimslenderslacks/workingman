@@ -475,7 +475,7 @@ the tab's status line:
 
 `j`/`k` here are scroll keys, not tab switches — tabs move with `⌥j`/`⌥k`
 (as on the main screen) or `h`/`l`. While typing a message, letters are text,
-so only `ctrl-f`/`ctrl-b` scroll; `esc` stops typing and gives `j`/`k`/`G` back.
+so only `ctrl-f`/`ctrl-b` scroll; sending a message (`enter`) or `esc` stops typing and gives `j`/`k`/`G` back; press `enter` again to type another.
 Each tab keeps its own scroll position.
 
 ## Hiding work streams
