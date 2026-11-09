@@ -80,7 +80,7 @@ the firing really started a cycle.
 - Go 1.22+
 - A terminal orch can open tabs in — [Ghostty](https://ghostty.org) (macOS via
   AppleScript, Linux via `ghostty +new-tab`), WezTerm or kitty. Sessions that
-  need a human at a TTY (the `--wolf-host` wolf, the TUI's `:dir`/`:session`)
+  need a human at a TTY (the `--wolf-host` wolf, the TUI's `:dir`/`:session`; `:orch`/`:workspace` open plain tabs in the orch dir / wsp workspace)
   open in a new tab titled after the project. orch detects the terminal it runs
   in; otherwise set `terminal: ghostty` in `~/.config/workingman/settings.yaml`.
   See [docs/terminal-tabs.md](docs/terminal-tabs.md).

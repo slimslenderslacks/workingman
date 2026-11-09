@@ -448,6 +448,14 @@ func (l interactiveLauncher) OpenSession(ctx context.Context, projectPath string
 	return l.d.OpenInteractiveSession(ctx, projectPath)
 }
 
+func (l interactiveLauncher) OpenOrchDir(ctx context.Context, projectPath string) (string, error) {
+	return l.d.OpenOrchDirTab(ctx, projectPath)
+}
+
+func (l interactiveLauncher) OpenWorkspaceDir(ctx context.Context, projectPath string) (string, error) {
+	return l.d.OpenWorkspaceDirTab(ctx, projectPath)
+}
+
 // sshAgentUnusable reports whether current is an SSH_AUTH_SOCK that cannot
 // hold the signing key: unset, or the macOS system (launchd) agent a GUI/login
 // shell inherits. Any other value is assumed to be the private agent.

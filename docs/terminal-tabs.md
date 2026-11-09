@@ -10,6 +10,8 @@ the terminal orch runs in**:
 | host wolf (`--wolf-host`) | the daemon, when the project blocks | `wolf-<branch>` | project name |
 | `:dir` shell (bash in the workspace, on the host) | the TUI command | `shell-<work-stream>` | project name |
 | `:session` claude (in the `session-<work-stream>` sandbox) | the TUI command | `session-<work-stream>` | project name |
+| `:orch` shell (bash in the work stream's orch directory) | the TUI command | `orch-<work-stream>` | project name |
+| `:workspace` shell (bash at the root of the wsp workspace) | the TUI command | `workspace-<work-stream>` | project name |
 | any agent, when orch runs **without** `--acp-kit` | the daemon | `<kind>-<task-or-branch>` | project name |
 
 The tab title is always the project's (work stream's) name. The session name
@@ -18,7 +20,7 @@ is the key orch uses to track the tab.
 ## One tab per session
 
 If a session's tab is already open, orch doesn't open a second one. Running
-`:dir` or `:session` again for the same work stream:
+`:dir`, `:session`, `:orch` or `:workspace` again for the same work stream:
 
 1. leaves the existing tab running,
 2. switches to it (brings its window and the terminal to the front), and
