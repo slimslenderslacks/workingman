@@ -36,7 +36,8 @@
 //   - [Config] — everything one session needs: ids and paths, kit and
 //     template, workspaces ([SplitMount] / [JoinMount] handle the `:ro`
 //     suffix), lifecycle mode, task/project paths, git identity and signing,
-//     model, static MCPs and sbx policies. cmd/acp-wrapper fills it from
+//     model, the per-sandbox MCP gateway (MCPGateway, see
+//     internal/mcpgateway) and sbx policies. cmd/acp-wrapper fills it from
 //     flags. [Config.SessionDir], [Config.SocketPath] and [Config.LogPath] give
 //     the on-disk layout.
 //   - [Run] — the blocking main loop described above.

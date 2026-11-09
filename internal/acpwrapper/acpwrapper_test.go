@@ -436,33 +436,6 @@ func TestEnsureSandboxIgnoresOtherSandboxesOnCacheMiss(t *testing.T) {
 	}
 }
 
-func TestEnsureSandboxForwardsStaticMCPs(t *testing.T) {
-	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
-	c := Config{
-		SandboxName: "acp-s",
-		KitPath:     "/kits/acp",
-		SbxPath:     "sbx",
-		Workspaces:  []string{"/repo"},
-		StaticMCPs:  []string{"github", "web-search"},
-	}
-	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
-		t.Fatalf("ensureSandbox: %v", err)
-	}
-	if len(f.calls) != 2 {
-		t.Fatalf("expected 2 sbx calls, got %d: %v", len(f.calls), f.calls)
-	}
-	create := f.calls[1]
-	want := []string{
-		"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp",
-		"--static-mcp", "github",
-		"--static-mcp", "web-search",
-		"/repo",
-	}
-	if !reflect.DeepEqual(create, want) {
-		t.Errorf("create call = %v, want %v", create, want)
-	}
-}
-
 func TestEnsureSandboxAppliesPoliciesAfterCreate(t *testing.T) {
 	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
 	c := Config{

@@ -187,11 +187,14 @@ type Task struct {
 	// to show tasks in the order they actually ran/completed.
 	CompletedAt *time.Time `yaml:"completed_at,omitempty"`
 
-	// StaticMCPs are the sbx static-MCP names this task's sandbox should be
-	// created with: each entry becomes a `--static-mcp <name>` flag on
-	// `sbx create`. Populated by the planning agent when a task needs an MCP
-	// server inside its sandbox (web search, github, etc.). Empty means no
-	// MCPs and a vanilla sandbox.
+	// StaticMCPs are the MCP server names this task's sandbox should reach.
+	// Populated by the planning agent when a task needs an MCP server inside
+	// its sandbox (web search, github, etc.). They are no longer passed to
+	// `sbx create --static-mcp`: when workingman runs with --mcp-gateway-url,
+	// they are the catalog server names of the sandbox's per-sandbox
+	// standalone-codemode gateway (POST /gateways {"servers": StaticMCPs}),
+	// handed to the sandbox as MCP_URL. Empty means the configured default
+	// set (--mcp-gateway-servers). See internal/mcpgateway.
 	StaticMCPs []string `yaml:"static_mcps,omitempty"`
 
 	// Policies are per-task sandbox policy rules applied with `sbx policy`

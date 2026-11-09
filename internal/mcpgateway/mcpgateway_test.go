@@ -1,0 +1,161 @@
+package mcpgateway
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"testing"
+
+	"github.com/slimslenderslacks/work/internal/policy"
+)
+
+func TestSandboxURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://localhost:3333/gateways/abc":     "http://host.docker.internal:3333/gateways/abc",
+		"http://127.0.0.1:3333/gateways/abc":     "http://host.docker.internal:3333/gateways/abc",
+		"http://[::1]:3333/gateways/abc":         "http://host.docker.internal:3333/gateways/abc",
+		"http://localhost/gateways/abc":          "http://host.docker.internal/gateways/abc",
+		"https://gw.example.com:8443/gateways/x": "https://gw.example.com:8443/gateways/x",
+	} {
+		got, err := SandboxURL(in)
+		if err != nil || got != want {
+			t.Errorf("SandboxURL(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err := SandboxURL("/no/host"); err == nil {
+		t.Error("SandboxURL without a host: want an error")
+	}
+}
+
+func TestPolicyRules(t *testing.T) {
+	allow := func(r string) policy.Rule {
+		return policy.Rule{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: r}
+	}
+	got, err := PolicyRules("http://localhost:3333")
+	if want := []policy.Rule{allow("host.docker.internal:3333"), allow("localhost:3333")}; err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("loopback: %v, %v; want %v", got, err, want)
+	}
+	got, err = PolicyRules("https://gw.example.com")
+	if want := []policy.Rule{allow("gw.example.com:443")}; err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("remote: %v, %v; want %v", got, err, want)
+	}
+}
+
+func TestClientCreateDeleteAlive(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /gateways", func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Servers []string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Servers) == 1 && body.Servers[0] == "nope" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "unknown_servers", "unknown": []string{"nope"}})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Gateway{ID: "abc", URL: "http://" + r.Host + "/gateways/abc"})
+	})
+	mux.HandleFunc("/gateways/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("id") != "abc" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := Client{BaseURL: srv.URL + "/"}
+	ctx := context.Background()
+
+	gw, err := c.Create(ctx, []string{"gmail"})
+	if err != nil || gw.ID != "abc" || gw.URL != srv.URL+"/gateways/abc" {
+		t.Fatalf("Create = %+v, %v", gw, err)
+	}
+	var unknown *UnknownServersError
+	if _, err := c.Create(ctx, []string{"nope"}); !errors.As(err, &unknown) || unknown.Names[0] != "nope" {
+		t.Errorf("Create unknown = %v, want *UnknownServersError", err)
+	}
+	if _, err := c.Create(ctx, nil); err == nil {
+		t.Error("Create with no servers: want an error")
+	}
+	if ok, err := c.Alive(ctx, "abc"); !ok || err != nil {
+		t.Errorf("Alive(abc) = %v, %v", ok, err)
+	}
+	if ok, err := c.Alive(ctx, "gone"); ok || err != nil {
+		t.Errorf("Alive(gone) = %v, %v", ok, err)
+	}
+	if err := c.Delete(ctx, "abc"); err != nil {
+		t.Errorf("Delete: %v", err)
+	}
+	if err := c.Delete(ctx, "gone"); err != nil {
+		t.Errorf("Delete of a gone gateway (404) must not fail: %v", err)
+	}
+}
+
+// Mint drops catalog-unknown names (a task's static_mcps may name servers
+// the catalog lacks) rather than failing the whole gateway.
+func TestManagerMintDropsUnknownServers(t *testing.T) {
+	var posted [][]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Servers []string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		posted = append(posted, body.Servers)
+		for _, s := range body.Servers {
+			if s == "web-search" {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "unknown_servers", "unknown": []string{"web-search"}})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Gateway{ID: "x", URL: "http://localhost:1/gateways/x"})
+	}))
+	defer srv.Close()
+	m := Manager{Client: Client{BaseURL: srv.URL}, Store: Store{Dir: t.TempDir()}, Servers: []string{"gmail", "web-search"}}
+	rec, err := m.Mint(context.Background(), "sb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(rec.Servers, []string{"gmail"}) || !reflect.DeepEqual(rec.Requested, []string{"gmail", "web-search"}) {
+		t.Errorf("record servers = %v requested = %v", rec.Servers, rec.Requested)
+	}
+	if rec.SandboxURL != "http://host.docker.internal:1/gateways/x" {
+		t.Errorf("SandboxURL = %q", rec.SandboxURL)
+	}
+	if len(posted) != 2 {
+		t.Errorf("POSTs = %v, want the retry without web-search", posted)
+	}
+}
+
+func TestStoreRoundTrip(t *testing.T) {
+	s := Store{Dir: t.TempDir()}
+	if _, ok, err := s.Load("sb"); ok || err != nil {
+		t.Fatalf("empty Load = %v, %v", ok, err)
+	}
+	rec := Record{Sandbox: "sb", ID: "abc", Servers: []string{"gmail"}}
+	if err := s.Save(rec); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.Load("sb")
+	if err != nil || !ok || got.ID != "abc" {
+		t.Errorf("Load = %+v, %v, %v", got, ok, err)
+	}
+	if list, _ := s.List(); len(list) != 1 {
+		t.Errorf("List = %v", list)
+	}
+	if err := s.Remove("sb"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove("sb"); err != nil {
+		t.Errorf("second Remove: %v", err)
+	}
+	if err := s.Save(Record{Sandbox: "../x"}); err == nil {
+		t.Error("Save with a path-like sandbox name: want an error")
+	}
+}

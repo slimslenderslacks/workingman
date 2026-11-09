@@ -161,14 +161,15 @@ the project into tasks as described above.
 {{end}}
 {{end}}
 
-A task may optionally include `static_mcps:` — a YAML list of sbx static-MCP
-names to attach when the task's sandbox is created. Each entry becomes a
-`--static-mcp <name>` flag on `sbx create`. Use this only when the task
-genuinely needs an MCP server in its sandbox (e.g. a `github` MCP for tasks
-that interact with GitHub APIs). Leave the field out for tasks that don't
-need extra MCPs. Each task gets its own sandbox named
-`<work-stream>-<task-name>`, so a task's MCP choices are isolated from
-sibling tasks. Example:
+A task may optionally include `static_mcps:` — a YAML list of MCP server
+names the task's sandbox should be able to reach. They are served to the
+agent through a per-sandbox MCP gateway (the `okta-gateway` MCP server inside
+the sandbox) built over exactly these catalog servers; a task that lists none
+gets the host's default server set. Use this only when the task genuinely
+needs specific MCP servers (e.g. a `github` MCP for tasks that interact with
+GitHub APIs). Leave the field out for tasks that don't. Each task gets its own
+sandbox named `<work-stream>-<task-name>`, so a task's MCP choices are
+isolated from sibling tasks. Example:
 
   static_mcps:
     - github

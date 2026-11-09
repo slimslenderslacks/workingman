@@ -1,0 +1,46 @@
+// Package mcpgateway gives every sandbox workingman creates its own MCP
+// gateway: a sub-gateway of the host's standalone-codemode gateway, minted
+// with POST /gateways and torn down with DELETE /gateways/{id}.
+//
+// Role: shared (runner and acp-wrapper)
+//
+// The flow, per sandbox (driven by acpwrapper.Run for ACP sessions and by
+// the runner for the terminal-tab and `:session` paths):
+//
+//  1. Creating the sandbox applies [PolicyRules] after the task's own
+//     policies: allow network to the gateway's port, as
+//     host.docker.internal:<port> and localhost:<port> for a loopback base.
+//  2. [Manager.Ensure] reuses the gateway recorded for the sandbox when it is
+//     still live and was minted over the same servers, else DELETEs the stale
+//     one and POSTs a new one over [Manager.Servers] (a task's static_mcps, or
+//     the configured default set). Catalog-unknown names are dropped rather
+//     than failing the whole gateway.
+//  3. The sandbox gets MCP_URL ([EnvVar]) = the gateway URL with a loopback
+//     host rewritten to host.docker.internal ([SandboxURL]). It is passed per
+//     `sbx exec -e` rather than at `sbx create`, so a reused sandbox whose
+//     gateway vanished (standalone-codemode keeps them in memory only) just
+//     gets a new one; acp-kit's claude-acp-client registers it as the
+//     `okta-gateway` MCP server. The wrapper also records it in the sandbox's
+//     /etc/sandbox-persistent.sh ([PersistEnvArgs]) for shells a human opens.
+//  4. Removing the sandbox (exit cleanup, or a recreate on mount drift)
+//     calls [Manager.Release]; [Manager.Sweep] releases the gateways of
+//     recorded sandboxes that have since disappeared.
+//
+// Gateway state is persisted as one JSON [Record] per sandbox in a [Store],
+// by default <sessions-root>/../gateways ([StateDir]), so restarts can reuse
+// or clean up gateways. Every gateway failure is best-effort: the agent runs
+// without MCP_URL rather than not at all.
+//
+// # Key types
+//
+//   - [Client] — the /gateways HTTP API (Create, Delete, Alive).
+//   - [Manager] — mint/reuse/release policy over a Client and a Store.
+//   - [Store], [Record] — the persisted per-sandbox gateway state.
+//
+// # Collaborators
+//
+// Uses internal/policy for the network rules. Used by internal/acpwrapper
+// and internal/runner; cmd/orch's --mcp-gateway-url / --mcp-gateway-servers
+// configure it, and cmd/acp-wrapper's --mcp-gateway-url / --mcp-server /
+// --mcp-gateway-state carry it to the wrapper.
+package mcpgateway

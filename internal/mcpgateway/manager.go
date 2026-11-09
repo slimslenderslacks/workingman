@@ -1,0 +1,225 @@
+package mcpgateway
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/slimslenderslacks/work/internal/policy"
+)
+
+// SweepGrace is how old a record must be before Sweep may release it for a
+// sandbox that `sbx ls` doesn't show. A record is saved only after its
+// sandbox is created, but another wrapper can save one between our `sbx ls`
+// and our sweep; the grace keeps us from deleting a gateway a concurrent
+// launch just minted.
+const SweepGrace = 10 * time.Minute
+
+// Manager mints, validates and releases the per-sandbox gateways for one
+// workingman process. The zero value is disabled (Enabled is false) and every
+// method is a no-op on it, so callers need no nil checks.
+type Manager struct {
+	// Client talks to the standalone-codemode gateway. An empty BaseURL
+	// disables the manager.
+	Client Client
+	// Store persists one Record per sandbox. An empty Dir disables
+	// persistence (and so reuse, Release and Sweep).
+	Store Store
+	// Servers are the catalog server names requested for every gateway
+	// minted. Empty disables the manager: POST /gateways needs at least one.
+	Servers []string
+	// Log receives diagnostics; nil means os.Stderr.
+	Log io.Writer
+}
+
+// Enabled reports whether sandboxes should get a gateway at all.
+func (m Manager) Enabled() bool {
+	return m.Client.base() != "" && len(m.Servers) > 0
+}
+
+func (m Manager) logf(format string, args ...any) {
+	w := m.Log
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, "mcpgateway: "+format+"\n", args...)
+}
+
+// PolicyRules are the sbx network rules every sandbox gets once a gateway
+// URL is configured (see the package-level PolicyRules) — even one whose
+// gateway could not be minted, so a later relaunch that reuses it can reach a
+// gateway again. Nil when no URL is configured.
+func (m Manager) PolicyRules() ([]policy.Rule, error) {
+	if m.Client.base() == "" {
+		return nil, nil
+	}
+	return PolicyRules(m.Client.BaseURL)
+}
+
+// Reusable reports whether the gateway recorded for an existing sandbox can
+// keep serving it: there is a record, it was minted on this BaseURL over
+// these Servers, and the gateway still exists. A gateway we cannot reach
+// (standalone-codemode down) counts as reusable — minting a replacement would
+// fail the same way, so recreating the sandbox would only lose its state.
+func (m Manager) Reusable(ctx context.Context, sandbox string) (Record, bool) {
+	if !m.Enabled() || m.Store.Dir == "" {
+		return Record{}, false
+	}
+	rec, ok, err := m.Store.Load(sandbox)
+	if err != nil {
+		m.logf("sandbox %s: %v", sandbox, err)
+		return Record{}, false
+	}
+	if !ok || rec.ID == "" || rec.SandboxURL == "" {
+		return Record{}, false
+	}
+	if rec.BaseURL != m.Client.base() || !slices.Equal(rec.Requested, m.Servers) {
+		return rec, false
+	}
+	alive, err := m.Client.Alive(ctx, rec.ID)
+	if err != nil {
+		m.logf("sandbox %s: WARNING cannot check gateway %s, keeping it: %v", sandbox, rec.ID, err)
+		return rec, true
+	}
+	return rec, alive
+}
+
+// Mint releases any gateway already recorded for sandbox, then POSTs a new
+// one over m.Servers and returns its record. The record is NOT saved: call
+// Save once the sandbox it belongs to exists, or Discard if creating it fails.
+func (m Manager) Mint(ctx context.Context, sandbox string) (Record, error) {
+	if !m.Enabled() {
+		return Record{}, fmt.Errorf("mcpgateway: not configured")
+	}
+	m.Release(ctx, sandbox)
+	servers := slices.Clone(m.Servers)
+	gw, err := m.Client.Create(ctx, servers)
+	// A task's static_mcps may name servers this catalog doesn't carry; serve
+	// the ones it does rather than none at all.
+	var unknown *UnknownServersError
+	if errors.As(err, &unknown) {
+		servers = slices.DeleteFunc(servers, func(s string) bool { return slices.Contains(unknown.Names, s) })
+		if len(servers) == 0 {
+			return Record{}, err
+		}
+		m.logf("sandbox %s: WARNING %v; creating the gateway over %s only", sandbox, err, strings.Join(servers, ","))
+		gw, err = m.Client.Create(ctx, servers)
+	}
+	if err != nil {
+		return Record{}, err
+	}
+	sandboxURL, err := SandboxURL(gw.URL)
+	if err == nil && strings.ContainsAny(sandboxURL, "'\n") {
+		err = fmt.Errorf("mcpgateway: refusing gateway url %q", sandboxURL)
+	}
+	if err != nil {
+		_ = m.Client.Delete(ctx, gw.ID)
+		return Record{}, err
+	}
+	return Record{
+		Sandbox:    sandbox,
+		BaseURL:    m.Client.base(),
+		ID:         gw.ID,
+		URL:        gw.URL,
+		SandboxURL: sandboxURL,
+		Servers:    servers,
+		Requested:  slices.Clone(m.Servers),
+		CreatedAt:  time.Now().UTC(),
+	}, nil
+}
+
+// Ensure returns the gateway sandbox should use: the recorded one when it is
+// still valid (Reusable), otherwise a freshly minted one — the stale one is
+// DELETEd first and the new one recorded.
+func (m Manager) Ensure(ctx context.Context, sandbox string) (Record, error) {
+	if rec, ok := m.Reusable(ctx, sandbox); ok {
+		return rec, nil
+	}
+	rec, err := m.Mint(ctx, sandbox)
+	if err != nil {
+		return Record{}, err
+	}
+	if err := m.Save(rec); err != nil {
+		m.Discard(ctx, rec)
+		return Record{}, err
+	}
+	return rec, nil
+}
+
+// Save persists rec so later launches can reuse or release its gateway.
+func (m Manager) Save(rec Record) error {
+	if m.Store.Dir == "" {
+		return nil
+	}
+	return m.Store.Save(rec)
+}
+
+// Discard best-effort DELETEs a minted-but-unsaved gateway.
+func (m Manager) Discard(ctx context.Context, rec Record) {
+	if rec.ID == "" {
+		return
+	}
+	if err := (Client{BaseURL: rec.BaseURL, HTTP: m.Client.HTTP}).Delete(ctx, rec.ID); err != nil {
+		m.logf("sandbox %s: WARNING %v", rec.Sandbox, err)
+	}
+}
+
+// Release best-effort DELETEs the gateway recorded for sandbox (on the
+// BaseURL it was minted on, which may differ from the current one) and drops
+// the record. Failures are logged, never returned: a leaked sub-gateway costs
+// memory in standalone-codemode until its next restart, nothing more.
+func (m Manager) Release(ctx context.Context, sandbox string) {
+	if m.Store.Dir == "" {
+		return
+	}
+	if _, err := os.Stat(m.Store.Dir); err != nil {
+		return // nothing ever recorded
+	}
+	rec, ok, err := m.Store.Load(sandbox)
+	if err != nil {
+		m.logf("sandbox %s: %v", sandbox, err)
+	}
+	if ok {
+		m.Discard(ctx, rec)
+	}
+	if err := m.Store.Remove(sandbox); err != nil {
+		m.logf("sandbox %s: %v", sandbox, err)
+	}
+}
+
+// Sweep releases the gateways of recorded sandboxes that no longer exist
+// (live reports false) and whose record is older than grace — e.g. a kept
+// sandbox someone later removed by hand, which no wrapper exit ever saw.
+func (m Manager) Sweep(ctx context.Context, live func(sandbox string) bool, grace time.Duration) {
+	recs, err := m.Store.List()
+	if err != nil {
+		m.logf("sweep: %v", err)
+		return
+	}
+	now := time.Now()
+	for _, rec := range recs {
+		if live(rec.Sandbox) || now.Sub(rec.CreatedAt) < grace {
+			continue
+		}
+		m.logf("sandbox %s is gone; releasing its gateway %s", rec.Sandbox, rec.ID)
+		m.Release(ctx, rec.Sandbox)
+	}
+}
+
+// EnvFile is the sandbox's persistent environment file, sourced by every
+// shell inside it (login, interactive and, via BASH_ENV, non-interactive).
+const EnvFile = "/etc/sandbox-persistent.sh"
+
+// PersistEnvArgs is the argv (after the sbx binary) that records
+// MCP_URL=<sandboxURL> in the sandbox's EnvFile, replacing any earlier
+// MCP_URL line, so shells a human opens in the sandbox see the gateway too.
+// The ACP client does not depend on it: it gets MCP_URL from `sbx exec -e`.
+func PersistEnvArgs(sandbox, sandboxURL string) []string {
+	script := `f=` + EnvFile + `; touch "$f" && sed -i '/^export ` + EnvVar + `=/d' "$f" && printf "export ` + EnvVar + `='%s'\n" "$1" >> "$f"`
+	return []string{"exec", sandbox, "--", "sh", "-c", script, "sh", sandboxURL}
+}

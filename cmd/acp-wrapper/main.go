@@ -31,6 +31,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/acpwrapper"
 	"github.com/slimslenderslacks/work/internal/gitsign"
+	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/policy"
 )
 
@@ -79,12 +80,11 @@ func (w *workspacesFlag) Set(s string) error {
 	return nil
 }
 
-// staticMCPsFlag collects repeatable --static-mcp values, forwarded verbatim
-// as `--static-mcp <name>` to `sbx create`.
-type staticMCPsFlag []string
+// namesFlag collects repeatable name values (--mcp-server), skipping blanks.
+type namesFlag []string
 
-func (m *staticMCPsFlag) String() string { return strings.Join(*m, ",") }
-func (m *staticMCPsFlag) Set(s string) error {
+func (m *namesFlag) String() string { return strings.Join(*m, ",") }
+func (m *namesFlag) Set(s string) error {
 	if strings.TrimSpace(s) == "" {
 		return nil
 	}
@@ -135,8 +135,12 @@ func main() {
 	model := fs.String("model", "", "claude model for the agent (an alias like opus/sonnet/haiku or a full model id), set as ANTHROPIC_MODEL inside the sandbox (default: claude's own default)")
 	var workspaces workspacesFlag
 	fs.Var(&workspaces, "workspace", "host path to mount into the sandbox; the first is the ACP client cwd and must be writable; a trailing :ro mounts a path read-only (repeatable, at least one required)")
-	var staticMCPs staticMCPsFlag
-	fs.Var(&staticMCPs, "static-mcp", "static-MCP name to attach when creating the sandbox; passed verbatim to `sbx create --static-mcp` (repeatable)")
+	mcpGatewayURL := fs.String("mcp-gateway-url", "", "base URL of the host's standalone-codemode gateway (e.g. http://localhost:3333). When set with at least one --mcp-server, the wrapper POSTs /gateways to mint a per-sandbox gateway, sets MCP_URL to it inside the sandbox, allows the gateway's port in the sandbox network policy, and DELETEs the gateway when the sandbox is removed")
+	var mcpServers namesFlag
+	fs.Var(&mcpServers, "mcp-server", "catalog server name to request from the per-sandbox MCP gateway (repeatable)")
+	mcpGatewayState := fs.String("mcp-gateway-state", "", "directory recording each sandbox's MCP gateway so later launches can reuse or delete it (default: <sessions-root>/../gateways)")
+	var staticMCPs namesFlag
+	fs.Var(&staticMCPs, "static-mcp", "deprecated and ignored: MCP servers now reach the sandbox through the --mcp-gateway-url gateway, not `sbx create --static-mcp`")
 	var policies policiesFlag
 	fs.Var(&policies, "policy", "sbx policy rule applied after `sbx create`, encoded as \"<allow|deny>:<network|filesystem>:<resource>\" (repeatable)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -164,11 +168,19 @@ func main() {
 		Push:          *push,
 		SaveSandbox:   *saveSandbox,
 		Model:         *model,
-		StaticMCPs:    staticMCPs,
-		Policies:      policies,
-		GitName:       gitName,
-		GitEmail:      gitEmail,
-		SigningKey:    signing.Key(),
+		MCPGateway: mcpgateway.Manager{
+			Client:  mcpgateway.Client{BaseURL: *mcpGatewayURL},
+			Store:   mcpgateway.Store{Dir: *mcpGatewayState},
+			Servers: mcpServers,
+		},
+		Policies:   policies,
+		GitName:    gitName,
+		GitEmail:   gitEmail,
+		SigningKey: signing.Key(),
+	}
+
+	if len(staticMCPs) > 0 {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ignoring deprecated --static-mcp %s (use --mcp-server with --mcp-gateway-url)\n", *sessionID, staticMCPs.String())
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +257,10 @@ func TestACPLaunchPlanningAgentNoRepoSingleMount(t *testing.T) {
 	}
 }
 
+// A task's static_mcps no longer become `--static-mcp` flags: with a gateway
+// URL configured they name the servers of the sandbox's per-sandbox MCP
+// gateway, forwarded to the wrapper as --mcp-server alongside
+// --mcp-gateway-url.
 func TestACPLaunchTaskAgentForwardsStaticMCPs(t *testing.T) {
 	wsRoot := t.TempDir()
 	orchDir := t.TempDir()
@@ -266,11 +271,14 @@ func TestACPLaunchTaskAgentForwardsStaticMCPs(t *testing.T) {
 
 	acp := &fakeLauncher{}
 	r := &Runner{
-		Workspaces:   workspace.NewStub(wsRoot),
-		Launcher:     &fakeLauncher{},
-		AcpLauncher:  acp,
-		Kit:          "kit-ref",
-		SessionsRoot: t.TempDir(),
+		Workspaces:        workspace.NewStub(wsRoot),
+		Launcher:          &fakeLauncher{},
+		AcpLauncher:       acp,
+		Kit:               "kit-ref",
+		SessionsRoot:      t.TempDir(),
+		MCPGatewayURL:     "http://localhost:3333",
+		MCPGatewayServers: []string{"default-server"},
+		MCPGatewayState:   "/state/gateways",
 	}
 
 	if _, err := r.Start(context.Background(), Plan{
@@ -284,9 +292,72 @@ func TestACPLaunchTaskAgentForwardsStaticMCPs(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	mcps := argValues(acp.last.Command, "--static-mcp")
-	if len(mcps) != 2 || mcps[0] != "github" || mcps[1] != "web-search" {
-		t.Errorf("--static-mcp = %v, want [github web-search]", mcps)
+	cmd := acp.last.Command
+	if got := argValues(cmd, "--static-mcp"); len(got) != 0 {
+		t.Errorf("--static-mcp = %v, want none (MCP traffic goes through the gateway)", got)
+	}
+	if got := argValues(cmd, "--mcp-server"); !reflect.DeepEqual(got, []string{"github", "web-search"}) {
+		t.Errorf("--mcp-server = %v, want [github web-search] (the task's static_mcps)", got)
+	}
+	if got := argValues(cmd, "--mcp-gateway-url"); !reflect.DeepEqual(got, []string{"http://localhost:3333"}) {
+		t.Errorf("--mcp-gateway-url = %v", got)
+	}
+	if got := argValues(cmd, "--mcp-gateway-state"); !reflect.DeepEqual(got, []string{"/state/gateways"}) {
+		t.Errorf("--mcp-gateway-state = %v", got)
+	}
+}
+
+// A task with no static_mcps gets the configured default server set; with no
+// gateway URL configured no gateway flags are sent at all (and still no
+// --static-mcp).
+func TestACPLaunchMCPGatewayDefaultsAndDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		url         string
+		defaults    []string
+		wantServers []string
+	}{
+		{name: "defaults", url: "http://localhost:3333", defaults: []string{"gmail", "linear"}, wantServers: []string{"gmail", "linear"}},
+		{name: "no-servers", url: "http://localhost:3333"},
+		{name: "disabled", defaults: []string{"gmail"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wsRoot := t.TempDir()
+			orchDir := t.TempDir()
+			projectPath := filepath.Join(orchDir, "project.yaml")
+			if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			acp := &fakeLauncher{}
+			r := &Runner{
+				Workspaces:        workspace.NewStub(wsRoot),
+				Launcher:          &fakeLauncher{},
+				AcpLauncher:       acp,
+				Kit:               "kit-ref",
+				SessionsRoot:      t.TempDir(),
+				MCPGatewayURL:     tc.url,
+				MCPGatewayServers: tc.defaults,
+			}
+			if _, err := r.Start(context.Background(), Plan{
+				Kind:        agent.TaskAgent,
+				Branch:      "feat-x",
+				ProjectPath: projectPath,
+				TaskPath:    filepath.Join(orchDir, "tasks", "first.yaml"),
+				TaskName:    "first",
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			cmd := acp.last.Command
+			if got := argValues(cmd, "--mcp-server"); !reflect.DeepEqual(got, tc.wantServers) {
+				t.Errorf("--mcp-server = %v, want %v", got, tc.wantServers)
+			}
+			if wantURL := len(tc.wantServers) > 0; hasFlag(cmd, "--mcp-gateway-url") != wantURL {
+				t.Errorf("--mcp-gateway-url present = %v, want %v: %v", !wantURL, wantURL, cmd)
+			}
+			if hasFlag(cmd, "--static-mcp") {
+				t.Errorf("--static-mcp must never be sent: %v", cmd)
+			}
+		})
 	}
 }
 

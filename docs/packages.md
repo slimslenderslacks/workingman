@@ -30,6 +30,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/channels/whatsapp/setup` | daemon | Package setup holds the non-interactive core of `orch whatsapp setup`, `status` and `test`. | — | `Cred`, `Current`, `Guide`, `SaveResult`, `Store`, `Update`, `WebhookSettings` |
 | `internal/daemon` | daemon | Package daemon is the orch control loop: it watches the orch roots, drives each project and task through its state machine, and launches the agent sessions that do the work. | `ChannelSender` | `ACPInfo`, `AuditEvent`, `ChannelOption`, `Daemon`, `DaemonInfo`, `OfflineOptions`, `Option`, `ProjectLive`, `ProjectSnapshot`, `PullRequestSummary`, `ReviewPollInfo`, `RuntimeInfo`, `SessionInfo`, `SessionSnapshot`, `SessionStatus`, `Snapshot`, `TaskSnapshot`, `WolfSession`, `WorkingmanAgentConfig`, `WorkingmanAgentSession` |
 | `internal/gitsign` | shared | Package gitsign makes a sandboxed agent commit as the host user, SSH-sign those commits, and check that the SSH agent forwarded into the sandbox can sign and push. | — | `Config`, `PushResult`, `RunFunc` |
+| `internal/mcpgateway` | shared | Package mcpgateway gives every sandbox workingman creates its own MCP gateway: a sub-gateway of the host's standalone-codemode gateway, minted with POST /gateways and torn down with DELETE /gateways/{id}. | — | `Client`, `Gateway`, `Manager`, `Record`, `Store`, `UnknownServersError` |
 | `internal/notify` | daemon | Package notify is the daemon's user-notification interface: how an agent that needs human attention reaches a person. | `Sender`, `TopicSender` | `Async`, `Call`, `Multi`, `Noop`, `Osascript`, `Recorder` |
 | `internal/policy` | shared | Package policy defines the per-task sandbox policy rules (allow or deny one network or filesystem resource pattern) and turns them into `sbx policy` commands. | — | `Action`, `Kind`, `Rule` |
 | `internal/project` | shared | Package project is the data model and on-disk format of a work stream's project.yaml, plus the two sidecar records the daemon and the wolf agent keep next to it. | — | `BlockedSession`, `PlannedSnapshot`, `Project`, `PullRequest`, `Repo`, `Status`, `Writer` |
@@ -83,6 +84,7 @@ graph LR
   subgraph grp_shared["shared"]
     internal_acpclient["acpclient"]
     internal_gitsign["gitsign"]
+    internal_mcpgateway["mcpgateway"]
     internal_policy["policy"]
     internal_project["project"]
     internal_sbx["sbx"]
@@ -97,6 +99,7 @@ graph LR
 
   cmd_acp_wrapper --> internal_acpwrapper
   cmd_acp_wrapper --> internal_gitsign
+  cmd_acp_wrapper --> internal_mcpgateway
   cmd_acp_wrapper --> internal_policy
   cmd_orch --> internal_agent
   cmd_orch --> internal_audit
@@ -117,6 +120,7 @@ graph LR
   internal_acpchat --> internal_acpclient
   internal_acpchat --> internal_session
   internal_acpwrapper --> internal_gitsign
+  internal_acpwrapper --> internal_mcpgateway
   internal_acpwrapper --> internal_policy
   internal_acpwrapper --> internal_project
   internal_acpwrapper --> internal_sbx
@@ -147,6 +151,7 @@ graph LR
   internal_daemon --> internal_taskgraph
   internal_daemon --> internal_terminal
   internal_daemon --> internal_workspace
+  internal_mcpgateway --> internal_policy
   internal_prompts --> internal_agent
   internal_prompts --> internal_sbx
   internal_router --> internal_acpchat
@@ -155,6 +160,7 @@ graph LR
   internal_runner --> internal_agent
   internal_runner --> internal_audit
   internal_runner --> internal_gitsign
+  internal_runner --> internal_mcpgateway
   internal_runner --> internal_policy
   internal_runner --> internal_prompts
   internal_runner --> internal_sbx
@@ -183,7 +189,7 @@ graph LR
   classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
   class internal_tui tui
   classDef shared fill:#fff1cc,stroke:#c99a06,color:#000
-  class internal_acpclient,internal_gitsign,internal_policy,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace shared
+  class internal_acpclient,internal_gitsign,internal_mcpgateway,internal_policy,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace shared
   classDef wrapper fill:#f3e2fb,stroke:#8e44ad,color:#000
   class internal_acpwrapper wrapper
 ```
@@ -194,11 +200,11 @@ The same graph as text: each package's internal imports and importers.
 
 | Package | Imports | Imported by |
 |---|---|---|
-| `cmd/acp-wrapper` | `acpwrapper`, `gitsign`, `policy` | — |
+| `cmd/acp-wrapper` | `acpwrapper`, `gitsign`, `mcpgateway`, `policy` | — |
 | `cmd/orch` | `agent`, `audit`, `channels`, `channels/signal`, `channels/signal/setup`, `channels/whatsapp`, `channels/whatsapp/setup`, `daemon`, `notify`, `router`, `runner`, `scheduler`, `session`, `terminal`, `tui`, `workspace` | — |
 | `internal/acpchat` | `acpclient`, `session` | `router` |
 | `internal/acpclient` | — | `acpchat`, `tui` |
-| `internal/acpwrapper` | `gitsign`, `policy`, `project`, `sbx`, `session`, `task` | `cmd/acp-wrapper` |
+| `internal/acpwrapper` | `gitsign`, `mcpgateway`, `policy`, `project`, `sbx`, `session`, `task` | `cmd/acp-wrapper` |
 | `internal/agent` | — | `cmd/orch`, `daemon`, `prompts`, `runner`, `terminal` |
 | `internal/audit` | — | `cmd/orch`, `daemon`, `router`, `runner` |
 | `internal/channels` | `notify` | `cmd/orch`, `channels/channeltest`, `channels/signal`, `channels/signal/setup`, `channels/whatsapp`, `channels/whatsapp/setup`, `daemon`, `router` |
@@ -210,12 +216,13 @@ The same graph as text: each package's internal imports and importers.
 | `internal/channels/whatsapp/setup` | `channels`, `channels/whatsapp` | `cmd/orch` |
 | `internal/daemon` | `agent`, `audit`, `channels`, `gitsign`, `notify`, `policy`, `project`, `runner`, `sbx`, `scheduler`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |
 | `internal/gitsign` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `runner` |
+| `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `acpwrapper`, `runner` |
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
-| `internal/policy` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `runner`, `task`, `tui` |
+| `internal/policy` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `mcpgateway`, `runner`, `task`, `tui` |
 | `internal/project` | — | `acpwrapper`, `daemon`, `tui` |
 | `internal/prompts` | `agent`, `sbx` | `runner` |
 | `internal/router` | `acpchat`, `audit`, `channels` | `cmd/orch` |
-| `internal/runner` | `agent`, `audit`, `gitsign`, `policy`, `prompts`, `sbx`, `session`, `setup`, `task`, `terminal`, `workspace` | `cmd/orch`, `daemon` |
+| `internal/runner` | `agent`, `audit`, `gitsign`, `mcpgateway`, `policy`, `prompts`, `sbx`, `session`, `setup`, `task`, `terminal`, `workspace` | `cmd/orch`, `daemon` |
 | `internal/sbx` | — | `acpwrapper`, `daemon`, `prompts`, `runner`, `task`, `tui` |
 | `internal/scheduler` | — | `cmd/orch`, `daemon` |
 | `internal/session` | — | `cmd/orch`, `acpchat`, `acpwrapper`, `daemon`, `runner`, `tui` |

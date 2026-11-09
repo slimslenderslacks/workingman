@@ -29,6 +29,16 @@
 //     sandbox with the [SandboxCreator] and wraps the argv in `sbx exec`, then
 //     opens it with Launcher (terminal.TabLauncher).
 //
+// MCP gateway: when Runner.MCPGatewayURL is set, every sandbox gets its own
+// sub-gateway of the host's standalone-codemode gateway (internal/mcpgateway)
+// over [Runner.MCPServersFor] — the plan's StaticMCPs (a task's static_mcps)
+// when it has any, else Runner.MCPGatewayServers. The sandbox is allowed to
+// reach the gateway's port and gets MCP_URL pointing at it; nothing is sent
+// as `sbx create --static-mcp` any more. On the ACP path the runner only
+// forwards --mcp-gateway-url / --mcp-server to acp-wrapper, which owns the
+// gateway like it owns the sandbox; the terminal-tab and `:session` paths
+// mint it here and pass MCP_URL to `sbx exec -e`.
+//
 // [Runner.LaunchInteractive] opens the TUI's ad-hoc `:dir` (host shell) and
 // `:session` (claude in a per-work-stream sandbox) tabs. It sets up git
 // identity and SSH commit signing, and these sessions have no daemon lifecycle.
@@ -52,13 +62,15 @@
 //     terminal-tab path; tests replace it with `sleep`.
 //   - [SandboxCreator], [SandboxSpec] and [DefaultSandboxCreator] — the
 //     idempotent `sbx create` and `sbx policy` step for the terminal-tab and
-//     `:session` paths.
+//     `:session` paths. It applies the MCP gateway's allow rules and releases
+//     a removed sandbox's gateway.
 //
 // # Collaborators
 //
 // Uses internal/agent (Kind, Spec, Launcher), internal/prompts and
 // internal/setup (the .orch handoff), internal/workspace (wsp workspaces),
-// internal/terminal (TabLauncher's already-open handling), internal/session
+// internal/terminal (TabLauncher's already-open handling), internal/mcpgateway
+// (per-sandbox MCP gateways), internal/session
 // (session.json records for ACP sessions), internal/sbx and internal/policy
 // (sandbox names and network rules), internal/gitsign (identity and signing
 // for interactive tabs), internal/task (model defaults) and internal/audit.

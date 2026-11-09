@@ -14,6 +14,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/gitsign"
+	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/prompts"
 	"github.com/slimslenderslacks/work/internal/sbx"
@@ -47,10 +48,14 @@ type Plan struct {
 	TaskName    string
 	FailedTasks []string
 
-	// StaticMCPs are sbx static-MCP names to attach to this agent's sandbox.
-	// Forwarded by the daemon from the task's static_mcps field for task and
-	// commit agents (commit shares the task's per-task sandbox). Empty for
-	// planning/project/wolf and for tasks that declared none.
+	// StaticMCPs are the MCP server names this agent's sandbox should be able
+	// to reach. Forwarded by the daemon from the task's static_mcps field for
+	// task and commit agents (commit shares the task's per-task sandbox), and
+	// set by the daemon for the review agent. They are no longer attached as
+	// sbx static MCPs (`--static-mcp`): when Runner.MCPGatewayURL is set they
+	// are the catalog server names requested for the sandbox's per-sandbox
+	// standalone-codemode gateway (see Runner.MCPServersFor). Empty means
+	// Runner.MCPGatewayServers.
 	StaticMCPs []string
 
 	// Policies are sbx policy rules applied to the sandbox right after
@@ -208,16 +213,19 @@ func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
 
 // SandboxSpec describes the sandbox a SandboxCreator should ensure exists.
 // Name is the sbx sandbox name; Workspaces are host paths to bind-mount (the
-// first is the primary cwd, the rest are extra mounts); StaticMCPs are sbx
-// static-MCP names that become repeated `--static-mcp <name>` flags on
-// `sbx create`; Policies are sbx policy rules applied immediately after
-// `sbx create` and before any `sbx exec` (one `sbx policy ...` invocation
-// per rule, in order).
+// first is the primary cwd, the rest are extra mounts); Policies are sbx
+// policy rules applied immediately after `sbx create` and before any
+// `sbx exec` (one `sbx policy ...` invocation per rule, in order).
+// MCPGateway is the sandbox's per-sandbox MCP gateway manager: its allow
+// rules are applied after Policies, and its recorded gateway is released
+// when the creator removes the sandbox. The gateway itself — and MCP_URL — is
+// the caller's job (mcpgateway.Manager.Ensure), since MCP_URL is passed per
+// `sbx exec`. The zero value means no gateway.
 type SandboxSpec struct {
 	Name       string
 	Workspaces []string
-	StaticMCPs []string
 	Policies   []policy.Rule
+	MCPGateway mcpgateway.Manager
 }
 
 // SandboxCreator ensures a sandbox described by spec exists.
@@ -231,21 +239,26 @@ type SandboxSpec struct {
 type SandboxCreator func(ctx context.Context, spec SandboxSpec) error
 
 // DefaultSandboxCreator ensures a sandbox named spec.Name exists with exactly
-// the given workspaces mounted and static MCPs attached. The flow is:
+// the given workspaces mounted. The flow is:
 //
 //  1. `sbx ls --json` to find the existing sandbox (if any).
 //  2. If it exists with the same set of workspaces → no-op. We do NOT inspect
-//     MCPs or policies on an existing sandbox because sbx ls doesn't surface
-//     those details; for per-task sandboxes the name uniquely encodes the
-//     task and its MCP/policy set, so a name collision implies a matching
-//     set. (A retry of the same task reuses the same sandbox.)
-//  3. If it exists with a different workspace set → `sbx rm --force` then
-//     recreate. This self-heals when the daemon's idea of the desired mounts
-//     has grown (e.g. task agents added the orch dir as a second mount).
-//  4. Otherwise `sbx create claude --name <name> [--static-mcp <m>...] <ws...>`,
-//     then one `sbx policy <action> <kind> --sandbox <name> <resource>` per
-//     rule in spec.Policies (in declaration order, so deny-all + allow-host
-//     compositions evaluate left-to-right as written).
+//     policies on an existing sandbox because sbx ls doesn't surface those
+//     details; for per-task sandboxes the name uniquely encodes the task and
+//     its policy set, so a name collision implies a matching set. (A retry
+//     of the same task reuses the same sandbox.) Its MCP gateway, if any, is
+//     kept: the caller reuses it when still live, or mints a new one —
+//     MCP_URL is per-exec, so a gone gateway never forces a recreate.
+//  3. If it exists with a different workspace set → `sbx rm --force`,
+//     release its recorded MCP gateway (best effort), then recreate. This
+//     self-heals when the daemon's idea of the desired mounts has grown
+//     (e.g. task agents added the orch dir as a second mount).
+//  4. Otherwise `sbx create claude --name <name> <ws...>`, then one
+//     `sbx policy <action> <kind> --sandbox <name> <resource>` per rule in
+//     spec.Policies (in declaration order, so deny-all + allow-host
+//     compositions evaluate left-to-right as written), then the MCP
+//     gateway's allow rules (spec.MCPGateway.PolicyRules). No
+//     `--static-mcp` flags: MCP servers are reached through the gateway.
 //
 // Recreation is safe here because we never use --clone — the sandbox is a
 // thin bind-mount wrapper, so rm just stops the container and leaves the
@@ -266,17 +279,19 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 		if out, err := rm.CombinedOutput(); err != nil {
 			return fmt.Errorf("sbx rm %s: %w: %s", spec.Name, err, strings.TrimSpace(string(out)))
 		}
+		spec.MCPGateway.Release(ctx, spec.Name)
+	}
+	gwRules, err := spec.MCPGateway.PolicyRules()
+	if err != nil {
+		return fmt.Errorf("sbx policy %s: %w", spec.Name, err)
 	}
 	args := []string{"create", "claude", "--name", spec.Name}
-	for _, m := range spec.StaticMCPs {
-		args = append(args, "--static-mcp", m)
-	}
 	args = append(args, spec.Workspaces...)
 	cmd := exec.CommandContext(ctx, "sbx", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("sbx create %s %v: %w: %s", spec.Name, spec.Workspaces, err, strings.TrimSpace(string(out)))
 	}
-	for _, r := range spec.Policies {
+	for _, r := range append(append([]policy.Rule(nil), spec.Policies...), gwRules...) {
 		if err := r.Validate(); err != nil {
 			return fmt.Errorf("sbx policy %s: %w", spec.Name, err)
 		}
@@ -426,6 +441,26 @@ type Runner struct {
 	// SbxPath, when set, is forwarded to `acp-wrapper --sbx` so the wrapper
 	// uses a specific sbx binary. Empty lets the wrapper resolve sbx on PATH.
 	SbxPath string
+
+	// MCPGatewayURL is the base URL of the host's standalone-codemode gateway
+	// (e.g. http://localhost:3333; cmd/orch's --mcp-gateway-url, defaulting to
+	// $WORKINGMAN_MCP_GATEWAY_URL). When set, every sandbox workingman creates
+	// gets its own sub-gateway (POST /gateways) over MCPServersFor(plan), is
+	// given MCP_URL pointing at it (host loopback rewritten to
+	// host.docker.internal), and is allowed to reach the gateway's port in its
+	// network policy; the gateway is DELETEd when the sandbox is removed.
+	// Empty disables all of that: no MCP_URL and no extra policy rules.
+	MCPGatewayURL string
+
+	// MCPGatewayServers is the default set of catalog server names requested
+	// for a sandbox's gateway when its plan names none (Plan.StaticMCPs).
+	// A sandbox whose server list ends up empty gets no gateway.
+	MCPGatewayServers []string
+
+	// MCPGatewayState is the directory recording each sandbox's gateway
+	// (mcpgateway.Store), forwarded as `acp-wrapper --mcp-gateway-state`.
+	// Empty means mcpgateway.StateDir(<sessions root>).
+	MCPGatewayState string
 
 	// preflightRun runs the interactive-session signing preflight command
 	// (`sbx exec ... ssh-add -l`). Nil means use the real exec (gitsign.ExecRun);
@@ -599,20 +634,25 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	sandboxName := SandboxNameFor(p.Kind, p.ProjectPath, p.TaskName)
 	if r.Sandbox != nil && sandboxName != "" {
 		workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
+		gw, err := r.mcpGateway(r.MCPServersFor(p))
+		if err != nil {
+			return nil, err
+		}
 		if err := r.Sandbox(ctx, SandboxSpec{
 			Name:       sandboxName,
 			Workspaces: workspaces,
-			StaticMCPs: p.StaticMCPs,
 			Policies:   p.Policies,
+			MCPGateway: gw,
 		}); err != nil {
 			return nil, fmt.Errorf("runner: sandbox: %w", err)
 		}
+		mcpEnv := r.ensureMCPGateway(ctx, gw, sandboxName)
 		if r.Audit != nil {
 			r.Audit.Log("sandbox_ensured",
 				"name", sandboxName,
 				"workspaces", strings.Join(workspaces, ","),
 				"kind", p.Kind.String(),
-				"static_mcps", strings.Join(p.StaticMCPs, ","),
+				"mcp_servers", strings.Join(gw.Servers, ","),
 				"policies", strconv.Itoa(len(p.Policies)),
 			)
 		}
@@ -622,7 +662,8 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		// so the agent's relative `Read .orch/instructions.md` prompt would
 		// resolve to nothing without this — claude would start up, find no
 		// instructions, and exit, sending the daemon into a relaunch loop.
-		command = append([]string{"sbx", "exec", "-it", "-w", workingDir, sandboxName}, command...)
+		wrap := append([]string{"sbx", "exec", "-it", "-w", workingDir}, mcpEnv...)
+		command = append(append(wrap, sandboxName), command...)
 	}
 
 	spec := agent.Spec{
@@ -726,7 +767,11 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 			// back to the default creator.
 			ensure = DefaultSandboxCreator
 		}
-		if err := ensure(ctx, SandboxSpec{Name: spec.SandboxName, Workspaces: spec.Workspaces}); err != nil {
+		gw, err := r.mcpGateway(r.MCPGatewayServers)
+		if err != nil {
+			return "", err
+		}
+		if err := ensure(ctx, SandboxSpec{Name: spec.SandboxName, Workspaces: spec.Workspaces, MCPGateway: gw}); err != nil {
 			return "", fmt.Errorf("runner: ensure interactive sandbox %q: %w", spec.SandboxName, err)
 		}
 		sbxBin := r.SbxPath
@@ -757,6 +802,7 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 		// recreated — DefaultSandboxCreator above already no-ops when a sandbox
 		// with the same name and mounts exists.
 		execArgs := []string{"exec", "-it", "-w", spec.Cwd}
+		execArgs = append(execArgs, r.ensureMCPGateway(ctx, gw, spec.SandboxName)...)
 		execArgs = append(execArgs, gitsign.IdentityEnvArgs(spec.GitName, spec.GitEmail)...)
 		execArgs = append(execArgs, gitsign.SigningEnvArgs(signingKey)...)
 		execArgs = append(execArgs, spec.SandboxName)
@@ -858,7 +904,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
 	}
 
-	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, p.StaticMCPs, p.Policies, p.TaskPath, p.Model, p.SaveSandbox, p.Persistent, p.Pushes())
+	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, r.MCPServersFor(p), p.Policies, p.TaskPath, p.Model, p.SaveSandbox, p.Persistent, p.Pushes())
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionID,
@@ -886,7 +932,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 // acpWrapperCommand builds the argv that launches one acp-wrapper host process
 // for an ACP session. The wrapper resolves --workspace paths to absolute itself,
 // but they already are (workspace.Manager and the orch dir both yield abs paths).
-func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, staticMCPs []string, policies []policy.Rule, taskPath, model string, saveSandbox, persistent, push bool) []string {
+func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, mcpServers []string, policies []policy.Rule, taskPath, model string, saveSandbox, persistent, push bool) []string {
 	bin := r.AcpWrapperPath
 	if bin == "" {
 		bin = "acp-wrapper"
@@ -965,8 +1011,18 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, project
 	if m := strings.TrimSpace(model); m != "" && m != task.ModelDefault {
 		args = append(args, "--model", m)
 	}
-	for _, m := range staticMCPs {
-		args = append(args, "--static-mcp", m)
+	// The per-sandbox MCP gateway: the wrapper mints it after `sbx create`,
+	// sets MCP_URL, allows its port and DELETEs it with the sandbox. Task
+	// static_mcps are NOT sent as `--static-mcp` any more; they name the
+	// gateway's servers (see MCPServersFor).
+	if u := strings.TrimSpace(r.MCPGatewayURL); u != "" && len(mcpServers) > 0 {
+		args = append(args, "--mcp-gateway-url", u)
+		for _, m := range mcpServers {
+			args = append(args, "--mcp-server", m)
+		}
+		if st := strings.TrimSpace(r.MCPGatewayState); st != "" {
+			args = append(args, "--mcp-gateway-state", st)
+		}
 	}
 	for _, p := range policies {
 		args = append(args, "--policy", p.Encode())
@@ -975,6 +1031,64 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, project
 		args = append(args, "--workspace", w)
 	}
 	return args
+}
+
+// MCPServersFor is the catalog server names requested for p's per-sandbox
+// MCP gateway: the plan's StaticMCPs (a task's static_mcps) when it names
+// any, otherwise the configured default set, MCPGatewayServers.
+func (r *Runner) MCPServersFor(p Plan) []string {
+	if names := nonBlank(p.StaticMCPs); len(names) > 0 {
+		return names
+	}
+	return nonBlank(r.MCPGatewayServers)
+}
+
+func nonBlank(in []string) []string {
+	var out []string
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// mcpGateway is the gateway manager for a sandbox launched by the runner
+// itself (the terminal-tab and `:session` paths; ACP sessions get theirs in
+// the acp-wrapper). Its store is the same one the wrapper defaults to, so
+// either process can release a gateway the other recorded.
+func (r *Runner) mcpGateway(servers []string) (mcpgateway.Manager, error) {
+	dir := strings.TrimSpace(r.MCPGatewayState)
+	if dir == "" {
+		root, err := r.sessionsRoot()
+		if err != nil {
+			return mcpgateway.Manager{}, err
+		}
+		dir = mcpgateway.StateDir(root)
+	}
+	return mcpgateway.Manager{
+		Client:  mcpgateway.Client{BaseURL: strings.TrimSpace(r.MCPGatewayURL)},
+		Store:   mcpgateway.Store{Dir: dir},
+		Servers: servers,
+	}, nil
+}
+
+// ensureMCPGateway reuses or mints the sandbox's gateway and returns the
+// `sbx exec` flags that hand it to the sandbox (`-e MCP_URL=<url>`). A
+// failure is audited and yields no flags: the agent runs without the gateway
+// rather than not at all.
+func (r *Runner) ensureMCPGateway(ctx context.Context, gw mcpgateway.Manager, sandbox string) []string {
+	if !gw.Enabled() {
+		return nil
+	}
+	rec, err := gw.Ensure(ctx, sandbox)
+	if err != nil {
+		if r.Audit != nil {
+			r.Audit.Log("mcp_gateway_failed", "sandbox", sandbox, "error", err.Error())
+		}
+		return nil
+	}
+	return []string{"-e", mcpgateway.EnvVar + "=" + rec.SandboxURL}
 }
 
 // sessionsRoot resolves the absolute sessions root: the configured value when
