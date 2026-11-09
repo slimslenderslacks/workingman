@@ -114,13 +114,20 @@ tell application "Ghostty"
 	set cfg to new surface configuration
 	set initial working directory of cfg to "/path/to/workspace"
 	set command of cfg to "sh -c '…' … env PATH=… claude --dangerously-skip-permissions …"
-	set t to new tab with configuration cfg
+	if (count of windows) is 0 then
+		set w to new window with configuration cfg
+		set t to selected tab of w
+	else
+		set t to new tab with configuration cfg
+	end if
 	set name override of t to "my-project"
 	activate
 	return id of t
 end tell
 ```
 
+- With no Ghostty window open there is no window to add a tab to, so the first
+  tab opens as a new window; otherwise it is always a tab.
 - Ghostty runs the `command` through the user's shell, so orch shell-quotes
   the argv first.
 - The title is set as a *name override*, so the program in the tab can't
