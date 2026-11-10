@@ -7,16 +7,20 @@
 // The flow, per sandbox (driven by acpwrapper.Run for ACP sessions and by
 // the runner for the terminal-tab and `:session` paths):
 //
-//  1. Creating the sandbox applies [PolicyRules] after the task's own
-//     policies: allow network to the gateway's port, as
+//  1. Before a sandbox is created, [Manager.Prepare] POSTs a gateway over
+//     [Manager.Servers] (a task's static_mcps, or the configured default
+//     set). Catalog-unknown names are dropped rather than failing the whole
+//     gateway.
+//  2. `sbx create` (no `--static-mcp` flags), then the task's own policies,
+//     then [PolicyRules]: allow network to the gateway's port, as
 //     host.docker.internal:<port> and localhost:<port> for a loopback base.
-//  2. [Manager.Ensure] reuses the gateway recorded for the sandbox when it is
-//     still live and was minted over the same servers, else DELETEs the stale
-//     one and POSTs a new one over [Manager.Servers] (a task's static_mcps, or
-//     the configured default set). Catalog-unknown names are dropped rather
-//     than failing the whole gateway.
-//  3. The sandbox gets MCP_URL ([EnvVar]) = the gateway URL with a loopback
-//     host rewritten to host.docker.internal ([SandboxURL]). It is passed per
+//     Only then is the gateway recorded ([Manager.Save]); a failed create or
+//     policy DELETEs it ([Manager.Discard]).
+//  3. [Manager.Ensure] — before every launch, new or reused sandbox —
+//     returns the recorded gateway when it is still live and was minted over
+//     the same servers, else DELETEs the stale one and POSTs a new one. The
+//     sandbox gets MCP_URL ([EnvVar]) = the gateway URL with a loopback host
+//     rewritten to host.docker.internal ([SandboxURL]). It is passed per
 //     `sbx exec -e` rather than at `sbx create`, so a reused sandbox whose
 //     gateway vanished (standalone-codemode keeps them in memory only) just
 //     gets a new one; acp-kit's claude-acp-client registers it as the
@@ -42,5 +46,5 @@
 // Uses internal/policy for the network rules. Used by internal/acpwrapper
 // and internal/runner; cmd/orch's --mcp-gateway-url / --mcp-gateway-servers
 // configure it, and cmd/acp-wrapper's --mcp-gateway-url / --mcp-server /
-// --mcp-gateway-state carry it to the wrapper.
+// --mcp-gateway-state carry it to the wrapper. See docs/mcp-gateway.md.
 package mcpgateway

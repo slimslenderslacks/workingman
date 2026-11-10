@@ -37,7 +37,9 @@
 // as `sbx create --static-mcp` any more. On the ACP path the runner only
 // forwards --mcp-gateway-url / --mcp-server to acp-wrapper, which owns the
 // gateway like it owns the sandbox; the terminal-tab and `:session` paths
-// mint it here and pass MCP_URL to `sbx exec -e`.
+// mint it here and pass MCP_URL to `sbx exec -e`. Either way the gateway is
+// POSTed before `sbx create` and the network policy is applied before the
+// first `sbx exec`; see docs/mcp-gateway.md.
 //
 // [Runner.LaunchInteractive] opens the TUI's ad-hoc `:dir` (host shell) and
 // `:session` (claude in a per-work-stream sandbox) tabs. It sets up git

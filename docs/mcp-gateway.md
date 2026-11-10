@@ -1,0 +1,243 @@
+# How a sandbox reaches MCP servers
+
+Every sandbox workingman creates reaches MCP servers (github, logseq, gmail,
+…) through **its own sub-gateway** of the host's
+[standalone-codemode](https://github.com/slimslenderslacks/standalone-codemode)
+process. The sandbox gets one URL, `MCP_URL`, and Claude Code inside it sees
+one MCP server, `okta-gateway`, which exposes only the servers the task asked
+for.
+
+> **`--static-mcp` is no longer used.** workingman never passes
+> `sbx create --static-mcp` (or any other sbx static-MCP flag) on any path:
+> ACP sessions, terminal-tab sessions, the TUI's `:session` tabs, or when a
+> sandbox is reused or recreated. A task's `static_mcps` field is still read,
+> but it now names the servers of the sandbox's gateway. `acp-wrapper
+> --static-mcp` is accepted only for compatibility. It is ignored, with a
+> warning.
+
+Code: [`internal/mcpgateway`](../internal/mcpgateway/doc.go) (the
+`/gateways` client, the per-sandbox lifecycle and the state store),
+[`internal/acpwrapper`](../internal/acpwrapper/doc.go) (ACP sessions) and
+[`internal/runner`](../internal/runner/doc.go) (terminal-tab and `:session`
+sandboxes).
+
+## Who holds what
+
+```
+ host                                                     sandbox
+ ┌──────────────────────────────────────────────┐        ┌───────────────────────────┐
+ │ standalone-codemode  (--port 3333)           │        │ claude (ACP)              │
+ │   catalog: github, logseq, gmail, …          │        │   MCP server okta-gateway │
+ │   credentials: 1Password, OAuth tokens,      │◀───────│   = $MCP_URL              │
+ │   header scripts                             │  HTTP  │                           │
+ │   /gateways/<id>  ← one per sandbox          │        │ MCP_URL=http://host.docker│
+ │                                              │        │  .internal:3333/gateways/…│
+ │ workingman (orch / acp-wrapper)              │        └───────────────────────────┘
+ │   POST /gateways, DELETE /gateways/<id>      │
+ │   ~/.workingman/gateways/<sandbox>.json      │
+ └──────────────────────────────────────────────┘
+```
+
+- **github, logseq, gmail, etc. are catalog entries** in the `catalog.yaml`
+  that standalone-codemode loads at startup (see its
+  [catalog reference](https://github.com/slimslenderslacks/standalone-codemode/blob/main/docs/catalog.md)).
+  standalone-codemode holds all of their credentials: OAuth tokens (github),
+  secret-interpolated headers (`logseq`'s `Bearer ${mcp_http_token}`, read
+  from 1Password), and `header-script` helpers that run on the host (`gmail`'s
+  `/opt/okta-cpe/Scripts/fetch-mcp-headers.sh`). Nothing secret goes into
+  the sandbox. The sandbox only gets an unguessable gateway URL.
+- **workingman** only decides which catalog names each sandbox gets, mints
+  and deletes the sub-gateways, sets the sandbox's network policy, and passes
+  `MCP_URL` in.
+- **acp-kit** (`claude-acp-client`, inside the sandbox) registers `MCP_URL`
+  with Claude Code as the `okta-gateway` MCP server.
+
+## Which servers a sandbox gets
+
+A sandbox's gateway is minted with `POST <gateway>/gateways` and the body
+`{"servers": [...]}`. The list is:
+
+1. the task's **`static_mcps`** when it names any. Each entry is a catalog
+   server name. The commit agent shares its task's sandbox, so it uses the
+   same list.
+2. otherwise the **default set**, `--mcp-gateway-servers` /
+   `WORKINGMAN_MCP_GATEWAY_SERVERS` (comma-separated). This covers tasks with
+   no `static_mcps` and the agents that have no task (project, planning,
+   wolf, archive, workingman). The TUI's `:session` sandboxes also always use
+   this set.
+3. The review agent always asks for `[github]`.
+
+If the list is empty (no `static_mcps` and no default set), the sandbox gets
+no gateway and no `MCP_URL`. Its network policy still gets the gateway's
+allow rules (see below).
+
+Names the catalog doesn't have make `POST /gateways` return `400
+{"error":"unknown_servers","unknown":[...]}`. workingman logs a warning,
+drops those names and POSTs again with the rest. A sandbox gets no gateway
+only when none of its names are known.
+
+### Example task
+
+```yaml
+# tasks/triage-inbox.yaml
+name: triage-inbox
+description: |
+  Read today's unread Gmail threads about the release, cross-reference the
+  open GitHub issues they mention, and add a summary page to the Logseq
+  journal.
+depends_on: []
+status: ready
+attempts: 0
+failure_reason: ""
+blocked_reason: ""
+# Catalog server names on the host's standalone-codemode. They become
+# POST /gateways {"servers": ["github", "logseq", "gmail"]}. They are NOT
+# passed as sbx --static-mcp flags.
+static_mcps: [github, logseq, gmail]
+```
+
+Inside that task's sandbox, Claude Code has one MCP server, `okta-gateway`,
+with the github, logseq and gmail tools behind it.
+
+## Order of operations
+
+For a sandbox that does not exist yet, both creation paths
+(`acpwrapper.createSandbox` and `runner.DefaultSandboxCreator`) run these
+steps in this order:
+
+1. **Create the gateway.** `POST <gateway>/gateways {"servers": [...]}`
+   (`mcpgateway.Manager.Prepare`). This happens before the sandbox exists.
+   The returned URL's loopback host (`localhost`, `127.0.0.1`, `::1`) is
+   rewritten to `host.docker.internal`, keeping the port and path. For
+   example, `http://localhost:3333/gateways/3f1c…` becomes
+   `http://host.docker.internal:3333/gateways/3f1c…`.
+2. **Create the sandbox.** `sbx create claude --name <name> [--kit <kit>]
+   <workspaces…>`, with no `--static-mcp` flags.
+3. **Apply the network policy.** First the task's own `policies:`, in order,
+   then the gateway's allow rules. For a loopback gateway URL those are
+   `sbx policy allow network --sandbox <name> host.docker.internal:<port>`
+   and `… localhost:<port>`. For any other host it is `<host>:<port>`. This
+   happens before anything runs in the sandbox. After these steps the
+   gateway is recorded. If `sbx create` or any policy fails, the gateway is
+   DELETEd and nothing is recorded.
+4. **Launch the agent with `MCP_URL`.** `mcpgateway.Manager.Ensure` gets
+   the recorded gateway (still live, same servers) and the agent starts with
+   `sbx exec -e MCP_URL=<sandbox url> …`. `sbx create` has no flag for
+   environment variables, so `MCP_URL` is passed on every `sbx exec`.
+   acp-wrapper also writes `export MCP_URL='…'` into the sandbox's
+   `/etc/sandbox-persistent.sh`, so a shell you open in the sandbox sees it
+   too.
+5. **acp-kit registers it.** Before it starts the ACP bridge,
+   `claude-acp-client` runs the equivalent of
+   `claude mcp add --transport http --scope user okta-gateway "$MCP_URL"`.
+   An entry that already points at `$MCP_URL` is left alone. A stale entry
+   from an older gateway is replaced. If `MCP_URL` is empty, nothing is
+   registered. User-scope settings load for every ACP session, so the
+   gateway is there even when `session/new` sends `"mcpServers": []`. (In an
+   interactive `claude`, run
+   `sbx exec <sandbox> -- env CLAUDE_ACP_REGISTER_ONLY=1 claude-acp-client`
+   first.)
+
+For an ACP session, orch only passes the settings on to acp-wrapper
+(`--mcp-gateway-url`, one `--mcp-server` per name, `--mcp-gateway-state`).
+The wrapper owns the gateway as it owns the sandbox. For terminal-tab and
+`:session` sandboxes, the runner does the same steps itself.
+
+## Reuse, recreation, cleanup and restarts
+
+Gateway state is recorded per sandbox in
+`<sessions-root>/../gateways/<sandbox>.json` (by default
+`~/.workingman/gateways/`). The record holds the gateway id, the base URL it
+was minted on, the host URL and sandbox URL, and the requested and served
+server lists. `acp-wrapper --mcp-gateway-state` overrides the directory.
+The store is deliberately outside the sessions root: a kept sandbox outlives
+its session directory.
+
+- **Reuse** (same sandbox name and the same mounts, e.g. a retry, or the
+  commit agent after its task): the sandbox is not recreated, and the
+  gateway's allow rules are applied again, best effort. `Ensure` then checks
+  the recorded gateway. If it is still registered (`GET /gateways/<id>` is
+  not `404`), it was minted on the same base URL, and it has the same server
+  list, it is reused. Otherwise the stale one is DELETEd and a new one is
+  minted. Because `MCP_URL` is passed per `sbx exec`, a reused sandbox always
+  gets a valid URL. That matters because standalone-codemode keeps
+  sub-gateways in memory only and loses them all when it restarts. A gateway
+  that can't be reached at all counts as reusable. Minting a new one would
+  fail the same way.
+- **Recreation** (same name, different mounts): `sbx rm --force`, then
+  DELETE the recorded gateway and drop its record, then run the full create
+  sequence above with a new gateway.
+- **Removal on exit**: when acp-wrapper removes its sandbox, it DELETEs the
+  gateway. A kept sandbox (a failed or blocked task, or `save_sandbox: true`)
+  keeps its gateway, so a relaunch reuses both.
+- **Restart cleanup**: every acp-wrapper launch sweeps the store. A record
+  whose sandbox `sbx ls` no longer lists, and that is older than 10 minutes
+  (`mcpgateway.SweepGrace`), has its gateway DELETEd. This catches kept
+  sandboxes that someone later removed by hand, and wrappers that died before
+  their exit cleanup.
+
+DELETE failures are only logged. A leaked sub-gateway costs memory in
+standalone-codemode until it restarts.
+
+## Configuration
+
+| orch flag | Environment variable | Meaning |
+|---|---|---|
+| `--mcp-gateway-url` | `WORKINGMAN_MCP_GATEWAY_URL` | Base URL of the host's standalone-codemode, e.g. `http://localhost:3333`. Empty turns the feature off: no gateways, no `MCP_URL`, no extra policy rules. Still no `--static-mcp`. |
+| `--mcp-gateway-servers` | `WORKINGMAN_MCP_GATEWAY_SERVERS` | Comma-separated default server set for sandboxes whose task names no `static_mcps` (and for agents with no task). Empty means those sandboxes get no gateway. |
+
+The flag wins over the environment variable. orch writes the effective
+values to the audit log as `mcp_gateway_config`.
+
+```sh
+# host: the gateway, with the full catalog available
+./bin/gateway --port 3333 --catalog catalog.yaml
+
+# host: orch
+./orch --root ~/orch --acp-kit <kit> \
+  --mcp-gateway-url http://localhost:3333 \
+  --mcp-gateway-servers github
+```
+
+acp-wrapper flags (set by orch, so you normally don't pass them yourself):
+`--mcp-gateway-url`, `--mcp-server <name>` (repeatable),
+`--mcp-gateway-state <dir>`.
+
+## Troubleshooting
+
+Where to look: for ACP sessions, `acp-wrapper.log` next to orch's audit log
+(e.g. `~/orch/acp-wrapper.log`; the lines start with
+`acp-wrapper: session <id>:` or `mcpgateway:`). For terminal-tab and `:session` sandboxes, the audit log
+(`mcp_gateway_failed`). In both cases a gateway failure is best effort: the
+agent still starts, but without `MCP_URL`.
+
+- **Unknown server name → `400`.** The log shows
+  `WARNING mcpgateway: unknown catalog server(s): <names>; creating the
+  gateway over <rest> only`. Fix the task's `static_mcps` (or
+  `--mcp-gateway-servers`), or add the entry to standalone-codemode's catalog
+  and restart it. If every name is unknown, the sandbox gets no gateway. To
+  check a name by hand:
+  `curl -sX POST localhost:3333/gateways -d '{"servers":["gmail"]}'`.
+- **Gateway not running.** The log shows `POST http://localhost:3333/gateways:
+  … connection refused` and `WARNING no MCP gateway for sandbox …`. Start
+  standalone-codemode on the port in `--mcp-gateway-url`. You don't need to
+  recreate anything: the next launch of that sandbox mints a gateway and
+  passes a new `MCP_URL`. If standalone-codemode restarted, every recorded
+  gateway is gone (`GET /gateways/<id>` returns `404`), and each sandbox gets
+  a new one on its next launch.
+- **Network policy blocks the gateway.** Inside the sandbox, a request to
+  `$MCP_URL` returns `403 Blocked by network policy: domain
+  host.docker.internal`. Or `claude mcp list` shows `okta-gateway` as
+  failing. Check `sbx policy ls` for allow rules on
+  `host.docker.internal:<port>` and `localhost:<port>`. The port must match
+  the one in `--mcp-gateway-url`. If you changed the port after the sandbox
+  was created, the reuse path re-applies the new rules, but a local or org
+  **deny** rule overrides any allow. See `sbx policy log`.
+- **`okta-gateway` is missing in Claude Code.** Check that `MCP_URL` is set
+  (`sbx exec <sandbox> -- printenv MCP_URL`). If it is empty, check the
+  causes above. If it is set, check `claude-acp-client`'s stderr for a
+  registration warning.
+- **A tool from another server shows up, or one is missing.** The gateway
+  serves exactly the record's `servers` (in
+  `~/.workingman/gateways/<sandbox>.json`). If you change a task's
+  `static_mcps`, the next launch mints a new gateway.

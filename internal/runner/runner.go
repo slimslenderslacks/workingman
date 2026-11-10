@@ -218,9 +218,11 @@ func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
 // `sbx exec` (one `sbx policy ...` invocation per rule, in order).
 // MCPGateway is the sandbox's per-sandbox MCP gateway manager: its allow
 // rules are applied after Policies, and its recorded gateway is released
-// when the creator removes the sandbox. The gateway itself — and MCP_URL — is
-// the caller's job (mcpgateway.Manager.Ensure), since MCP_URL is passed per
-// `sbx exec`. The zero value means no gateway.
+// when the creator removes the sandbox. A creator that creates the sandbox
+// mints its gateway first (mcpgateway.Manager.Prepare) and records it; the
+// caller then gets it — or a replacement for a reused sandbox whose gateway is
+// gone — from mcpgateway.Manager.Ensure and passes MCP_URL per `sbx exec`.
+// The zero value means no gateway.
 type SandboxSpec struct {
 	Name       string
 	Workspaces []string
@@ -242,23 +244,27 @@ type SandboxCreator func(ctx context.Context, spec SandboxSpec) error
 // the given workspaces mounted. The flow is:
 //
 //  1. `sbx ls --json` to find the existing sandbox (if any).
-//  2. If it exists with the same set of workspaces → no-op. We do NOT inspect
-//     policies on an existing sandbox because sbx ls doesn't surface those
-//     details; for per-task sandboxes the name uniquely encodes the task and
-//     its policy set, so a name collision implies a matching set. (A retry
-//     of the same task reuses the same sandbox.) Its MCP gateway, if any, is
-//     kept: the caller reuses it when still live, or mints a new one —
-//     MCP_URL is per-exec, so a gone gateway never forces a recreate.
+//  2. If it exists with the same set of workspaces → reuse it. We do NOT
+//     inspect policies on an existing sandbox because sbx ls doesn't surface
+//     those details; for per-task sandboxes the name uniquely encodes the
+//     task and its policy set, so a name collision implies a matching set.
+//     (A retry of the same task reuses the same sandbox.) Only the MCP
+//     gateway's allow rules are re-applied, best effort, as acp-wrapper does.
+//     Its MCP gateway, if any, is kept: the caller reuses it when still live,
+//     or mints a new one — MCP_URL is per-exec, so a gone gateway never
+//     forces a recreate.
 //  3. If it exists with a different workspace set → `sbx rm --force`,
 //     release its recorded MCP gateway (best effort), then recreate. This
 //     self-heals when the daemon's idea of the desired mounts has grown
 //     (e.g. task agents added the orch dir as a second mount).
-//  4. Otherwise `sbx create claude --name <name> <ws...>`, then one
+//  4. Otherwise mint the MCP gateway (spec.MCPGateway.Prepare — before the
+//     sandbox exists), `sbx create claude --name <name> <ws...>`, then one
 //     `sbx policy <action> <kind> --sandbox <name> <resource>` per rule in
 //     spec.Policies (in declaration order, so deny-all + allow-host
 //     compositions evaluate left-to-right as written), then the MCP
-//     gateway's allow rules (spec.MCPGateway.PolicyRules). No
-//     `--static-mcp` flags: MCP servers are reached through the gateway.
+//     gateway's allow rules (spec.MCPGateway.PolicyRules), then record the
+//     gateway (DELETEd instead if any step failed). No `--static-mcp`
+//     flags: MCP servers are reached through the gateway.
 //
 // Recreation is safe here because we never use --clone — the sandbox is a
 // thin bind-mount wrapper, so rm just stops the container and leaves the
@@ -273,6 +279,13 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 	}
 	if existing != nil {
 		if sameWorkspaceSet(existing, spec.Workspaces) {
+			// Best-effort, like acp-wrapper's reuse path: a sandbox created
+			// before the gateway was configured can still reach it.
+			if rules, err := spec.MCPGateway.PolicyRules(); err == nil {
+				for _, r := range rules {
+					_ = exec.CommandContext(ctx, "sbx", r.CLIArgs(spec.Name)...).Run()
+				}
+			}
 			return nil
 		}
 		rm := exec.CommandContext(ctx, "sbx", "rm", "--force", spec.Name)
@@ -285,21 +298,32 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 	if err != nil {
 		return fmt.Errorf("sbx policy %s: %w", spec.Name, err)
 	}
+	// Mint the gateway before the sandbox exists; record it once the sandbox
+	// and its policies are in place (the caller's Ensure then reuses it), and
+	// DELETE it again if any step fails.
+	gw := spec.MCPGateway.Prepare(ctx, spec.Name)
+	fail := func(err error) error {
+		spec.MCPGateway.Discard(ctx, gw)
+		return err
+	}
 	args := []string{"create", "claude", "--name", spec.Name}
 	args = append(args, spec.Workspaces...)
 	cmd := exec.CommandContext(ctx, "sbx", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("sbx create %s %v: %w: %s", spec.Name, spec.Workspaces, err, strings.TrimSpace(string(out)))
+		return fail(fmt.Errorf("sbx create %s %v: %w: %s", spec.Name, spec.Workspaces, err, strings.TrimSpace(string(out))))
 	}
 	for _, r := range append(append([]policy.Rule(nil), spec.Policies...), gwRules...) {
 		if err := r.Validate(); err != nil {
-			return fmt.Errorf("sbx policy %s: %w", spec.Name, err)
+			return fail(fmt.Errorf("sbx policy %s: %w", spec.Name, err))
 		}
 		pcmd := exec.CommandContext(ctx, "sbx", r.CLIArgs(spec.Name)...)
 		if out, err := pcmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("sbx policy %s %s %s %s: %w: %s",
-				r.Action, r.Kind, spec.Name, r.Resource, err, strings.TrimSpace(string(out)))
+			return fail(fmt.Errorf("sbx policy %s %s %s %s: %w: %s",
+				r.Action, r.Kind, spec.Name, r.Resource, err, strings.TrimSpace(string(out))))
 		}
+	}
+	if err := spec.MCPGateway.Save(gw); err != nil {
+		spec.MCPGateway.Discard(ctx, gw)
 	}
 	return nil
 }
@@ -1262,7 +1286,7 @@ func (p Plan) Pushes() bool {
 //     project.yaml). Workspace = control dir.
 //   - Task / commit → "<work-stream>-<task-name>" where work-stream is the
 //     basename of the project's control dir. Each task gets its OWN sandbox
-//     so its `--static-mcp` set can differ from siblings; the commit agent
+//     so its MCP gateway (static_mcps) and policies can differ from siblings; the commit agent
 //     for that task reuses the same sandbox so it sees the task's git work.
 //   - Archive → "<work-stream>-archive". It runs against the project's wsp
 //     workspace (not a per-task sandbox: it is a whole-project wrap-up), so it

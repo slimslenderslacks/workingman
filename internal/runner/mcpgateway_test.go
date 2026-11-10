@@ -169,3 +169,117 @@ func TestSandboxedLaunchWithoutMCPGateway(t *testing.T) {
 		t.Errorf("unexpected env in %v", launcher.last.Command)
 	}
 }
+
+// DefaultSandboxCreator POSTs the sandbox's gateway before `sbx create`,
+// applies the task's policies and then the gateway's allow rule before
+// anything is exec'd, records the gateway for the caller's Ensure to reuse,
+// and never sends --static-mcp.
+func TestDefaultSandboxCreatorMintsGatewayFirst(t *testing.T) {
+	gw := newFakeGateway(t)
+	logPath := filepath.Join(t.TempDir(), "events.log")
+	appendEvent := func(line string) {
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(line + "\n")
+	}
+	// Wrap the fake gateway so POSTs land in the same ordered event log as
+	// the fake sbx's invocations.
+	inner := gw.srv.Config.Handler
+	gw.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			appendEvent("POST " + r.URL.Path)
+		}
+		inner.ServeHTTP(w, r)
+	})
+	bin := t.TempDir()
+	script := "#!/bin/sh\necho \"sbx $*\" >> '" + logPath + "'\n" +
+		"[ \"$1\" = ls ] && echo '{\"sandboxes\":[]}'\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "sbx"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	store := mcpgateway.Store{Dir: t.TempDir()}
+	m := mcpgateway.Manager{
+		Client:  mcpgateway.Client{BaseURL: gw.srv.URL},
+		Store:   store,
+		Servers: []string{"github", "logseq", "gmail"},
+	}
+	taskRule := policy.Rule{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.github.com"}
+	if err := DefaultSandboxCreator(context.Background(), SandboxSpec{
+		Name: "task-x", Workspaces: []string{"/ws"}, Policies: []policy.Rule{taskRule}, MCPGateway: m,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := gw.srv.URL[strings.LastIndex(gw.srv.URL, ":")+1:]
+	want := []string{
+		"sbx ls --json",
+		"POST /gateways",
+		"sbx create claude --name task-x /ws",
+		"sbx policy allow network --sandbox task-x api.github.com",
+		"sbx policy allow network --sandbox task-x host.docker.internal:" + port,
+		"sbx policy allow network --sandbox task-x localhost:" + port,
+	}
+	if got := strings.Split(strings.TrimSpace(string(data)), "\n"); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("events =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if strings.Contains(string(data), "--static-mcp") {
+		t.Errorf("--static-mcp must not be sent: %s", data)
+	}
+	if len(gw.created) != 1 || strings.Join(gw.created[0], ",") != "github,logseq,gmail" {
+		t.Errorf("POST /gateways servers = %v, want [github logseq gmail]", gw.created)
+	}
+	rec, ok, err := store.Load("task-x")
+	if err != nil || !ok || rec.ID != "gw-1" {
+		t.Fatalf("record = %+v, %v, %v; want gw-1", rec, ok, err)
+	}
+	// The caller's Ensure reuses the gateway minted at create time.
+	got, err := m.Ensure(context.Background(), "task-x")
+	if err != nil || got.ID != "gw-1" || got.SandboxURL != "http://host.docker.internal:"+port+"/gateways/gw-1" {
+		t.Errorf("Ensure = %+v, %v; want gw-1 at host.docker.internal", got, err)
+	}
+	if len(gw.created) != 1 {
+		t.Errorf("POST /gateways calls = %d, want 1", len(gw.created))
+	}
+}
+
+// Reusing an existing sandbox (same mounts) re-applies only the gateway's
+// allow rules — no create, no POST: the caller's Ensure handles MCP_URL.
+func TestDefaultSandboxCreatorReuseReappliesGatewayRules(t *testing.T) {
+	gw := newFakeGateway(t)
+	logPath := filepath.Join(t.TempDir(), "sbx.log")
+	bin := t.TempDir()
+	script := "#!/bin/sh\necho \"sbx $*\" >> '" + logPath + "'\n" +
+		"[ \"$1\" = ls ] && echo '{\"sandboxes\":[{\"name\":\"task-x\",\"workspaces\":[\"/ws\"]}]}'\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "sbx"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	m := mcpgateway.Manager{
+		Client:  mcpgateway.Client{BaseURL: gw.srv.URL},
+		Store:   mcpgateway.Store{Dir: t.TempDir()},
+		Servers: []string{"github"},
+	}
+	if err := DefaultSandboxCreator(context.Background(), SandboxSpec{Name: "task-x", Workspaces: []string{"/ws"}, MCPGateway: m}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(logPath)
+	port := gw.srv.URL[strings.LastIndex(gw.srv.URL, ":")+1:]
+	want := "sbx ls --json\n" +
+		"sbx policy allow network --sandbox task-x host.docker.internal:" + port + "\n" +
+		"sbx policy allow network --sandbox task-x localhost:" + port + "\n"
+	if string(data) != want {
+		t.Errorf("sbx calls =\n%s\nwant\n%s", data, want)
+	}
+	if len(gw.created) != 0 {
+		t.Errorf("POST /gateways on reuse = %v, want none", gw.created)
+	}
+}

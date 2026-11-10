@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -157,5 +158,36 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if err := s.Save(Record{Sandbox: "../x"}); err == nil {
 		t.Error("Save with a path-like sandbox name: want an error")
+	}
+}
+
+// Prepare mints without recording; a disabled manager or a failed mint yields
+// a zero Record, which Save and Discard ignore.
+func TestManagerPrepare(t *testing.T) {
+	if rec := (Manager{Servers: []string{"gmail"}}).Prepare(context.Background(), "sb"); rec.ID != "" {
+		t.Errorf("disabled Prepare = %+v, want zero", rec)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(Gateway{ID: "x", URL: "http://localhost:1/gateways/x"})
+	}))
+	defer srv.Close()
+	m := Manager{Client: Client{BaseURL: srv.URL}, Store: Store{Dir: t.TempDir()}, Servers: []string{"gmail"}, Log: io.Discard}
+	rec := m.Prepare(context.Background(), "sb")
+	if rec.ID != "x" {
+		t.Fatalf("Prepare = %+v, want gateway x", rec)
+	}
+	if _, ok, _ := m.Store.Load("sb"); ok {
+		t.Error("Prepare must not record the gateway")
+	}
+	if err := m.Save(Record{Sandbox: "sb"}); err != nil {
+		t.Errorf("Save(zero) = %v", err)
+	}
+	if _, ok, _ := m.Store.Load("sb"); ok {
+		t.Error("Save(zero) wrote a record")
+	}
+	down := Manager{Client: Client{BaseURL: "http://127.0.0.1:1"}, Servers: []string{"gmail"}, Log: io.Discard}
+	if rec := down.Prepare(context.Background(), "sb"); rec.ID != "" {
+		t.Errorf("Prepare with the gateway down = %+v, want zero", rec)
 	}
 }

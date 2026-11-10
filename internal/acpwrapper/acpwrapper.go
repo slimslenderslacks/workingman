@@ -547,7 +547,8 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 // createSandbox runs `sbx create claude --name <name> --kit <kit>
 // <c.Workspaces...>` and then applies c.Policies in declaration order (so
 // deny-all + allow-host stacks evaluate left-to-right), followed by the MCP
-// gateway's allow rules. No `--static-mcp` flags: MCP servers reach the
+// gateway's allow rules. The sandbox's gateway is POSTed before `sbx create`
+// and recorded after the policies succeed (DELETEd if any step fails). No `--static-mcp` flags: MCP servers reach the
 // sandbox through its per-sandbox gateway (MCP_URL) instead.
 // It is the one place that "attaches" a sandbox's workspace mounts, used both
 // for a brand-new sandbox and to repair one whose mounts must change (the
@@ -571,24 +572,36 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 		args = append(args, "-t", img, "--pull", "missing")
 	}
 	args = append(args, c.Workspaces...)
-	createStart := time.Now()
-	out, err := run(ctx, c.SbxPath, args...)
-	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: sbx create %s took %s\n", c.SessionID, name, time.Since(createStart))
-	if err != nil {
-		return "", fmt.Errorf("acpwrapper: sbx create %s: %w: %s", name, err, strings.TrimSpace(string(out)))
-	}
 	gwRules, err := c.MCPGateway.PolicyRules()
 	if err != nil {
 		return "", fmt.Errorf("acpwrapper: mcp gateway policy %s: %w", name, err)
 	}
+	// Mint the gateway before the sandbox exists; it is recorded only once
+	// the sandbox and its policies are in place (ensureMCPGateway then reuses
+	// it), and DELETEd again if creating the sandbox fails.
+	gw := c.MCPGateway.Prepare(ctx, name)
+	fail := func(err error) (string, error) {
+		c.MCPGateway.Discard(ctx, gw)
+		return "", err
+	}
+	createStart := time.Now()
+	out, err := run(ctx, c.SbxPath, args...)
+	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: sbx create %s took %s\n", c.SessionID, name, time.Since(createStart))
+	if err != nil {
+		return fail(fmt.Errorf("acpwrapper: sbx create %s: %w: %s", name, err, strings.TrimSpace(string(out))))
+	}
 	for _, r := range append(slices.Clone(c.Policies), gwRules...) {
 		if err := r.Validate(); err != nil {
-			return "", fmt.Errorf("acpwrapper: sbx policy %s: %w", name, err)
+			return fail(fmt.Errorf("acpwrapper: sbx policy %s: %w", name, err))
 		}
 		if out, err := run(ctx, c.SbxPath, r.CLIArgs(name)...); err != nil {
-			return "", fmt.Errorf("acpwrapper: sbx policy %s %s %s %s: %w: %s",
-				r.Action, r.Kind, name, r.Resource, err, strings.TrimSpace(string(out)))
+			return fail(fmt.Errorf("acpwrapper: sbx policy %s %s %s %s: %w: %s",
+				r.Action, r.Kind, name, r.Resource, err, strings.TrimSpace(string(out))))
 		}
+	}
+	if err := c.MCPGateway.Save(gw); err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING %v\n", c.SessionID, err)
+		c.MCPGateway.Discard(ctx, gw)
 	}
 	return name, nil
 }
@@ -612,10 +625,11 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 //     c.Policies, in declaration order (so deny-all + allow-host stacks
 //     evaluate left-to-right), then the gateway's allow rules.
 //
-// The gateway itself is minted afterwards, by ensureMCPGateway: MCP_URL is
-// injected per `sbx exec`, not baked in at create time, so an existing
-// sandbox whose gateway is gone just gets a new one — it is never recreated
-// for that.
+// On create the gateway is minted first (createSandbox → Manager.Prepare),
+// before `sbx create`, and recorded once the sandbox and its policies exist;
+// ensureMCPGateway then reuses it. MCP_URL is injected per `sbx exec`, not
+// baked in at create time, so an existing sandbox whose gateway is gone just
+// gets a new one from ensureMCPGateway — it is never recreated for that.
 //
 // A cache miss always means "create a fresh sandbox under c.SandboxName" —
 // this never looks up or adopts any other sandbox by a different name.

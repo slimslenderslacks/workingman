@@ -29,7 +29,8 @@ const (
 	// resolves threads whose fix has landed, escalates contested comments by
 	// blocking the project (→ wolf), and flips the project to done once the PR is
 	// merged or closed. It is autonomous (runs under `claude --print` via ACP,
-	// like planning) so it can carry `--static-mcp github`. Appended so the iota
+	// like planning) and reaches the github MCP server through its sandbox's
+	// MCP gateway (static_mcps [github]). Appended so the iota
 	// values of the existing kinds don't shift.
 	ReviewAgent
 	// WorkingmanAgent is the long-lived, always-on observer the daemon starts at

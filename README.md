@@ -109,7 +109,9 @@ tail -f ~/orch/audit.log
 
 Sandboxes reach MCP servers through the host's
 [standalone-codemode](https://github.com/slimslenderslacks/standalone-codemode)
-gateway, not through sbx static MCPs. Point orch at it:
+gateway, not through sbx static MCPs. [docs/mcp-gateway.md](docs/mcp-gateway.md)
+covers the whole flow end to end, with an example task and troubleshooting.
+Point orch at it:
 
 ```sh
 ./orch --root ~/orch --acp-kit <kit> \
@@ -120,7 +122,8 @@ gateway, not through sbx static MCPs. Point orch at it:
 
 Each time a sandbox is created (or reused):
 
-1. **A sub-gateway is minted**: `POST <url>/gateways {"servers": [...]}`. The
+1. **A sub-gateway is minted**: `POST <url>/gateways {"servers": [...]}`,
+   before `sbx create` for a new sandbox. The
    servers are the task's `static_mcps` when it lists any (each entry is a
    catalog server name), otherwise `--mcp-gateway-servers`. The review agent
    asks for `github`. Names the catalog doesn't have are dropped, with a

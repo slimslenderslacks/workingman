@@ -84,7 +84,7 @@ func TestKindInteractive(t *testing.T) {
 		// an ACP sandbox like the commit agent.
 		{ArchiveAgent, false},
 		// The review agent is autonomous: it runs under ACP with `--print` so it
-		// can carry --static-mcp github, like planning.
+		// reaches github through its MCP gateway, like planning.
 		{ReviewAgent, false},
 		// The workingman agent is autonomous-ACP too (no human drives its
 		// prompt; questions arrive over channels) — just persistent.

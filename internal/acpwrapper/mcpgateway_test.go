@@ -79,16 +79,29 @@ func gatewayConfig(t *testing.T, g *fakeGateway, servers ...string) Config {
 	}
 }
 
-// A new sandbox is created with no --static-mcp flags and gets the gateway's
-// allow rules after the task's own policies; ensureMCPGateway then mints a
-// gateway over the requested servers, records it, writes MCP_URL into the
-// sandbox's env file, and execArgs passes it as -e MCP_URL.
+// A new sandbox's gateway is POSTed before `sbx create`; the sandbox is
+// created with no --static-mcp flags and gets the gateway's allow rules after
+// the task's own policies, and the gateway is recorded. ensureMCPGateway then
+// reuses it, writes MCP_URL into the sandbox's env file, and execArgs passes
+// it as -e MCP_URL.
 func TestCreateSandboxWithMCPGateway(t *testing.T) {
 	g := newFakeGateway(t)
-	c := gatewayConfig(t, g, "gmail", "github")
+	c := gatewayConfig(t, g, "gmail", "github", "logseq")
 	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
-	if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
+	postsAtCreate := -1
+	run := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "create" {
+			g.mu.Lock()
+			postsAtCreate = len(g.created)
+			g.mu.Unlock()
+		}
+		return f.run(ctx, name, args...)
+	}
+	if _, err := ensureSandbox(context.Background(), run, c); err != nil {
 		t.Fatalf("ensureSandbox: %v", err)
+	}
+	if postsAtCreate != 1 {
+		t.Errorf("POST /gateways calls before sbx create = %d, want 1", postsAtCreate)
 	}
 	wantCreate := []string{"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp", "/repo"}
 	if !reflect.DeepEqual(f.calls[1], wantCreate) {
@@ -101,18 +114,18 @@ func TestCreateSandboxWithMCPGateway(t *testing.T) {
 	if !reflect.DeepEqual(f.calls[2:], wantPolicies) {
 		t.Errorf("policy calls = %v, want %v", f.calls[2:], wantPolicies)
 	}
-	if len(g.created) != 0 {
-		t.Errorf("ensureSandbox must not mint the gateway itself: %v", g.created)
+	wantURL := "http://host.docker.internal:" + g.port() + "/gateways/gw-1"
+	if rec, ok, _ := c.MCPGateway.Store.Load("acp-s"); !ok || rec.ID != "gw-1" {
+		t.Errorf("record after create = %+v, %v; want gw-1", rec, ok)
 	}
 
 	f.calls = nil
 	c.mcpURL = ensureMCPGateway(context.Background(), f.run, c)
-	wantURL := "http://host.docker.internal:" + g.port() + "/gateways/gw-1"
 	if c.mcpURL != wantURL {
 		t.Fatalf("mcpURL = %q, want %q", c.mcpURL, wantURL)
 	}
-	if !reflect.DeepEqual(g.created, [][]string{{"gmail", "github"}}) {
-		t.Errorf("POST /gateways = %v", g.created)
+	if !reflect.DeepEqual(g.created, [][]string{{"gmail", "github", "logseq"}}) {
+		t.Errorf("POST /gateways = %v, want one, minted before create", g.created)
 	}
 	if len(f.calls) != 1 || !reflect.DeepEqual(f.calls[0][1:], mcpgateway.PersistEnvArgs("acp-s", wantURL)) {
 		t.Errorf("env-file call = %v", f.calls)
@@ -177,11 +190,13 @@ func TestSandboxRemovalReleasesMCPGateway(t *testing.T) {
 	if !reflect.DeepEqual(g.deleted, []string{"gw-1"}) {
 		t.Errorf("after recreate: deleted = %v, want [gw-1]", g.deleted)
 	}
-	if _, ok, _ := c.MCPGateway.Store.Load("acp-s"); ok {
-		t.Error("record survived the recreate")
+	if rec, ok, _ := c.MCPGateway.Store.Load("acp-s"); !ok || rec.ID != "gw-2" {
+		t.Errorf("record after recreate = %+v, %v; want the new gw-2", rec, ok)
 	}
 
-	ensureMCPGateway(context.Background(), f.run, c)
+	if got := ensureMCPGateway(context.Background(), f.run, c); !strings.HasSuffix(got, "/gateways/gw-2") {
+		t.Errorf("after recreate: url %q, want the gateway minted at create (gw-2)", got)
+	}
 	removeSandboxOnExit(context.Background(), f.run, c, false)
 	if !reflect.DeepEqual(g.deleted, []string{"gw-1", "gw-2"}) {
 		t.Errorf("after exit: deleted = %v, want [gw-1 gw-2]", g.deleted)
@@ -234,6 +249,25 @@ func TestMCPGatewayDisabled(t *testing.T) {
 	for _, a := range c.execArgs() {
 		if strings.HasPrefix(a, "MCP_URL=") {
 			t.Errorf("execArgs carries %s with the gateway disabled", a)
+		}
+	}
+}
+
+// A failed `sbx create` (or policy) DELETEs the gateway minted for it and
+// leaves no record behind.
+func TestCreateSandboxFailureDiscardsMCPGateway(t *testing.T) {
+	for _, failCmd := range []string{"create", "policy"} {
+		g := newFakeGateway(t)
+		c := gatewayConfig(t, g, "gmail")
+		f := &fakeSbx{lsOutput: `{"sandboxes":[]}`, failCmd: failCmd}
+		if _, err := ensureSandbox(context.Background(), f.run, c); err == nil {
+			t.Fatalf("%s failure: ensureSandbox succeeded", failCmd)
+		}
+		if !reflect.DeepEqual(g.deleted, []string{"gw-1"}) {
+			t.Errorf("%s failure: deleted = %v, want [gw-1]", failCmd, g.deleted)
+		}
+		if _, ok, _ := c.MCPGateway.Store.Load("acp-s"); ok {
+			t.Errorf("%s failure: gateway record left behind", failCmd)
 		}
 	}
 }

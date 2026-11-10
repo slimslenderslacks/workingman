@@ -133,6 +133,23 @@ func (m Manager) Mint(ctx context.Context, sandbox string) (Record, error) {
 	}, nil
 }
 
+// Prepare mints the gateway for a sandbox that is about to be created, so the
+// gateway exists before the sandbox does. The record is not saved: call Save
+// once `sbx create` and its policies succeed, or Discard if they fail. A
+// disabled manager or a failed mint (logged) yields a zero Record — creating
+// the sandbox still goes ahead, and Ensure retries the mint afterwards.
+func (m Manager) Prepare(ctx context.Context, sandbox string) Record {
+	if !m.Enabled() {
+		return Record{}
+	}
+	rec, err := m.Mint(ctx, sandbox)
+	if err != nil {
+		m.logf("sandbox %s: WARNING no gateway before create: %v", sandbox, err)
+		return Record{}
+	}
+	return rec
+}
+
 // Ensure returns the gateway sandbox should use: the recorded one when it is
 // still valid (Reusable), otherwise a freshly minted one — the stale one is
 // DELETEd first and the new one recorded.
@@ -151,9 +168,10 @@ func (m Manager) Ensure(ctx context.Context, sandbox string) (Record, error) {
 	return rec, nil
 }
 
-// Save persists rec so later launches can reuse or release its gateway.
+// Save persists rec so later launches can reuse or release its gateway. A
+// zero Record (nothing minted) is a no-op.
 func (m Manager) Save(rec Record) error {
-	if m.Store.Dir == "" {
+	if m.Store.Dir == "" || rec.ID == "" {
 		return nil
 	}
 	return m.Store.Save(rec)
