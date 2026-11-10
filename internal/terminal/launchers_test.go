@@ -48,6 +48,9 @@ func TestGhosttyMacOSOpenTab(t *testing.T) {
 		// The command is shell-quoted, then AppleScript-escaped.
 		`set command of cfg to "sbx exec -it session-widget bash -lc 'echo \"it'\\''s\"'"`,
 		`set t to new tab with configuration cfg`,
+		// No Ghostty window yet: open a window instead of failing.
+		`if (count of windows) is 0 then`,
+		`set w to new window with configuration cfg`,
 		`set name override of t to "widget"`,
 		`return id of t`,
 	} {

@@ -368,7 +368,7 @@ func (d *Daemon) liveSessionSnapshots() []SessionSnapshot {
 	for key, entry := range d.sessions {
 		projectPath, _ := splitSessionKey(key)
 		workStream := filepath.Base(filepath.Dir(projectPath))
-		if entry.kind == agent.WorkingmanAgent {
+		if entry.kind == agent.WorkingmanAgent || entry.kind == agent.SleepyHeadAgent {
 			// Daemon-owned, not part of any project: no work stream, no project path.
 			projectPath, workStream = "", ""
 		}

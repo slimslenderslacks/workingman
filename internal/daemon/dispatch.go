@@ -138,6 +138,11 @@ func (d *Daemon) handleProjectSeed(path string) {
 // daemon-write filter (otherwise our own created_at stamp save, also
 // written as `daemon`, would silence every subsequent cron firing).
 func (d *Daemon) dispatchProject(path string, p *project.Project) {
+	// On battery nothing new starts; the project is re-dispatched on AC.
+	if d.deferForPower(path) {
+		d.audit.Log("power_deferred", "path", path)
+		return
+	}
 	// `:stop` outranks everything else — cleanup, cron, the status switch. A
 	// stopped project gets no further routing until `:start` restores its prior
 	// status; this call is what actually kills whatever agents were running for
@@ -844,9 +849,11 @@ func (d *Daemon) registerCronIfAny(projectPath string, p *project.Project) bool 
 	}
 	if reason := p.CronStopReason(); reason != "" {
 		d.scheduler.Unregister(projectPath)
+		d.untrackCron(projectPath)
 		d.audit.Log("cron_unscheduled", "path", projectPath, "spec", p.Cron, "reason", reason)
 		return true
 	}
+	d.trackCron(projectPath)
 	err := d.scheduler.Register(projectPath, p.Cron, func() { d.onCronFired(projectPath) })
 	if err != nil {
 		d.audit.Log("cron_register_error", "path", projectPath, "spec", p.Cron, "err", err.Error())
@@ -891,7 +898,14 @@ func (d *Daemon) onCronFired(projectPath string) {
 		}
 		return
 	}
+	if d.PowerPaused() {
+		// Not fired: counted as missed so sleepy-head reports it.
+		d.recordMissedTick(projectPath, d.clock())
+		d.audit.Log("cron_skipped_battery", "path", projectPath, "spec", p.Cron)
+		return
+	}
 	d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
+	d.recordCronFire(projectPath, d.clock())
 
 	// Entry check: the budget on disk may already be spent (a restart that
 	// re-registered from a stale read, or a schedule left over from before the

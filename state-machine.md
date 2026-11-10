@@ -530,6 +530,34 @@ dead end for every cron project. The `#review` poll, by contrast, is always
 unregistered when a project settles idle-and-not-watching — the PR loop (if
 any) is finished regardless of cron.
 
+### Missed schedules, sleepy-head and catch-up
+
+robfig/cron fires at most one late tick after a sleep and none for a daemon that
+was down, so the daemon keeps its own history (`cron_missed.go`, persisted via
+`WithCronState`): per project, `LastFired` (stamped by `onCronFired` through
+`recordCronFire`) and an `Observed` baseline so a brand-new schedule doesn't
+"miss" ticks from before it existed.
+
+- **Detection.** `detectMissedAtStartup` runs before `scheduler.Start`;
+  `sleepWatchLoop` samples the wall clock and on a gap of more than twice its
+  interval calls `detectMissedTracked`. Both use `evaluateMissed`, which counts
+  ticks in (baseline, now] with `scheduler.TicksBetween` and folds them into one
+  `MissedSchedule` per project. Projects whose stop condition has tripped are
+  skipped. A later firing drops the record.
+- **Power.** While the daemon is power-paused (battery, `--require-ac`), each
+  cron firing is recorded as a missed tick instead of running `onCronFired`.
+- **sleepy-head.** After startup `launchSleepyHead` opens the interactive
+  sleepy-head agent (session key `sleepy-head`, no project) if anything is
+  behind, at most one at a time, never on battery, and log-only without a
+  runner.
+- **Catch-up.** `orch catchup <project.yaml>` (`RequestCatchup`) writes a
+  `catchup-request` marker next to the project file; the watcher hands it to
+  `handleCatchup`, which consumes it and calls `catchUpProject`. That fires
+  `onCronFired` exactly once, and only while the project is still recorded as
+  behind, so duplicate events and stale requests are no-ops. A busy project
+  (`working`/`blocked`) clears its record but starts no cycle and is not charged
+  against `cron_max_runs`.
+
 ## 2. Task status
 
 ### Diagram

@@ -14,6 +14,11 @@
 // (like "@every 5m"). Production project schedules use 5-field specs; the
 // review poll and fast-cycle tests use @every.
 //
+// The library keeps no history and fires at most one late tick after a sleep,
+// so [TicksBetween] lets the daemon count the ticks of a spec in a time window.
+// It uses them to report schedules missed while the host slept or the daemon
+// was down; see the missed-schedule part of the cron section of state-machine.md.
+//
 // # Key types
 //
 //   - [Scheduler] — the key → cron entry table. [New] creates one;

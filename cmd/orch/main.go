@@ -15,6 +15,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/daemon"
+	"github.com/slimslenderslacks/work/internal/power"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
 	"github.com/slimslenderslacks/work/internal/session"
@@ -41,8 +42,10 @@ func (r *rootsFlag) Set(s string) error {
 const usageHeader = `usage: orch --root <dir> [flags]        run the daemon, with the TUI unless --headless
        orch tui --root <dir>            run only the TUI over a directory
        orch status [--json]             print the running daemon's state snapshot
+       orch catchup <project-path>      fire a behind project's schedule once, now (used by sleepy-head)
        orch whatsapp <subcommand>       set up and check the WhatsApp channel (see docs/channels.md)
        orch signal <subcommand>         set up and check the Signal channel (see docs/channels.md)
+       orch service install|uninstall|status   run the daemon in the background via launchd (macOS)
 
 whatsapp subcommands:
   setup    configure the Business Cloud API channel: credentials, owner allowlist, webhook
@@ -68,12 +71,18 @@ func main() {
 	if len(args) > 0 && args[0] == "status" {
 		os.Exit(runStatus(args[1:], os.Stdout, os.Stderr))
 	}
+	if len(args) > 0 && args[0] == "catchup" {
+		os.Exit(runCatchup(args[1:], os.Stdout, os.Stderr))
+	}
 	if len(args) > 0 && args[0] == "help" {
 		fmt.Fprint(os.Stdout, usageHeader)
 		return
 	}
 	if len(args) > 0 && args[0] == "whatsapp" {
 		os.Exit(runWhatsApp(args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	if len(args) > 0 && args[0] == "service" {
+		os.Exit(runService(args[1:], os.Stdout, os.Stderr))
 	}
 	if len(args) > 0 && args[0] == "signal" {
 		os.Exit(runSignal(args[1:], os.Stdin, os.Stdout, os.Stderr))
@@ -108,6 +117,7 @@ func runDaemon(args []string) {
 	fs.Var(&workingmanMode, "workingman-agent", `run the workingman agent: a persistent assistant in its own sandbox that answers questions about the orch state and, on request, edits the orch roots (projects, tasks, intake). "auto" (default) turns it on when --acp-kit is set and channels.yaml has an inbound-capable channel; --workingman-agent / =on forces it on (requires --acp-kit); =off disables it`)
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
+	requireAC := fs.Bool("require-ac", false, "pause dispatching new work and cron firings while the laptop is on battery (macOS, via pmset), resuming on AC; skipped cron ticks are recorded as missed. No-op off macOS. `orch service install` turns it on")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -207,6 +217,10 @@ func runDaemon(args []string) {
 	dopts := []daemon.Option{
 		daemon.WithRunner(r),
 		daemon.WithScheduler(scheduler.New()),
+		daemon.WithCronState(filepath.Join(stateDir, "cron_state.json")),
+	}
+	if *requireAC {
+		dopts = append(dopts, daemon.WithPowerSource(power.New(), 0))
 	}
 	dopts = append(dopts, ch.options(a)...)
 	stateFilePath, err := resolveStateFile(*stateFile, *sessionsRoot)
@@ -257,6 +271,7 @@ func runDaemon(args []string) {
 		"acp_kit", *acpKit,
 		"acp_image", *acpImage,
 		"wolf_host", fmt.Sprintf("%t", *wolfHost),
+		"require_ac", fmt.Sprintf("%t", *requireAC),
 		"state_file", stateFilePath,
 	)
 
@@ -431,6 +446,14 @@ func (l interactiveLauncher) OpenShell(ctx context.Context, projectPath string) 
 
 func (l interactiveLauncher) OpenSession(ctx context.Context, projectPath string) (string, error) {
 	return l.d.OpenInteractiveSession(ctx, projectPath)
+}
+
+func (l interactiveLauncher) OpenOrchDir(ctx context.Context, projectPath string) (string, error) {
+	return l.d.OpenOrchDirTab(ctx, projectPath)
+}
+
+func (l interactiveLauncher) OpenWorkspaceDir(ctx context.Context, projectPath string) (string, error) {
+	return l.d.OpenWorkspaceDirTab(ctx, projectPath)
 }
 
 // sshAgentUnusable reports whether current is an SSH_AUTH_SOCK that cannot

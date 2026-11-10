@@ -439,6 +439,7 @@ func TestRenderAllKinds(t *testing.T) {
 		agent.ArchiveAgent,
 		agent.ReviewAgent,
 		agent.WorkingmanAgent,
+		agent.SleepyHeadAgent,
 	} {
 		if _, err := Render(k, Data{Workspace: "/ws"}); err != nil {
 			t.Errorf("Render(%s): %v", k, err)
@@ -585,5 +586,54 @@ func TestRenderWorkingmanWithoutSnapshot(t *testing.T) {
 	}
 	if strings.Contains(out, "START by reading the snapshot (") {
 		t.Errorf("must not name a snapshot path when there is none:\n%s", out)
+	}
+}
+
+func sleepyHeadData() Data {
+	return Data{
+		Workspace: "/ws",
+		BehindProjects: []BehindProject{
+			{Name: "nightly", ProjectPath: "/orch/nightly/project.yaml", Cron: "0 2 * * *", LastFired: "2026-11-01 02:00", MissedCount: 5, MostRecent: "2026-11-06 02:00", Status: "idle"},
+			{Name: "weekly", ProjectPath: "/orch/weekly/project.yaml", Cron: "0 9 * * 1", MissedCount: 1, MostRecent: "2026-11-02 09:00", Status: "blocked"},
+		},
+		ReplanInstruction: "run `orch replan <project-path>` once",
+	}
+}
+
+// TestRenderSleepyHead checks the behind projects and the launcher-supplied
+// replan instruction are substituted, and that the prompt keeps its
+// confirm-first, one-replan-per-project contract.
+func TestRenderSleepyHead(t *testing.T) {
+	out, err := Render(agent.SleepyHeadAgent, sleepyHeadData())
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"INTERACTIVE",
+		"nightly", "/orch/nightly/project.yaml", "0 2 * * *", "2026-11-01 02:00", "2026-11-06 02:00",
+		"weekly", "/orch/weekly/project.yaml", "blocked",
+		"missed ticks:   5",
+		"run `orch replan <project-path>` once",
+		"exactly ONE re-plan",
+		"never one re-plan per missed tick",
+		"must NOT re-plan",
+		"explicit confirmation",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "never") || !strings.Contains(out, "last fired:     never") {
+		t.Errorf("a project that never fired should say so:\n%s", out)
+	}
+}
+
+func TestRenderSleepyHeadNothingBehind(t *testing.T) {
+	out, err := Render(agent.SleepyHeadAgent, Data{Workspace: "/ws", ReplanInstruction: "x"})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(out, "nothing is behind") {
+		t.Errorf("empty list should say nothing is behind:\n%s", out)
 	}
 }

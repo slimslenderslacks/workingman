@@ -16,6 +16,8 @@ import (
 type fakeInteractive struct {
 	shellCalls   []string
 	sessionCalls []string
+	orchCalls    []string
+	wsCalls      []string
 	target       string
 	err          error
 }
@@ -28,6 +30,101 @@ func (f *fakeInteractive) OpenShell(_ context.Context, projectPath string) (stri
 func (f *fakeInteractive) OpenSession(_ context.Context, projectPath string) (string, error) {
 	f.sessionCalls = append(f.sessionCalls, projectPath)
 	return f.target, f.err
+}
+
+func (f *fakeInteractive) OpenOrchDir(_ context.Context, projectPath string) (string, error) {
+	f.orchCalls = append(f.orchCalls, projectPath)
+	return f.target, f.err
+}
+
+func (f *fakeInteractive) OpenWorkspaceDir(_ context.Context, projectPath string) (string, error) {
+	f.wsCalls = append(f.wsCalls, projectPath)
+	return f.target, f.err
+}
+
+// dirCommandCase drives `:orch` / `:workspace`, which differ only in the
+// launcher method they reach.
+func dirCommandCases(f *fakeInteractive) map[string]*[]string {
+	return map[string]*[]string{"orch": &f.orchCalls, "workspace": &f.wsCalls}
+}
+
+// The `w` shortcut belongs to wolf, so :workspace is picked by moving the
+// highlight; :orch's `o` shortcut works directly.
+func runDirCommand(t *testing.T, m model, key string) (model, tea.Cmd) {
+	t.Helper()
+	if key == "orch" {
+		return runProjectCommand(t, m, key)
+	}
+	m = openCommandPicker(t, m)
+	m.cmdPickerIdx = projectCommandIndex(key)
+	step, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return step.(model), cmd
+}
+
+func TestOrchAndWorkspaceCommandsLaunch(t *testing.T) {
+	for _, key := range []string{"orch", "workspace"} {
+		t.Run(key, func(t *testing.T) {
+			fake := &fakeInteractive{target: key + "-widget"}
+			m, projPath := selectProject(t, t.TempDir(), "widget")
+			m.interactive = fake
+			m, cmd := runDirCommand(t, m, key)
+			if m.mode != modeNormal || cmd == nil {
+				t.Fatalf("mode = %v, cmd nil = %v; want launch command", m.mode, cmd == nil)
+			}
+			launched, ok := cmd().(interactiveLaunchedMsg)
+			if !ok || launched.kind != key || launched.target != key+"-widget" {
+				t.Fatalf("launched = %+v", launched)
+			}
+			calls := *dirCommandCases(fake)[key]
+			if len(calls) != 1 || calls[0] != projPath {
+				t.Errorf("calls = %v, want [%q]", calls, projPath)
+			}
+			if len(fake.shellCalls)+len(fake.sessionCalls) != 0 {
+				t.Errorf("unexpected shell/session calls")
+			}
+			next, _ := m.handleInteractiveLaunched(launched)
+			if got := next.(model).statusMsg; !strings.Contains(got, "new tab") || !strings.Contains(got, key) {
+				t.Errorf("statusMsg = %q", got)
+			}
+		})
+	}
+}
+
+func TestOrchAndWorkspaceCommandsNoSelection(t *testing.T) {
+	for _, key := range []string{"orch", "workspace"} {
+		t.Run(key, func(t *testing.T) {
+			fake := &fakeInteractive{}
+			m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
+			m.interactive = fake
+			m = focusProjectsPane(t, m)
+			m, cmd := runDirCommand(t, m, key)
+			if cmd != nil || !strings.Contains(m.statusMsg, "no work stream") {
+				t.Errorf("cmd nil = %v, statusMsg = %q", cmd == nil, m.statusMsg)
+			}
+			if len(*dirCommandCases(fake)[key]) != 0 {
+				t.Errorf("launcher must not be called")
+			}
+		})
+	}
+}
+
+func TestOrchAndWorkspaceCommandsMissingDir(t *testing.T) {
+	for _, key := range []string{"orch", "workspace"} {
+		t.Run(key, func(t *testing.T) {
+			fake := &fakeInteractive{err: errors.New(key + " directory /nope does not exist")}
+			m, _ := selectProject(t, t.TempDir(), "widget")
+			m.interactive = fake
+			m, cmd := runDirCommand(t, m, key)
+			if cmd == nil {
+				t.Fatal("expected launch command")
+			}
+			next, _ := m.handleInteractiveLaunched(cmd().(interactiveLaunchedMsg))
+			got := next.(model).statusMsg
+			if !strings.Contains(got, "open "+key+":") || !strings.Contains(got, "does not exist") {
+				t.Errorf("statusMsg = %q, want the missing-directory error", got)
+			}
+		})
+	}
 }
 
 func TestDirCommandLaunchesShell(t *testing.T) {
