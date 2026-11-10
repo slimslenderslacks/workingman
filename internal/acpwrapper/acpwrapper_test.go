@@ -315,7 +315,7 @@ func TestEnsureSandboxMountsOnlyWorkspacesWhenSigning(t *testing.T) {
 }
 
 // A prebuilt TemplateImage must reach `sbx create` as `-t <image>` with an
-// explicit `--pull never`: sbx defaults to --pull always, and the sandbox
+// explicit `--pull missing`: sbx defaults to --pull always, and the sandbox
 // runtime's image store is separate from the host docker's, so a locally built
 // image would otherwise fail at PREPARE IMAGE with a registry 403. The kit
 // stays on the command line alongside it — the image removes the kit's install
@@ -325,7 +325,7 @@ func TestEnsureSandboxCreatesFromTemplateImage(t *testing.T) {
 	c := Config{
 		SandboxName:   "acp-s",
 		KitPath:       "/kits/acp",
-		TemplateImage: "slimslenderslacks/claude-code-acp:0.88.0",
+		TemplateImage: "slimslenderslacks/claude-code-acp:0.89.0",
 		SbxPath:       "sbx",
 		Workspaces:    []string{"/repo"},
 	}
@@ -335,7 +335,7 @@ func TestEnsureSandboxCreatesFromTemplateImage(t *testing.T) {
 	create := f.calls[1]
 	want := []string{
 		"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp",
-		"-t", "slimslenderslacks/claude-code-acp:0.88.0", "--pull", "missing", "/repo",
+		"-t", "slimslenderslacks/claude-code-acp:0.89.0", "--pull", "missing", "/repo",
 	}
 	if !reflect.DeepEqual(create, want) {
 		t.Errorf("create call = %v, want %v", create, want)

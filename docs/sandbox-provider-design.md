@@ -45,7 +45,7 @@ argv.
 | `sbx exec <n> -- sh -c 'ssh -T … git@github.com 2>&1'` | — | `gitsign.PushPreflight`, `check-signing.sh` | text classification: "successfully authenticated", "permission denied", "host key verification failed", or unreachable | Fatal for pushing sessions, with an actionable reason that names `sbx policy log` / `sbx policy allow network`. |
 | `sbx secret ls --json` | — | `acpwrapper.gatewaySecretConfigured` | `custom_secrets[].{scope, targets[]}`. Matches when scope is `global` or the sandbox name and `targets` contains `llm.es.atko.services` | An error is logged as a WARNING and the gateway is not used (fail-open to the default API). |
 | `sbx daemon stop` / `sbx daemon start -d` | env `SSH_AUTH_SOCK=<private agent>` | `start.sh`, `check-signing.sh restart_sandboxd` | none | `start.sh`: a failed start is fatal. Stop is `|| true`. |
-| `sbx template load` / `sbx template ls` | — | **manual**, documented in `start.sh` comments | — | — |
+| `sbx template load` / `sbx template ls` | — | **manual**, documented in `start.sh` comments and `docs/mcp-gateway.md` (`ACP_IMAGE` default `slimslenderslacks/claude-code-acp:0.89.0`) | — | — |
 | `sbx mcp ls` / `sbx mcp auth` | — | **text only**: `daemon/review.go` block reason, `wolf.tmpl` | — | — |
 | `sbx policy log` / `sbx policy allow network` | — | **text only**: `gitsign.classifyPushProbe` reason, `check-signing.sh` messages | — | — |
 

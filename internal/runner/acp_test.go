@@ -367,7 +367,7 @@ func TestACPLaunchMCPGatewayDefaultsAndDisabled(t *testing.T) {
 // flag is absent entirely so hosts without a prebuilt image keep sbx's stock
 // template.
 func TestACPLaunchForwardsTemplateImageForEveryKind(t *testing.T) {
-	const image = "slimslenderslacks/claude-code-acp:0.88.0"
+	const image = "slimslenderslacks/claude-code-acp:0.89.0"
 	for _, kind := range []agent.Kind{agent.TaskAgent, agent.CommitAgent} {
 		t.Run(kind.String(), func(t *testing.T) {
 			orchDir := t.TempDir()

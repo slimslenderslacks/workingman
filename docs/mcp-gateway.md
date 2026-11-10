@@ -50,7 +50,9 @@ sandboxes).
   and deletes the sub-gateways, sets the sandbox's network policy, and passes
   `MCP_URL` in.
 - **acp-kit** (`claude-acp-client`, inside the sandbox) registers `MCP_URL`
-  with Claude Code as the `okta-gateway` MCP server.
+  with Claude Code as the `okta-gateway` MCP server, and then removes the
+  stock sbx `mcp-gateway` server (see
+  [okta-gateway only](#okta-gateway-only-mcp-gateway-is-removed)).
 
 ## Which servers a sandbox gets
 
@@ -138,10 +140,80 @@ steps in this order:
    `sbx exec <sandbox> -- env CLAUDE_ACP_REGISTER_ONLY=1 claude-acp-client`
    first.)
 
+6. **acp-kit removes `mcp-gateway`.** Once `okta-gateway` is registered,
+   `claude-acp-client` also removes the stock sbx `mcp-gateway` server.
+   See [okta-gateway only](#okta-gateway-only-mcp-gateway-is-removed).
+
 For an ACP session, orch only passes the settings on to acp-wrapper
 (`--mcp-gateway-url`, one `--mcp-server` per name, `--mcp-gateway-state`).
 The wrapper owns the gateway as it owns the sandbox. For terminal-tab and
 `:session` sandboxes, the runner does the same steps itself.
+
+## okta-gateway only: `mcp-gateway` is removed
+
+Stock sbx `claude` sandboxes come with a default MCP server named
+`mcp-gateway` (`http://mcp-gateway.docker.internal/mcp`). sbx adds it at user
+scope every time the sandbox starts. acp-kit's `claude-acp-client` removes it
+(`claude mcp remove --scope user mcp-gateway`, and `--scope local` if it is
+still there) after it has registered `okta-gateway`, on every run. So the
+only MCP server the agent sees is `okta-gateway`, and every MCP call goes
+through the sandbox's sub-gateway. If `MCP_URL` is empty or `okta-gateway`
+could not be registered, `mcp-gateway` is left in place. A project-scope
+`mcp-gateway` (from a repo's `.mcp.json`) is not removed; acp-kit only warns
+about it. workingman sends `"mcpServers": []` in `session/new`, so it adds no
+servers of its own.
+
+This behavior shipped in acp-kit's image **`slimslenderslacks/claude-code-acp:0.89.0`**,
+which is the `ACP_IMAGE` default in `start.sh` (orch `--acp-image`, acp-wrapper
+`--template`). The image tag is acp-kit's `IMAGE_VERSION`. It is versioned
+separately from the ACP bridge version (still 0.88.0) and bumped whenever
+anything in the image changes.
+
+### Loading the image
+
+Sandboxes are created with `sbx create … -t <image> --pull missing`. The
+sandbox runtime keeps its own image store, separate from the host docker's,
+so build the image and load it there. From the acp-kit checkout:
+
+```sh
+make image-build        # or `make image-verify` to also check the baked-in claude-acp-client
+docker save slimslenderslacks/claude-code-acp:0.89.0 -o /tmp/acp.tar
+sbx template load /tmp/acp.tar
+sbx template ls         # confirm the 0.89.0 tag is listed
+```
+
+`--pull missing` only pulls a tag the sandbox store doesn't have. Because
+the fix has a new tag, the new image is used as soon as it is loaded. (If the
+same tag had been rebuilt, the cached old image would keep being used.) If
+0.89.0 is neither loaded nor pushed to the registry, `sbx create` fails at
+PREPARE IMAGE. To use a different image, set `ACP_IMAGE` before running
+`start.sh`. `ACP_IMAGE=""` uses the stock template.
+
+### Sandboxes created from the old image
+
+A new image only affects sandboxes created after the change. An existing
+sandbox is never rebuilt:
+
+- **New tasks always get a new sandbox.** The sandbox name comes from the
+  project and task name (`runner.SandboxNameFor`), and workingman never
+  adopts a sandbox under a different name. So every new task is created from
+  the current `ACP_IMAGE`.
+- **Reuse is for the same name only.** That covers a retry of the same task,
+  the commit agent after its task, a restart after a signal, and sandboxes
+  kept because their task failed or blocked or set `save_sandbox: true`.
+  These sandboxes stay on the image they were created from. A clean exit
+  removes the sandbox, so reuse never outlasts a task.
+- **The entrypoint is still updated on create.** `--kit` layers acp-kit on
+  top of the image, and its install step writes `claude-acp-client` from the
+  kit checkout every time a sandbox is created. A sandbox created from the
+  old 0.88.0 image with the current acp-kit checkout already removes
+  `mcp-gateway`. Only sandboxes created before the acp-kit change keep the
+  old entrypoint.
+
+To move a kept sandbox to the new image, remove it with
+`sbx rm --force <sandbox>`. The next launch of that task creates it again
+from the current `ACP_IMAGE`. You can also remove `mcp-gateway` from it by
+hand: `sbx exec <sandbox> -- claude mcp remove --scope user mcp-gateway`.
 
 ## Reuse, recreation, cleanup and restarts
 
@@ -233,6 +305,11 @@ agent still starts, but without `MCP_URL`.
   the one in `--mcp-gateway-url`. If you changed the port after the sandbox
   was created, the reuse path re-applies the new rules, but a local or org
   **deny** rule overrides any allow. See `sbx policy log`.
+- **The agent still sees `mcp-gateway`.** Check whether the sandbox
+  predates the acp-kit change (see
+  [Sandboxes created from the old image](#sandboxes-created-from-the-old-image)).
+  Check that `okta-gateway` registered: `mcp-gateway` is only removed once
+  it has. A project-scope entry from a repo's `.mcp.json` is never removed.
 - **`okta-gateway` is missing in Claude Code.** Check that `MCP_URL` is set
   (`sbx exec <sandbox> -- printenv MCP_URL`). If it is empty, check the
   causes above. If it is set, check `claude-acp-client`'s stderr for a

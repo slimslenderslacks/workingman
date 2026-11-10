@@ -98,7 +98,10 @@ Repeat `--root` for multiple trees.
 For day-to-day use, run `./start.sh` instead. It rebuilds `orch` and
 `acp-wrapper` from source, starts the private ssh-agent (see above), restarts
 sandboxd bound to it, and then runs the daemon and TUI in the foreground of
-the terminal you launched it from.
+the terminal you launched it from. ACP sandboxes are created from
+`ACP_IMAGE` (default `slimslenderslacks/claude-code-acp:0.89.0`, acp-kit's
+prebuilt image), which must be loaded into sbx first (`sbx template load`, see
+[docs/mcp-gateway.md](docs/mcp-gateway.md#loading-the-image)).
 `Ctrl-C` stops orch and tears the private agent down. Watch the audit log in another shell:
 
 ```sh
@@ -135,7 +138,13 @@ Each time a sandbox is created (or reused):
    `sbx exec` as `-e MCP_URL=…`. The ACP wrapper also writes it into the
    sandbox's `/etc/sandbox-persistent.sh` (the env file every shell in the
    sandbox sources), so a shell you open there sees it too. acp-kit's
-   `claude-acp-client` registers it as the `okta-gateway` MCP server.
+   `claude-acp-client` registers it as the `okta-gateway` MCP server and
+   removes the stock sbx `mcp-gateway` server, so `okta-gateway` is the
+   only one. This needs acp-kit's image
+   `slimslenderslacks/claude-code-acp:0.89.0` (`start.sh`'s `ACP_IMAGE`
+   default) or a current acp-kit checkout as `--acp-kit`. See
+   [docs/mcp-gateway.md](docs/mcp-gateway.md#loading-the-image) for how to
+   load the image.
 3. **The network policy allows the gateway's port**: right after `sbx create`,
    after the task's own `policies:`, and before any `sbx exec`:
    `allow network host.docker.internal:<port>` and `localhost:<port>`. A

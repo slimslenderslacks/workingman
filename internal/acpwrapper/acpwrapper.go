@@ -567,6 +567,8 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 	// first use — so the per-create path stays offline once it's cached, but a
 	// wiped store (e.g. after an sbx upgrade) self-heals instead of failing
 	// every create with "not cached locally and pull_policy=never". The
+	// flip side: a cached tag is never re-pulled, so a changed image must ship
+	// under a new tag (acp-kit's IMAGE_VERSION) to reach new sandboxes. The
 	// stock-template path keeps sbx's own default untouched.
 	if img := strings.TrimSpace(c.TemplateImage); img != "" {
 		args = append(args, "-t", img, "--pull", "missing")
