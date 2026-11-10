@@ -135,10 +135,10 @@ steps in this order:
    An entry that already points at `$MCP_URL` is left alone. A stale entry
    from an older gateway is replaced. If `MCP_URL` is empty, nothing is
    registered. User-scope settings load for every ACP session, so the
-   gateway is there even when `session/new` sends `"mcpServers": []`. (In an
-   interactive `claude`, run
-   `sbx exec <sandbox> -- env CLAUDE_ACP_REGISTER_ONLY=1 claude-acp-client`
-   first.)
+   gateway is there even when `session/new` sends `"mcpServers": []`. An
+   interactive `claude` (`sbx run`) does the same at launch through the
+   image's `claude` shim; see
+   [Interactive sandboxes](#interactive-sandboxes-sbx-run).
 
 6. **acp-kit removes `mcp-gateway`.** Once `okta-gateway` is registered,
    `claude-acp-client` also removes the stock sbx `mcp-gateway` server.
@@ -163,7 +163,30 @@ could not be registered, `mcp-gateway` is left in place. A project-scope
 about it. workingman sends `"mcpServers": []` in `session/new`, so it adds no
 servers of its own.
 
-This behavior shipped in acp-kit's image **`slimslenderslacks/claude-code-acp:0.89.0`**,
+### Interactive sandboxes (`sbx run`)
+
+When `MCP_URL` is set, an interactive sandbox sees only `okta-gateway` too.
+`sbx run <sandbox>` starts the interactive `claude`, which never goes through
+`claude-acp-client`. In acp-kit's image, `claude` on `PATH` is a shim
+(`claude-acp-shim`). Every time `claude` starts, the shim runs the same
+registration as the ACP path (`CLAUDE_ACP_REGISTER_ONLY=1 claude-acp-client`):
+it registers `$MCP_URL` as `okta-gateway` and removes `mcp-gateway`. Then it
+starts the real binary (`claude-acp-real`). sbx re-adds `mcp-gateway` on every
+sandbox start, but the shim runs after that, so `/mcp` lists only
+`okta-gateway`. `sbx run` does not get `-e MCP_URL`, so if `MCP_URL` is not in
+the environment, the shim reads it from `/etc/sandbox-persistent.sh`, where
+acp-wrapper writes it (step 4 above). With no `MCP_URL` at all, the shim
+changes nothing and `mcp-gateway` stays. A failed registration only warns, so
+`claude` always starts.
+
+The shim is only in the image (0.90.0 and later), not in the `--kit` mixin.
+In a sandbox on the stock template or an older image, register the gateway
+by hand before the interactive `claude`:
+`sbx exec <sandbox> -- env CLAUDE_ACP_REGISTER_ONLY=1 claude-acp-client`.
+
+### Image
+
+This behavior shipped in acp-kit's image **`slimslenderslacks/claude-code-acp:0.90.0`**,
 which is the `ACP_IMAGE` default in `start.sh` (orch `--acp-image`, acp-wrapper
 `--template`). The image tag is acp-kit's `IMAGE_VERSION`. It is versioned
 separately from the ACP bridge version (still 0.88.0) and bumped whenever
@@ -177,15 +200,15 @@ so build the image and load it there. From the acp-kit checkout:
 
 ```sh
 make image-build        # or `make image-verify` to also check the baked-in claude-acp-client
-docker save slimslenderslacks/claude-code-acp:0.89.0 -o /tmp/acp.tar
+docker save slimslenderslacks/claude-code-acp:0.90.0 -o /tmp/acp.tar
 sbx template load /tmp/acp.tar
-sbx template ls         # confirm the 0.89.0 tag is listed
+sbx template ls         # confirm the 0.90.0 tag is listed
 ```
 
 `--pull missing` only pulls a tag the sandbox store doesn't have. Because
 the fix has a new tag, the new image is used as soon as it is loaded. (If the
 same tag had been rebuilt, the cached old image would keep being used.) If
-0.89.0 is neither loaded nor pushed to the registry, `sbx create` fails at
+0.90.0 is neither loaded nor pushed to the registry, `sbx create` fails at
 PREPARE IMAGE. To use a different image, set `ACP_IMAGE` before running
 `start.sh`. `ACP_IMAGE=""` uses the stock template.
 
@@ -207,8 +230,10 @@ sandbox is never rebuilt:
   top of the image, and its install step writes `claude-acp-client` from the
   kit checkout every time a sandbox is created. A sandbox created from the
   old 0.88.0 image with the current acp-kit checkout already removes
-  `mcp-gateway`. Only sandboxes created before the acp-kit change keep the
-  old entrypoint.
+  `mcp-gateway` for ACP sessions. Only sandboxes created before the acp-kit
+  change keep the old entrypoint. The interactive `claude` shim is not
+  layered on by the kit, so a sandbox created from 0.89.0 or older keeps
+  `mcp-gateway` under `sbx run` until it is recreated from 0.90.0.
 
 To move a kept sandbox to the new image, remove it with
 `sbx rm --force <sandbox>`. The next launch of that task creates it again

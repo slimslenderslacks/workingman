@@ -325,7 +325,7 @@ func TestEnsureSandboxCreatesFromTemplateImage(t *testing.T) {
 	c := Config{
 		SandboxName:   "acp-s",
 		KitPath:       "/kits/acp",
-		TemplateImage: "slimslenderslacks/claude-code-acp:0.89.0",
+		TemplateImage: "slimslenderslacks/claude-code-acp:0.90.0",
 		SbxPath:       "sbx",
 		Workspaces:    []string{"/repo"},
 	}
@@ -335,7 +335,7 @@ func TestEnsureSandboxCreatesFromTemplateImage(t *testing.T) {
 	create := f.calls[1]
 	want := []string{
 		"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp",
-		"-t", "slimslenderslacks/claude-code-acp:0.89.0", "--pull", "missing", "/repo",
+		"-t", "slimslenderslacks/claude-code-acp:0.90.0", "--pull", "missing", "/repo",
 	}
 	if !reflect.DeepEqual(create, want) {
 		t.Errorf("create call = %v, want %v", create, want)

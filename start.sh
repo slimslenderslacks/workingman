@@ -146,19 +146,20 @@ export ACP_KIT="${ACP_KIT:-$HOME/dev/repos/slimslenderslacks/acp-kit}"
 # `docker images`. From the acp-kit checkout:
 #
 #   make image-build
-#   docker save slimslenderslacks/claude-code-acp:0.89.0 -o /tmp/acp.tar
+#   docker save slimslenderslacks/claude-code-acp:0.90.0 -o /tmp/acp.tar
 #   sbx template load /tmp/acp.tar
 #
 # Confirm with `sbx template ls`. The tag is acp-kit's IMAGE_VERSION, which is
 # versioned independently of the bridge version its Dockerfile pins: it is
-# bumped whenever anything baked into the image changes (0.89.0 is the
-# claude-acp-client that drops the stock `mcp-gateway` MCP server and keeps
-# only `okta-gateway`). Keep this default in step with acp-kit's IMAGE_VERSION.
+# bumped whenever anything baked into the image changes (0.90.0 adds the
+# `claude` shim, so the interactive `claude` from `sbx run` also registers
+# `okta-gateway` and drops the stock `mcp-gateway` MCP server, as
+# claude-acp-client already does for ACP sessions). Keep this default in step with acp-kit's IMAGE_VERSION.
 # sbx creates with `--pull missing`, so only a NEW tag gets a new image; an
 # already-loaded tag is reused as-is. Existing sandboxes are not rebuilt when
 # this changes (see docs/mcp-gateway.md). Set ACP_IMAGE="" to fall back to the
 # stock template (and pay the ~31s per-create install again).
-export ACP_IMAGE="${ACP_IMAGE-slimslenderslacks/claude-code-acp:0.89.0}"
+export ACP_IMAGE="${ACP_IMAGE-slimslenderslacks/claude-code-acp:0.90.0}"
 
 # Run orch as a child (not exec) so the EXIT trap can stop the private agent.
 # Forward INT/TERM to it for a clean shutdown and preserve its exit status.
