@@ -259,7 +259,11 @@ const EnvFile = "/etc/sandbox-persistent.sh"
 // MCP_URL=<sandboxURL> in the sandbox's EnvFile, replacing any earlier
 // MCP_URL line, so shells a human opens in the sandbox see the gateway too.
 // The ACP client does not depend on it: it gets MCP_URL from `sbx exec -e`.
+//
+// The file is rewritten in place (read, filter, truncate-and-write) rather than
+// with `sed -i`: the agent user owns the file but not /etc, where `sed -i`
+// must create its temporary file.
 func PersistEnvArgs(sandbox, sandboxURL string) []string {
-	script := `f=` + EnvFile + `; touch "$f" && sed -i '/^export ` + EnvVar + `=/d' "$f" && printf "export ` + EnvVar + `='%s'\n" "$1" >> "$f"`
+	script := `f=` + EnvFile + `; touch "$f" && rest=$(grep -v '^export ` + EnvVar + `=' "$f"; true) && { [ -z "$rest" ] || printf '%s\n' "$rest"; printf "export ` + EnvVar + `='%s'\n" "$1"; } > "$f"`
 	return []string{"exec", sandbox, "--", "sh", "-c", script, "sh", sandboxURL}
 }

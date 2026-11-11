@@ -7,7 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/slimslenderslacks/work/internal/policy"
@@ -236,5 +240,36 @@ func TestCreateEnvArgs(t *testing.T) {
 	want := []string{"-e", "MCP_URL=http://host.docker.internal:3333/gateways/x"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("CreateEnvArgs = %v, want %v", got, want)
+	}
+}
+
+// The env-file script must work for the sandbox's agent user, who owns the
+// file but not /etc: an in-place sed (`sed -i`) fails there creating its
+// temporary file. Run it against a file in a read-only directory, twice,
+// and check the MCP_URL line is replaced and the other lines kept.
+func TestPersistEnvArgsRewritesInPlace(t *testing.T) {
+	etc := filepath.Join(t.TempDir(), "etc")
+	if err := os.Mkdir(etc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(etc, "sandbox-persistent.sh")
+	if err := os.WriteFile(f, []byte("export FOO=1\nexport MCP_URL='old'\nexport BAR=2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(etc, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(etc, 0o755) })
+
+	for _, u := range []string{"http://first", "http://second"} {
+		args := PersistEnvArgs("sb", u)
+		script := strings.ReplaceAll(args[5], EnvFile, f)
+		if out, err := exec.Command("sh", "-c", script, "sh", u).CombinedOutput(); err != nil {
+			t.Fatalf("script: %v: %s", err, out)
+		}
+	}
+	got, _ := os.ReadFile(f)
+	if want := "export FOO=1\nexport BAR=2\nexport MCP_URL='http://second'\n"; string(got) != want {
+		t.Errorf("env file = %q, want %q", got, want)
 	}
 }
