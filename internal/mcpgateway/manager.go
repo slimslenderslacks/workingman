@@ -33,6 +33,9 @@ type Manager struct {
 	// Servers are the catalog server names requested for every gateway
 	// minted. Empty disables the manager: POST /gateways needs at least one.
 	Servers []string
+	// Dynamic asks for gateways with mcp-find and mcp-add, so the agent can
+	// find and attach catalog servers beyond Servers.
+	Dynamic bool
 	// Log receives diagnostics; nil means os.Stderr.
 	Log io.Writer
 }
@@ -63,7 +66,7 @@ func (m Manager) PolicyRules() ([]policy.Rule, error) {
 
 // Reusable reports whether the gateway recorded for an existing sandbox can
 // keep serving it: there is a record, it was minted on this BaseURL over
-// these Servers, and the gateway still exists. A gateway we cannot reach
+// these Servers with the same Dynamic, and the gateway still exists. A gateway we cannot reach
 // (standalone-codemode down) counts as reusable — minting a replacement would
 // fail the same way, so recreating the sandbox would only lose its state.
 func (m Manager) Reusable(ctx context.Context, sandbox string) (Record, bool) {
@@ -75,10 +78,16 @@ func (m Manager) Reusable(ctx context.Context, sandbox string) (Record, bool) {
 		m.logf("sandbox %s: %v", sandbox, err)
 		return Record{}, false
 	}
-	if !ok || rec.ID == "" || rec.SandboxURL == "" {
+	if !ok || rec.ID == "" || rec.URL == "" {
 		return Record{}, false
 	}
-	if rec.BaseURL != m.Client.base() || !slices.Equal(rec.Requested, m.Servers) {
+	// Re-derive the sandbox URL rather than trusting the stored one, so a
+	// record written with a loopback host never reaches the sandbox as-is.
+	if rec.SandboxURL, err = SandboxURL(rec.URL); err != nil {
+		m.logf("sandbox %s: %v", sandbox, err)
+		return Record{}, false
+	}
+	if rec.BaseURL != m.Client.base() || !slices.Equal(rec.Requested, m.Servers) || rec.Dynamic != m.Dynamic {
 		return rec, false
 	}
 	alive, err := m.Client.Alive(ctx, rec.ID)
@@ -98,7 +107,7 @@ func (m Manager) Mint(ctx context.Context, sandbox string) (Record, error) {
 	}
 	m.Release(ctx, sandbox)
 	servers := slices.Clone(m.Servers)
-	gw, err := m.Client.Create(ctx, servers)
+	gw, err := m.Client.Create(ctx, servers, m.Dynamic)
 	// A task's static_mcps may name servers this catalog doesn't carry; serve
 	// the ones it does rather than none at all.
 	var unknown *UnknownServersError
@@ -108,7 +117,7 @@ func (m Manager) Mint(ctx context.Context, sandbox string) (Record, error) {
 			return Record{}, err
 		}
 		m.logf("sandbox %s: WARNING %v; creating the gateway over %s only", sandbox, err, strings.Join(servers, ","))
-		gw, err = m.Client.Create(ctx, servers)
+		gw, err = m.Client.Create(ctx, servers, m.Dynamic)
 	}
 	if err != nil {
 		return Record{}, err
@@ -129,6 +138,7 @@ func (m Manager) Mint(ctx context.Context, sandbox string) (Record, error) {
 		SandboxURL: sandboxURL,
 		Servers:    servers,
 		Requested:  slices.Clone(m.Servers),
+		Dynamic:    m.Dynamic,
 		CreatedAt:  time.Now().UTC(),
 	}, nil
 }
@@ -227,6 +237,18 @@ func (m Manager) Sweep(ctx context.Context, live func(sandbox string) bool, grac
 		m.logf("sandbox %s is gone; releasing its gateway %s", rec.Sandbox, rec.ID)
 		m.Release(ctx, rec.Sandbox)
 	}
+}
+
+// CreateEnvArgs are the `sbx create` flags that set MCP_URL to rec's
+// sandbox-reachable URL (loopback rewritten to host.docker.internal), or none
+// for a zero Record. `sbx exec` still passes it per launch (Ensure may have
+// replaced the gateway since); this covers everything else started in the
+// sandbox, such as an interactive `sbx run`.
+func CreateEnvArgs(rec Record) []string {
+	if rec.SandboxURL == "" {
+		return nil
+	}
+	return []string{"-e", EnvVar + "=" + rec.SandboxURL}
 }
 
 // EnvFile is the sandbox's persistent environment file, sourced by every

@@ -307,6 +307,7 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 		return err
 	}
 	args := []string{"create", "claude", "--name", spec.Name}
+	args = append(args, mcpgateway.CreateEnvArgs(gw)...)
 	args = append(args, spec.Workspaces...)
 	cmd := exec.CommandContext(ctx, "sbx", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -486,6 +487,10 @@ type Runner struct {
 	// Empty means mcpgateway.StateDir(<sessions root>).
 	MCPGatewayState string
 
+	// MCPGatewayStatic turns off dynamic gateways (see MCPGatewayDynamic):
+	// every sandbox then gets only the servers it asked for.
+	MCPGatewayStatic bool
+
 	// preflightRun runs the interactive-session signing preflight command
 	// (`sbx exec ... ssh-add -l`). Nil means use the real exec (gitsign.ExecRun);
 	// tests set it to avoid shelling out to sbx.
@@ -658,7 +663,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	sandboxName := SandboxNameFor(p.Kind, p.ProjectPath, p.TaskName)
 	if r.Sandbox != nil && sandboxName != "" {
 		workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
-		gw, err := r.mcpGateway(r.MCPServersFor(p))
+		gw, err := r.mcpGateway(r.MCPServersFor(p), r.MCPGatewayDynamic(p.Kind))
 		if err != nil {
 			return nil, err
 		}
@@ -791,7 +796,7 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 			// back to the default creator.
 			ensure = DefaultSandboxCreator
 		}
-		gw, err := r.mcpGateway(r.MCPGatewayServers)
+		gw, err := r.mcpGateway(r.MCPGatewayServers, false)
 		if err != nil {
 			return "", err
 		}
@@ -928,7 +933,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
 	}
 
-	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, r.MCPServersFor(p), p.Policies, p.TaskPath, p.Model, p.SaveSandbox, p.Persistent, p.Pushes())
+	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, r.MCPServersFor(p), r.MCPGatewayDynamic(p.Kind), p.Policies, p.TaskPath, p.Model, p.SaveSandbox, p.Persistent, p.Pushes())
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionID,
@@ -956,7 +961,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 // acpWrapperCommand builds the argv that launches one acp-wrapper host process
 // for an ACP session. The wrapper resolves --workspace paths to absolute itself,
 // but they already are (workspace.Manager and the orch dir both yield abs paths).
-func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, mcpServers []string, policies []policy.Rule, taskPath, model string, saveSandbox, persistent, push bool) []string {
+func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, mcpServers []string, mcpDynamic bool, policies []policy.Rule, taskPath, model string, saveSandbox, persistent, push bool) []string {
 	bin := r.AcpWrapperPath
 	if bin == "" {
 		bin = "acp-wrapper"
@@ -1047,6 +1052,9 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, project
 		if st := strings.TrimSpace(r.MCPGatewayState); st != "" {
 			args = append(args, "--mcp-gateway-state", st)
 		}
+		if mcpDynamic {
+			args = append(args, "--mcp-dynamic")
+		}
 	}
 	for _, p := range policies {
 		args = append(args, "--policy", p.Encode())
@@ -1060,6 +1068,17 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, project
 // MCPServersFor is the catalog server names requested for p's per-sandbox
 // MCP gateway: the plan's StaticMCPs (a task's static_mcps) when it names
 // any, otherwise the configured default set, MCPGatewayServers.
+// MCPGatewayDynamic reports whether kind's sandbox gateway is dynamic: it
+// also serves mcp-find and mcp-add over the whole catalog, so the agent can
+// find and attach servers beyond MCPServersFor. On by default for the wolf
+// and task agents; MCPGatewayStatic turns it off.
+func (r *Runner) MCPGatewayDynamic(kind agent.Kind) bool {
+	if r.MCPGatewayStatic {
+		return false
+	}
+	return kind == agent.WolfAgent || kind == agent.TaskAgent
+}
+
 func (r *Runner) MCPServersFor(p Plan) []string {
 	if names := nonBlank(p.StaticMCPs); len(names) > 0 {
 		return names
@@ -1081,7 +1100,7 @@ func nonBlank(in []string) []string {
 // itself (the terminal-tab and `:session` paths; ACP sessions get theirs in
 // the acp-wrapper). Its store is the same one the wrapper defaults to, so
 // either process can release a gateway the other recorded.
-func (r *Runner) mcpGateway(servers []string) (mcpgateway.Manager, error) {
+func (r *Runner) mcpGateway(servers []string, dynamic bool) (mcpgateway.Manager, error) {
 	dir := strings.TrimSpace(r.MCPGatewayState)
 	if dir == "" {
 		root, err := r.sessionsRoot()
@@ -1094,6 +1113,7 @@ func (r *Runner) mcpGateway(servers []string) (mcpgateway.Manager, error) {
 		Client:  mcpgateway.Client{BaseURL: strings.TrimSpace(r.MCPGatewayURL)},
 		Store:   mcpgateway.Store{Dir: dir},
 		Servers: servers,
+		Dynamic: dynamic,
 	}, nil
 }
 

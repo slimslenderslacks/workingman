@@ -223,7 +223,7 @@ func TestDefaultSandboxCreatorMintsGatewayFirst(t *testing.T) {
 	want := []string{
 		"sbx ls --json",
 		"POST /gateways",
-		"sbx create claude --name task-x /ws",
+		"sbx create claude --name task-x -e MCP_URL=http://host.docker.internal:" + port + "/gateways/gw-1 /ws",
 		"sbx policy allow network --sandbox task-x api.github.com",
 		"sbx policy allow network --sandbox task-x host.docker.internal:" + port,
 		"sbx policy allow network --sandbox task-x localhost:" + port,

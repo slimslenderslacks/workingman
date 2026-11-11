@@ -28,8 +28,10 @@ type Record struct {
 	SandboxURL string `json:"sandbox_url"`
 	// Requested are the server names asked for; Servers the ones the gateway
 	// was actually created over (Requested minus names the catalog lacks).
-	Requested []string  `json:"requested"`
-	Servers   []string  `json:"servers"`
+	Requested []string `json:"requested"`
+	Servers   []string `json:"servers"`
+	// Dynamic is whether the gateway has mcp-find and mcp-add.
+	Dynamic   bool      `json:"dynamic,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

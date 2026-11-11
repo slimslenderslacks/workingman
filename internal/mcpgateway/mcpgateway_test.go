@@ -47,9 +47,13 @@ func TestPolicyRules(t *testing.T) {
 
 func TestClientCreateDeleteAlive(t *testing.T) {
 	mux := http.NewServeMux()
+	var lastBody map[string]any
 	mux.HandleFunc("POST /gateways", func(w http.ResponseWriter, r *http.Request) {
 		var body struct{ Servers []string }
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		lastBody = nil
+		_ = json.Unmarshal(raw, &lastBody)
 		if len(body.Servers) == 1 && body.Servers[0] == "nope" {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": "unknown_servers", "unknown": []string{"nope"}})
@@ -74,15 +78,21 @@ func TestClientCreateDeleteAlive(t *testing.T) {
 	c := Client{BaseURL: srv.URL + "/"}
 	ctx := context.Background()
 
-	gw, err := c.Create(ctx, []string{"gmail"})
+	gw, err := c.Create(ctx, []string{"gmail"}, false)
 	if err != nil || gw.ID != "abc" || gw.URL != srv.URL+"/gateways/abc" {
 		t.Fatalf("Create = %+v, %v", gw, err)
 	}
+	if _, sent := lastBody["dynamic"]; sent {
+		t.Errorf("non-dynamic Create sent %v, want no dynamic key", lastBody)
+	}
+	if _, err := c.Create(ctx, []string{"gmail"}, true); err != nil || lastBody["dynamic"] != true {
+		t.Errorf("dynamic Create sent %v (err %v), want \"dynamic\": true", lastBody, err)
+	}
 	var unknown *UnknownServersError
-	if _, err := c.Create(ctx, []string{"nope"}); !errors.As(err, &unknown) || unknown.Names[0] != "nope" {
+	if _, err := c.Create(ctx, []string{"nope"}, false); !errors.As(err, &unknown) || unknown.Names[0] != "nope" {
 		t.Errorf("Create unknown = %v, want *UnknownServersError", err)
 	}
-	if _, err := c.Create(ctx, nil); err == nil {
+	if _, err := c.Create(ctx, nil, false); err == nil {
 		t.Error("Create with no servers: want an error")
 	}
 	if ok, err := c.Alive(ctx, "abc"); !ok || err != nil {
@@ -189,5 +199,42 @@ func TestManagerPrepare(t *testing.T) {
 	down := Manager{Client: Client{BaseURL: "http://127.0.0.1:1"}, Servers: []string{"gmail"}, Log: io.Discard}
 	if rec := down.Prepare(context.Background(), "sb"); rec.ID != "" {
 		t.Errorf("Prepare with the gateway down = %+v, want zero", rec)
+	}
+}
+
+// A reused record's MCP_URL is re-derived from its host-side URL, so a record
+// whose stored sandbox_url still names localhost is rewritten, not trusted.
+func TestManagerReusableRewritesLoopback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed) // live
+	}))
+	defer srv.Close()
+	m := Manager{Client: Client{BaseURL: srv.URL}, Store: Store{Dir: t.TempDir()}, Servers: []string{"gmail"}, Log: io.Discard}
+	stale := Record{
+		Sandbox: "sb", BaseURL: srv.URL, ID: "x",
+		URL:        "http://localhost:3333/gateways/x",
+		SandboxURL: "http://localhost:3333/gateways/x",
+		Requested:  []string{"gmail"}, Servers: []string{"gmail"},
+	}
+	if err := m.Store.Save(stale); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := m.Reusable(context.Background(), "sb")
+	if !ok {
+		t.Fatalf("Reusable = %+v, false; want true", rec)
+	}
+	if want := "http://host.docker.internal:3333/gateways/x"; rec.SandboxURL != want {
+		t.Errorf("SandboxURL = %q, want %q", rec.SandboxURL, want)
+	}
+}
+
+func TestCreateEnvArgs(t *testing.T) {
+	if got := CreateEnvArgs(Record{}); got != nil {
+		t.Errorf("CreateEnvArgs(zero) = %v, want nil", got)
+	}
+	got := CreateEnvArgs(Record{SandboxURL: "http://host.docker.internal:3333/gateways/x"})
+	want := []string{"-e", "MCP_URL=http://host.docker.internal:3333/gateways/x"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CreateEnvArgs = %v, want %v", got, want)
 	}
 }

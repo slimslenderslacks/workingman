@@ -573,7 +573,6 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 	if img := strings.TrimSpace(c.TemplateImage); img != "" {
 		args = append(args, "-t", img, "--pull", "missing")
 	}
-	args = append(args, c.Workspaces...)
 	gwRules, err := c.MCPGateway.PolicyRules()
 	if err != nil {
 		return "", fmt.Errorf("acpwrapper: mcp gateway policy %s: %w", name, err)
@@ -582,6 +581,8 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 	// the sandbox and its policies are in place (ensureMCPGateway then reuses
 	// it), and DELETEd again if creating the sandbox fails.
 	gw := c.MCPGateway.Prepare(ctx, name)
+	args = append(args, mcpgateway.CreateEnvArgs(gw)...)
+	args = append(args, c.Workspaces...)
 	fail := func(err error) (string, error) {
 		c.MCPGateway.Discard(ctx, gw)
 		return "", err

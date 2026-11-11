@@ -65,16 +65,18 @@ func (c Client) httpClient() *http.Client {
 
 func (c Client) base() string { return strings.TrimSuffix(strings.TrimSpace(c.BaseURL), "/") }
 
-// Create POSTs {"servers": servers} to <BaseURL>/gateways and returns the new
-// gateway. Anything but a 201 with an id and url is an error carrying the
+// Create POSTs {"servers": servers, "dynamic": dynamic} to <BaseURL>/gateways
+// and returns the new gateway. A dynamic gateway also serves mcp-find and
+// mcp-add over the whole catalog, so the agent can attach more servers. Anything but a 201 with an id and url is an error carrying the
 // response body.
-func (c Client) Create(ctx context.Context, servers []string) (Gateway, error) {
+func (c Client) Create(ctx context.Context, servers []string, dynamic bool) (Gateway, error) {
 	if len(servers) == 0 {
 		return Gateway{}, fmt.Errorf("mcpgateway: at least one server is required")
 	}
 	body, err := json.Marshal(struct {
 		Servers []string `json:"servers"`
-	}{servers})
+		Dynamic bool     `json:"dynamic,omitempty"`
+	}{servers, dynamic})
 	if err != nil {
 		return Gateway{}, err
 	}

@@ -138,6 +138,7 @@ func main() {
 	mcpGatewayURL := fs.String("mcp-gateway-url", "", "base URL of the host's standalone-codemode gateway (e.g. http://localhost:3333). When set with at least one --mcp-server, the wrapper POSTs /gateways to mint a per-sandbox gateway, sets MCP_URL to it inside the sandbox, allows the gateway's port in the sandbox network policy, and DELETEs the gateway when the sandbox is removed")
 	var mcpServers namesFlag
 	fs.Var(&mcpServers, "mcp-server", "catalog server name to request from the per-sandbox MCP gateway (repeatable)")
+	mcpDynamic := fs.Bool("mcp-dynamic", false, "ask for a dynamic per-sandbox MCP gateway: it also serves mcp-find and mcp-add over the whole catalog, so the agent can find and attach servers beyond --mcp-server")
 	mcpGatewayState := fs.String("mcp-gateway-state", "", "directory recording each sandbox's MCP gateway so later launches can reuse or delete it (default: <sessions-root>/../gateways)")
 	var staticMCPs namesFlag
 	fs.Var(&staticMCPs, "static-mcp", "deprecated and ignored: MCP servers now reach the sandbox through the --mcp-gateway-url gateway, not `sbx create --static-mcp`")
@@ -172,6 +173,7 @@ func main() {
 			Client:  mcpgateway.Client{BaseURL: *mcpGatewayURL},
 			Store:   mcpgateway.Store{Dir: *mcpGatewayState},
 			Servers: mcpServers,
+			Dynamic: *mcpDynamic,
 		},
 		Policies:   policies,
 		GitName:    gitName,

@@ -20,6 +20,7 @@ type fakeGateway struct {
 	mu      sync.Mutex
 	srv     *httptest.Server
 	created [][]string
+	dynamic []bool
 	deleted []string
 	live    map[string]bool
 	n       int
@@ -30,12 +31,16 @@ func newFakeGateway(t *testing.T) *fakeGateway {
 	g := &fakeGateway{live: map[string]bool{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /gateways", func(w http.ResponseWriter, r *http.Request) {
-		var body struct{ Servers []string }
+		var body struct {
+			Servers []string
+			Dynamic bool
+		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		g.mu.Lock()
 		g.n++
 		id := "gw-" + string(rune('0'+g.n))
 		g.created = append(g.created, body.Servers)
+		g.dynamic = append(g.dynamic, body.Dynamic)
 		g.live[id] = true
 		g.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
@@ -103,7 +108,8 @@ func TestCreateSandboxWithMCPGateway(t *testing.T) {
 	if postsAtCreate != 1 {
 		t.Errorf("POST /gateways calls before sbx create = %d, want 1", postsAtCreate)
 	}
-	wantCreate := []string{"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp", "/repo"}
+	wantCreate := []string{"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp",
+		"-e", "MCP_URL=http://host.docker.internal:" + g.port() + "/gateways/gw-1", "/repo"}
 	if !reflect.DeepEqual(f.calls[1], wantCreate) {
 		t.Errorf("create = %v, want %v", f.calls[1], wantCreate)
 	}
@@ -269,5 +275,33 @@ func TestCreateSandboxFailureDiscardsMCPGateway(t *testing.T) {
 		if _, ok, _ := c.MCPGateway.Store.Load("acp-s"); ok {
 			t.Errorf("%s failure: gateway record left behind", failCmd)
 		}
+	}
+}
+
+// A Dynamic manager asks for a dynamic gateway; a recorded gateway minted
+// without it is not reused for a manager that wants it (and vice versa).
+func TestMCPGatewayDynamicMintAndReuse(t *testing.T) {
+	g := newFakeGateway(t)
+	c := gatewayConfig(t, g, "github")
+	ctx := context.Background()
+	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`}
+
+	if url := ensureMCPGateway(ctx, f.run, c); url == "" {
+		t.Fatal("no gateway minted")
+	}
+	c.MCPGateway.Dynamic = true
+	if url := ensureMCPGateway(ctx, f.run, c); url == "" {
+		t.Fatal("no gateway minted")
+	}
+	if url := ensureMCPGateway(ctx, f.run, c); url == "" {
+		t.Fatal("no gateway")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !reflect.DeepEqual(g.dynamic, []bool{false, true}) {
+		t.Errorf("POST /gateways dynamic = %v, want [false true]: switching to dynamic re-mints once, then reuses", g.dynamic)
+	}
+	if rec, ok, _ := c.MCPGateway.Store.Load("acp-s"); !ok || !rec.Dynamic {
+		t.Errorf("record = %+v, want dynamic", rec)
 	}
 }

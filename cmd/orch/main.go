@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -108,6 +109,7 @@ func runDaemon(args []string) {
 	fs.Var(&workingmanMode, "workingman-agent", `run the workingman agent: a persistent assistant in its own sandbox that answers questions about the orch state and, on request, edits the orch roots (projects, tasks, intake). "auto" (default) turns it on when --acp-kit is set and channels.yaml has an inbound-capable channel; --workingman-agent / =on forces it on (requires --acp-kit); =off disables it`)
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	mcpGatewayURL := fs.String("mcp-gateway-url", os.Getenv("WORKINGMAN_MCP_GATEWAY_URL"), "base URL of the host's standalone-codemode gateway, e.g. http://localhost:3333 (default $WORKINGMAN_MCP_GATEWAY_URL). When set, every sandbox gets its own sub-gateway (POST /gateways) over the task's static_mcps — or --mcp-gateway-servers when a task names none — exposed inside it as MCP_URL (localhost rewritten to host.docker.internal), with the gateway's port allowed in its network policy; the gateway is DELETEd when the sandbox is removed. Empty disables the gateway (and MCP_URL)")
+	mcpGatewayStatic := fs.Bool("mcp-gateway-static", os.Getenv("WORKINGMAN_MCP_GATEWAY_STATIC") == "1", "give no sandbox a dynamic gateway (default false, or true when $WORKINGMAN_MCP_GATEWAY_STATIC=1). By default the wolf and task agents' gateways are dynamic: they also serve mcp-find and mcp-add over the whole catalog")
 	mcpGatewayServers := fs.String("mcp-gateway-servers", os.Getenv("WORKINGMAN_MCP_GATEWAY_SERVERS"), "comma-separated catalog server names requested for a sandbox's gateway when its task has no static_mcps (default $WORKINGMAN_MCP_GATEWAY_SERVERS). Empty means such sandboxes get no gateway")
 	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
 	if err := fs.Parse(args); err != nil {
@@ -170,8 +172,9 @@ func runDaemon(args []string) {
 		SessionsRoot:      *sessionsRoot,
 		MCPGatewayURL:     strings.TrimSpace(*mcpGatewayURL),
 		MCPGatewayServers: splitList(*mcpGatewayServers),
+		MCPGatewayStatic:  *mcpGatewayStatic,
 	}
-	a.Log("mcp_gateway_config", "url", r.MCPGatewayURL, "default_servers", strings.Join(r.MCPGatewayServers, ","))
+	a.Log("mcp_gateway_config", "url", r.MCPGatewayURL, "default_servers", strings.Join(r.MCPGatewayServers, ","), "static", strconv.FormatBool(r.MCPGatewayStatic))
 
 	// When --acp-kit is set, non-interactive agents (planning/task/commit/
 	// archive) are launched as acp-wrapper-backed ACP sessions rather than

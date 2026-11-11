@@ -20,10 +20,11 @@
 //     returns the recorded gateway when it is still live and was minted over
 //     the same servers, else DELETEs the stale one and POSTs a new one. The
 //     sandbox gets MCP_URL ([EnvVar]) = the gateway URL with a loopback host
-//     rewritten to host.docker.internal ([SandboxURL]). It is passed per
-//     `sbx exec -e` rather than at `sbx create`, so a reused sandbox whose
-//     gateway vanished (standalone-codemode keeps them in memory only) just
-//     gets a new one; acp-kit's claude-acp-client registers it as the
+//     rewritten to host.docker.internal ([SandboxURL]), re-derived from the
+//     host-side URL on reuse. It is set at `sbx create` ([CreateEnvArgs])
+//     and again per `sbx exec -e`, so a reused sandbox whose gateway
+//     vanished (standalone-codemode keeps them in memory only) just gets a
+//     new one; acp-kit's claude-acp-client registers it as the
 //     `okta-gateway` MCP server. The wrapper also records it in the sandbox's
 //     /etc/sandbox-persistent.sh ([PersistEnvArgs]) for shells a human opens.
 //  4. Removing the sandbox (exit cleanup, or a recreate on mount drift)

@@ -125,17 +125,26 @@ Point orch at it:
 
 Each time a sandbox is created (or reused):
 
-1. **A sub-gateway is minted**: `POST <url>/gateways {"servers": [...]}`,
+1. **A sub-gateway is minted**: `POST <url>/gateways {"servers": [...],
+   "dynamic": ...}`,
    before `sbx create` for a new sandbox. The
    servers are the task's `static_mcps` when it lists any (each entry is a
    catalog server name), otherwise `--mcp-gateway-servers`. The review agent
    asks for `github`. Names the catalog doesn't have are dropped, with a
-   warning. If no servers are left, the sandbox gets no gateway.
+   warning. If no servers are left, the sandbox gets no gateway. The wolf
+   and task agents get `"dynamic": true`, which adds `mcp-find` and
+   `mcp-add` over the whole catalog so the agent can attach servers beyond
+   that list; other agents get just their servers. `--mcp-gateway-static`
+   (or `WORKINGMAN_MCP_GATEWAY_STATIC=1`) turns dynamic gateways off. A
+   recorded gateway is reused only if it was minted with the same setting.
 2. **The sandbox gets `MCP_URL`**: the returned URL, with a loopback host
    (`localhost`, `127.0.0.1`, `::1`) rewritten to `host.docker.internal`, same
-   port and path, e.g. `http://host.docker.internal:3333/gateways/<id>`. `sbx
-   create` has no flag for environment variables, so it is passed on every
-   `sbx exec` as `-e MCP_URL=…`. The ACP wrapper also writes it into the
+   port and path, e.g. `http://host.docker.internal:3333/gateways/<id>`
+   (inside a sandbox, `localhost` is the sandbox's own loopback). It is set
+   at `sbx create` as `-e MCP_URL=…`, and again on every `sbx exec`, since a
+   reused sandbox may have been given a new gateway since it was created.
+   A recorded gateway's URL is re-derived on reuse, so an old record that
+   still says `localhost` is rewritten too. The ACP wrapper also writes it into the
    sandbox's `/etc/sandbox-persistent.sh` (the env file every shell in the
    sandbox sources), so a shell you open there sees it too. acp-kit's
    `claude-acp-client` registers it as the `okta-gateway` MCP server and
@@ -171,6 +180,37 @@ policy rules, and still no static MCPs. If the gateway can't be reached when
 a sandbox starts, the agent runs without `MCP_URL`; this is logged in the
 acp-wrapper log, or as `mcp_gateway_failed` in the audit log for terminal-tab
 sandboxes.
+
+### By hand: `sbx-create.sh` / `sbx-rm.sh`
+
+To get the same wiring for a sandbox you start yourself, outside the daemon:
+
+```
+./sbx-create.sh --name t1 [--servers github,gmail] [--no-run] [workspace...]
+./sbx-rm.sh --name t1
+```
+
+`sbx-create.sh` POSTs a dynamic sub-gateway (default servers: `github`;
+`--static` for one without `mcp-find`/`mcp-add`), creates the
+sandbox with `-e MCP_URL=http://host.docker.internal:<port>/gateways/<id>`
+from the `slimslenderslacks/claude-code-acp:0.90.0` template (`--image`,
+default `$ACP_IMAGE`), allows the gateway port in its network policy,
+records the gateway in `~/.workingman/gateways/<name>.json` (the record the
+daemon uses), and attaches with `sbx run` unless `--no-run`. Workspaces
+default to the current directory. If any step fails, the gateway is DELETEd.
+The gateway is `$WORKINGMAN_MCP_GATEWAY_URL`, else `http://localhost:3333`
+(`--gateway-url`).
+
+`sbx-rm.sh` removes the sandbox and DELETEs its gateway, from that record or,
+without one, from the sandbox's `MCP_URL`. A gateway that is already gone is
+not an error.
+
+A sandbox only sees the servers its own sub-gateway was created over. If it
+shows `<server>-authorize` for a server that `gateway authorize` reports as
+authorized, check that the sandbox's gateway includes that server (and, since
+standalone-codemode keeps gateways in memory only, that it was created after
+the gateway's last restart); otherwise recreate it with `sbx-rm.sh` +
+`sbx-create.sh`.
 
 ## Walk through a project
 
