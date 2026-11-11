@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/slimslenderslacks/work/internal/gitsign"
@@ -33,6 +34,65 @@ func (d *Daemon) OpenInteractiveShell(ctx context.Context, projectPath string) (
 // and reported with a *terminal.AlreadyOpenError.
 func (d *Daemon) OpenInteractiveSession(ctx context.Context, projectPath string) (string, error) {
 	return d.openInteractive(ctx, projectPath, true)
+}
+
+// OpenOrchDirTab opens a host shell in a new terminal tab whose working
+// directory is the work stream's orch directory (the project.md's parent).
+// Backs the TUI's `:orch` command. It fails, without opening a tab, when the
+// directory does not exist.
+func (d *Daemon) OpenOrchDirTab(ctx context.Context, projectPath string) (string, error) {
+	orchDir := filepath.Dir(projectPath)
+	return d.openDirTab(ctx, "orch", orchDir, orchDir)
+}
+
+// OpenWorkspaceDirTab opens a host shell in a new terminal tab whose working
+// directory is the root of the work stream's wsp workspace. Backs the TUI's
+// `:workspace` command. Unlike `:dir` it never provisions: it fails, without
+// opening a tab, when the workspace does not exist.
+func (d *Daemon) OpenWorkspaceDirTab(ctx context.Context, projectPath string) (string, error) {
+	if d.runner == nil || d.runner.Workspaces == nil {
+		return "", fmt.Errorf("workspace tabs need a workspace manager (none configured)")
+	}
+	p, err := project.Load(projectPath)
+	if err != nil {
+		return "", fmt.Errorf("load project: %w", err)
+	}
+	if p.Branch == "" {
+		return "", fmt.Errorf("project %q has no branch to resolve a workspace from", projectPath)
+	}
+	dir, err := d.runner.Workspaces.Path(p.Branch)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace for %q: %w", p.Branch, err)
+	}
+	return d.openDirTab(ctx, "workspace", filepath.Dir(projectPath), dir)
+}
+
+// openDirTab verifies dir exists and opens a host bash there in a terminal tab
+// named "<kind>-<work-stream>", titled after the work stream. An already-open
+// tab is focused and reported with a *terminal.AlreadyOpenError.
+func (d *Daemon) openDirTab(ctx context.Context, kind, orchDir, dir string) (string, error) {
+	if d.runner == nil {
+		return "", fmt.Errorf("terminal tabs need a runner (none configured)")
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return "", fmt.Errorf("%s directory %s does not exist", kind, dir)
+	}
+	workStream := filepath.Base(orchDir)
+	target, err := d.runner.LaunchInteractive(ctx, runner.InteractiveSpec{
+		Cwd:   dir,
+		Inner: []string{"bash"},
+		Name:  kind + "-" + workStream,
+		Title: workStream,
+	})
+	var already *terminal.AlreadyOpenError
+	if errors.As(err, &already) {
+		return target, err
+	}
+	if err != nil {
+		return "", err
+	}
+	d.audit.Log("interactive_open", "work_stream", workStream, "kind", kind, "target", target)
+	return target, nil
 }
 
 // openInteractive is the shared body of OpenInteractiveShell/Session. It loads

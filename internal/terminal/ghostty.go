@@ -39,7 +39,8 @@ func (g *Ghostty) OpenTab(ctx context.Context, tab Tab) (string, error) {
 	}
 	out, err := run(ctx, g.Run, name, args...)
 	if err != nil {
-		return "", fmt.Errorf("ghostty: open tab %q: %w", tab.Title, err)
+		// osascript errors are multi-line; keep the TUI status line readable.
+		return "", fmt.Errorf("ghostty: open tab %q: %s", tab.Title, strings.Join(strings.Fields(err.Error()), " "))
 	}
 	if g.goos() == "darwin" {
 		return strings.TrimSpace(string(out)), nil
@@ -93,7 +94,14 @@ func ghosttyOpenScript(tab Tab) string {
 		fmt.Fprintf(&b, "\tset initial working directory of cfg to %s\n", appleScriptString(tab.Dir))
 	}
 	fmt.Fprintf(&b, "\tset command of cfg to %s\n", appleScriptString(shellJoin(tab.Command)))
-	b.WriteString("\tset t to new tab with configuration cfg\n")
+	// With no window open there is nothing to add a tab to, so the first
+	// "tab" is the new window's own.
+	b.WriteString("\tif (count of windows) is 0 then\n")
+	b.WriteString("\t\tset w to new window with configuration cfg\n")
+	b.WriteString("\t\tset t to selected tab of w\n")
+	b.WriteString("\telse\n")
+	b.WriteString("\t\tset t to new tab with configuration cfg\n")
+	b.WriteString("\tend if\n")
 	if tab.Title != "" {
 		fmt.Fprintf(&b, "\tset name override of t to %s\n", appleScriptString(tab.Title))
 	}

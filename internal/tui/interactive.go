@@ -21,18 +21,23 @@ import (
 type InteractiveLauncher interface {
 	OpenShell(ctx context.Context, projectPath string) (string, error)
 	OpenSession(ctx context.Context, projectPath string) (string, error)
+	// OpenOrchDir backs `:orch` (a shell in the work stream's orch directory)
+	// and OpenWorkspaceDir backs `:workspace` (a shell at the root of its wsp
+	// workspace). Neither provisions anything: a missing directory is an error.
+	OpenOrchDir(ctx context.Context, projectPath string) (string, error)
+	OpenWorkspaceDir(ctx context.Context, projectPath string) (string, error)
 }
 
 // interactiveLaunchedMsg carries the result of an InteractiveLauncher call back
 // into Update so the model can report the new tab or surface an error.
 type interactiveLaunchedMsg struct {
-	kind   string // "shell" or "session" — for the status message
+	kind   string // "shell", "session", "orch" or "workspace" — for the status message
 	target string
 	err    error
 }
 
-// openInteractive kicks off a `:dir` (kind "shell") or `:session` (kind
-// "session") launch. It validates the preconditions on the UI goroutine and
+// openInteractive kicks off a `:dir` (kind "shell"), `:session` (kind
+// "session"), `:orch` (kind "orch") or `:workspace` (kind "workspace") launch. It validates the preconditions on the UI goroutine and
 // returns a tea.Cmd that performs the actual launch — which may block on
 // workspace provisioning and sandbox creation — off the UI goroutine, reporting
 // the outcome via interactiveLaunchedMsg.
@@ -53,10 +58,16 @@ func (m model) openInteractive(kind string) (tea.Model, tea.Cmd) {
 			target string
 			err    error
 		)
-		if kind == "session" {
-			target, err = launcher.OpenSession(context.Background(), projectPath)
-		} else {
-			target, err = launcher.OpenShell(context.Background(), projectPath)
+		ctx := context.Background()
+		switch kind {
+		case "session":
+			target, err = launcher.OpenSession(ctx, projectPath)
+		case "orch":
+			target, err = launcher.OpenOrchDir(ctx, projectPath)
+		case "workspace":
+			target, err = launcher.OpenWorkspaceDir(ctx, projectPath)
+		default:
+			target, err = launcher.OpenShell(ctx, projectPath)
 		}
 		return interactiveLaunchedMsg{kind: kind, target: target, err: err}
 	}

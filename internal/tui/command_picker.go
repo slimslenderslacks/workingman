@@ -26,11 +26,14 @@ type projectCommand struct {
 // so typing that letter runs the command directly — except stop/start/show,
 // which all share `session`'s "s" and so are only reachable via j/k + enter;
 // those were the names asked for, and shadowing the far more common `session`
-// shortcut for them isn't worth it.
+// shortcut for them isn't worth it. `workspace` likewise shares "w" with `wolf`,
+// which is listed first and so keeps the shortcut; `workspace` needs j/k + enter.
 var projectCommands = []projectCommand{
 	{"dir", "dir", "open a shell in the workspace sandbox"},
 	{"session", "session", "open/resume an interactive claude session"},
 	{"wolf", "wolf", "summon the wolf to investigate"},
+	{"orch", "orch", "open a terminal tab in this work stream's orch directory"},
+	{"workspace", "workspace", "open a terminal tab at the root of this work stream's wsp workspace"},
 	{"review", "review", "watch this work stream's PR (or poll it now)"},
 	{"cleanup", "cleanup", "prepare this work stream for archiving"},
 	{"archive", "archive", "archive this work stream"},
@@ -233,6 +236,10 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 		return m.openInteractive("shell")
 	case "session":
 		return m.openInteractive("session")
+	case "orch":
+		return m.openInteractive("orch")
+	case "workspace":
+		return m.openInteractive("workspace")
 	default:
 		m.statusMsg = "unknown command: " + cmd
 	}

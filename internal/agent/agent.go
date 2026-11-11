@@ -43,6 +43,12 @@ const (
 	// mounts the orch state read-only and cannot change it. Appended so the iota
 	// values of the existing kinds don't shift.
 	WorkingmanAgent
+	// SleepyHeadAgent is the interactive catch-up agent: when the daemon wakes
+	// to find cron-driven projects that missed ticks (the machine slept or the
+	// daemon was down), it reports which are behind and, on the user's
+	// confirmation, triggers exactly one re-plan per approved project. Appended
+	// so the iota values of the existing kinds don't shift.
+	SleepyHeadAgent
 )
 
 func (k Kind) String() string {
@@ -63,6 +69,8 @@ func (k Kind) String() string {
 		return "review"
 	case WorkingmanAgent:
 		return "workingman"
+	case SleepyHeadAgent:
+		return "sleepy-head"
 	}
 	return "unknown"
 }
@@ -89,12 +97,15 @@ func ParseKind(s string) (Kind, bool) {
 		return ReviewAgent, true
 	case "workingman":
 		return WorkingmanAgent, true
+	case "sleepy-head":
+		return SleepyHeadAgent, true
 	}
 	return 0, false
 }
 
 // Interactive reports whether this Kind expects a human in the loop. Exactly
-// one does: the wolf agent, which asks for guidance when a project is blocked.
+// two do: the wolf agent, which asks for guidance when a project is blocked,
+// and the sleepy-head agent, which asks which behind projects to catch up.
 // Every other kind is autonomous — it runs one turn and exits without
 // prompting. The project agent generates `project.yaml` from the user's seed
 // description and, when the description is insufficient, escalates by blocking
@@ -109,7 +120,7 @@ func ParseKind(s string) (Kind, bool) {
 // as a persistent ACP session when an ACP launcher is configured, unless
 // --wolf-host selects the host escape hatch (a terminal tab on the host) (see runner.Runner.UsesACP).
 func (k Kind) Interactive() bool {
-	return k == WolfAgent
+	return k == WolfAgent || k == SleepyHeadAgent
 }
 
 // Spec is the minimum a Launcher needs to start a session. Command is

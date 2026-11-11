@@ -32,12 +32,55 @@ as before. Every schedule needs an explicit stop condition (`cron_until:` or
 `cron_max_runs` counts cycles, not wake-ups: a firing that starts no cycle isn't
 charged against it.
 
+## Running in the background (macOS)
+
+`orch service install --root <dir> [-- <daemon flags>]` writes a launchd
+LaunchAgent (`~/Library/LaunchAgents/com.workingman.orch.plist`) that runs
+`orch --headless --require-ac` at login and restarts it if it dies; logs go to
+`~/.workingman/logs` (`--log-dir`). `orch service status` / `uninstall` check
+and remove it.
+
+`--require-ac` (on for the service, off for a plain `orch`; a no-op off macOS)
+polls `pmset -g batt` every 30s. **On battery the daemon pauses rather than
+exiting**: no new agents are dispatched (running sessions are left alone), and
+each cron firing is recorded as a missed tick instead of firing, so sleepy-head
+reports it like a tick lost to sleep. Back on AC, deferred projects are
+re-dispatched. Pausing was chosen over exit-and-restart because it needs no
+power-aware launchd keepalive and keeps state, sessions and channels alive. An
+unreadable `pmset` result keeps the previous state.
+
+### Missed schedules and sleepy-head
+
+robfig/cron keeps no history, so a tick that passes while the daemon is down or
+the laptop is asleep is simply gone. The daemon therefore records when each cron
+project last fired (`cron_state.json` in the orch state directory, outside the watched roots) and
+collapses the ticks that went by unobserved into one **missed-schedule** record
+per project (tick count, last fire, most recent missed tick). It looks at
+startup, and while running it notices a wall-clock jump (lid closed) and counts
+the ticks that sleep swallowed. Nothing is fired for missed ticks automatically.
+
+When the daemon starts and any project is behind, it opens one interactive
+**sleepy-head** agent in a terminal tab (like the wolf; also announced on the
+messaging channels). It reports which projects are behind and offers to catch
+them up. For each project you approve it runs
+
+```
+orch catchup <path/to/project.yaml>
+```
+
+which drops a `catchup-request` marker beside the project file. The running
+daemon consumes the marker and fires that project's cron callback **once**,
+however many ticks were missed, so the planner re-plans a single time. The
+request is ignored if the project is no longer behind (so repeating it can't
+double-fire), and on battery it is deferred. `cron_max_runs` is only charged if
+the firing really started a cycle.
+
 ## Prerequisites
 
 - Go 1.22+
 - A terminal orch can open tabs in — [Ghostty](https://ghostty.org) (macOS via
   AppleScript, Linux via `ghostty +new-tab`), WezTerm or kitty. Sessions that
-  need a human at a TTY (the `--wolf-host` wolf, the TUI's `:dir`/`:session`)
+  need a human at a TTY (the `--wolf-host` wolf, the TUI's `:dir`/`:session`; `:orch`/`:workspace` open plain tabs in the orch dir / wsp workspace)
   open in a new tab titled after the project. orch detects the terminal it runs
   in; otherwise set `terminal: ghostty` in `~/.config/workingman/settings.yaml`.
   See [docs/terminal-tabs.md](docs/terminal-tabs.md).
@@ -539,7 +582,7 @@ the tab's status line:
 
 `j`/`k` here are scroll keys, not tab switches — tabs move with `⌥j`/`⌥k`
 (as on the main screen) or `h`/`l`. While typing a message, letters are text,
-so only `ctrl-f`/`ctrl-b` scroll; `esc` stops typing and gives `j`/`k`/`G` back.
+so only `ctrl-f`/`ctrl-b` scroll; sending a message (`enter`) or `esc` stops typing and gives `j`/`k`/`G` back; press `enter` again to type another.
 Each tab keeps its own scroll position.
 
 ## Hiding work streams

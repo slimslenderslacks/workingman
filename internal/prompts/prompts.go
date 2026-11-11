@@ -72,6 +72,25 @@ type Data struct {
 	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
 	AuditLog     string   // the audit log file; empty when unknown
 	SessionsRoot string   // ACP sessions root (<id>/session.json, <id>/stream.log)
+
+	// The fields below are for the SleepyHeadAgent.
+	BehindProjects []BehindProject // cron projects that missed ticks, in the order to report them
+	// ReplanInstruction says how to trigger a ONE-TIME re-plan of a single
+	// behind project (e.g. a command to run or a file edit to make). The
+	// launcher decides the mechanism and supplies the text; the template
+	// embeds it verbatim.
+	ReplanInstruction string
+}
+
+// BehindProject is one cron project the SleepyHeadAgent must report on.
+type BehindProject struct {
+	Name        string // work-stream name
+	ProjectPath string // absolute path to the project's project.yaml
+	Cron        string // the project's cron spec
+	LastFired   string // when the cron last fired (human-readable); empty if never
+	MissedCount int    // how many ticks were missed
+	MostRecent  string // the most recent missed tick (human-readable)
+	Status      string // current project status (idle, working, blocked, ...)
 }
 
 // tmplFuncs are the helpers available to every template.

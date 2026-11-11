@@ -12,6 +12,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/notify"
+	"github.com/slimslenderslacks/work/internal/power"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
@@ -108,6 +109,23 @@ type Daemon struct {
 	// ACP stream activity before the stranded-session reaper terminates it.
 	// See reaper.go.
 	sessionIdleTimeout time.Duration
+
+	// cronHistory is the persisted per-project cron history (last fire, missed
+	// ticks); see cron_missed.go. cronStatePath is its file ("" = memory only),
+	// clock is the time source (tests replace it), sleepCheckEvery the
+	// wall-clock sampling period of the sleep watcher.
+	cronHistory     *cronState
+	cronStatePath   string
+	clock           func() time.Time
+	sleepCheckEvery time.Duration
+
+	// power gates dispatching on AC power (nil = no gate); see power_gate.go.
+	power           power.Source
+	powerCheckEvery time.Duration
+	powerMu         sync.Mutex
+	powerPaused     bool
+	powerDeferred   map[string]bool
+	powerRevisit    func(string) // test hook; nil = revisitProject
 
 	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
 	// unless WithStateFile configured a path.
@@ -225,6 +243,9 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		reviewBackoff:      map[string]int{},
 		dispatchChains:     map[string]chan struct{}{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
+		clock:              time.Now,
+		sleepCheckEvery:    cronSleepCheckEvery,
+		powerCheckEvery:    defaultPowerCheckEvery,
 	}
 	d.snapshot.startedAt = time.Now()
 	d.snapshot.pid = os.Getpid()
@@ -236,6 +257,17 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 	if err := d.resolveWorkingman(); err != nil {
 		w.Close()
 		return nil, fmt.Errorf("daemon: %w", err)
+	}
+	if d.cronStatePath != "" {
+		if err := validateStateFile(d.cronStatePath, roots); err != nil {
+			w.Close()
+			return nil, fmt.Errorf("daemon: %w", err)
+		}
+	}
+	hist, herr := loadCronState(d.cronStatePath)
+	d.cronHistory = hist // usable (empty) even when the file was unreadable
+	if herr != nil {
+		a.Log("cron_state_load_error", "path", d.cronStatePath, "err", herr.Error())
 	}
 	if d.snapshot.path != "" {
 		if err := validateStateFile(d.snapshot.path, roots); err != nil {
@@ -254,8 +286,17 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 func (d *Daemon) Run(ctx context.Context) error {
 	d.ctx = ctx
 	defer d.shutdown()
+	if d.power != nil {
+		// Synchronously first, so a daemon started on battery never dispatches.
+		d.checkPower(ctx)
+		go d.powerWatchLoop(ctx)
+	}
 	if d.scheduler != nil {
+		// Before Start: count the ticks missed while the daemon was down. They
+		// are recorded, never fired.
+		d.detectMissedAtStartup()
 		d.scheduler.Start()
+		go d.sleepWatchLoop(ctx)
 	}
 	for _, r := range d.roots {
 		// Before the watch is installed, so the renames aren't seen as events.
@@ -283,6 +324,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// can't delay it (nor it them).
 	d.beginWorkingmanAgent(ctx)
 	d.startupScan()
+	d.launchSleepyHead()
 	go d.reapLoop(ctx)
 	if d.snapshot.path != "" {
 		// Publish immediately so a reader never sees a stale file from a

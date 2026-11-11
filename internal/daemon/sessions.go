@@ -69,6 +69,9 @@ func (d *Daemon) ListSessions() []SessionInfo {
 	out := make([]SessionInfo, 0, len(d.sessions))
 	for key, entry := range d.sessions {
 		project := filepath.Base(filepath.Dir(key))
+		if entry.kind == agent.SleepyHeadAgent {
+			project = agent.SleepyHeadAgent.String()
+		}
 		if entry.kind == agent.WorkingmanAgent {
 			// Not a work stream: its key is not a project path, so Dir/Base of it
 			// would label the row ".". Show the agent's own name instead.

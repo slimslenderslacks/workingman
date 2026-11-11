@@ -25,7 +25,7 @@
 //     dashboard of the selected project: status, badges, repos and task graph.
 //
 // Overlays sit on top of the columns: "z" zooms the focused pane, ":" opens
-// the command picker (dir, session, wolf, review, cleanup, archive, stop,
+// the command picker (dir, session, wolf, orch, workspace, review, cleanup, archive, stop,
 // start, hide, show), :archive asks for confirmation in a modal, and "a"
 // opens the full-window ACP tab view, one tab per live ACP session with its
 // transcript (prompts, streamed text, tool calls, plans). Conversational
@@ -44,7 +44,7 @@
 //     writes behind :wolf, :review, :cleanup, :stop/:start and :hide/:show.
 //   - archive.go — :archive: removes the wsp workspace, then moves the
 //     project directory to the sibling <root>.backup directory.
-//   - interactive.go — :dir and :session through [InteractiveLauncher].
+//   - interactive.go — :dir, :session, :orch and :workspace through [InteractiveLauncher].
 //   - tab_attach.go — attaching to non-ACP sessions through [TabFocuser].
 //   - acpwatch.go — [WatchACPSessions]: discovers ACP sessions on disk,
 //     dials their sockets, sends the opening prompt and streams events.
@@ -59,8 +59,8 @@
 //     for project.yaml and tasks/*.yaml every second and sends a snapshot
 //     when something changed. Files that fail to parse are shown as error
 //     cards rather than dropped.
-//   - Project files, written. Every command except :archive, :dir and
-//     :session works by editing the selected project.yaml through
+//   - Project files, written. Every command except :archive, :dir,
+//     :session, :orch and :workspace works by editing the selected project.yaml through
 //     internal/project and letting the daemon's fsnotify watch react: :wolf
 //     sets status blocked, :cleanup sets cleanup, :review sets review or
 //     review_now, :stop/:start set status stopped and back. These are saved
@@ -92,7 +92,7 @@
 //     sort key.
 //   - [SessionView] — one live agent session, adapted from the daemon's
 //     SessionInfo by cmd/orch so this package doesn't import internal/daemon.
-//   - [InteractiveLauncher] — interface for :dir and :session; implemented in
+//   - [InteractiveLauncher] — interface for :dir, :session, :orch and :workspace; implemented in
 //     cmd/orch over the daemon's OpenInteractiveShell/OpenInteractiveSession.
 //   - [TabFocuser] — interface to focus a session's terminal tab; implemented
 //     by terminal.TabLauncher, shared with the daemon by cmd/orch.
