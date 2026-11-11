@@ -168,6 +168,20 @@ fi
 # stock template (and pay the ~31s per-create install again).
 export ACP_IMAGE="${ACP_IMAGE-slimslenderslacks/claude-code-acp:0.90.0}"
 
+# Route every sandbox's MCP traffic through its own sub-gateway on the host's
+# standalone-codemode gateway (see "MCP gateway" in README.md). Without a URL
+# orch sets no MCP_URL, so acp-kit keeps the stock `mcp-gateway` MCP server
+# instead of `okta-gateway`. The servers are the default set for a task with
+# no static_mcps; wolf and task gateways also get mcp-find/mcp-add over the
+# whole catalog. Set WORKINGMAN_MCP_GATEWAY_URL="" to turn the gateway off.
+export WORKINGMAN_MCP_GATEWAY_URL="${WORKINGMAN_MCP_GATEWAY_URL-http://localhost:3333}"
+export WORKINGMAN_MCP_GATEWAY_SERVERS="${WORKINGMAN_MCP_GATEWAY_SERVERS-github}"
+if [ "$CHECK_AGENT" != 1 ] && [ -n "$WORKINGMAN_MCP_GATEWAY_URL" ] &&
+  ! curl -fsS -m 3 -o /dev/null "${WORKINGMAN_MCP_GATEWAY_URL%/}/healthz" 2>/dev/null; then
+  echo "start: warning: no MCP gateway answering at $WORKINGMAN_MCP_GATEWAY_URL/healthz;" >&2
+  echo "start: sandboxes will fall back to mcp-gateway until it is up (start standalone-codemode's bin/gateway)." >&2
+fi
+
 # Run orch as a child (not exec) so the EXIT trap can stop the private agent.
 # Forward INT/TERM to it for a clean shutdown and preserve its exit status.
 "$HERE/orch" \

@@ -166,6 +166,12 @@ Point orch at it:
 # or: WORKINGMAN_MCP_GATEWAY_URL / WORKINGMAN_MCP_GATEWAY_SERVERS
 ```
 
+`./start.sh` does this for you: it defaults `WORKINGMAN_MCP_GATEWAY_URL` to
+`http://localhost:3333` and `WORKINGMAN_MCP_GATEWAY_SERVERS` to `github`, and
+warns if nothing answers at `<url>/healthz`. Set `WORKINGMAN_MCP_GATEWAY_URL=""`
+to run without the gateway. Without a URL, sandboxes get no `MCP_URL` and keep
+the stock `mcp-gateway` MCP server instead of `okta-gateway`.
+
 Each time a sandbox is created (or reused):
 
 1. **A sub-gateway is minted**: `POST <url>/gateways {"servers": [...],
