@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/slimslenderslacks/work/internal/policy"
 )
@@ -271,5 +272,20 @@ func TestPersistEnvArgsRewritesInPlace(t *testing.T) {
 	got, _ := os.ReadFile(f)
 	if want := "export FOO=1\nexport BAR=2\nexport MCP_URL='http://second'\n"; string(got) != want {
 		t.Errorf("env file = %q, want %q", got, want)
+	}
+}
+
+// POST /gateways answers only once every backend has attached, which can take
+// tens of seconds (gmail through its proxy takes ~30s), so Create allows far
+// more than the 15s every other call gets.
+func TestCreateTimeoutAllowsSlowBackends(t *testing.T) {
+	if createTimeout < 60*time.Second || createTimeout <= defaultTimeout {
+		t.Errorf("createTimeout = %s, want >= 60s (standalone-codemode's per-backend attach budget) and > defaultTimeout %s", createTimeout, defaultTimeout)
+	}
+	if got := (Client{}).createClient().Timeout; got != createTimeout {
+		t.Errorf("Create's client timeout = %s, want %s", got, createTimeout)
+	}
+	if got := (Client{}).httpClient().Timeout; got != defaultTimeout {
+		t.Errorf("other calls' client timeout = %s, want %s", got, defaultTimeout)
 	}
 }

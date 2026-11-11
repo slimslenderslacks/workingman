@@ -24,9 +24,16 @@ const EnvVar = "MCP_URL"
 // localhost.
 const SandboxHost = "host.docker.internal"
 
-// defaultTimeout bounds one create/delete call when the caller's context has
-// no deadline of its own.
+// defaultTimeout bounds one delete or liveness call when the caller's context
+// has no deadline of its own.
 const defaultTimeout = 15 * time.Second
+
+// createTimeout bounds one POST /gateways. Creating a gateway attaches each of
+// its backends before answering, and standalone-codemode allows each attach
+// up to 60s (aggregategw.DefaultAttachTimeout); a slow one — gmail through
+// the llm.atko.ai proxy takes ~30s — must not time the request out here and
+// leave the sandbox without MCP_URL.
+const createTimeout = 90 * time.Second
 
 // Gateway is one sub-gateway minted by POST /gateways.
 type Gateway struct {
@@ -51,8 +58,8 @@ func (e *UnknownServersError) Error() string {
 type Client struct {
 	// BaseURL is the gateway's root, e.g. http://localhost:3333.
 	BaseURL string
-	// HTTP is the client used for requests; nil means a client with a 15s
-	// timeout.
+	// HTTP is the client used for requests; nil means a client with a 90s
+	// timeout for Create and 15s for everything else.
 	HTTP *http.Client
 }
 
@@ -61,6 +68,13 @@ func (c Client) httpClient() *http.Client {
 		return c.HTTP
 	}
 	return &http.Client{Timeout: defaultTimeout}
+}
+
+func (c Client) createClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return &http.Client{Timeout: createTimeout}
 }
 
 func (c Client) base() string { return strings.TrimSuffix(strings.TrimSpace(c.BaseURL), "/") }
@@ -85,7 +99,7 @@ func (c Client) Create(ctx context.Context, servers []string, dynamic bool) (Gat
 		return Gateway{}, fmt.Errorf("mcpgateway: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient().Do(req)
+	resp, err := c.createClient().Do(req)
 	if err != nil {
 		return Gateway{}, fmt.Errorf("mcpgateway: POST %s/gateways: %w", c.base(), err)
 	}
