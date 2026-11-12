@@ -305,6 +305,7 @@ A message is handled by the first rule that applies.
    | `/help` | list the commands |
    | `/status` | one-line summary from the daemon snapshot: projects by status, live sessions by kind, task counts |
    | `/wolf [work-stream]` | bind this chat to a live wolf: the named project's (exact name, else a unique substring), or the only one. `no wolf running` when there is none; several wolves and no name lists them |
+   | `/sleepy` | bind this chat to the sleepy-head agent while it is catching up missed schedules (ACP only) |
    | `/agent` | bind the chat back to the workingman agent |
    | `/who` | show what the chat is bound to |
 
@@ -320,7 +321,9 @@ A message is handled by the first rule that applies.
    wolf's answer comes back labelled `[wolf <work-stream>]`. A reply does not
    change the chat's binding. If the wolf has ended, or the notification was
    from an earlier session of the same project, the router says so instead of
-   guessing.
+   guessing. A reply to the "😴 sleepy-head is running" message (or to an
+   answer relayed from it) goes to the sleepy-head session the same way,
+   labelled `[sleepy-head]`.
 
 4. **The chat's binding.** By default the chat is bound to the **workingman
    agent**: the text is sent to it with `Ask` and its reply is sent back. After

@@ -429,12 +429,13 @@ func (d *Daemon) shutdown() {
 // --wolf-host wolf and the legacy terminal-tab path (no AcpLauncher configured) are
 // unaffected — those sessions are still closed on shutdown as before.
 //
-// The workingman agent is the exception among the ACP kinds: it is owned by the
-// daemon (supervised, relaunched, mounts derived from this run's flags) rather
-// than by any project, so it stops with the daemon and the next boot starts a
-// fresh one.
+// The workingman and sleepy-head agents are the exceptions among the ACP kinds:
+// they are owned by the daemon (mounts derived from this run's state) rather
+// than by any project, and reconcileSessions does not re-adopt them, so they
+// stop with the daemon and the next boot starts a fresh one — for sleepy-head,
+// only if something is still behind.
 func (d *Daemon) detachable(kind agent.Kind) bool {
-	if kind == agent.WorkingmanAgent {
+	if kind == agent.WorkingmanAgent || kind == agent.SleepyHeadAgent {
 		return false
 	}
 	return d.runner != nil && d.runner.UsesACP(kind)

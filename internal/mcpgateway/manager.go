@@ -31,7 +31,8 @@ type Manager struct {
 	// persistence (and so reuse, Release and Sweep).
 	Store Store
 	// Servers are the catalog server names requested for every gateway
-	// minted. Empty disables the manager: POST /gateways needs at least one.
+	// minted. Empty disables a static manager (a static gateway over nothing
+	// would serve nothing); a Dynamic one starts empty and grows with mcp-add.
 	Servers []string
 	// Dynamic asks for gateways with mcp-find and mcp-add, so the agent can
 	// find and attach catalog servers beyond Servers.
@@ -42,7 +43,7 @@ type Manager struct {
 
 // Enabled reports whether sandboxes should get a gateway at all.
 func (m Manager) Enabled() bool {
-	return m.Client.base() != "" && len(m.Servers) > 0
+	return m.Client.base() != "" && (len(m.Servers) > 0 || m.Dynamic)
 }
 
 func (m Manager) logf(format string, args ...any) {
@@ -113,7 +114,7 @@ func (m Manager) Mint(ctx context.Context, sandbox string) (Record, error) {
 	var unknown *UnknownServersError
 	if errors.As(err, &unknown) {
 		servers = slices.DeleteFunc(servers, func(s string) bool { return slices.Contains(unknown.Names, s) })
-		if len(servers) == 0 {
+		if len(servers) == 0 && !m.Dynamic {
 			return Record{}, err
 		}
 		m.logf("sandbox %s: WARNING %v; creating the gateway over %s only", sandbox, err, strings.Join(servers, ","))

@@ -10,18 +10,25 @@ import (
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
+	"github.com/slimslenderslacks/work/internal/channels"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/prompts"
 	"github.com/slimslenderslacks/work/internal/runner"
+	"github.com/slimslenderslacks/work/internal/session"
 )
 
 // Sleepy-head launcher.
 //
 // When the daemon comes up and Daemon.MissedSchedules is non-empty, it opens an
-// interactive sleepy-head agent in a terminal tab (the wolf's host launch path:
-// agent.Kind.Interactive, no ACP) that reports the projects that are behind and,
+// interactive sleepy-head agent that reports the projects that are behind and,
 // with the user's say-so, catches them up. A catch-up is ONE firing of the
 // project's cron callback however many ticks were missed.
+//
+// With an ACP launcher it runs like the wolf: a persistent acp-wrapper session
+// in its own `sleepy-head` sandbox, so the TUI, the daemon and the messaging
+// channels can all reach the conversation. Its cwd is a scratch dir outside the
+// watched roots, and only the behind projects' orch dirs are mounted writable.
+// Without one it falls back to a host terminal tab.
 //
 // The agent triggers a catch-up by dropping a marker file next to the project's
 // project.yaml (`orch catchup <project.yaml>` does exactly that). The daemon
@@ -35,7 +42,11 @@ const (
 
 	// sleepyHeadSessionKey is the session-map key of the (single) sleepy-head
 	// agent. Like the workingman agent it belongs to no project.
-	sleepyHeadSessionKey = "sleepy-head"
+	sleepyHeadSessionKey = runner.SleepyHeadSession
+
+	// sleepyHeadScratchName is the sleepy-head agent's scratch directory, a
+	// sibling of the sessions root (like the workingman agent's).
+	sleepyHeadScratchName = "sleepy-head"
 )
 
 // RequestCatchup asks the running daemon to fire the cron callback of the
@@ -100,8 +111,14 @@ func (d *Daemon) catchUpProject(projectPath string) {
 	d.onCronFired(projectPath)
 }
 
-// catchupInstruction is the text the sleepy-head prompt embeds for step 3.
-func catchupInstruction() string {
+// catchupInstruction is the text the sleepy-head prompt embeds for step 3. A
+// sandboxed agent has no orch binary, so it is only told about the marker file.
+func catchupInstruction(sandboxed bool) string {
+	if sandboxed {
+		return fmt.Sprintf("create an empty file named `%s` in the same directory as the approved project's "+
+			"project file (the project file path is listed above), e.g. `touch <project dir>/%s`. The orchestrator "+
+			"picks it up and fires that project's schedule exactly once.", CatchupMarker, CatchupMarker)
+	}
 	bin := "orch"
 	if exe, err := os.Executable(); err == nil {
 		bin = exe
@@ -160,12 +177,10 @@ func (d *Daemon) launchSleepyHead() bool {
 		d.audit.Log("session_skip_duplicate", "kind", agent.SleepyHeadAgent.String())
 		return false
 	}
-	plan := runner.Plan{
-		Kind:              agent.SleepyHeadAgent,
-		WorkingDir:        d.roots[0],
-		SessionName:       sleepyHeadSessionKey,
-		BehindProjects:    behindProjects(missed),
-		ReplanInstruction: catchupInstruction(),
+	plan, err := d.sleepyHeadPlan(missed)
+	if err != nil {
+		d.audit.Log("sleepy_head_error", "err", err.Error())
+		return false
 	}
 	started, _ := d.startSessionTracked(sleepyHeadSessionKey, plan, func(error) {
 		d.audit.Log("sleepy_head_ended")
@@ -176,6 +191,82 @@ func (d *Daemon) launchSleepyHead() bool {
 	d.audit.Log("sleepy_head_dispatch", "projects", strconv.Itoa(len(missed)), "behind", strings.Join(names, ","))
 	d.announceSleepyHead(missed)
 	return true
+}
+
+// SleepyHeadSession describes the live sleepy-head agent session so the
+// inbound-message router can attach to its ACP conversation.
+type SleepyHeadSession struct {
+	// Key is the daemon's session-map key (also
+	// channels.ConversationTarget.SessionKey).
+	Key string
+	// ID is the launcher's name for the session — the ACP session directory
+	// name, and channels.ConversationTarget.SessionID.
+	ID string
+	// Dir is the session directory (<sessions-root>/<ID>); "" when it cannot be
+	// resolved.
+	Dir string
+	// Attachable is false for a sleepy-head the router cannot tune in to: one
+	// running in a host terminal tab (no ACP launcher).
+	Attachable bool
+	StartedAt  time.Time
+}
+
+// SleepyHeadSession returns the live sleepy-head session, or false when none
+// is running.
+func (d *Daemon) SleepyHeadSession() (SleepyHeadSession, bool) {
+	d.sessionsMu.Lock()
+	e, ok := d.sessions[sleepyHeadSessionKey]
+	d.sessionsMu.Unlock()
+	if !ok {
+		return SleepyHeadSession{}, false
+	}
+	out := SleepyHeadSession{
+		Key:        sleepyHeadSessionKey,
+		ID:         e.sess.Name(),
+		Attachable: d.runner != nil && d.runner.UsesACP(agent.SleepyHeadAgent),
+		StartedAt:  e.startedAt,
+	}
+	if out.Attachable {
+		if root, err := d.runner.ResolveSessionsRoot(); err == nil {
+			out.Dir = session.Store{Root: root}.Dir(out.ID)
+		}
+	}
+	return out, true
+}
+
+// sleepyHeadPlan builds the launch Plan. Under ACP the agent runs in a scratch
+// dir of its own (outside the watched roots, so its .orch/ writes don't feed the
+// daemon's watcher) with only the behind projects' orch dirs writable: that is
+// where it drops catch-up markers, and nothing else of the orch state is
+// visible to it. On the host fallback it runs in the first root as before.
+func (d *Daemon) sleepyHeadPlan(missed []MissedSchedule) (runner.Plan, error) {
+	sandboxed := d.runner.UsesACP(agent.SleepyHeadAgent)
+	plan := runner.Plan{
+		Kind:              agent.SleepyHeadAgent,
+		WorkingDir:        d.roots[0],
+		SessionName:       sleepyHeadSessionKey,
+		BehindProjects:    behindProjects(missed),
+		ReplanInstruction: catchupInstruction(sandboxed),
+	}
+	if !sandboxed {
+		return plan, nil
+	}
+	root, err := d.runner.ResolveSessionsRoot()
+	if err != nil {
+		return runner.Plan{}, fmt.Errorf("sleepy-head: %w", err)
+	}
+	plan.WorkingDir = filepath.Join(filepath.Dir(root), sleepyHeadScratchName)
+	plan.Persistent = true
+	seen := map[string]bool{}
+	for _, m := range missed {
+		dir, err := filepath.Abs(filepath.Dir(m.ProjectPath))
+		if err != nil || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		plan.WritableMounts = append(plan.WritableMounts, dir)
+	}
+	return plan, nil
 }
 
 // announceSleepyHead tells the messaging channels (if enabled) that sleepy-head
@@ -190,11 +281,36 @@ func (d *Daemon) announceSleepyHead(missed []MissedSchedule) {
 	for _, m := range missed {
 		fmt.Fprintf(&b, "\n- %s (%d missed)", m.WorkStream, m.MissedCount)
 	}
-	b.WriteString("\nOpen the sleepy-head terminal tab to catch them up.")
+	acp := d.runner != nil && d.runner.UsesACP(agent.SleepyHeadAgent)
+	if acp {
+		b.WriteString("\nReply to this message (or send /sleepy) to catch them up from here, or use its tab in the orch TUI.")
+	} else {
+		b.WriteString("\nOpen the sleepy-head terminal tab to catch them up.")
+	}
 	text := b.String()
+	var target *channels.ConversationTarget
+	if s, ok := d.SleepyHeadSession(); ok && acp {
+		target = &channels.ConversationTarget{
+			Kind:       channels.ConversationKindSleepyHead,
+			SessionKey: s.Key,
+			SessionID:  s.ID,
+		}
+	}
 	c.inflight.Add(1)
 	go func() {
 		defer c.inflight.Done()
-		d.sendChannelMessage(text, "sleepy_head", "")
+		results, _ := d.sendChannelMessage(text, "sleepy_head", "")
+		if target == nil || c.index == nil {
+			return
+		}
+		// Index the announcement so replying to it reaches sleepy-head.
+		for _, r := range results {
+			if r.Err != nil || r.MessageID == "" {
+				continue
+			}
+			if err := c.index.Register(r.Route.Channel, r.MessageID, *target); err != nil {
+				d.audit.Log("channel_index_error", "event", "sleepy_head", "channel", r.Route.Channel, "err", err.Error())
+			}
+		}
 	}()
 }

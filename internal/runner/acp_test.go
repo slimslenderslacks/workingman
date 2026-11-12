@@ -735,6 +735,8 @@ func TestUsesACPWolf(t *testing.T) {
 		{"archive under ACP", Runner{AcpLauncher: &fakeLauncher{}}, agent.ArchiveAgent, true},
 		{"archive without ACP", Runner{}, agent.ArchiveAgent, false},
 		{"planning under ACP unaffected by WolfOnHost", Runner{AcpLauncher: &fakeLauncher{}, WolfOnHost: true}, agent.PlanningAgent, true},
+		{"sleepy-head under ACP", Runner{AcpLauncher: &fakeLauncher{}}, agent.SleepyHeadAgent, true},
+		{"sleepy-head without ACP", Runner{}, agent.SleepyHeadAgent, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

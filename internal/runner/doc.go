@@ -18,8 +18,8 @@
 //
 // The two launch paths:
 //
-//   - ACP (production, [Runner.UsesACP]): every autonomous kind, plus the
-//     wolf unless WolfOnHost is set. The runner writes an initial session.json
+//   - ACP (production, [Runner.UsesACP]): every autonomous kind, plus
+//     sleepy-head and the wolf (unless WolfOnHost is set). The runner writes an initial session.json
 //     and starts an acp-wrapper host process through AcpLauncher
 //     (agent.ProcessLauncher). The wrapper creates the sbx sandbox, runs the
 //     ACP claude client and serves agent.sock, and the TUI watches the session

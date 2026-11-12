@@ -16,6 +16,10 @@ import (
 // agent session.
 const ConversationKindWolf = "wolf"
 
+// ConversationKindSleepyHead marks a ConversationTarget that points at the
+// sleepy-head agent session.
+const ConversationKindSleepyHead = "sleepy-head"
+
 // ConversationTarget is what an outbound notification is a conversation
 // with: the agent session a reply to that notification should be routed to.
 type ConversationTarget struct {

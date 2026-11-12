@@ -83,9 +83,15 @@ func (c Client) base() string { return strings.TrimSuffix(strings.TrimSpace(c.Ba
 // and returns the new gateway. A dynamic gateway also serves mcp-find and
 // mcp-add over the whole catalog, so the agent can attach more servers. Anything but a 201 with an id and url is an error carrying the
 // response body.
+//
+// servers may be empty only for a dynamic gateway, which then starts with just
+// mcp-find and mcp-add.
 func (c Client) Create(ctx context.Context, servers []string, dynamic bool) (Gateway, error) {
-	if len(servers) == 0 {
+	if len(servers) == 0 && !dynamic {
 		return Gateway{}, fmt.Errorf("mcpgateway: at least one server is required")
+	}
+	if servers == nil {
+		servers = []string{} // "servers": [], not null
 	}
 	body, err := json.Marshal(struct {
 		Servers []string `json:"servers"`

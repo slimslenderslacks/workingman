@@ -100,6 +100,12 @@ func TestClientCreateDeleteAlive(t *testing.T) {
 	if _, err := c.Create(ctx, nil, false); err == nil {
 		t.Error("Create with no servers: want an error")
 	}
+	if _, err := c.Create(ctx, nil, true); err != nil {
+		t.Errorf("dynamic Create with no servers: %v", err)
+	}
+	if srv, ok := lastBody["servers"].([]any); !ok || len(srv) != 0 || lastBody["dynamic"] != true {
+		t.Errorf("empty dynamic Create sent %v, want \"servers\": [] and \"dynamic\": true", lastBody)
+	}
 	if ok, err := c.Alive(ctx, "abc"); !ok || err != nil {
 		t.Errorf("Alive(abc) = %v, %v", ok, err)
 	}
@@ -287,5 +293,19 @@ func TestCreateTimeoutAllowsSlowBackends(t *testing.T) {
 	}
 	if got := (Client{}).httpClient().Timeout; got != defaultTimeout {
 		t.Errorf("other calls' client timeout = %s, want %s", got, defaultTimeout)
+	}
+}
+
+// A dynamic manager is enabled with no servers; a static one is not.
+func TestManagerEnabledEmptyDynamic(t *testing.T) {
+	c := Client{BaseURL: "http://localhost:3333"}
+	if (Manager{Client: c}).Enabled() {
+		t.Error("static manager with no servers must be disabled")
+	}
+	if !(Manager{Client: c, Dynamic: true}).Enabled() {
+		t.Error("dynamic manager with no servers must be enabled")
+	}
+	if (Manager{Dynamic: true}).Enabled() {
+		t.Error("no base URL must disable the manager")
 	}
 }

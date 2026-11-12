@@ -39,8 +39,8 @@ type Context struct {
 	// tasks) rather than leaving the commit local. See prompts.Data.PushBranch.
 	PushBranch bool `yaml:"push_branch,omitempty"`
 
-	// Sandboxed is true when a wolf agent runs inside an sbx sandbox rather
-	// than on the host. See prompts.Data.Sandboxed.
+	// Sandboxed is true when a wolf or sleepy-head agent runs inside an sbx
+	// sandbox rather than on the host. See prompts.Data.Sandboxed.
 	Sandboxed bool `yaml:"sandboxed,omitempty"`
 
 	// Roots/SnapshotFile/AuditLog/SessionsRoot describe the orch state a

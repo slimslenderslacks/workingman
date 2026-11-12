@@ -58,7 +58,9 @@ type Data struct {
 	// tab: the --wolf-host escape hatch). A sandboxed wolf can only see the
 	// control dir (and the project's wsp worktree, if any) and cannot reach host
 	// tooling — sbx, the other agents' sandboxes, osascript — so its template
-	// drops the host-only advice and tells it so.
+	// drops the host-only advice and tells it so. For the SleepyHeadAgent it
+	// means the same (an ACP sandbox rather than a host terminal tab): the
+	// conversation may reach it from a messaging channel as well as the TUI.
 	Sandboxed bool
 
 	// The fields below are for the WorkingmanAgent: the orch state it observes.

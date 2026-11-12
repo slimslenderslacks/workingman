@@ -2,7 +2,6 @@ package acpwrapper
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -375,20 +374,11 @@ func (c Config) goModCacheDir() string {
 
 // gatewayHost is the LLM gateway the sandboxed Claude Code agent is pointed at
 // when sbx holds a secret for it (see gatewaySecretConfigured).
-const gatewayHost = "llm.es.atko.services"
+const gatewayHost = sbx.LLMGatewayHost
 
-// claudeEnv is injected into every `sbx exec` so the Claude Code agent inside
-// the sandbox resolves its opus/sonnet/haiku aliases to the gateway's model
-// ids, and skips the nonessential traffic and experimental betas the gateway
-// doesn't support. ANTHROPIC_BASE_URL is added separately, and only when
-// c.useGateway is set.
-var claudeEnv = []string{
-	"ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]",
-	"ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5-5[1m]",
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5",
-	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-	"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
-}
+// claudeEnv is injected into every `sbx exec` (see sbx.ClaudeEnv).
+// ANTHROPIC_BASE_URL is added separately, and only when c.useGateway is set.
+var claudeEnv = sbx.ClaudeEnv
 
 // execArgs builds the argv (after the sbx binary) that runs acp-kit's
 // claude-acp-client entrypoint inside the sandbox over `sbx exec`, producing an
@@ -747,32 +737,9 @@ func listSandboxes(ctx context.Context, run commandFunc, sbxPath string) (map[st
 	return m, nil
 }
 
-// gatewaySecretConfigured reports whether `sbx secret ls --json` lists a
-// custom secret targeting gatewayHost that applies to sandboxName — i.e. one
-// scoped globally or to that sandbox.
+// gatewaySecretConfigured is sbx.GatewaySecretConfigured over run.
 func gatewaySecretConfigured(ctx context.Context, run commandFunc, sbxPath, sandboxName string) (bool, error) {
-	out, err := run(ctx, sbxPath, "secret", "ls", "--json")
-	if err != nil {
-		return false, fmt.Errorf("sbx secret ls: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	var data struct {
-		CustomSecrets []struct {
-			Scope   string   `json:"scope"`
-			Targets []string `json:"targets"`
-		} `json:"custom_secrets"`
-	}
-	if err := json.Unmarshal(out, &data); err != nil {
-		return false, fmt.Errorf("decode sbx secret ls output: %w", err)
-	}
-	for _, s := range data.CustomSecrets {
-		if s.Scope != "global" && s.Scope != sandboxName {
-			continue
-		}
-		if slices.Contains(s.Targets, gatewayHost) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return sbx.GatewaySecretConfigured(ctx, sbx.RunFunc(run), sbxPath, sandboxName)
 }
 
 // sameWorkspaceSet reports whether a and b contain the same paths, ignoring

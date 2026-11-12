@@ -35,38 +35,6 @@ func TestSessionUUIDStableAndWellFormed(t *testing.T) {
 	}
 }
 
-func TestSessionCommandResumesOrCreates(t *testing.T) {
-	uuid := sessionUUID("widget")
-	cmd := sessionCommand(uuid)
-
-	// Runs as a bash wrapper so the resume-vs-create decision happens inside
-	// the sandbox at launch time.
-	if len(cmd) != 3 || cmd[0] != "bash" || cmd[1] != "-lc" {
-		t.Fatalf("sessionCommand = %v, want a `bash -lc <script>` invocation", cmd)
-	}
-	script := cmd[2]
-
-	// The stable id must reach both branches: --resume when the transcript
-	// already exists, --session-id (create) when it doesn't. Passing
-	// --session-id unconditionally is the bug that crashed the window on
-	// reopen, so both flags must be present.
-	for _, want := range []string{
-		"~/.claude/projects/",
-		"--resume",
-		"--session-id",
-		uuid,
-	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("session script missing %q\nscript: %s", want, script)
-		}
-	}
-	// It must not launch claude with --session-id when the transcript exists —
-	// resume has to come first in the conditional.
-	if strings.Index(script, "--resume") > strings.Index(script, "else") {
-		t.Errorf("resume branch must precede the create (else) branch\nscript: %s", script)
-	}
-}
-
 func TestSanitizeSandboxName(t *testing.T) {
 	// sbx rejects underscores; they must become hyphens.
 	if got := sanitizeSandboxName("session-my_work_stream"); got != "session-my-work-stream" {

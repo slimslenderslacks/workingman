@@ -60,9 +60,13 @@ startup, and while running it notices a wall-clock jump (lid closed) and counts
 the ticks that sleep swallowed. Nothing is fired for missed ticks automatically.
 
 When the daemon starts and any project is behind, it opens one interactive
-**sleepy-head** agent in a terminal tab (like the wolf; also announced on the
-messaging channels). It reports which projects are behind and offers to catch
-them up. For each project you approve it runs
+**sleepy-head** agent. Like the wolf, it is a persistent ACP session in its own
+`sleepy-head` sandbox (a host terminal tab only without `--acp-kit`), so you can
+talk to it from its TUI tab or from a messaging channel: the announcement
+message can be replied to, and `/sleepy` binds a chat to it. It reports which
+projects are behind and offers to catch them up. For each project you approve
+it creates a `catchup-request` file beside the project file (the sandbox
+mounts only the behind projects' orch dirs writable); on the host it runs
 
 ```
 orch catchup <path/to/project.yaml>

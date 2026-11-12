@@ -67,10 +67,11 @@ func (r *Router) conversation(ctx context.Context, tgt target) (*conv, error) {
 	defer cancel()
 	opts := r.cfg.AttachOptions
 	opts.PermissionTimeout = r.cfg.PermissionTimeout
-	// Nobody else drives the workingman agent's session when the daemon runs
-	// without the TUI, so the router creates the ACP session itself (and gives it
-	// its opening prompt, below). A wolf's session is always the TUI's to create.
-	opts.CreateIfMissing = opts.CreateIfMissing || !tgt.wolf
+	// Nobody else drives the workingman agent's or sleepy-head's session when the
+	// daemon runs without the TUI, so the router creates the ACP session itself
+	// (and gives it its opening prompt, below). A wolf's session is always the
+	// TUI's to create.
+	opts.CreateIfMissing = opts.CreateIfMissing || !tgt.wolf || tgt.sleepyHead()
 	opts.OnPermission = func(pctx context.Context, req acpchat.PermissionRequest) acpchat.PermissionDecision {
 		return r.askPermission(pctx, tgt, req)
 	}
@@ -124,6 +125,9 @@ func (r *Router) audit(event string, kv ...string) {
 }
 
 func kindOf(t target) string {
+	if t.sleepyHead() {
+		return "sleepy-head"
+	}
 	if t.wolf {
 		return "wolf"
 	}
@@ -213,7 +217,7 @@ func (r *Router) turnFailed(c *chat, tgt target, cv *conv, err error, partial st
 		}
 		if tgt.wolf {
 			r.unbindWolf(tgt.Key, tgt.ID)
-			r.notify(c, fmt.Sprintf("The wolf for %s has ended. You're back on the workingman agent.", tgt.WorkStream))
+			r.notify(c, fmt.Sprintf("%s has ended. You're back on the workingman agent.", capitalize(tgt.name())))
 			return
 		}
 		r.notify(c, AgentStartingMessage)
@@ -224,6 +228,14 @@ func (r *Router) turnFailed(c *chat, tgt target, cv *conv, err error, partial st
 		}
 		r.notify(c, "Something went wrong talking to the agent: "+shorten(audit.Redact(err.Error()), 200))
 	}
+}
+
+// capitalize upper-cases the first letter, for a name() that starts a sentence.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 func shorten(s string, n int) string {
@@ -319,9 +331,9 @@ func (r *Router) notify(c *chat, text string) {
 }
 
 // reply sends an agent's text to the chat: secrets redacted, over-long text cut,
-// split by the channel's own chunker if it has one, and — for a wolf — labelled
-// "[wolf <work-stream>]" and recorded in the conversation index so replying to
-// it reaches the same wolf.
+// split by the channel's own chunker if it has one, and — for a wolf or
+// sleepy-head — labelled ("[wolf <work-stream>]", "[sleepy-head]") and recorded
+// in the conversation index so replying to it reaches the same session.
 func (r *Router) reply(c *chat, tgt target, text string) {
 	text = limitRunes(audit.Redact(text), r.cfg.MaxReplyRunes)
 	var reg *target

@@ -10,6 +10,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/policy"
+	"github.com/slimslenderslacks/work/internal/prompts"
 	"github.com/slimslenderslacks/work/internal/session"
 )
 
@@ -215,5 +216,78 @@ func TestStartWorkingmanAgentNeedsACP(t *testing.T) {
 	_, err := r.Start(context.Background(), Plan{Kind: agent.WorkingmanAgent, WorkingDir: t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "ACP") {
 		t.Fatalf("Start without ACP = %v, want an error naming ACP", err)
+	}
+}
+
+func TestUsesACPSleepyHead(t *testing.T) {
+	if (&Runner{}).UsesACP(agent.SleepyHeadAgent) {
+		t.Error("without an AcpLauncher sleepy-head must not claim ACP")
+	}
+	if !(&Runner{AcpLauncher: &fakeLauncher{}}).UsesACP(agent.SleepyHeadAgent) {
+		t.Error("with an AcpLauncher sleepy-head runs under ACP")
+	}
+	if !(&Runner{AcpLauncher: &fakeLauncher{}, WolfOnHost: true}).UsesACP(agent.SleepyHeadAgent) {
+		t.Error("WolfOnHost must not move sleepy-head to the host")
+	}
+	if got := ACPSandboxNameFor(agent.SleepyHeadAgent, "", ""); got != "sleepy-head" {
+		t.Errorf("ACPSandboxNameFor = %q, want sleepy-head", got)
+	}
+}
+
+func TestStartSleepyHeadAgent(t *testing.T) {
+	base := t.TempDir()
+	scratch := filepath.Join(base, "sleepy-head") // does not exist yet: Start creates it
+	sessionsRoot := filepath.Join(base, "sessions")
+	streamA := filepath.Join(t.TempDir(), "stream-a")
+
+	acp := &fakeLauncher{}
+	tabs := &fakeLauncher{}
+	r := &Runner{
+		Launcher:       tabs,
+		AcpLauncher:    acp,
+		Kit:            "/kits/acp-kit",
+		SessionsRoot:   sessionsRoot,
+		AcpWrapperPath: "/bin/acp-wrapper",
+	}
+	_, err := r.Start(context.Background(), Plan{
+		Kind:              agent.SleepyHeadAgent,
+		WorkingDir:        scratch,
+		WritableMounts:    []string{streamA},
+		BehindProjects:    []prompts.BehindProject{{Name: "stream-a", ProjectPath: filepath.Join(streamA, "project.yaml"), MissedCount: 3}},
+		ReplanInstruction: "touch the marker",
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if tabs.last.Name != "" {
+		t.Errorf("the tab launcher must not be used: %+v", tabs.last)
+	}
+	cmd := acp.last.Command
+	if got := argValue(cmd, "--session-id"); got != "sleepy-head" {
+		t.Errorf("--session-id = %q", got)
+	}
+	if got := argValue(cmd, "--sandbox"); got != "sleepy-head" {
+		t.Errorf("--sandbox = %q", got)
+	}
+	if got := argValue(cmd, "--kind"); got != "sleepy-head" {
+		t.Errorf("--kind = %q", got)
+	}
+	if !hasFlag(cmd, "--persistent") || hasFlag(cmd, "--exit-when-empty") {
+		t.Errorf("must be persistent, not one-shot: %v", cmd)
+	}
+	if !hasFlag(cmd, "--idle-timeout") || hasFlag(cmd, "--unblock-grace") {
+		t.Errorf("want an idle timeout and no unblock grace: %v", cmd)
+	}
+	if got, want := argValues(cmd, "--workspace"), []string{scratch, streamA}; !reflect.DeepEqual(got, want) {
+		t.Errorf("--workspace = %v, want %v", got, want)
+	}
+	instr, err := os.ReadFile(filepath.Join(scratch, ".orch", "instructions.md"))
+	if err != nil {
+		t.Fatalf("instructions.md: %v", err)
+	}
+	for _, want := range []string{"you are sandboxed", "stream-a", "touch the marker"} {
+		if !strings.Contains(string(instr), want) {
+			t.Errorf("instructions.md missing %q:\n%s", want, instr)
+		}
 	}
 }

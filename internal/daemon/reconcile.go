@@ -80,6 +80,17 @@ func (d *Daemon) reconcileSessions() {
 			}
 			continue
 		}
+		if kind == agent.SleepyHeadAgent {
+			// Project-independent and not detachable, so a live one is a leftover
+			// from a daemon that died without closing it. Adopt it under its key
+			// so launchSleepyHead doesn't start a second wrapper on the same
+			// session id beside it.
+			sess := newReconciledSession(rec.ID, store, nil)
+			if d.trackSession(sleepyHeadSessionKey, sess, kind, "", func(error) { d.audit.Log("sleepy_head_ended") }) {
+				d.audit.Log("session_reconciled", "key", sleepyHeadSessionKey, "kind", rec.Kind, "id", rec.ID)
+			}
+			continue
+		}
 		if rec.ProjectPath == "" {
 			continue
 		}

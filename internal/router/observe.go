@@ -52,6 +52,6 @@ func (r *Router) relayForeignTurn(tgt target, text string) {
 func (r *Router) wolfEnded(cv *conv) {
 	for _, c := range r.unbindWolf(cv.tgt.Key, cv.tgt.ID) {
 		r.log("binding_ended", c, "work_stream", cv.tgt.WorkStream)
-		r.notify(c, fmt.Sprintf("The wolf for %s has ended. You're back on the workingman agent.", cv.tgt.WorkStream))
+		r.notify(c, fmt.Sprintf("%s has ended. You're back on the workingman agent.", capitalize(cv.tgt.name())))
 	}
 }

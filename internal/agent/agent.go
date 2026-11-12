@@ -116,9 +116,10 @@ func ParseKind(s string) (Kind, bool) {
 //
 // The runner uses this to pick the right claude flags; the TUI uses it to
 // highlight sessions that won't make progress until someone attaches. It does
-// NOT decide the launch path on its own: the wolf is interactive but still runs
-// as a persistent ACP session when an ACP launcher is configured, unless
-// --wolf-host selects the host escape hatch (a terminal tab on the host) (see runner.Runner.UsesACP).
+// NOT decide the launch path on its own: the wolf and sleepy-head are
+// interactive but still run as persistent ACP sessions when an ACP launcher is
+// configured (the wolf unless --wolf-host selects the host escape hatch, a
+// terminal tab on the host) (see runner.Runner.UsesACP).
 func (k Kind) Interactive() bool {
 	return k == WolfAgent || k == SleepyHeadAgent
 }

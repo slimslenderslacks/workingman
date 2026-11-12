@@ -41,8 +41,22 @@ type Session struct {
 	// Ref is what Attach takes: the session directory. Empty means the session
 	// cannot be attached to (a wolf running on the host in a terminal tab).
 	Ref string
-	// WorkStream labels a wolf's project; unused for the workingman agent.
+	// WorkStream labels a wolf's project; unused for the other agents.
 	WorkStream string
+	// Kind is channels.ConversationKindSleepyHead for the sleepy-head agent;
+	// empty means a wolf (or, as a turn target, the workingman agent).
+	Kind string
+}
+
+// sleepyHead reports whether s is the sleepy-head agent's session.
+func (s Session) sleepyHead() bool { return s.Kind == channels.ConversationKindSleepyHead }
+
+// name is how router messages refer to a bound session's agent.
+func (s Session) name() string {
+	if s.sleepyHead() {
+		return "sleepy-head"
+	}
+	return "the wolf for " + s.WorkStream
 }
 
 // Source is what the router needs to know about the daemon.
@@ -52,6 +66,9 @@ type Source interface {
 	WorkingmanAgent() (Session, bool)
 	// WolfSessions lists the live wolf sessions.
 	WolfSessions() []Session
+	// SleepyHead returns the live sleepy-head agent session, or false when none
+	// is running.
+	SleepyHead() (Session, bool)
 	// Status is the one-line daemon summary behind /status.
 	Status() string
 }
@@ -168,7 +185,7 @@ type chat struct {
 	channel, id string
 	ref         string // hashed id for the audit log
 
-	wolf    *Session // nil: bound to the workingman agent
+	wolf    *Session // nil: bound to the workingman agent; else a wolf or sleepy-head
 	queue   []item
 	busy    bool
 	pending *permission
@@ -179,14 +196,20 @@ type item struct {
 	text string
 }
 
-// target is a session a message is being sent to.
+// target is a session a message is being sent to. wolf is set for every
+// session other than the workingman agent — a wolf or sleepy-head, the agents
+// a chat can bind to.
 type target struct {
 	wolf bool
 	Session
 }
 
-// label prefixes replies from a wolf: "[wolf <work-stream>]".
+// label prefixes replies from a bound agent: "[wolf <work-stream>]" or
+// "[sleepy-head]".
 func (t target) label() string {
+	if t.sleepyHead() {
+		return "sleepy-head"
+	}
 	if t.wolf {
 		return "wolf " + t.WorkStream
 	}
@@ -194,8 +217,12 @@ func (t target) label() string {
 }
 
 func (t target) conversationTarget() channels.ConversationTarget {
+	kind := channels.ConversationKindWolf
+	if t.sleepyHead() {
+		kind = channels.ConversationKindSleepyHead
+	}
 	return channels.ConversationTarget{
-		Kind:       channels.ConversationKindWolf,
+		Kind:       kind,
 		WorkStream: t.WorkStream,
 		SessionKey: t.Key,
 		SessionID:  t.ID,
@@ -356,9 +383,10 @@ func (r *Router) work(c *chat) {
 
 // process picks the destination of one queued message.
 func (r *Router) process(c *chat, it item) {
-	// Rule 1: a reply to a notification goes to the wolf that sent it.
+	// Rule 1: a reply to a notification goes to the wolf (or sleepy-head) that
+	// sent it.
 	if it.msg.ReplyToID != "" && r.cfg.Index != nil {
-		if ct, ok := r.cfg.Index.Lookup(c.channel, it.msg.ReplyToID); ok && ct.Kind == channels.ConversationKindWolf {
+		if ct, ok := r.cfg.Index.Lookup(c.channel, it.msg.ReplyToID); ok && (ct.Kind == channels.ConversationKindWolf || ct.Kind == channels.ConversationKindSleepyHead) {
 			tgt, problem := r.resolveReplyTarget(ct)
 			if problem != "" {
 				r.log("reply_unroutable", c, "work_stream", ct.WorkStream)
@@ -378,7 +406,7 @@ func (r *Router) process(c *chat, it item) {
 		return
 	}
 	if bound {
-		r.log("route", c, "to", "wolf", "work_stream", w.WorkStream)
+		r.log("route", c, "to", kindOf(target{wolf: true, Session: w}), "work_stream", w.WorkStream)
 		r.turn(c, target{wolf: true, Session: w}, it.text)
 		return
 	}
@@ -386,9 +414,21 @@ func (r *Router) process(c *chat, it item) {
 	r.turn(c, target{}, it.text)
 }
 
-// resolveReplyTarget finds the live wolf session a notification came from, or
-// explains why there is none.
+// resolveReplyTarget finds the live wolf (or sleepy-head) session a
+// notification came from, or explains why there is none.
 func (r *Router) resolveReplyTarget(ct channels.ConversationTarget) (target, string) {
+	if ct.Kind == channels.ConversationKindSleepyHead {
+		s, ok := r.cfg.Source.SleepyHead()
+		switch {
+		case !ok || s.Key != ct.SessionKey:
+			return target{}, "sleepy-head has ended, so I can't pass your reply on."
+		case ct.SessionID != "" && s.ID != ct.SessionID:
+			return target{}, "That message was from an earlier sleepy-head session; a newer one is running. Use /sleepy to talk to it."
+		case s.Ref == "":
+			return target{}, "sleepy-head runs in a terminal tab on the host, so I can't reach it from here."
+		}
+		return target{wolf: true, Session: s}, ""
+	}
 	ws := ct.WorkStream
 	if ws == "" {
 		ws = "that project"
@@ -408,8 +448,9 @@ func (r *Router) resolveReplyTarget(ct channels.ConversationTarget) (target, str
 	return target{}, fmt.Sprintf("The wolf session for %s has ended, so I can't pass your reply on. Ask me directly, or use /wolf when one is running.", ws)
 }
 
-// boundWolf returns the live wolf the chat is bound to. A binding whose wolf has
-// ended is dropped and the user told (ended=true) — rule 3's fall-back.
+// boundWolf returns the live wolf (or sleepy-head) the chat is bound to. A
+// binding whose session has ended is dropped and the user told (ended=true) —
+// rule 3's fall-back.
 func (r *Router) boundWolf(c *chat) (w Session, bound, ended bool) {
 	r.mu.Lock()
 	b := c.wolf
@@ -417,15 +458,29 @@ func (r *Router) boundWolf(c *chat) (w Session, bound, ended bool) {
 	if b == nil {
 		return Session{}, false, false
 	}
-	for _, w := range r.cfg.Source.WolfSessions() {
+	for _, w := range r.bindable() {
 		if w.Key == b.Key && w.ID == b.ID && w.Ref != "" {
 			return w, true, false
 		}
 	}
 	r.unbindIf(c, b)
 	r.log("binding_ended", c, "work_stream", b.WorkStream)
-	r.notify(c, fmt.Sprintf("The wolf for %s has ended. You're back on the workingman agent; send your message again to ask it, or /wolf when another wolf is running.", b.WorkStream))
+	if b.sleepyHead() {
+		r.notify(c, "sleepy-head has ended. You're back on the workingman agent; send your message again to ask it.")
+	} else {
+		r.notify(c, fmt.Sprintf("The wolf for %s has ended. You're back on the workingman agent; send your message again to ask it, or /wolf when another wolf is running.", b.WorkStream))
+	}
 	return Session{}, false, true
+}
+
+// bindable lists the live sessions a chat can be bound to: the wolves and
+// sleepy-head.
+func (r *Router) bindable() []Session {
+	out := r.cfg.Source.WolfSessions()
+	if s, ok := r.cfg.Source.SleepyHead(); ok {
+		out = append(out, s)
+	}
+	return out
 }
 
 // unbindIf returns the chat to the workingman agent if it is still bound to b.

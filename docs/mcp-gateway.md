@@ -65,9 +65,12 @@ A sandbox's gateway is minted with `POST <gateway>/gateways` and the body
 2. otherwise the **default set**, `--mcp-gateway-servers` /
    `WORKINGMAN_MCP_GATEWAY_SERVERS` (comma-separated). This covers tasks with
    no `static_mcps` and the agents that have no task (project, planning,
-   wolf, archive, workingman). The TUI's `:session` sandboxes also always use
-   this set.
+   wolf, archive, workingman).
 3. The review agent always asks for `[github]`.
+4. The TUI's `:session` sandboxes ask for **no servers** and a dynamic
+   gateway (`{"servers": [], "dynamic": true}`): the agent finds and attaches
+   what it needs with `mcp-find` / `mcp-add`. With `--mcp-gateway-static`
+   they get no gateway.
 
 If the list is empty (no `static_mcps` and no default set), the sandbox gets
 no gateway and no `MCP_URL`. Its network policy still gets the gateway's
@@ -147,7 +150,10 @@ steps in this order:
 For an ACP session, orch only passes the settings on to acp-wrapper
 (`--mcp-gateway-url`, one `--mcp-server` per name, `--mcp-gateway-state`).
 The wrapper owns the gateway as it owns the sandbox. For terminal-tab and
-`:session` sandboxes, the runner does the same steps itself.
+`:session` sandboxes, the runner does the same steps itself. A `:session`
+sandbox follows `sbx-create.sh`: `sbx create claude --kit <acp-kit> -t
+<ACP_IMAGE> -e MCP_URL=… -e <claude env>`, then `sbx run --name <sandbox>` in
+the tab, so acp-kit's `claude` shim registers `okta-gateway`.
 
 ## okta-gateway only: `mcp-gateway` is removed
 

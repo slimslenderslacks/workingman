@@ -204,7 +204,9 @@ Build with `go build -o orch ./cmd/orch` and start orch from Ghostty
 3. **Reopen after close.** Close the shell tab (or `exit` in it), then run
    `:dir` again. Expect a fresh tab.
 4. **`:session`.** Same as steps 1–3, with a claude session in the
-   `session-<work-stream>` sandbox.
+   `session-<work-stream>` sandbox, attached with `sbx run`. In it, `/mcp`
+   lists only `okta-gateway`, with `mcp-find` and `mcp-add` and no servers
+   until you add one.
 5. **Host wolf.** Run `./orch --root … --acp-kit … --wolf-host` and block a
    project (`status: blocked`). Expect a tab titled with the project name
    running claude. Enter on the wolf's row in the sessions pane switches to

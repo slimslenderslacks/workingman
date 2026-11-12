@@ -137,11 +137,13 @@ type Plan struct {
 	// claude process is already long-lived.
 	Persistent bool
 
-	// WritableMounts, for the workingman agent, are host paths bind-mounted into
-	// its sandbox READ-WRITE next to its scratch directory (WorkingDir): the orch
-	// roots, where it edits project.yaml / tasks/*.yaml and creates
-	// project.md / intake/*.md on a human's request. Ignored for every other
-	// Kind. See workingmanWorkspaces.
+	// WritableMounts, for the workingman and sleepy-head agents, are host paths
+	// bind-mounted into the sandbox READ-WRITE next to its scratch directory
+	// (WorkingDir). For the workingman agent: the orch roots, where it edits
+	// project.yaml / tasks/*.yaml and creates project.md / intake/*.md on a
+	// human's request. For sleepy-head: the orch dirs of the behind projects,
+	// where it drops catch-up markers. Ignored for every other Kind. See
+	// workingmanWorkspaces.
 	WritableMounts []string
 
 	// ReadOnlyMounts, for the workingman agent, are host paths bind-mounted into
@@ -183,6 +185,14 @@ type Observe struct {
 const (
 	WorkingmanAgentSandbox = "workingman-agent"
 	WorkingmanAgentSession = "workingman-agent"
+)
+
+// SleepyHeadSandbox is the sbx sandbox name — and SleepyHeadSession the ACP
+// session id — of the sleepy-head agent. There is at most one, independent of
+// any project path.
+const (
+	SleepyHeadSandbox = "sleepy-head"
+	SleepyHeadSession = "sleepy-head"
 )
 
 // CommandBuilder produces the argv that the launcher runs inside the
@@ -497,6 +507,16 @@ type Runner struct {
 	// every sandbox then gets only the servers it asked for.
 	MCPGatewayStatic bool
 
+	// SessionMCPServers are the catalog servers a `:session` sandbox's gateway
+	// starts with. Empty by default: the gateway is dynamic, so the agent finds
+	// and attaches servers itself with mcp-find / mcp-add. (With
+	// MCPGatewayStatic and no servers, a `:session` gets no gateway.)
+	SessionMCPServers []string
+
+	// sbxRun runs the sbx commands that set up a `:session` sandbox. Nil means
+	// a real exec; tests set it to avoid shelling out to sbx.
+	sbxRun sbx.RunFunc
+
 	// preflightRun runs the interactive-session signing preflight command
 	// (`sbx exec ... ssh-add -l`). Nil means use the real exec (gitsign.ExecRun);
 	// tests set it to avoid shelling out to sbx.
@@ -518,11 +538,11 @@ func (r *Runner) signingPreflightRun() gitsign.RunFunc {
 // sessions own a stable, user-visible sandbox; the legacy terminal-tab path's sandbox
 // is an implementation detail.
 //
-// The wolf is interactive but conversational, so it is the one interactive kind
-// that also runs under ACP (a persistent session other processes can tune in
-// to) — unless WolfOnHost selects the host (terminal tab) escape hatch. Every other kind,
-// the archive agent included, is autonomous and takes the ACP path whenever an
-// AcpLauncher is configured.
+// The interactive kinds are conversational, so they run under ACP too, as
+// persistent sessions other processes can tune in to: the wolf (unless
+// WolfOnHost selects the host terminal-tab escape hatch) and sleepy-head. Every
+// other kind, the archive agent included, is autonomous and takes the ACP path
+// whenever an AcpLauncher is configured.
 func (r *Runner) UsesACP(kind agent.Kind) bool {
 	if r.AcpLauncher == nil {
 		return false
@@ -530,7 +550,7 @@ func (r *Runner) UsesACP(kind agent.Kind) bool {
 	if kind == agent.WolfAgent {
 		return !r.WolfOnHost
 	}
-	return !kind.Interactive()
+	return true
 }
 
 // projectNameFromPath returns the work-stream name for a project.yaml path:
@@ -562,6 +582,20 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		if p.WorkingDir != "" {
 			if err := os.MkdirAll(p.WorkingDir, 0o755); err != nil {
 				return nil, fmt.Errorf("runner: workingman scratch dir: %w", err)
+			}
+		}
+	}
+	if p.Kind == agent.SleepyHeadAgent && r.UsesACP(p.Kind) {
+		// Conversational like the wolf: the wrapper must outlive the TUI watcher
+		// that drives the opening prompt, since the agent then waits for the
+		// user's answer. Its .orch/ handoff lives in a scratch dir of its own.
+		if p.SessionName == "" {
+			p.SessionName = SleepyHeadSession
+		}
+		p.Persistent = true
+		if p.WorkingDir != "" {
+			if err := os.MkdirAll(p.WorkingDir, 0o755); err != nil {
+				return nil, fmt.Errorf("runner: sleepy-head scratch dir: %w", err)
 			}
 		}
 	}
@@ -609,7 +643,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
 		PushBranch:              p.PushBranch,
-		Sandboxed:               useACP && p.Kind == agent.WolfAgent,
+		Sandboxed:               useACP && (p.Kind == agent.WolfAgent || p.Kind == agent.SleepyHeadAgent),
 		Roots:                   p.Observe.Roots,
 		SnapshotFile:            p.Observe.SnapshotFile,
 		AuditLog:                p.Observe.AuditLog,
@@ -640,7 +674,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
 		PushBranch:              p.PushBranch,
-		Sandboxed:               useACP && p.Kind == agent.WolfAgent,
+		Sandboxed:               useACP && (p.Kind == agent.WolfAgent || p.Kind == agent.SleepyHeadAgent),
 		Roots:                   p.Observe.Roots,
 		SnapshotFile:            p.Observe.SnapshotFile,
 		AuditLog:                p.Observe.AuditLog,
@@ -743,9 +777,14 @@ type InteractiveSpec struct {
 	// Cwd is the working directory inside the sandbox (`sbx exec -w`). Usually
 	// the first workspace.
 	Cwd string
-	// Inner is the command run inside the sandbox, e.g. ["bash"] or
-	// ["claude", "--dangerously-skip-permissions", "--session-id", uuid].
+	// Inner is the host command to run when SandboxName is empty, e.g.
+	// ["bash"]. Ignored for a sandbox, which is attached with `sbx run` and so
+	// runs the sandbox's own interactive agent.
 	Inner []string
+	// ClaudeSessionID, for a sandbox, is the stable claude conversation id the
+	// tab opens (or resumes) — deterministic per work stream so re-opening the
+	// tab continues the same conversation. Empty starts claude without one.
+	ClaudeSessionID string
 	// Name is the session name the tab is tracked by: re-opening a Name whose
 	// tab is still open focuses that tab instead of opening a second one.
 	Name string
@@ -774,13 +813,14 @@ type InteractiveSpec struct {
 // opening a second), that error is returned alongside the name so the caller
 // can warn the user.
 //
-// When spec.SandboxName is set (`:session`), it first ensures the sandbox
-// exists (idempotently, via DefaultSandboxCreator — a plain `sbx create claude`
-// with the given mounts, no acp-kit, since the tab runs claude directly
-// rather than the ACP bridge) and wraps the command in `sbx exec -it`, which
-// auto-starts the sandbox if it was stopped. Nothing removes these sandboxes,
-// so a `:session` sandbox persists and claude resumes the same conversation on
-// the next open.
+// When spec.SandboxName is set (`:session`), it sets the sandbox up the way
+// sbx-create.sh does (see ensureSessionSandbox: a dynamic per-sandbox MCP
+// gateway, `sbx create` from the acp-kit image and kit with MCP_URL and the
+// claude env) and attaches the tab with `sbx run --name <sandbox>`, so the
+// pty runs the sandbox's own interactive claude — not the ACP bridge. `sbx run`
+// starts the sandbox if it was stopped. Nothing removes these sandboxes, so a
+// `:session` sandbox persists and claude resumes the same conversation on the
+// next open.
 //
 // When spec.SandboxName is empty (`:dir`), the command runs directly on the
 // host — no sandbox, no `sbx exec` — in spec.Cwd. That's a plain host shell.
@@ -788,7 +828,7 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 	if r.Launcher == nil {
 		return "", fmt.Errorf("runner: no terminal launcher configured for interactive sessions")
 	}
-	if len(spec.Inner) == 0 {
+	if spec.SandboxName == "" && len(spec.Inner) == 0 {
 		return "", fmt.Errorf("runner: interactive session needs a command to run")
 	}
 
@@ -797,24 +837,15 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 		if len(spec.Workspaces) == 0 {
 			return "", fmt.Errorf("runner: sandboxed interactive session needs at least one workspace")
 		}
-		ensure := r.Sandbox
-		if ensure == nil {
-			// Production wires the ACP path and leaves r.Sandbox nil; the
-			// interactive session sandbox still needs a plain sandbox, so fall
-			// back to the default creator.
-			ensure = DefaultSandboxCreator
-		}
-		gw, err := r.mcpGateway(r.MCPGatewayServers, false)
+		gw, err := r.sessionGateway()
 		if err != nil {
 			return "", err
 		}
-		if err := ensure(ctx, SandboxSpec{Name: spec.SandboxName, Workspaces: spec.Workspaces, MCPGateway: gw}); err != nil {
+		env, err := r.ensureSessionSandbox(ctx, spec.SandboxName, spec.Workspaces, gw)
+		if err != nil {
 			return "", fmt.Errorf("runner: ensure interactive sandbox %q: %w", spec.SandboxName, err)
 		}
-		sbxBin := r.SbxPath
-		if sbxBin == "" {
-			sbxBin = "sbx"
-		}
+		sbxBin := r.sbxBin()
 		// Teach the tab to commit as the host user and, when the host signs,
 		// to SSH-sign — the same env the ACP commit agent injects. Signing is
 		// preflighted first: with commit.gpgsign forced on, a forwarded agent
@@ -834,17 +865,16 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 				}
 			}
 		}
-		// `sbx exec` auto-starts the sandbox if it's stopped, so a persisted
-		// `:session` sandbox is reused (started + exec'd into) rather than
-		// recreated — DefaultSandboxCreator above already no-ops when a sandbox
-		// with the same name and mounts exists.
-		execArgs := []string{"exec", "-it", "-w", spec.Cwd}
-		execArgs = append(execArgs, r.ensureMCPGateway(ctx, gw, spec.SandboxName)...)
-		execArgs = append(execArgs, gitsign.IdentityEnvArgs(spec.GitName, spec.GitEmail)...)
-		execArgs = append(execArgs, gitsign.SigningEnvArgs(signingKey)...)
-		execArgs = append(execArgs, spec.SandboxName)
-		execArgs = append(execArgs, spec.Inner...)
-		command = append([]string{sbxBin}, execArgs...)
+		// `sbx run --name` re-attaches to (and starts) the persisted sandbox,
+		// running its own agent on the tab's pty; -e applies to that session.
+		runArgs := []string{"run", "--name", spec.SandboxName}
+		runArgs = append(runArgs, env...)
+		runArgs = append(runArgs, gitsign.IdentityEnvArgs(spec.GitName, spec.GitEmail)...)
+		runArgs = append(runArgs, gitsign.SigningEnvArgs(signingKey)...)
+		if agentArgs := r.sessionAgentArgs(ctx, spec.SandboxName, spec.ClaudeSessionID); len(agentArgs) > 0 {
+			runArgs = append(append(runArgs, "--"), agentArgs...)
+		}
+		command = append([]string{sbxBin}, runArgs...)
 	}
 
 	launch := agent.Spec{
@@ -913,7 +943,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 	}
 	sessionID := acpSessionID(p)
 	workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
-	if p.Kind == agent.WorkingmanAgent {
+	if p.Kind == agent.WorkingmanAgent || p.Kind == agent.SleepyHeadAgent {
 		workspaces = workingmanWorkspaces(workingDir, p.WritableMounts, p.ReadOnlyMounts)
 	}
 
@@ -1384,8 +1414,8 @@ func durationOrDefault(v, def time.Duration) time.Duration {
 }
 
 // ACPSandboxNameFor is SandboxNameFor for sessions that run under ACP. It
-// differs in two kinds: the workingman agent gets the fixed, project-independent
-// name WorkingmanAgentSandbox, and the ACP wolf gets "<work-stream>-wolf", a sandbox
+// differs in three kinds: the workingman and sleepy-head agents get the fixed,
+// project-independent names WorkingmanAgentSandbox and SleepyHeadSandbox, and the ACP wolf gets "<work-stream>-wolf", a sandbox
 // of its own (distinct from planning's, which may be live alongside it — the wolf
 // runs in tandem with the project's other agents). SandboxNameFor itself keeps
 // returning "" for the wolf because that is the host terminal-tab path's contract: no
@@ -1395,6 +1425,10 @@ func ACPSandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 	if kind == agent.WorkingmanAgent {
 		// Project-independent: there is one workingman agent for the whole daemon.
 		return WorkingmanAgentSandbox
+	}
+	if kind == agent.SleepyHeadAgent {
+		// Project-independent too: one sleepy-head covers every behind project.
+		return SleepyHeadSandbox
 	}
 	if kind == agent.WolfAgent {
 		if projectPath == "" {
