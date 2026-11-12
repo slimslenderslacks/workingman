@@ -183,6 +183,10 @@ type Config struct {
 	// MCP servers no longer reach the sandbox as sbx static MCPs; they are
 	// served by this gateway instead (see mcpgateway.Manager).
 	MCPGateway mcpgateway.Manager
+	// MCPGatewayReadyTimeout is how long Run waits for a configured gateway
+	// that is not answering yet before failing the launch; zero means
+	// mcpgateway.DefaultReadyTimeout.
+	MCPGatewayReadyTimeout time.Duration
 
 	// Policies are sbx policy rules applied with `sbx policy ...` after the
 	// sandbox is created and before any `sbx exec`. Skipped on an existing
@@ -919,6 +923,17 @@ func Run(ctx context.Context, c Config) error {
 	store := session.Store{Root: c.SessionsRoot}
 	createdAt := time.Now()
 	if err := store.Write(c.sessionRecord(session.StatusStarting, createdAt, createdAt)); err != nil {
+		return err
+	}
+
+	// A configured MCP gateway that is not answering yet (standalone-codemode
+	// listens only after attaching its whole catalog) must not leave the agent
+	// without MCP_URL for its whole life: wait for it, and fail the launch if
+	// it never comes up, so the daemon retries (and eventually blocks with
+	// this reason) instead of running an agent that cannot reach its MCPs.
+	if err := c.MCPGateway.WaitReady(ctx, c.SandboxName, c.MCPGatewayReadyTimeout); err != nil {
+		err = fmt.Errorf("acpwrapper: MCP gateway (okta-gateway) unavailable, not starting the agent without it: %w", err)
+		failRecord(store, c, createdAt, err)
 		return err
 	}
 

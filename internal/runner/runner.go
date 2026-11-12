@@ -507,6 +507,11 @@ type Runner struct {
 	// every sandbox then gets only the servers it asked for.
 	MCPGatewayStatic bool
 
+	// MCPGatewayReadyTimeout is how long a `:session` launch waits for a
+	// configured MCP gateway that is not answering yet; zero means
+	// mcpgateway.DefaultReadyTimeout.
+	MCPGatewayReadyTimeout time.Duration
+
 	// SessionMCPServers are the catalog servers a `:session` sandbox's gateway
 	// starts with. Empty by default: the gateway is dynamic, so the agent finds
 	// and attaches servers itself with mcp-find / mcp-add. (With

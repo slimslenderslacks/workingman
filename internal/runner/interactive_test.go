@@ -70,6 +70,10 @@ func newGatewayServer(t *testing.T) (*httptest.Server, *[]map[string]any) {
 			_ = json.NewEncoder(w).Encode(map[string]string{"id": "gw1", "url": "http://localhost:3333/gateways/gw1"})
 			return
 		}
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusMethodNotAllowed) // GET /gateways/gw1: alive
 	}))
 	t.Cleanup(srv.Close)

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -373,5 +374,48 @@ func TestManagerMintAllProvidedAndOldGateway(t *testing.T) {
 	}
 	if log.Len() != 0 {
 		t.Errorf("old gateway: log = %q, want nothing", log.String())
+	}
+}
+
+// WaitReady waits out a gateway that is still starting (refusing, then 503),
+// and gives up with an error after the timeout.
+func TestManagerWaitReady(t *testing.T) {
+	var up atomic.Bool
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path != "/healthz" || !up.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	var log strings.Builder
+	m := Manager{Client: Client{BaseURL: srv.URL}, Servers: []string{"github"}, Log: &log, RetryBase: 5 * time.Millisecond}
+
+	go func() { time.Sleep(30 * time.Millisecond); up.Store(true) }()
+	if err := m.WaitReady(context.Background(), "sb", time.Second); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if hits.Load() < 2 || !strings.Contains(log.String(), "not ready") || !strings.Contains(log.String(), "ready after") {
+		t.Errorf("hits=%d log=%q", hits.Load(), log.String())
+	}
+
+	// Already up: no waiting, nothing logged.
+	log.Reset()
+	if err := m.WaitReady(context.Background(), "sb", time.Second); err != nil || log.Len() != 0 {
+		t.Errorf("ready gateway: err=%v log=%q", err, log.String())
+	}
+
+	// Never up: error after the timeout.
+	up.Store(false)
+	if err := m.WaitReady(context.Background(), "sb", 40*time.Millisecond); err == nil || !strings.Contains(err.Error(), "not ready after") {
+		t.Errorf("down gateway: err = %v", err)
+	}
+
+	// Disabled manager: no wait at all.
+	if err := (Manager{}).WaitReady(context.Background(), "sb", time.Second); err != nil {
+		t.Errorf("disabled: %v", err)
 	}
 }

@@ -68,6 +68,11 @@ func sessionEnv(mcpURL string, useGateway bool) []string {
 // workspaces mounted and returns the env (`-e` flags) to attach with.
 func (r *Runner) ensureSessionSandbox(ctx context.Context, name string, workspaces []string, gw mcpgateway.Manager) ([]string, error) {
 	run, bin := r.sbxRunner(), r.sbxBin()
+	// As acp-wrapper does: a gateway that is still starting must not leave the
+	// session without MCP_URL baked into a brand-new sandbox.
+	if err := gw.WaitReady(ctx, name, r.MCPGatewayReadyTimeout); err != nil {
+		return nil, fmt.Errorf("MCP gateway (okta-gateway) unavailable: %w", err)
+	}
 	useGateway, err := sbx.GatewaySecretConfigured(ctx, run, bin, name)
 	if err != nil {
 		r.audit("session_llm_gateway_unknown", "sandbox", name, "err", err.Error())

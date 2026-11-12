@@ -42,6 +42,9 @@ type Manager struct {
 	// Prefix starts every diagnostic line (e.g. "acp-wrapper: session <id>: ");
 	// empty means "mcpgateway: ".
 	Prefix string
+	// RetryBase is WaitReady's first retry delay; zero means 1s. Tests shrink
+	// it.
+	RetryBase time.Duration
 }
 
 // Enabled reports whether sandboxes should get a gateway at all.
@@ -205,6 +208,62 @@ func dynamicNote(dynamic bool) string {
 		return " plus mcp-find/mcp-add"
 	}
 	return ""
+}
+
+// DefaultReadyTimeout is how long WaitReady waits for a gateway that is not
+// answering yet: a restarted standalone-codemode attaches its whole catalog
+// (some backends take ~30s) before it listens.
+const DefaultReadyTimeout = 2 * time.Minute
+
+// WaitReady blocks until the gateway answers /healthz, retrying with backoff
+// (1s doubling to 10s) for up to timeout (DefaultReadyTimeout when <= 0). It
+// is a no-op for a disabled manager. Each wait is logged once at the start and
+// once when it ends, so a sandbox that started late — or without its gateway
+// — says why.
+func (m Manager) WaitReady(ctx context.Context, sandbox string, timeout time.Duration) error {
+	if !m.Enabled() {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = DefaultReadyTimeout
+	}
+	err := m.Client.Healthy(ctx)
+	if err == nil {
+		return nil
+	}
+	start := time.Now()
+	m.logf("sandbox %s: gateway %s not ready (%v); waiting up to %s before creating the sandbox", sandbox, m.Client.base(), err, timeout)
+	deadline := start.Add(timeout)
+	delay := m.retryBase()
+	for {
+		wait := delay
+		if left := time.Until(deadline); left < wait {
+			wait = left
+		}
+		if wait <= 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+		if err = m.Client.Healthy(ctx); err == nil {
+			m.logf("sandbox %s: gateway %s ready after %s", sandbox, m.Client.base(), time.Since(start).Round(time.Second))
+			return nil
+		}
+		if delay *= 2; delay > 10*time.Second {
+			delay = 10 * time.Second
+		}
+	}
+	return fmt.Errorf("mcpgateway: gateway %s not ready after %s: %w", m.Client.base(), timeout, err)
+}
+
+func (m Manager) retryBase() time.Duration {
+	if m.RetryBase > 0 {
+		return m.RetryBase
+	}
+	return time.Second
 }
 
 // Prepare mints the gateway for a sandbox that is about to be created, so the

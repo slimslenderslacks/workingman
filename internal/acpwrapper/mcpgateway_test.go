@@ -30,6 +30,7 @@ func newFakeGateway(t *testing.T) *fakeGateway {
 	t.Helper()
 	g := &fakeGateway{live: map[string]bool{}}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /gateways", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Servers []string

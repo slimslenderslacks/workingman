@@ -253,6 +253,27 @@ func PolicyRules(baseURL string) ([]policy.Rule, error) {
 	return []policy.Rule{allow(u.Hostname())}, nil
 }
 
+// Healthy reports whether the gateway answers GET <BaseURL>/healthz with 200.
+// standalone-codemode only starts listening once it has attached the
+// backends of its whole catalog, which takes a while after a restart.
+func (c Client) Healthy(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base()+"/healthz", nil)
+	if err != nil {
+		return fmt.Errorf("mcpgateway: %w", err)
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("mcpgateway: GET %s/healthz: %w", c.base(), err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("mcpgateway: GET %s/healthz: %s", c.base(), resp.Status)
+	}
+	return nil
+}
+
 // Alive reports whether the gateway with the given id is still registered:
 // false only on a 404 (standalone-codemode keeps sub-gateways in memory, so a
 // gateway restart drops every one). Any other answer — the endpoint is an MCP

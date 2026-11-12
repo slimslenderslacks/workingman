@@ -139,6 +139,7 @@ func main() {
 	var mcpServers namesFlag
 	fs.Var(&mcpServers, "mcp-server", "catalog server name to request from the per-sandbox MCP gateway (repeatable)")
 	mcpDynamic := fs.Bool("mcp-dynamic", false, "ask for a dynamic per-sandbox MCP gateway: it also serves mcp-find and mcp-add over the whole catalog, so the agent can find and attach servers beyond --mcp-server")
+	mcpGatewayWait := fs.Duration("mcp-gateway-wait", mcpgateway.DefaultReadyTimeout, "how long to wait for a configured --mcp-gateway-url that is not answering /healthz yet (e.g. just restarted) before failing the launch rather than starting the agent without its MCP gateway")
 	mcpGatewayState := fs.String("mcp-gateway-state", "", "directory recording each sandbox's MCP gateway so later launches can reuse or delete it (default: <sessions-root>/../gateways)")
 	var staticMCPs namesFlag
 	fs.Var(&staticMCPs, "static-mcp", "deprecated and ignored: MCP servers now reach the sandbox through the --mcp-gateway-url gateway, not `sbx create --static-mcp`")
@@ -176,10 +177,11 @@ func main() {
 			Dynamic: *mcpDynamic,
 			Prefix:  "acp-wrapper: session " + *sessionID + ": mcpgateway: ",
 		},
-		Policies:   policies,
-		GitName:    gitName,
-		GitEmail:   gitEmail,
-		SigningKey: signing.Key(),
+		MCPGatewayReadyTimeout: *mcpGatewayWait,
+		Policies:               policies,
+		GitName:                gitName,
+		GitEmail:               gitEmail,
+		SigningKey:             signing.Key(),
 	}
 
 	if len(staticMCPs) > 0 {

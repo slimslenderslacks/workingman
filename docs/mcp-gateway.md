@@ -304,15 +304,34 @@ values to the audit log as `mcp_gateway_config`.
 
 acp-wrapper flags (set by orch, so you normally don't pass them yourself):
 `--mcp-gateway-url`, `--mcp-server <name>` (repeatable),
-`--mcp-gateway-state <dir>`.
+`--mcp-gateway-state <dir>`, `--mcp-gateway-wait <duration>` (default 2m).
 
 ## Troubleshooting
 
 Where to look: for ACP sessions, `acp-wrapper.log` next to orch's audit log
 (e.g. `~/orch/acp-wrapper.log`; the lines start with
 `acp-wrapper: session <id>:` or `mcpgateway:`). For terminal-tab and `:session` sandboxes, the audit log
-(`mcp_gateway_failed`). In both cases a gateway failure is best effort: the
-agent still starts, but without `MCP_URL`.
+(`mcp_gateway_failed`).
+
+- **Gateway not answering yet.** standalone-codemode listens only after
+  attaching its whole catalog, so right after a restart it refuses
+  connections. acp-wrapper (and `:session`) wait for `GET /healthz` for up to
+  `--mcp-gateway-wait` (2m), logging `gateway … not ready …; waiting` and
+  `ready after …`. If it never answers, the launch **fails** with `MCP gateway
+  (okta-gateway) unavailable` instead of starting the agent without
+  `MCP_URL`; the daemon retries it like any failed launch. `start.sh` waits
+  the same way (`WORKINGMAN_MCP_GATEWAY_WAIT`, default 120s) before starting
+  orch.
+- **Gateway up, but a server missing.** Each requested server the new
+  gateway is not serving is logged as `WARNING gateway <id> does not provide
+  <server>: <state>, <n> tools[: why]`: `needs_auth` (run `gateway authorize
+  <server>` on the host), `deferred` / `reconnecting` (the remote is
+  unreachable; the gateway keeps retrying), `failed` (attach errored), or
+  `connected, 0 tools`. A missing dynamic is reported the same way. The agent
+  still starts with the gateway it got.
+- **Not sbx's MCP support.** MCP servers never reach a sandbox through
+  `sbx mcp`; `sbx mcp ls` / `sbx mcp add` / `sbx mcp auth` are not part of
+  this setup.
 
 - **Unknown server name → `400`.** The log shows
   `WARNING mcpgateway: unknown catalog server(s): <names>; creating the

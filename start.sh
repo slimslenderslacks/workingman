@@ -176,10 +176,30 @@ export ACP_IMAGE="${ACP_IMAGE-slimslenderslacks/claude-code-acp:0.90.0}"
 # whole catalog. Set WORKINGMAN_MCP_GATEWAY_URL="" to turn the gateway off.
 export WORKINGMAN_MCP_GATEWAY_URL="${WORKINGMAN_MCP_GATEWAY_URL-http://localhost:3333}"
 export WORKINGMAN_MCP_GATEWAY_SERVERS="${WORKINGMAN_MCP_GATEWAY_SERVERS-github}"
-if [ "$CHECK_AGENT" != 1 ] && [ -n "$WORKINGMAN_MCP_GATEWAY_URL" ] &&
-  ! curl -fsS -m 3 -o /dev/null "${WORKINGMAN_MCP_GATEWAY_URL%/}/healthz" 2>/dev/null; then
-  echo "start: warning: no MCP gateway answering at $WORKINGMAN_MCP_GATEWAY_URL/healthz;" >&2
-  echo "start: sandboxes will fall back to mcp-gateway until it is up (start standalone-codemode's bin/gateway)." >&2
+# The gateway listens only after attaching its whole catalog, so right after
+# a restart it refuses connections for a while. orch relaunches agents (a
+# blocked project's wolf, say) as soon as it starts, so wait for the gateway
+# here rather than have those agents come up without it. acp-wrapper also
+# waits (--mcp-gateway-wait) and fails a launch rather than run without it.
+if [ "$CHECK_AGENT" != 1 ] && [ -n "$WORKINGMAN_MCP_GATEWAY_URL" ]; then
+  gw_health="${WORKINGMAN_MCP_GATEWAY_URL%/}/healthz"
+  gw_wait="${WORKINGMAN_MCP_GATEWAY_WAIT:-120}"
+  waited=0
+  until curl -fsS -m 3 -o /dev/null "$gw_health" 2>/dev/null; do
+    if [ "$waited" -eq 0 ]; then
+      echo "start: waiting up to ${gw_wait}s for the MCP gateway at $gw_health (start standalone-codemode's bin/gateway)..." >&2
+    fi
+    if [ "$waited" -ge "$gw_wait" ]; then
+      echo "start: warning: MCP gateway still not answering at $gw_health after ${gw_wait}s;" >&2
+      echo "start: agents will wait for it at launch and fail if it never comes up." >&2
+      break
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if [ "$waited" -gt 0 ] && [ "$waited" -lt "$gw_wait" ]; then
+    echo "start: MCP gateway ready after ${waited}s" >&2
+  fi
 fi
 
 # Run orch as a child (not exec) so the EXIT trap can stop the private agent.
