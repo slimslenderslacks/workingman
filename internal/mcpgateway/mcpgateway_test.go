@@ -309,3 +309,69 @@ func TestManagerEnabledEmptyDynamic(t *testing.T) {
 		t.Error("no base URL must disable the manager")
 	}
 }
+
+// Mint reports every requested server the new gateway does not serve, and a
+// missing dynamic, so a sandbox started without its MCPs is visible in the log.
+func TestManagerMintReportsGaps(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "x", "url": "http://localhost:1/gateways/x", "dynamic": false,
+			"servers": map[string]any{
+				"github": map[string]any{"state": "connected", "tools": 40},
+				"gmail":  map[string]any{"state": "needs_auth", "tools": 0},
+				"miro":   map[string]any{"state": "deferred", "tools": 0, "error": "dial tcp: connection refused"},
+				"linear": map[string]any{"state": "connected", "tools": 0},
+			},
+		})
+	}))
+	defer srv.Close()
+	var log strings.Builder
+	m := Manager{Client: Client{BaseURL: srv.URL}, Servers: []string{"github", "gmail", "miro", "linear", "notion"}, Dynamic: true, Log: &log}
+	if _, err := m.Mint(context.Background(), "sb"); err != nil {
+		t.Fatal(err)
+	}
+	out := log.String()
+	for _, want := range []string{
+		"gmail: needs_auth, 0 tools (authorize it on the host: gateway authorize gmail)",
+		"miro: deferred, 0 tools: dial tcp: connection refused (remote unreachable",
+		"linear: connected, 0 tools",
+		"notion: not in the gateway",
+		"mcp-find/mcp-add: dynamic was requested but the gateway is not dynamic",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "github:") {
+		t.Errorf("a serving server must not be reported:\n%s", out)
+	}
+}
+
+// A gateway that gives everything gets one confirmation line; one too old to
+// report server states gets nothing.
+func TestManagerMintAllProvidedAndOldGateway(t *testing.T) {
+	body := map[string]any{"id": "x", "url": "http://localhost:1/gateways/x", "dynamic": true,
+		"servers": map[string]any{"github": map[string]any{"state": "connected", "tools": 3}}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	defer srv.Close()
+	var log strings.Builder
+	m := Manager{Client: Client{BaseURL: srv.URL}, Servers: []string{"github"}, Dynamic: true, Log: &log}
+	if _, err := m.Mint(context.Background(), "sb"); err != nil {
+		t.Fatal(err)
+	}
+	if out := log.String(); strings.Contains(out, "WARNING") || !strings.Contains(out, "provides every requested server (github) plus mcp-find/mcp-add") {
+		t.Errorf("log = %q", out)
+	}
+	body = map[string]any{"id": "x", "url": "http://localhost:1/gateways/x"}
+	log.Reset()
+	if _, err := m.Mint(context.Background(), "sb"); err != nil {
+		t.Fatal(err)
+	}
+	if log.Len() != 0 {
+		t.Errorf("old gateway: log = %q, want nothing", log.String())
+	}
+}

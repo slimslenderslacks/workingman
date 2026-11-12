@@ -39,6 +39,9 @@ type Manager struct {
 	Dynamic bool
 	// Log receives diagnostics; nil means os.Stderr.
 	Log io.Writer
+	// Prefix starts every diagnostic line (e.g. "acp-wrapper: session <id>: ");
+	// empty means "mcpgateway: ".
+	Prefix string
 }
 
 // Enabled reports whether sandboxes should get a gateway at all.
@@ -51,7 +54,11 @@ func (m Manager) logf(format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
-	fmt.Fprintf(w, "mcpgateway: "+format+"\n", args...)
+	prefix := m.Prefix
+	if prefix == "" {
+		prefix = "mcpgateway: "
+	}
+	fmt.Fprintf(w, prefix+format+"\n", args...)
 }
 
 // PolicyRules are the sbx network rules every sandbox gets once a gateway
@@ -123,6 +130,7 @@ func (m Manager) Mint(ctx context.Context, sandbox string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
+	m.reportGaps(sandbox, gw)
 	sandboxURL, err := SandboxURL(gw.URL)
 	if err == nil && strings.ContainsAny(sandboxURL, "'\n") {
 		err = fmt.Errorf("mcpgateway: refusing gateway url %q", sandboxURL)
@@ -142,6 +150,61 @@ func (m Manager) Mint(ctx context.Context, sandbox string) (Record, error) {
 		Dynamic:    m.Dynamic,
 		CreatedAt:  time.Now().UTC(),
 	}, nil
+}
+
+// Gaps lists, one line each, what gw does not provide of what m asked for:
+// every requested server that is not attached and serving tools (with its
+// state and why), and mcp-find / mcp-add when Dynamic was asked for and the
+// gateway did not confirm it. Empty when the gateway gave everything, or when
+// it is too old to report (no Servers in its answer).
+func (m Manager) Gaps(gw Gateway) []string {
+	if gw.Servers == nil {
+		return nil
+	}
+	var gaps []string
+	for _, name := range m.Servers {
+		st, ok := gw.Servers[name]
+		switch {
+		case !ok:
+			gaps = append(gaps, fmt.Sprintf("%s: not in the gateway", name))
+		case !st.Serving():
+			line := fmt.Sprintf("%s: %s, %d tools", name, st.State, st.Tools)
+			if st.Error != "" {
+				line += ": " + st.Error
+			}
+			switch st.State {
+			case "needs_auth":
+				line += " (authorize it on the host: gateway authorize " + name + ")"
+			case "reconnecting", "deferred":
+				line += " (remote unreachable; the gateway keeps retrying)"
+			}
+			gaps = append(gaps, line)
+		}
+	}
+	if m.Dynamic && !gw.Dynamic {
+		gaps = append(gaps, "mcp-find/mcp-add: dynamic was requested but the gateway is not dynamic")
+	}
+	return gaps
+}
+
+// reportGaps logs Gaps for a freshly minted gateway, one WARNING per gap. The
+// sandbox still gets the gateway: a server whose remote is down may come
+// back, and the rest of the gateway is usable meanwhile.
+func (m Manager) reportGaps(sandbox string, gw Gateway) {
+	gaps := m.Gaps(gw)
+	for _, g := range gaps {
+		m.logf("sandbox %s: WARNING gateway %s does not provide %s", sandbox, gw.ID, g)
+	}
+	if len(gaps) == 0 && gw.Servers != nil {
+		m.logf("sandbox %s: gateway %s provides every requested server (%s)%s", sandbox, gw.ID, strings.Join(m.Servers, ","), dynamicNote(m.Dynamic))
+	}
+}
+
+func dynamicNote(dynamic bool) string {
+	if dynamic {
+		return " plus mcp-find/mcp-add"
+	}
+	return ""
 }
 
 // Prepare mints the gateway for a sandbox that is about to be created, so the

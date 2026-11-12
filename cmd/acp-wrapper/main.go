@@ -174,6 +174,7 @@ func main() {
 			Store:   mcpgateway.Store{Dir: *mcpGatewayState},
 			Servers: mcpServers,
 			Dynamic: *mcpDynamic,
+			Prefix:  "acp-wrapper: session " + *sessionID + ": mcpgateway: ",
 		},
 		Policies:   policies,
 		GitName:    gitName,

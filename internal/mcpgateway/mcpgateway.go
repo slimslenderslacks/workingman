@@ -42,7 +42,27 @@ type Gateway struct {
 	// URL is the gateway's MCP endpoint as the host reaches it (built by
 	// standalone-codemode from the Host header we POSTed with).
 	URL string `json:"url"`
+	// Servers is what each requested server was doing when the gateway was
+	// created. Nil from a gateway too old to report it.
+	Servers map[string]ServerState `json:"servers,omitempty"`
+	// Dynamic is whether the gateway reports having mcp-find and mcp-add.
+	// Only meaningful when Servers is non-nil (an older gateway omits both).
+	Dynamic bool `json:"dynamic"`
 }
+
+// ServerState is POST /gateways' report on one requested server.
+type ServerState struct {
+	// State is "connected", "needs_auth", "reconnecting", "failed" or
+	// "deferred".
+	State string `json:"state"`
+	// Tools is how many tools the server published.
+	Tools int `json:"tools"`
+	// Error says why, for failed and deferred.
+	Error string `json:"error,omitempty"`
+}
+
+// Serving reports whether the server is attached and publishing tools.
+func (s ServerState) Serving() bool { return s.State == "connected" && s.Tools > 0 }
 
 // UnknownServersError is POST /gateways' 400 for server names outside the
 // gateway's catalog.
