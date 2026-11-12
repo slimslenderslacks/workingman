@@ -21,6 +21,7 @@ const helpText = `Commands:
 /help – this list
 /status – one-line summary of projects, sessions and tasks
 /wolf [work-stream] – talk to a running wolf (the only one, or the named project's)
+/sleepy – talk to sleepy-head, when it is catching up missed schedules
 /agent – talk to the workingman agent again
 /who – who this chat is talking to
 
@@ -44,6 +45,8 @@ func (r *Router) handleCommand(c *chat, name, args string) {
 		r.cmdWho(c)
 	case "wolf":
 		r.cmdWolf(c, args)
+	case "sleepy":
+		r.cmdSleepy(c)
 	default:
 		r.notify(c, fmt.Sprintf("Unknown command /%s. Try /help.", name))
 	}
@@ -56,9 +59,9 @@ func (r *Router) cmdWho(c *chat) {
 	}
 	if bound {
 		r.mu.Lock()
-		ws := c.wolf.WorkStream
+		name := c.wolf.name()
 		r.mu.Unlock()
-		r.notify(c, fmt.Sprintf("You're talking to the wolf for %s. /agent to switch back.", ws))
+		r.notify(c, fmt.Sprintf("You're talking to %s. /agent to switch back.", name))
 		return
 	}
 	r.notify(c, "You're talking to the workingman agent. /wolf to talk to a wolf.")
@@ -96,18 +99,37 @@ func (r *Router) cmdWolf(c *chat, arg string) {
 		return
 	}
 
+	r.bind(c, pick, fmt.Sprintf("Now talking to the wolf for %s. Its messages are labelled [wolf %s]; you'll also see what it says to others, and its permission requests. /agent to switch back.", pick.WorkStream, pick.WorkStream))
+}
+
+// cmdSleepy binds the chat to the sleepy-head agent.
+func (r *Router) cmdSleepy(c *chat) {
+	s, ok := r.cfg.Source.SleepyHead()
+	if !ok {
+		r.notify(c, "sleepy-head isn't running: no schedules are behind.")
+		return
+	}
+	if s.Ref == "" {
+		r.notify(c, "sleepy-head runs in a terminal tab on the host (not as an ACP session), so I can't talk to it.")
+		return
+	}
+	r.bind(c, &s, "Now talking to sleepy-head. Its messages are labelled [sleepy-head]; you'll also see what it says to others, and its permission requests. /agent to switch back.")
+}
+
+// bind points the chat at pick (a wolf or sleepy-head) and attaches now, so
+// observe mode is live before the first message.
+func (r *Router) bind(c *chat, pick *Session, msg string) {
 	r.mu.Lock()
 	c.wolf = pick
 	r.mu.Unlock()
 	r.log("bind", c, "work_stream", pick.WorkStream)
-	r.notify(c, fmt.Sprintf("Now talking to the wolf for %s. Its messages are labelled [wolf %s]; you'll also see what it says to others, and its permission requests. /agent to switch back.", pick.WorkStream, pick.WorkStream))
+	r.notify(c, msg)
 
-	// Attach now so observe mode is live before the first message.
 	tgt := target{wolf: true, Session: *pick}
 	r.goFn(func() {
 		if _, err := r.conversation(r.ctx, tgt); err != nil && r.ctx.Err() == nil {
 			r.log("attach_error", c, "work_stream", pick.WorkStream, "err", shorten(err.Error(), 200))
-			r.notify(c, fmt.Sprintf("I couldn't attach to the wolf for %s yet (%s). I'll retry when you send a message.", pick.WorkStream, shorten(err.Error(), 120)))
+			r.notify(c, fmt.Sprintf("I couldn't attach to %s yet (%s). I'll retry when you send a message.", pick.name(), shorten(err.Error(), 120)))
 		}
 	})
 }

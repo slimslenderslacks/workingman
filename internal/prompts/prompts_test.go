@@ -637,3 +637,25 @@ func TestRenderSleepyHeadNothingBehind(t *testing.T) {
 		t.Errorf("empty list should say nothing is behind:\n%s", out)
 	}
 }
+
+// TestRenderWolfMCPGuidance: the wolf is told MCP servers arrive through the
+// okta-gateway, not sbx's MCP support, so it never recommends `sbx mcp …`.
+func TestRenderWolfMCPGuidance(t *testing.T) {
+	for _, sandboxed := range []bool{false, true} {
+		out, err := Render(agent.WolfAgent, Data{ProjectPath: "/ws/project.yaml", Workspace: "/ws", BlockedSessionPath: "/ws/blocked-session.yaml", Sandboxed: sandboxed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"`okta-gateway`", "never suggest `sbx mcp ls`, `sbx mcp add` or\n`sbx mcp auth`", "localhost:3333/healthz", "gateway authorize <server>"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("sandboxed=%v: wolf missing %q", sandboxed, want)
+			}
+		}
+		if got := strings.Count(out, "sbx mcp"); got != 3 {
+			t.Errorf("sandboxed=%v: %d mentions of `sbx mcp`, want only the three in the never-suggest line", sandboxed, got)
+		}
+		if strings.Contains(out, "echo $MCP_URL") != sandboxed {
+			t.Errorf("sandboxed=%v: self-check advice present = %v", sandboxed, !sandboxed)
+		}
+	}
+}

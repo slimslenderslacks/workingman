@@ -79,6 +79,7 @@ type fakeSource struct {
 	mu     sync.Mutex
 	agent  *Session
 	wolves []Session
+	sleepy *Session
 	status string
 }
 
@@ -95,6 +96,15 @@ func (s *fakeSource) WolfSessions() []Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Session(nil), s.wolves...)
+}
+
+func (s *fakeSource) SleepyHead() (Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sleepy == nil {
+		return Session{}, false
+	}
+	return *s.sleepy, true
 }
 
 func (s *fakeSource) Status() string { return s.status }
@@ -234,6 +244,20 @@ func (h *harness) addWolf(ws string) (Session, *fakeAgent) {
 	h.src.wolves = append(h.src.wolves, s)
 	h.src.mu.Unlock()
 	return s, ag
+}
+
+var sleepySess = Session{Key: "sleepy-head", ID: "sleepy-head", Ref: "/sessions/sleepy-head", Kind: channels.ConversationKindSleepyHead}
+
+func (h *harness) addSleepy() *fakeAgent {
+	ag := newFakeAgent()
+	h.mu.Lock()
+	h.agents[sleepySess.Ref] = ag
+	h.mu.Unlock()
+	s := sleepySess
+	h.src.mu.Lock()
+	h.src.sleepy = &s
+	h.src.mu.Unlock()
+	return ag
 }
 
 func (h *harness) agentFake() *fakeAgent {
@@ -1175,5 +1199,78 @@ func TestParseCommand(t *testing.T) {
 	}
 	if _, args, _ := parseCommand("/wolf  my-proj "); args != "my-proj" {
 		t.Errorf("args = %q", args)
+	}
+}
+
+// --- sleepy-head ---
+
+func TestSleepyCommandBindsAndCreatesTheSession(t *testing.T) {
+	h := newHarness(t, nil)
+	h.say("/sleepy")
+	got := h.wait(1)
+	contains(t, got[0], "isn't running")
+
+	sleepy := h.addSleepy()
+	h.say("/sleepy")
+	h.say("catch up nightly")
+	got = h.wait(3)
+	contains(t, got[1], "Now talking to sleepy-head")
+	if got[2] != "[sleepy-head] echo: catch up nightly" {
+		t.Fatalf("reply = %q", got[2])
+	}
+	if asks := sleepy.Asks(); len(asks) != 1 || asks[0] != "catch up nightly" {
+		t.Fatalf("sleepy asks = %q", asks)
+	}
+	if len(h.agentFake().Asks()) != 0 {
+		t.Fatal("message leaked to the workingman agent")
+	}
+	h.mu.Lock()
+	create := h.opts[sleepySess.Ref].CreateIfMissing
+	h.mu.Unlock()
+	if !create {
+		t.Fatal("the router may have to create sleepy-head's ACP session when no TUI is attached")
+	}
+	h.say("/who")
+	got = h.wait(4)
+	contains(t, got[3], "talking to sleepy-head")
+
+	// It ends: the chat falls back to the workingman agent.
+	h.src.mu.Lock()
+	h.src.sleepy = nil
+	h.src.mu.Unlock()
+	h.say("anything else?")
+	got = h.wait(5)
+	contains(t, got[4], "sleepy-head has ended")
+}
+
+func TestReplyToSleepyHeadAnnouncement(t *testing.T) {
+	h := newHarness(t, nil)
+	sleepy := h.addSleepy()
+	if err := h.index.Register(chanNm, "notif-1", channels.ConversationTarget{
+		Kind: channels.ConversationKindSleepyHead, SessionKey: sleepySess.Key, SessionID: sleepySess.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.sayReply("yes, nightly", "notif-1")
+	got := h.wait(1)
+	if got[0] != "[sleepy-head] echo: yes, nightly" {
+		t.Fatalf("reply = %q", got[0])
+	}
+	if asks := sleepy.Asks(); len(asks) != 1 {
+		t.Fatalf("sleepy asks = %q", asks)
+	}
+	// The relayed answer is indexed as sleepy-head too.
+	if tgt, ok := h.index.Lookup(chanNm, chanNm+"-1"); !ok || tgt.Kind != channels.ConversationKindSleepyHead {
+		t.Fatalf("relayed reply not indexed as sleepy-head: %+v %v", tgt, ok)
+	}
+
+	h.src.mu.Lock()
+	h.src.sleepy = nil
+	h.src.mu.Unlock()
+	h.sayReply("and weekly?", "notif-1")
+	got = h.wait(2)
+	contains(t, got[1], "sleepy-head has ended")
+	if len(h.agentFake().Asks()) != 0 {
+		t.Fatal("an unroutable sleepy-head reply must not be asked of the workingman agent")
 	}
 }

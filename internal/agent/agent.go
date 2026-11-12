@@ -29,7 +29,8 @@ const (
 	// resolves threads whose fix has landed, escalates contested comments by
 	// blocking the project (→ wolf), and flips the project to done once the PR is
 	// merged or closed. It is autonomous (runs under `claude --print` via ACP,
-	// like planning) so it can carry `--static-mcp github`. Appended so the iota
+	// like planning) and reaches the github MCP server through its sandbox's
+	// MCP gateway (static_mcps [github]). Appended so the iota
 	// values of the existing kinds don't shift.
 	ReviewAgent
 	// WorkingmanAgent is the long-lived, always-on observer the daemon starts at
@@ -115,9 +116,10 @@ func ParseKind(s string) (Kind, bool) {
 //
 // The runner uses this to pick the right claude flags; the TUI uses it to
 // highlight sessions that won't make progress until someone attaches. It does
-// NOT decide the launch path on its own: the wolf is interactive but still runs
-// as a persistent ACP session when an ACP launcher is configured, unless
-// --wolf-host selects the host escape hatch (a terminal tab on the host) (see runner.Runner.UsesACP).
+// NOT decide the launch path on its own: the wolf and sleepy-head are
+// interactive but still run as persistent ACP sessions when an ACP launcher is
+// configured (the wolf unless --wolf-host selects the host escape hatch, a
+// terminal tab on the host) (see runner.Runner.UsesACP).
 func (k Kind) Interactive() bool {
 	return k == WolfAgent || k == SleepyHeadAgent
 }

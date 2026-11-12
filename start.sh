@@ -130,7 +130,14 @@ fi
 # now resolves to a path with no kit checked out, which fails sandbox creation
 # for every project ("resolve kits: path does not exist"). Point ACP_KIT at the
 # real kit checkout; still overridable from the environment.
-export ACP_KIT="${ACP_KIT:-$HOME/dev/repos/slimslenderslacks/acp-kit}"
+# Prefer a sibling acp-kit checkout (a wsp workspace) when there is one: the
+# kit's install step rewrites claude-acp-client on every `sbx create`, so an
+# older kit undoes the image's okta-gateway client.
+if [ -f "$HERE/../acp-kit/spec.yaml" ]; then
+  export ACP_KIT="${ACP_KIT:-$(cd "$HERE/../acp-kit" && pwd)}"
+else
+  export ACP_KIT="${ACP_KIT:-$HOME/dev/repos/slimslenderslacks/acp-kit}"
+fi
 
 # Create every ACP sandbox from acp-kit's prebuilt image rather than the stock
 # claude template. acp-kit is a mixin, and a user --kit mixin is never embedded
@@ -146,13 +153,54 @@ export ACP_KIT="${ACP_KIT:-$HOME/dev/repos/slimslenderslacks/acp-kit}"
 # `docker images`. From the acp-kit checkout:
 #
 #   make image-build
-#   docker save slimslenderslacks/claude-code-acp:<tag> -o /tmp/acp.tar
+#   docker save slimslenderslacks/claude-code-acp:0.90.0 -o /tmp/acp.tar
 #   sbx template load /tmp/acp.tar
 #
-# Confirm with `sbx template ls`. Keep the tag in step with the bridge version
-# that acp-kit's Dockerfile pins. Set ACP_IMAGE="" to fall back to the stock
-# template (and pay the ~31s per-create install again).
-export ACP_IMAGE="${ACP_IMAGE-slimslenderslacks/claude-code-acp:0.88.0}"
+# Confirm with `sbx template ls`. The tag is acp-kit's IMAGE_VERSION, which is
+# versioned independently of the bridge version its Dockerfile pins: it is
+# bumped whenever anything baked into the image changes (0.90.0 adds the
+# `claude` shim, so the interactive `claude` from `sbx run` also registers
+# `okta-gateway` and drops the stock `mcp-gateway` MCP server, as
+# claude-acp-client already does for ACP sessions). Keep this default in step with acp-kit's IMAGE_VERSION.
+# sbx creates with `--pull missing`, so only a NEW tag gets a new image; an
+# already-loaded tag is reused as-is. Existing sandboxes are not rebuilt when
+# this changes (see docs/mcp-gateway.md). Set ACP_IMAGE="" to fall back to the
+# stock template (and pay the ~31s per-create install again).
+export ACP_IMAGE="${ACP_IMAGE-slimslenderslacks/claude-code-acp:0.90.0}"
+
+# Route every sandbox's MCP traffic through its own sub-gateway on the host's
+# standalone-codemode gateway (see "MCP gateway" in README.md). Without a URL
+# orch sets no MCP_URL, so acp-kit keeps the stock `mcp-gateway` MCP server
+# instead of `okta-gateway`. The servers are the default set for a task with
+# no static_mcps; wolf and task gateways also get mcp-find/mcp-add over the
+# whole catalog. Set WORKINGMAN_MCP_GATEWAY_URL="" to turn the gateway off.
+export WORKINGMAN_MCP_GATEWAY_URL="${WORKINGMAN_MCP_GATEWAY_URL-http://localhost:3333}"
+export WORKINGMAN_MCP_GATEWAY_SERVERS="${WORKINGMAN_MCP_GATEWAY_SERVERS-github}"
+# The gateway listens only after attaching its whole catalog, so right after
+# a restart it refuses connections for a while. orch relaunches agents (a
+# blocked project's wolf, say) as soon as it starts, so wait for the gateway
+# here rather than have those agents come up without it. acp-wrapper also
+# waits (--mcp-gateway-wait) and fails a launch rather than run without it.
+if [ "$CHECK_AGENT" != 1 ] && [ -n "$WORKINGMAN_MCP_GATEWAY_URL" ]; then
+  gw_health="${WORKINGMAN_MCP_GATEWAY_URL%/}/healthz"
+  gw_wait="${WORKINGMAN_MCP_GATEWAY_WAIT:-120}"
+  waited=0
+  until curl -fsS -m 3 -o /dev/null "$gw_health" 2>/dev/null; do
+    if [ "$waited" -eq 0 ]; then
+      echo "start: waiting up to ${gw_wait}s for the MCP gateway at $gw_health (start standalone-codemode's bin/gateway)..." >&2
+    fi
+    if [ "$waited" -ge "$gw_wait" ]; then
+      echo "start: warning: MCP gateway still not answering at $gw_health after ${gw_wait}s;" >&2
+      echo "start: agents will wait for it at launch and fail if it never comes up." >&2
+      break
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if [ "$waited" -gt 0 ] && [ "$waited" -lt "$gw_wait" ]; then
+    echo "start: MCP gateway ready after ${waited}s" >&2
+  fi
+fi
 
 # Run orch as a child (not exec) so the EXIT trap can stop the private agent.
 # Forward INT/TERM to it for a clean shutdown and preserve its exit status.

@@ -26,9 +26,13 @@ func (d *Daemon) OpenInteractiveShell(ctx context.Context, projectPath string) (
 
 // OpenInteractiveSession opens (or resumes) the work stream's persistent
 // interactive claude session in its `session-<work-stream>` sandbox — both the
-// workspace worktree and the orch control dir mounted, no prompt injected. The
-// claude session id is derived deterministically from the work stream name, so
-// closing the tab and re-running the command resumes the same conversation.
+// workspace worktree and the orch control dir mounted, cwd the worktree's root,
+// no prompt injected. It is not an ACP session: the sandbox is set up the way
+// sbx-create.sh does it (a dynamic MCP gateway with no servers preselected,
+// acp-kit's image and kit, the claude env) and attached to the tab's pty with
+// `sbx run`. The claude session id is derived deterministically from the work
+// stream name, so closing the tab and re-running the command resumes the same
+// conversation.
 // It returns the session name the TUI can focus the tab by. Backs the TUI's
 // `:session` command. Like OpenInteractiveShell, an already-open tab is focused
 // and reported with a *terminal.AlreadyOpenError.
@@ -143,12 +147,12 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 			Cwd:        workspaceDir,
 			// Open (or resume) a stable per-work-stream claude conversation. No
 			// prompt is injected — claude opens at its prompt awaiting the user.
-			Inner:      sessionCommand(sessionUUID(workStream)),
-			Name:       "session-" + workStream,
-			Title:      workStream,
-			GitName:    gitName,
-			GitEmail:   gitEmail,
-			SigningKey: gitsign.Resolve().Key(),
+			ClaudeSessionID: sessionUUID(workStream),
+			Name:            "session-" + workStream,
+			Title:           workStream,
+			GitName:         gitName,
+			GitEmail:        gitEmail,
+			SigningKey:      gitsign.Resolve().Key(),
 		}
 	} else {
 		// `:dir` is a plain host shell (no sandbox) cd'd to the workspace dir —
@@ -196,31 +200,6 @@ func interactiveKindName(claudeSession bool) string {
 // can't drift.
 func sanitizeSandboxName(name string) string {
 	return sbx.SanitizeName(name)
-}
-
-// sessionCommand builds the claude invocation for a `:session` window. It runs
-// inside the sandbox as a bash wrapper that decides, at launch time, whether to
-// resume or create the conversation with the given stable id.
-//
-// This matters because `claude --session-id <uuid>` only *creates* a
-// conversation with that id — it errors ("Session ID <uuid> is already in
-// use") and exits if one already exists. Passing it on every open therefore
-// worked the first time but crashed instantly on every reopen, closing the
-// tab. The sandbox's ~/.claude/projects is a persistent volume that
-// survives sandbox restarts, so the wrapper checks it: `--resume` when the
-// transcript already exists, `--session-id` (to create with the stable id)
-// when it doesn't. `exec` replaces the shell with claude so the tab's
-// process is claude itself, keeping lifecycle and signals identical to running
-// it directly. The uuid is a v5 UUID (hex + hyphens only), so it's safe to
-// interpolate unquoted into the shell.
-func sessionCommand(uuid string) []string {
-	script := fmt.Sprintf(
-		`uuid=%s; `+
-			`if ls ~/.claude/projects/*/"$uuid".jsonl >/dev/null 2>&1; then `+
-			`exec claude --dangerously-skip-permissions --resume "$uuid"; `+
-			`else exec claude --dangerously-skip-permissions --session-id "$uuid"; fi`,
-		uuid)
-	return []string{"bash", "-lc", script}
 }
 
 // sessionUUID derives a stable RFC-4122 v5 UUID from the work stream name so the

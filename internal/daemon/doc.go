@@ -50,7 +50,8 @@
 //     fired ([WithCronState]), counts ticks lost to daemon downtime or host
 //     sleep into one [MissedSchedule] per project, and never fires them itself.
 //   - sleepy_head.go: when schedules were missed, opens the interactive
-//     sleepy-head agent once at startup to report them; `orch catchup` drops a
+//     sleepy-head agent (an ACP session in its own sandbox) once at startup to
+//     report them; `orch catchup` drops a
 //     marker that [RequestCatchup] writes and the daemon turns into exactly one
 //     cron firing per approved project.
 //   - power_gate.go: with `--require-ac`, pauses dispatch while on battery
@@ -100,7 +101,8 @@
 //     *channels.Registry implements it. Given to [WithChannels].
 //   - [SessionInfo] — one live session as the TUI's sessions pane shows it;
 //     cmd/orch turns [Daemon.WatchSessions] output into tui.SessionView.
-//   - [WolfSession], [WorkingmanAgentSession] — live sessions the router can
+//   - [WolfSession], [WorkingmanAgentSession], [SleepyHeadSession] — live
+//     sessions the router can
 //     attach to; cmd/orch adapts them to router.Session.
 //   - [Snapshot] — the JSON state document ([ProjectSnapshot],
 //     [SessionSnapshot], [AuditEvent], ...) behind --state-file and

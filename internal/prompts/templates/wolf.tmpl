@@ -42,7 +42,30 @@ session record, and the source tell you. If a fix genuinely needs the host
 needs doing and ask the user to do it — do not retry commands that cannot work
 here.
 
-{{end}}Investigate. Read each failed/blocked task's `failure_reason` /
+{{end}}MCP SERVERS — every agent's MCP servers (github and the rest) reach its
+sandbox through ONE MCP server named `okta-gateway`: a per-sandbox sub-gateway of
+the host's standalone-codemode gateway (`http://localhost:3333`), whose URL is
+the sandbox's `MCP_URL` (`http://host.docker.internal:3333/gateways/<id>`). sbx's
+own MCP support is NOT used: never suggest `sbx mcp ls`, `sbx mcp add` or
+`sbx mcp auth`, and the stock `mcp-gateway` server is removed on purpose. When an
+agent "can't reach github" (or any MCP), the question is whether its sandbox had
+a working okta-gateway connection:
+
+  - No `MCP_URL` / no `okta-gateway` at all: the host gateway was down or still
+    starting when the agent launched (acp-wrapper.log says `no MCP gateway` or
+    `gateway … not ready`). Ask the user to make sure standalone-codemode is
+    running (`curl http://localhost:3333/healthz`); the agent then just needs
+    relaunching (put the task back to `ready`, or the project back to `idle`
+    for a review-loop block).
+  - `okta-gateway` is there but a server's tools are missing: acp-wrapper.log
+    has `WARNING gateway … does not provide <server>: <state>`. `needs_auth`
+    means the user must authorize it on the host (`gateway authorize <server>`);
+    `deferred` / `reconnecting` / `failed` means that remote server was
+    unreachable — retry once it is back.
+{{if .Sandboxed}}  You can check your own connection: `echo $MCP_URL`, and whether
+  `okta-gateway` lists the tool you need.
+{{end}}
+Investigate. Read each failed/blocked task's `failure_reason` /
 `blocked_reason`, look at the code in the workspace, and decide what to do.
 You may need input from the user — when you do, {{if .Sandboxed}}ask your question as a normal
 message in this conversation and stop to wait for the reply. Your messages are
@@ -112,10 +135,11 @@ can recognize from the `blocked_reason`:
   - "PR review produced N consecutive fix cycles without converging" — the PR
     has churned through too many rounds of fixes without ever coming back
     clean. Look at what keeps reopening and break the cycle.
-  - "PR review agent failed to run N times in a row" — the review agent's own
-    sandbox/MCP is broken (commonly the github MCP can't be created; the reason
-    suggests `sbx mcp ls` / `sbx mcp auth`). This is infrastructure, not the
-    PR's content — fix the MCP/sandbox, don't touch the PR.
+  - "PR review agent failed to run N times in a row", or a reason saying the
+    review agent couldn't reach GitHub / its github tools — the review agent's
+    okta-gateway connection is broken (see MCP SERVERS above). This is
+    infrastructure, not the PR's content — get the gateway fixed, then set the
+    project back to `idle`; don't touch the PR.
 
 Crucially: when you resolve a review-loop block, the right exit is almost
 always `status: idle` with `review`/`pull_requests` left exactly as they

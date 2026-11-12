@@ -13,9 +13,11 @@
 //  1. A reply-to a known notification goes to THAT wolf session as a prompt;
 //     the wolf's answer comes back labelled "[wolf <work-stream>]".
 //  2. Slash commands are answered by the router itself, with no LLM:
-//     /help, /status, /wolf [work-stream], /agent, /who.
-//  3. Otherwise the chat is bound to the workingman agent (the default) or to
-//     the wolf chosen with /wolf, until /agent or the wolf session ends.
+//     /help, /status, /wolf [work-stream], /sleepy, /agent, /who.
+//  3. Otherwise the chat is bound to the workingman agent (the default), to
+//     the wolf chosen with /wolf, or to sleepy-head (/sleepy), until /agent or
+//     that session ends. A reply to sleepy-head's announcement reaches it as
+//     rule 1 does for a wolf.
 //  4. While a chat is bound to a wolf it also sees what the wolf says to other
 //     clients (the TUI user), and the wolf's permission requests are put to the
 //     chat, whose next message answers them; unanswered ones time out rejected.

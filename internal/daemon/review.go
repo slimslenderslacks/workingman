@@ -277,7 +277,7 @@ func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
 			return
 		}
 		d.transitionProjectBlocked(projectPath, p, fmt.Sprintf(
-			"PR review agent failed to run %d times in a row (last error: %v); the loop is stuck — commonly the github MCP sandbox can't be created (check `sbx mcp ls` / `sbx mcp auth`)", n, waitErr))
+			"PR review agent failed to run %d times in a row (last error: %v); the loop is stuck — commonly its sandbox has no working okta-gateway (the host MCP gateway at --mcp-gateway-url was down, or github is not authorized there: check acp-wrapper.log for 'MCP gateway' warnings)", n, waitErr))
 		return
 	}
 	d.resetReviewErrors(projectPath)

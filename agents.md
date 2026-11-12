@@ -180,7 +180,9 @@ nothing else. Finishes by setting `status: working` with `updated_by: agent`.
    - **Else** (normal/incremental): if it finds a "seed" task (empty `name`,
      filled `description`, from a human's `:task`), flesh it out without
      touching any other existing task; otherwise do a first plan from scratch.
-3. Optional per-task `static_mcps:` (sbx `--static-mcp` flags) and `policies:`
+3. Optional per-task `static_mcps:` (the server names of the sandbox's
+   per-sandbox MCP gateway — see "MCP gateway" in README.md; no longer sbx
+   `--static-mcp` flags) and `policies:`
    (sbx policy rules, `action`/`type`/`resource`, applied in declaration order
    right after `sbx create`) fields, plus the fixed status enums for both
    project and task, and `model: default` on every new task.
@@ -605,10 +607,11 @@ project-root session already running).
 
 **Workspace/session.** `WorkingDir` = control dir (runs like planning — no
 wsp workspace of its own), plus `Repos`/`Branch` forwarded, and
-`StaticMCPs: []string{"github"}` plus a fixed network policy
+`StaticMCPs: []string{"github"}` (the `github` server of its per-sandbox
+MCP gateway) plus a fixed network policy
 (`reviewNetworkPolicies`: allow `api.github.com` and
 `api.githubcopilot.com`) so the sandbox can reach GitHub's API through the
-attached `github` MCP. `SandboxNameFor` gives it its own sandbox,
+`github` MCP. `SandboxNameFor` gives it its own sandbox,
 `"<work-stream>-review"`. Runs on the ACP path (autonomous, `claude --print`),
 sharing the project's *main* session slot (not a side key like
 wolf/archive/planning), so it cannot run concurrently with a task/commit agent

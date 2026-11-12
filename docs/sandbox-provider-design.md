@@ -35,17 +35,17 @@ argv.
 | Subcommand | Flags / shape | Who | Parsed output | Failure handling |
 |---|---|---|---|---|
 | `sbx ls --json` | — | `internal/sbx.Alive`, `runner.readSandboxWorkspaces`, `acpwrapper.listSandboxes` | `sbx.DecodeList`: either `[{name, workspaces[]}]` (v0.50+) or `{"sandboxes":[...]}` (older) | `Alive` returns a **tri-state**: `(false, nil)` means definitely gone, and `err != nil` means inconclusive and must never be read as gone. Ensure paths wrap the error and abort the launch. |
-| `sbx create claude` | `--name <n>`, `--kit <kit>` (ACP only), `-t <image> --pull missing` (when `--acp-image` is set), `--static-mcp <m>`… (repeatable), then positional workspaces, where the first is primary and a `<path>:ro` suffix means read-only | `acpwrapper.createSandbox`, `runner.DefaultSandboxCreator` (no kit/template), `check-signing.sh` (probe sandbox) | none (CombinedOutput is captured for error text) | The error is wrapped with the trimmed output and the launch fails. The wrapper logs the create duration to stderr. |
+| `sbx create claude` | `--name <n>`, `--kit <kit>` (ACP only), `-t <image> --pull missing` (when `--acp-image` is set), then positional workspaces (no `--static-mcp` any more: MCP servers go through the per-sandbox gateway, see `internal/mcpgateway`), where the first is primary and a `<path>:ro` suffix means read-only | `acpwrapper.createSandbox`, `runner.DefaultSandboxCreator` (no kit/template), `check-signing.sh` (probe sandbox) | none (CombinedOutput is captured for error text) | The error is wrapped with the trimmed output and the launch fails. The wrapper logs the create duration to stderr. |
 | `sbx rm --force <n>` | — | `acpwrapper.ensureSandbox` (mount drift), `acpwrapper.removeSandboxOnExit`, `runner.DefaultSandboxCreator` (drift), `check-signing.sh` cleanup | none | Drift path: a fatal error. Exit path: best-effort, logged and never returned. Script: `|| true`. |
 | `sbx policy <allow\|deny> <network\|filesystem> --sandbox <n> <resource>` | one invocation per rule, in declaration order, after create and before any exec | `policy.Rule.CLIArgs` (used by `acpwrapper.createSandbox` and `runner.DefaultSandboxCreator`), `check-signing.sh probe_push` | none | Validated first (`Rule.Validate`), then a failure is fatal to create. Rules are **not** re-applied to a reused sandbox. |
 | `sbx exec` (ACP) | `-e K=V`… `-w <primary-ws> <n> -- claude-acp-client`, **no `-it`** (raw stdio JSON-RPC) | `acpwrapper.Run` / `Config.execArgs` | stdout and stdin are the ACP stream, stderr goes to the wrapper log | A start failure is fatal. An exit makes the wrapper tear down. |
 | `sbx exec -it` (tab) | `-it -w <cwd> <n> <claude …>` | `runner.Start` legacy path (no `--acp-kit`) | n/a (runs in a terminal tab) | n/a |
-| `sbx exec -it` (`:session`) | `-it -w <cwd> -e GIT_*… <n> <bash -c …>` | `runner.LaunchInteractive` | n/a | n/a. Relies on **exec auto-starting a stopped sandbox**. |
+| `sbx create` + `sbx run` (`:session`) | create: `claude --name <n> -e MCP_URL=… -e <claude env> --kit <kit> -t <image> --pull missing <ws…>`; run: `--name <n> -e …  -e GIT_*… -- --session-id\|--resume <uuid>` | `runner.LaunchInteractive` / `ensureSessionSandbox` (mirrors `sbx-create.sh`) | n/a (runs in a terminal tab) | A create failure is fatal and DELETEs the gateway. Relies on **run starting a stopped sandbox**. |
 | `sbx exec <n> -- ssh-add -l` | — | `gitsign.Preflight`, `gitsign.PushPreflight`, `check-signing.sh` | looks for `SHA256:` in stdout | A missing key degrades signing to unsigned (`SigningBroken` in session.json). For push it is fatal (`PushBroken`). |
 | `sbx exec <n> -- sh -c 'ssh -T … git@github.com 2>&1'` | — | `gitsign.PushPreflight`, `check-signing.sh` | text classification: "successfully authenticated", "permission denied", "host key verification failed", or unreachable | Fatal for pushing sessions, with an actionable reason that names `sbx policy log` / `sbx policy allow network`. |
 | `sbx secret ls --json` | — | `acpwrapper.gatewaySecretConfigured` | `custom_secrets[].{scope, targets[]}`. Matches when scope is `global` or the sandbox name and `targets` contains `llm.es.atko.services` | An error is logged as a WARNING and the gateway is not used (fail-open to the default API). |
 | `sbx daemon stop` / `sbx daemon start -d` | env `SSH_AUTH_SOCK=<private agent>` | `start.sh`, `check-signing.sh restart_sandboxd` | none | `start.sh`: a failed start is fatal. Stop is `|| true`. |
-| `sbx template load` / `sbx template ls` | — | **manual**, documented in `start.sh` comments | — | — |
+| `sbx template load` / `sbx template ls` | — | **manual**, documented in `start.sh` comments and `docs/mcp-gateway.md` (`ACP_IMAGE` default `slimslenderslacks/claude-code-acp:0.90.0`) | — | — |
 | `sbx mcp ls` / `sbx mcp auth` | — | **text only**: `daemon/review.go` block reason, `wolf.tmpl` | — | — |
 | `sbx policy log` / `sbx policy allow network` | — | **text only**: `gitsign.classifyPushProbe` reason, `check-signing.sh` messages | — | — |
 
@@ -62,7 +62,7 @@ argv.
   slug fitting, `taskgraph` (dedupe suffix), and `prompts` (`nameBudget`
   template func, which tells planning/review agents the name budget).
 - **`internal/runner/runner.go`**:
-  - `SandboxSpec{Name, Workspaces, StaticMCPs, Policies}` and the
+  - `SandboxSpec{Name, Workspaces, Policies, MCPGateway}` and the
     `SandboxCreator` func type, which is already a proto-interface for "ensure".
   - `DefaultSandboxCreator`: ls, then compare the workspace set ignoring order,
     then `rm --force` on drift, then create (no kit), then apply policies.
@@ -72,7 +72,7 @@ argv.
     `sbx exec -it -w … -e …`. Uses `Runner.SbxPath`, but its ensure fallback
     (`DefaultSandboxCreator`) does not.
   - `startACP`/`acpWrapperCommand`: no direct sbx call. It forwards the
-    sandbox name, workspaces, `--static-mcp`, `--policy`, `--template`,
+    sandbox name, workspaces, `--mcp-gateway-url`/`--mcp-server`, `--policy`, `--template`,
     `--sbx`, and `--save-sandbox` to acp-wrapper. It also writes the initial
     `session.json` with `SandboxName`.
   - Names: `SandboxNameFor`, `ACPSandboxNameFor`, `WorkingmanAgentSandbox`.
@@ -86,7 +86,11 @@ argv.
     `SplitMount`/`JoinMount` (`:ro`).
   - `gatewaySecretConfigured` (`sbx secret ls`), which drives
     `ANTHROPIC_BASE_URL`.
-  - `execArgs`: env (claude model aliases, gateway, model, git identity,
+  - `ensureMCPGateway` / `sweepMCPGateways` (via `internal/mcpgateway`):
+    the per-sandbox standalone-codemode gateway → `MCP_URL`, plus one
+    `sbx exec <n> -- sh -c …` that records it in
+    `/etc/sandbox-persistent.sh`.
+  - `execArgs`: env (`MCP_URL`, claude model aliases, gateway, model, git identity,
     `.gomodcache` → `GOMODCACHE`/`GOPROXY=off`, signing), `-w`, the sandbox
     name, and `-- claude-acp-client`.
   - `signingPreflight` / `pushPreflightError` (via `gitsign`).
@@ -99,8 +103,9 @@ argv.
     is **default-deny**; the credential proxy swaps placeholder tokens for
     hosts with a secret.
 - **`cmd/acp-wrapper/main.go`**: flags `--sandbox`, `--kit`, `--template`,
-  `--sbx`, `--static-mcp`, `--policy` (`policy.Encode`), `--workspace`
-  (`:ro`), and `--save-sandbox`.
+  `--sbx`, `--mcp-gateway-url`/`--mcp-server`/`--mcp-gateway-state`,
+  `--policy` (`policy.Encode`), `--workspace` (`:ro`), and `--save-sandbox`.
+  `--static-mcp` is still accepted but ignored.
 - **`cmd/orch/main.go`**: `--acp-kit`, `--acp-image` (documented as
   `sbx create -t`), and `--wolf-host`. Without `--acp-kit` it wires
   `r.Sandbox = runner.DefaultSandboxCreator`.
@@ -140,7 +145,7 @@ argv.
   (`ProcessLauncher` for acp-wrapper, `terminal.TabLauncher` for tabs). This
   is the layer the provider's exec argv feeds into, and it is unchanged.
 - **Prompt templates**: `planning.tmpl` (sandbox name budget;
-  `static_mcps` → `--static-mcp` on `sbx create`; `policies` → `sbx policy`;
+  `static_mcps` → the per-sandbox MCP gateway's servers; `policies` → `sbx policy`;
   the "balanced" default policy), `review.tmpl` (name cap), `wolf.tmpl`
   (sandboxed wolf has "no `sbx`"; the `sbx mcp` hint), `workingman.tmpl`
   ("anything on the host (sbx, wsp, …)").

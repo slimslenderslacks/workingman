@@ -142,7 +142,7 @@ func TestReviewAgentSandbox(t *testing.T) {
 			sbCalls = append(sbCalls, call{
 				name:       spec.Name,
 				workspaces: append([]string(nil), spec.Workspaces...),
-				mcps:       append([]string(nil), spec.StaticMCPs...),
+				mcps:       append([]string(nil), spec.MCPGateway.Servers...),
 				policies:   len(spec.Policies),
 			})
 			return nil
@@ -197,7 +197,7 @@ func TestSandboxCreatorInvokedAndWraps(t *testing.T) {
 			sbCalls = append(sbCalls, call{
 				name:       spec.Name,
 				workspaces: append([]string(nil), spec.Workspaces...),
-				mcps:       append([]string(nil), spec.StaticMCPs...),
+				mcps:       append([]string(nil), spec.MCPGateway.Servers...),
 			})
 			return nil
 		},
@@ -254,7 +254,7 @@ func TestTaskAgentSandboxMountsOrchDir(t *testing.T) {
 			sbCalls = append(sbCalls, call{
 				name:       spec.Name,
 				workspaces: append([]string(nil), spec.Workspaces...),
-				mcps:       append([]string(nil), spec.StaticMCPs...),
+				mcps:       append([]string(nil), spec.MCPGateway.Servers...),
 			})
 			return nil
 		},

@@ -60,9 +60,13 @@ startup, and while running it notices a wall-clock jump (lid closed) and counts
 the ticks that sleep swallowed. Nothing is fired for missed ticks automatically.
 
 When the daemon starts and any project is behind, it opens one interactive
-**sleepy-head** agent in a terminal tab (like the wolf; also announced on the
-messaging channels). It reports which projects are behind and offers to catch
-them up. For each project you approve it runs
+**sleepy-head** agent. Like the wolf, it is a persistent ACP session in its own
+`sleepy-head` sandbox (a host terminal tab only without `--acp-kit`), so you can
+talk to it from its TUI tab or from a messaging channel: the announcement
+message can be replied to, and `/sleepy` binds a chat to it. It reports which
+projects are behind and offers to catch them up. For each project you approve
+it creates a `catchup-request` file beside the project file (the sandbox
+mounts only the behind projects' orch dirs writable); on the host it runs
 
 ```
 orch catchup <path/to/project.yaml>
@@ -141,12 +145,125 @@ Repeat `--root` for multiple trees.
 For day-to-day use, run `./start.sh` instead. It rebuilds `orch` and
 `acp-wrapper` from source, starts the private ssh-agent (see above), restarts
 sandboxd bound to it, and then runs the daemon and TUI in the foreground of
-the terminal you launched it from.
+the terminal you launched it from. ACP sandboxes are created from
+`ACP_IMAGE` (default `slimslenderslacks/claude-code-acp:0.90.0`, acp-kit's
+prebuilt image), which must be loaded into sbx first (`sbx template load`, see
+[docs/mcp-gateway.md](docs/mcp-gateway.md#loading-the-image)).
 `Ctrl-C` stops orch and tears the private agent down. Watch the audit log in another shell:
 
 ```sh
 tail -f ~/orch/audit.log
 ```
+
+## MCP gateway (per-sandbox MCP servers)
+
+Sandboxes reach MCP servers through the host's
+[standalone-codemode](https://github.com/slimslenderslacks/standalone-codemode)
+gateway, not through sbx static MCPs. [docs/mcp-gateway.md](docs/mcp-gateway.md)
+covers the whole flow end to end, with an example task and troubleshooting.
+Point orch at it:
+
+```sh
+./orch --root ~/orch --acp-kit <kit> \
+  --mcp-gateway-url http://localhost:3333 \
+  --mcp-gateway-servers gmail,github     # default set for tasks without static_mcps
+# or: WORKINGMAN_MCP_GATEWAY_URL / WORKINGMAN_MCP_GATEWAY_SERVERS
+```
+
+`./start.sh` does this for you: it defaults `WORKINGMAN_MCP_GATEWAY_URL` to
+`http://localhost:3333` and `WORKINGMAN_MCP_GATEWAY_SERVERS` to `github`, and
+warns if nothing answers at `<url>/healthz`. Set `WORKINGMAN_MCP_GATEWAY_URL=""`
+to run without the gateway. Without a URL, sandboxes get no `MCP_URL` and keep
+the stock `mcp-gateway` MCP server instead of `okta-gateway`.
+
+Each time a sandbox is created (or reused):
+
+1. **A sub-gateway is minted**: `POST <url>/gateways {"servers": [...],
+   "dynamic": ...}`,
+   before `sbx create` for a new sandbox. The
+   servers are the task's `static_mcps` when it lists any (each entry is a
+   catalog server name), otherwise `--mcp-gateway-servers`. The review agent
+   asks for `github`. Names the catalog doesn't have are dropped, with a
+   warning. If no servers are left, the sandbox gets no gateway. The wolf
+   and task agents get `"dynamic": true`, which adds `mcp-find` and
+   `mcp-add` over the whole catalog so the agent can attach servers beyond
+   that list; other agents get just their servers. `--mcp-gateway-static`
+   (or `WORKINGMAN_MCP_GATEWAY_STATIC=1`) turns dynamic gateways off. A
+   recorded gateway is reused only if it was minted with the same setting.
+2. **The sandbox gets `MCP_URL`**: the returned URL, with a loopback host
+   (`localhost`, `127.0.0.1`, `::1`) rewritten to `host.docker.internal`, same
+   port and path, e.g. `http://host.docker.internal:3333/gateways/<id>`
+   (inside a sandbox, `localhost` is the sandbox's own loopback). It is set
+   at `sbx create` as `-e MCP_URL=…`, and again on every `sbx exec`, since a
+   reused sandbox may have been given a new gateway since it was created.
+   A recorded gateway's URL is re-derived on reuse, so an old record that
+   still says `localhost` is rewritten too. The ACP wrapper also writes it into the
+   sandbox's `/etc/sandbox-persistent.sh` (the env file every shell in the
+   sandbox sources), so a shell you open there sees it too. acp-kit's
+   `claude-acp-client` registers it as the `okta-gateway` MCP server and
+   removes the stock sbx `mcp-gateway` server, so `okta-gateway` is the
+   only one. In the image, a `claude` shim does the same when you start an
+   interactive `claude` with `sbx run`, so that also sees only
+   `okta-gateway`. This needs acp-kit's image
+   `slimslenderslacks/claude-code-acp:0.90.0` (`start.sh`'s `ACP_IMAGE`
+   default). A current acp-kit checkout as `--acp-kit` covers ACP sessions
+   only. See
+   [docs/mcp-gateway.md](docs/mcp-gateway.md#loading-the-image) for how to
+   load the image.
+3. **The network policy allows the gateway's port**: right after `sbx create`,
+   after the task's own `policies:`, and before any `sbx exec`:
+   `allow network host.docker.internal:<port>` and `localhost:<port>`. A
+   non-loopback gateway gets `<host>:<port>`. The rules are re-applied, best
+   effort, when an existing sandbox is reused.
+4. **No `--static-mcp`**: `static_mcps` is still parsed from task files but
+   is never passed to `sbx create`.
+5. **Cleanup**: the gateway is DELETEd (best effort) when its sandbox is
+   removed: on exit cleanup, or on a recreate when the mounts changed. A
+   kept sandbox (failed task, `save_sandbox`) keeps its gateway. Each gateway
+   is recorded as `<sessions-root>/../gateways/<sandbox>.json`
+   (`acp-wrapper --mcp-gateway-state` overrides the directory), so after a
+   restart it is either reused (it is still live and has the same servers) or
+   replaced. Gateways whose sandboxes have since disappeared are swept on the
+   next launch. standalone-codemode keeps gateways in memory, so a reused
+   sandbox whose gateway is gone gets a new one, and the sandbox itself is
+   not recreated.
+
+Without `--mcp-gateway-url` none of this happens: no `MCP_URL`, no extra
+policy rules, and still no static MCPs. If the gateway can't be reached when
+a sandbox starts, the agent runs without `MCP_URL`; this is logged in the
+acp-wrapper log, or as `mcp_gateway_failed` in the audit log for terminal-tab
+sandboxes.
+
+### By hand: `sbx-create.sh` / `sbx-rm.sh`
+
+To get the same wiring for a sandbox you start yourself, outside the daemon:
+
+```
+./sbx-create.sh --name t1 [--servers github,gmail] [--no-run] [workspace...]
+./sbx-rm.sh --name t1
+```
+
+`sbx-create.sh` POSTs a dynamic sub-gateway (default servers: `github`;
+`--static` for one without `mcp-find`/`mcp-add`), creates the
+sandbox with `-e MCP_URL=http://host.docker.internal:<port>/gateways/<id>`
+from the `slimslenderslacks/claude-code-acp:0.90.0` template (`--image`,
+default `$ACP_IMAGE`), allows the gateway port in its network policy,
+records the gateway in `~/.workingman/gateways/<name>.json` (the record the
+daemon uses), and attaches with `sbx run` unless `--no-run`. Workspaces
+default to the current directory. If any step fails, the gateway is DELETEd.
+The gateway is `$WORKINGMAN_MCP_GATEWAY_URL`, else `http://localhost:3333`
+(`--gateway-url`).
+
+`sbx-rm.sh` removes the sandbox and DELETEs its gateway, from that record or,
+without one, from the sandbox's `MCP_URL`. A gateway that is already gone is
+not an error.
+
+A sandbox only sees the servers its own sub-gateway was created over. If it
+shows `<server>-authorize` for a server that `gateway authorize` reports as
+authorized, check that the sandbox's gateway includes that server (and, since
+standalone-codemode keeps gateways in memory only, that it was created after
+the gateway's last restart); otherwise recreate it with `sbx-rm.sh` +
+`sbx-create.sh`.
 
 ## Walk through a project
 

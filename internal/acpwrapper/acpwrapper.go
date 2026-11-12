@@ -2,7 +2,6 @@ package acpwrapper
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/gitsign"
+	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/sbx"
@@ -176,17 +176,23 @@ type Config struct {
 	// Empty leaves claude on its own default.
 	Model string
 
-	// StaticMCPs are sbx static-MCP names to attach to the sandbox when it
-	// is created (each becomes a `--static-mcp <name>` flag on `sbx create`).
-	// Ignored when the sandbox already exists with a matching workspace set —
-	// the sandbox name encodes the task identity, so a reused name implies a
-	// matching MCP set.
-	StaticMCPs []string
+	// MCPGateway mints this sandbox's per-sandbox standalone-codemode
+	// gateway (POST /gateways), records it in its Store, and releases it
+	// (DELETE /gateways/{id}) when the sandbox is removed. Its zero value
+	// (no BaseURL) disables the gateway: no MCP_URL, no extra policy rules.
+	// MCP servers no longer reach the sandbox as sbx static MCPs; they are
+	// served by this gateway instead (see mcpgateway.Manager).
+	MCPGateway mcpgateway.Manager
+	// MCPGatewayReadyTimeout is how long Run waits for a configured gateway
+	// that is not answering yet before failing the launch; zero means
+	// mcpgateway.DefaultReadyTimeout.
+	MCPGatewayReadyTimeout time.Duration
 
 	// Policies are sbx policy rules applied with `sbx policy ...` after the
-	// sandbox is created and before any `sbx exec`. Same reuse semantics as
-	// StaticMCPs: skipped on an existing sandbox because the name encodes
-	// the policy set.
+	// sandbox is created and before any `sbx exec`. Skipped on an existing
+	// sandbox because the sandbox name encodes the task identity, and so its
+	// policy set. The MCP gateway's allow rules (MCPGateway.PolicyRules) are
+	// appended after them on create, and re-applied best-effort on reuse.
 	Policies []policy.Rule
 
 	// GitName / GitEmail are the host user's git identity. When BOTH are set,
@@ -246,6 +252,11 @@ type Config struct {
 	// pushPreflightFailed is set internally when the commit agent's ssh push
 	// preflight fails (see pushPreflightError); recorded in session.json.
 	pushPreflightFailed bool
+
+	// mcpURL is set internally by Run() to the sandbox-reachable URL of this
+	// sandbox's MCP gateway (see ensureMCPGateway); execArgs injects it as
+	// MCP_URL. Empty when the gateway is disabled or could not be minted.
+	mcpURL string
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -367,20 +378,11 @@ func (c Config) goModCacheDir() string {
 
 // gatewayHost is the LLM gateway the sandboxed Claude Code agent is pointed at
 // when sbx holds a secret for it (see gatewaySecretConfigured).
-const gatewayHost = "llm.es.atko.services"
+const gatewayHost = sbx.LLMGatewayHost
 
-// claudeEnv is injected into every `sbx exec` so the Claude Code agent inside
-// the sandbox resolves its opus/sonnet/haiku aliases to the gateway's model
-// ids, and skips the nonessential traffic and experimental betas the gateway
-// doesn't support. ANTHROPIC_BASE_URL is added separately, and only when
-// c.useGateway is set.
-var claudeEnv = []string{
-	"ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5[1m]",
-	"ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5-5[1m]",
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-5-5",
-	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-	"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
-}
+// claudeEnv is injected into every `sbx exec` (see sbx.ClaudeEnv).
+// ANTHROPIC_BASE_URL is added separately, and only when c.useGateway is set.
+var claudeEnv = sbx.ClaudeEnv
 
 // execArgs builds the argv (after the sbx binary) that runs acp-kit's
 // claude-acp-client entrypoint inside the sandbox over `sbx exec`, producing an
@@ -392,6 +394,9 @@ var claudeEnv = []string{
 // agent's cwd matches the mounted host path.
 func (c Config) execArgs() []string {
 	args := []string{"exec"}
+	if c.mcpURL != "" {
+		args = append(args, "-e", mcpgateway.EnvVar+"="+c.mcpURL)
+	}
 	if c.useGateway {
 		args = append(args, "-e", "ANTHROPIC_BASE_URL=https://"+gatewayHost)
 	}
@@ -514,6 +519,13 @@ func (c *Config) normalize() error {
 		c.SbxPath = "sbx"
 	}
 
+	// Default the gateway record store even when no gateway is configured now,
+	// so gateways recorded by an earlier, gateway-enabled run are still
+	// released when their sandboxes go.
+	if c.MCPGateway.Store.Dir == "" {
+		c.MCPGateway.Store.Dir = mcpgateway.StateDir(c.SessionsRoot)
+	}
+
 	return nil
 }
 
@@ -527,8 +539,11 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 }
 
 // createSandbox runs `sbx create claude --name <name> --kit <kit>
-// [--static-mcp <m>...] <c.Workspaces...>` and then applies c.Policies in
-// declaration order (so deny-all + allow-host stacks evaluate left-to-right).
+// <c.Workspaces...>` and then applies c.Policies in declaration order (so
+// deny-all + allow-host stacks evaluate left-to-right), followed by the MCP
+// gateway's allow rules. The sandbox's gateway is POSTed before `sbx create`
+// and recorded after the policies succeed (DELETEd if any step fails). No `--static-mcp` flags: MCP servers reach the
+// sandbox through its per-sandbox gateway (MCP_URL) instead.
 // It is the one place that "attaches" a sandbox's workspace mounts, used both
 // for a brand-new sandbox and to repair one whose mounts must change (the
 // caller is responsible for `sbx rm --force`-ing name first in that case).
@@ -546,28 +561,44 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 	// first use — so the per-create path stays offline once it's cached, but a
 	// wiped store (e.g. after an sbx upgrade) self-heals instead of failing
 	// every create with "not cached locally and pull_policy=never". The
+	// flip side: a cached tag is never re-pulled, so a changed image must ship
+	// under a new tag (acp-kit's IMAGE_VERSION) to reach new sandboxes. The
 	// stock-template path keeps sbx's own default untouched.
 	if img := strings.TrimSpace(c.TemplateImage); img != "" {
 		args = append(args, "-t", img, "--pull", "missing")
 	}
-	for _, m := range c.StaticMCPs {
-		args = append(args, "--static-mcp", m)
+	gwRules, err := c.MCPGateway.PolicyRules()
+	if err != nil {
+		return "", fmt.Errorf("acpwrapper: mcp gateway policy %s: %w", name, err)
 	}
+	// Mint the gateway before the sandbox exists; it is recorded only once
+	// the sandbox and its policies are in place (ensureMCPGateway then reuses
+	// it), and DELETEd again if creating the sandbox fails.
+	gw := c.MCPGateway.Prepare(ctx, name)
+	args = append(args, mcpgateway.CreateEnvArgs(gw)...)
 	args = append(args, c.Workspaces...)
+	fail := func(err error) (string, error) {
+		c.MCPGateway.Discard(ctx, gw)
+		return "", err
+	}
 	createStart := time.Now()
 	out, err := run(ctx, c.SbxPath, args...)
 	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: sbx create %s took %s\n", c.SessionID, name, time.Since(createStart))
 	if err != nil {
-		return "", fmt.Errorf("acpwrapper: sbx create %s: %w: %s", name, err, strings.TrimSpace(string(out)))
+		return fail(fmt.Errorf("acpwrapper: sbx create %s: %w: %s", name, err, strings.TrimSpace(string(out))))
 	}
-	for _, r := range c.Policies {
+	for _, r := range append(slices.Clone(c.Policies), gwRules...) {
 		if err := r.Validate(); err != nil {
-			return "", fmt.Errorf("acpwrapper: sbx policy %s: %w", name, err)
+			return fail(fmt.Errorf("acpwrapper: sbx policy %s: %w", name, err))
 		}
 		if out, err := run(ctx, c.SbxPath, r.CLIArgs(name)...); err != nil {
-			return "", fmt.Errorf("acpwrapper: sbx policy %s %s %s %s: %w: %s",
-				r.Action, r.Kind, name, r.Resource, err, strings.TrimSpace(string(out)))
+			return fail(fmt.Errorf("acpwrapper: sbx policy %s %s %s %s: %w: %s",
+				r.Action, r.Kind, name, r.Resource, err, strings.TrimSpace(string(out))))
 		}
+	}
+	if err := c.MCPGateway.Save(gw); err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING %v\n", c.SessionID, err)
+		c.MCPGateway.Discard(ctx, gw)
 	}
 	return name, nil
 }
@@ -577,16 +608,25 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 // daemon's idempotent SandboxCreator so the wrapper is safe to relaunch:
 //
 //  1. `sbx ls --json` to find an existing sandbox by c.SandboxName.
-//  2. Same workspace set → no-op, use c.SandboxName as-is. This is the
-//     existing task<->commit-agent reuse fast path (same derived name): a
-//     name match already proves the workspace/MCP/policy set lines up (see
-//     the Config.StaticMCPs doc).
-//  3. Different set → `sbx rm --force` then fall through (self-heals drift).
+//  2. Same workspace set → reuse c.SandboxName. This is the existing
+//     task<->commit-agent reuse fast path (same derived name): a name match
+//     already proves the workspace/policy set lines up (see the
+//     Config.Policies doc). The MCP gateway's allow rules are re-applied
+//     best-effort, so a sandbox created before the gateway was configured can
+//     still reach it.
+//  3. Different set → `sbx rm --force`, release its MCP gateway, then fall
+//     through (self-heals drift).
 //  4. No sandbox named c.SandboxName, or it was just removed by (3):
-//     `sbx create claude --name <name> --kit <kit> [--static-mcp <m>...] <ws...>`,
-//     then one `sbx policy <action> <kind> --sandbox <name> <resource>` per rule
-//     in c.Policies, in declaration order (so deny-all + allow-host stacks
-//     evaluate left-to-right).
+//     `sbx create claude --name <name> --kit <kit> <ws...>`, then one
+//     `sbx policy <action> <kind> --sandbox <name> <resource>` per rule in
+//     c.Policies, in declaration order (so deny-all + allow-host stacks
+//     evaluate left-to-right), then the gateway's allow rules.
+//
+// On create the gateway is minted first (createSandbox → Manager.Prepare),
+// before `sbx create`, and recorded once the sandbox and its policies exist;
+// ensureMCPGateway then reuses it. MCP_URL is injected per `sbx exec`, not
+// baked in at create time, so an existing sandbox whose gateway is gone just
+// gets a new one from ensureMCPGateway — it is never recreated for that.
 //
 // A cache miss always means "create a fresh sandbox under c.SandboxName" —
 // this never looks up or adopts any other sandbox by a different name.
@@ -610,14 +650,76 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, erro
 	}
 	if existing, ok := sandboxes[c.SandboxName]; ok {
 		if sameWorkspaceSet(existing, c.Workspaces) {
+			reapplyGatewayPolicies(ctx, run, c)
 			return c.SandboxName, nil
 		}
 		if out, err := run(ctx, c.SbxPath, "rm", "--force", c.SandboxName); err != nil {
 			return "", fmt.Errorf("acpwrapper: sbx rm %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
 		}
+		c.MCPGateway.Release(ctx, c.SandboxName)
 	}
 
 	return createSandbox(ctx, run, c, c.SandboxName)
+}
+
+// reapplyGatewayPolicies applies the MCP gateway's allow rules to a reused
+// sandbox. Best-effort: a failure (sbx refusing a duplicate rule, say) is
+// logged, never returned — the rules were applied when the sandbox was
+// created by a gateway-aware wrapper, so this only matters for older ones.
+func reapplyGatewayPolicies(ctx context.Context, run commandFunc, c Config) {
+	rules, err := c.MCPGateway.PolicyRules()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING mcp gateway policy: %v\n", c.SessionID, err)
+		return
+	}
+	for _, r := range rules {
+		if out, err := run(ctx, c.SbxPath, r.CLIArgs(c.SandboxName)...); err != nil {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING sbx policy %s %s %s %s: %v: %s\n",
+				c.SessionID, r.Action, r.Kind, c.SandboxName, r.Resource, err, strings.TrimSpace(string(out)))
+		}
+	}
+}
+
+// ensureMCPGateway makes sure the sandbox has a live per-sandbox MCP gateway
+// and returns the sandbox-reachable URL to inject as MCP_URL: the recorded
+// gateway when it is still valid, otherwise a freshly minted one (see
+// mcpgateway.Manager.Ensure). The URL is also written into the sandbox's persistent env file
+// (mcpgateway.PersistEnvArgs), best-effort, so shells a human opens in the
+// sandbox see it too. Any failure is logged and yields "": the agent then
+// runs without the gateway rather than not at all.
+func ensureMCPGateway(ctx context.Context, run commandFunc, c Config) string {
+	if !c.MCPGateway.Enabled() {
+		return ""
+	}
+	rec, err := c.MCPGateway.Ensure(ctx, c.SandboxName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING no MCP gateway for sandbox %q: %v\n", c.SessionID, c.SandboxName, err)
+		return ""
+	}
+	if out, err := run(ctx, c.SbxPath, mcpgateway.PersistEnvArgs(c.SandboxName, rec.SandboxURL)...); err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING could not record %s in %s: %v: %s\n",
+			c.SessionID, mcpgateway.EnvVar, mcpgateway.EnvFile, err, strings.TrimSpace(string(out)))
+	}
+	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: MCP gateway %s (%s) at %s\n",
+		c.SessionID, rec.ID, strings.Join(rec.Servers, ","), rec.SandboxURL)
+	return rec.SandboxURL
+}
+
+// sweepMCPGateways releases the recorded gateways of sandboxes that no
+// longer exist — kept sandboxes someone removed by hand, or ones whose
+// wrapper died before its exit cleanup. Best-effort and quiet on success.
+func sweepMCPGateways(ctx context.Context, run commandFunc, c Config) {
+	if recs, err := c.MCPGateway.Store.List(); err != nil || len(recs) == 0 {
+		return
+	}
+	sandboxes, err := listSandboxes(ctx, run, c.SbxPath)
+	if err != nil {
+		return // can't tell what's gone; never release on a guess
+	}
+	c.MCPGateway.Sweep(ctx, func(name string) bool {
+		_, ok := sandboxes[name]
+		return ok || name == c.SandboxName
+	}, mcpgateway.SweepGrace)
 }
 
 // listSandboxes returns every sandbox's workspace list, keyed by name, from
@@ -639,32 +741,9 @@ func listSandboxes(ctx context.Context, run commandFunc, sbxPath string) (map[st
 	return m, nil
 }
 
-// gatewaySecretConfigured reports whether `sbx secret ls --json` lists a
-// custom secret targeting gatewayHost that applies to sandboxName — i.e. one
-// scoped globally or to that sandbox.
+// gatewaySecretConfigured is sbx.GatewaySecretConfigured over run.
 func gatewaySecretConfigured(ctx context.Context, run commandFunc, sbxPath, sandboxName string) (bool, error) {
-	out, err := run(ctx, sbxPath, "secret", "ls", "--json")
-	if err != nil {
-		return false, fmt.Errorf("sbx secret ls: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	var data struct {
-		CustomSecrets []struct {
-			Scope   string   `json:"scope"`
-			Targets []string `json:"targets"`
-		} `json:"custom_secrets"`
-	}
-	if err := json.Unmarshal(out, &data); err != nil {
-		return false, fmt.Errorf("decode sbx secret ls output: %w", err)
-	}
-	for _, s := range data.CustomSecrets {
-		if s.Scope != "global" && s.Scope != sandboxName {
-			continue
-		}
-		if slices.Contains(s.Targets, gatewayHost) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return sbx.GatewaySecretConfigured(ctx, sbx.RunFunc(run), sbxPath, sandboxName)
 }
 
 // sameWorkspaceSet reports whether a and b contain the same paths, ignoring
@@ -757,6 +836,9 @@ func removeSandboxOnExit(ctx context.Context, run commandFunc, c Config, shuttin
 		return
 	}
 	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: removed sandbox %q\n", c.SessionID, c.SandboxName)
+	// The sandbox is gone, so is the only user of its MCP gateway. A kept
+	// sandbox keeps its gateway: a relaunch reuses both.
+	c.MCPGateway.Release(ctx, c.SandboxName)
 }
 
 // signingPreflight verifies, once the sandbox exists, that the SSH agent sbx
@@ -844,6 +926,17 @@ func Run(ctx context.Context, c Config) error {
 		return err
 	}
 
+	// A configured MCP gateway that is not answering yet (standalone-codemode
+	// listens only after attaching its whole catalog) must not leave the agent
+	// without MCP_URL for its whole life: wait for it, and fail the launch if
+	// it never comes up, so the daemon retries (and eventually blocks with
+	// this reason) instead of running an agent that cannot reach its MCPs.
+	if err := c.MCPGateway.WaitReady(ctx, c.SandboxName, c.MCPGatewayReadyTimeout); err != nil {
+		err = fmt.Errorf("acpwrapper: MCP gateway (okta-gateway) unavailable, not starting the agent without it: %w", err)
+		failRecord(store, c, createdAt, err)
+		return err
+	}
+
 	ensureStart := time.Now()
 	sandboxName, err := ensureSandbox(ctx, execCommand, c)
 	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ensureSandbox took %s\n", c.SessionID, time.Since(ensureStart))
@@ -852,6 +945,11 @@ func Run(ctx context.Context, c Config) error {
 		return err
 	}
 	c.SandboxName = sandboxName
+
+	// Per-sandbox MCP gateway → MCP_URL (see ensureMCPGateway), then release
+	// the gateways of sandboxes that have since disappeared.
+	c.mcpURL = ensureMCPGateway(ctx, execCommand, c)
+	sweepMCPGateways(ctx, execCommand, c)
 
 	// Route the agent through the LLM gateway only when sbx can authenticate
 	// it there; otherwise leave ANTHROPIC_BASE_URL unset (the default API).

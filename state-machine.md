@@ -549,7 +549,10 @@ was down, so the daemon keeps its own history (`cron_missed.go`, persisted via
 - **sleepy-head.** After startup `launchSleepyHead` opens the interactive
   sleepy-head agent (session key `sleepy-head`, no project) if anything is
   behind, at most one at a time, never on battery, and log-only without a
-  runner.
+  runner. With an ACP launcher it is a persistent acp-wrapper session in the
+  `sleepy-head` sandbox (scratch cwd outside the roots, the behind projects'
+  orch dirs writable); like the workingman agent it is not detachable, so it
+  ends with the daemon.
 - **Catch-up.** `orch catchup <project.yaml>` (`RequestCatchup`) writes a
   `catchup-request` marker next to the project file; the watcher hands it to
   `handleCatchup`, which consumes it and calls `catchUpProject`. That fires

@@ -178,6 +178,18 @@ func (s daemonSource) WolfSessions() []router.Session {
 	return out
 }
 
+func (s daemonSource) SleepyHead() (router.Session, bool) {
+	sh, ok := s.d.SleepyHeadSession()
+	if !ok {
+		return router.Session{}, false
+	}
+	sess := router.Session{Key: sh.Key, ID: sh.ID, Kind: channels.ConversationKindSleepyHead}
+	if sh.Attachable {
+		sess.Ref = sessionRef(sh.Dir, sh.ID)
+	}
+	return sess, true
+}
+
 // sessionRef is what acpchat.Attach takes: the session directory, or the bare
 // session id (resolved under the sessions root) when the directory is unknown.
 func sessionRef(dir, id string) string {

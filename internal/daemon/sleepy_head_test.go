@@ -11,6 +11,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
+	"github.com/slimslenderslacks/work/internal/channels"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 )
@@ -213,5 +214,94 @@ func TestSleepyHeadChannelAnnouncement(t *testing.T) {
 	msg := h.fake.Sent()[0]
 	if msg.Topic != wolfTopic || !strings.Contains(msg.Text, "myproj (1 missed)") {
 		t.Errorf("message = %+v", msg)
+	}
+}
+
+// Under ACP sleepy-head runs as a persistent acp-wrapper session in its own
+// scratch dir (outside the roots), with only the behind project's orch dir
+// writable, and is told to create the marker rather than run the host orch.
+func TestSleepyHeadLaunchesUnderACP(t *testing.T) {
+	f, tabs := newBehindFixture(t, nil)
+	acp := &specLauncher{}
+	sessionsRoot := filepath.Join(t.TempDir(), "sessions")
+	f.d.runner = &runner.Runner{
+		Launcher:       tabs,
+		AcpLauncher:    acp,
+		Kit:            "/kits/acp-kit",
+		SessionsRoot:   sessionsRoot,
+		AcpWrapperPath: "/bin/acp-wrapper",
+	}
+	if !f.d.launchSleepyHead() {
+		t.Fatal("expected launch")
+	}
+	if tabs.count() != 0 || acp.count() != 1 {
+		t.Fatalf("tabs=%d acp=%d, want only the ACP launcher used", tabs.count(), acp.count())
+	}
+	cmd := acp.specs[0].Command
+	scratch := filepath.Join(filepath.Dir(sessionsRoot), sleepyHeadScratchName)
+	var workspaces []string
+	for i := 0; i+1 < len(cmd); i++ {
+		if cmd[i] == "--workspace" {
+			workspaces = append(workspaces, cmd[i+1])
+		}
+	}
+	if want := []string{scratch, filepath.Dir(f.projPath)}; strings.Join(workspaces, ",") != strings.Join(want, ",") {
+		t.Errorf("--workspace = %v, want %v", workspaces, want)
+	}
+	if !strings.Contains(strings.Join(cmd, " "), "--persistent") {
+		t.Errorf("not persistent: %v", cmd)
+	}
+	b, err := os.ReadFile(filepath.Join(scratch, ".orch", "instructions.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "touch <project dir>/"+CatchupMarker) || strings.Contains(string(b), " catchup <project file>") {
+		t.Errorf("sandboxed instructions should use the marker, not the host orch:\n%s", b)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, ".orch")); err == nil {
+		t.Error("handoff files written into the watched root")
+	}
+	infos := f.d.ListSessions()
+	if len(infos) != 1 || infos[0].SandboxName != "sleepy-head" || !infos[0].Interactive {
+		t.Errorf("ListSessions = %+v", infos)
+	}
+	if f.d.detachable(agent.SleepyHeadAgent) {
+		t.Error("sleepy-head must not be detachable")
+	}
+}
+
+// Under ACP the announcement invites a reply and is indexed, so replying to it
+// on the channel reaches the sleepy-head session.
+func TestSleepyHeadACPAnnouncementIsIndexed(t *testing.T) {
+	h := newChannelHarness(t)
+	h.d.roots = []string{filepath.Dir(filepath.Dir(h.proj))}
+	h.d.runner = &runner.Runner{
+		Launcher:       h.launcher,
+		AcpLauncher:    &specLauncher{},
+		Kit:            "/kits/acp-kit",
+		SessionsRoot:   filepath.Join(t.TempDir(), "sessions"),
+		AcpWrapperPath: "/bin/acp-wrapper",
+	}
+	h.d.recordMissedTick(h.proj, time.Now())
+	if !h.d.launchSleepyHead() {
+		t.Fatal("expected launch")
+	}
+	eventually(t, "sleepy-head message", func() bool { return len(h.fake.Sent()) == 1 })
+	msg := h.fake.Sent()[0]
+	if !strings.Contains(msg.Text, "Reply to this message") {
+		t.Errorf("message = %q", msg.Text)
+	}
+	var tgt channels.ConversationTarget
+	eventually(t, "index entry", func() bool {
+		var ok bool
+		tgt, ok = h.index.Lookup("whatsapp", "whatsapp-1")
+		return ok
+	})
+	if tgt.Kind != channels.ConversationKindSleepyHead || tgt.SessionKey != sleepyHeadSessionKey || tgt.SessionID != "sleepy-head" {
+		t.Errorf("index target = %+v", tgt)
+	}
+	s, ok := h.d.SleepyHeadSession()
+	if !ok || !s.Attachable || !strings.HasSuffix(s.Dir, filepath.Join("sessions", "sleepy-head")) {
+		t.Errorf("SleepyHeadSession = %+v, %v", s, ok)
 	}
 }
