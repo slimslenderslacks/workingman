@@ -35,6 +35,7 @@ sandboxes).
  │ workingman (orch / acp-wrapper)              │        └───────────────────────────┘
  │   POST /gateways, DELETE /gateways/<id>      │
  │   ~/.workingman/gateways/<sandbox>.json      │
+ │   + its own github-only gateway (orch-daemon)│
  └──────────────────────────────────────────────┘
 ```
 
@@ -301,6 +302,157 @@ Errors fall into three kinds:
 - `*mcpgateway.RPCError` — a JSON-RPC error, such as an unknown tool. The
   session still works.
 
+## The daemon's own gateway (PR fingerprint check)
+
+Besides the per-sandbox gateways, the orch daemon mints **one gateway of its
+own**, over the `github` server only (static, no dynamics). It uses it for the
+cheap PR fingerprint check that decides whether a watched PR changed and the
+review agent needs to run. The check runs on the host and goes through
+standalone-codemode's github credentials. The daemon doesn't need the `gh`
+CLI or any local GitHub auth. Code: `internal/daemon/review_gateway.go` (the
+gateway), `internal/daemon/review_mcp.go` (the session and the tool calls)
+and `internal/daemon/review.go` (the poll gate).
+
+### Gateway lifecycle
+
+- **Startup.** With `--mcp-gateway-url` set, `Daemon.Run` starts the gateway
+  loop off the startup path. It uses the same `mcpgateway.Client` that
+  acp-wrapper uses: `POST /gateways {"servers": ["github"]}` (static).
+  The record is kept under the fixed key `orch-daemon` in
+  `<gateways-dir>/daemon/orch-daemon.json` (by default
+  `~/.workingman/gateways/daemon/`). That subdirectory is skipped by
+  acp-wrapper's sweep, so the sweep never releases the daemon's gateway.
+- **Stale cleanup.** Before minting, the daemon checks for a recorded
+  gateway. One is only there if a previous run crashed or couldn't delete
+  it. The daemon DELETEs it and drops the record, so gateways don't pile up
+  in standalone-codemode. If the stale gateway is on the current endpoint and
+  can't be deleted, creation waits and retries, and the record is kept.
+- **Failure and retry.** A failed creation never stops the daemon. It is
+  retried with exponential backoff, 5s doubling up to 5m. A fingerprint call
+  that arrives after the backoff window has passed also tries a creation on
+  demand. While no gateway is available, every poll is *unverified* (see
+  below).
+- **Gateway gone.** If opening a session on the gateway's URL fails with
+  `ErrSessionLost`, the gateway is gone, usually because standalone-codemode
+  restarted and dropped its in-memory gateways. The daemon invalidates it,
+  DELETEs it best-effort, mints a new one and retries the open once.
+- **Shutdown.** The MCP session is closed first. Then the gateway is DELETEd
+  (with a 10s limit) and its record removed. If the DELETE fails, the record
+  is kept, so the next startup deletes the gateway as stale.
+
+### The MCP session
+
+The daemon keeps **one MCP session** (`mcpgateway.OpenSession`, client name
+`orch-daemon`) on its gateway and uses it for every fingerprint tool call. The
+session is opened lazily on the first call. If a call fails with
+`ErrSessionLost`, the daemon drops the session and opens a new one. When that
+works right away, the call is retried once on the new session. If the open
+fails, the next one waits with exponential backoff (5s doubling up to 5m) and
+logs each attempt, instead of failing forever. A `ToolError` or `RPCError`
+doesn't drop the session. Each tool call has a 30s limit. Opening a session
+(gateway URL plus `initialize`) also has a 30s limit.
+
+### Fingerprint signals
+
+Every read goes through the github server's `pull_request_read` tool. The
+`method` argument picks the data:
+
+| method | signal |
+|---|---|
+| `get` | head SHA, state (`open` / `closed` / `merged`) |
+| `get_reviews` | latest review id |
+| `get_comments` | latest conversation comment id |
+| `get_review_comments` | review-thread count, unresolved-thread count, latest inline comment id |
+| `get_check_runs` | check-run states at the head (conclusion once completed, otherwise status) |
+| `get_status` | commit-status states at the head |
+
+Lists are paged 100 at a time, up to 10 pages. The results fill the same
+`project.PRFingerprint` shape that the review agent records, and are hashed
+with `project.PRsFingerprint`. `observed_at` is not part of the hash. If any
+watched PR can't be read, the check is treated as unavailable for the whole
+project.
+
+### Agent-recorded fallback
+
+At the end of every poll, the review agent records the fingerprint it observed
+under each `pull_requests:` entry in `project.yaml`:
+
+```yaml
+pull_requests:
+  - repo: org/name
+    number: 42
+    head_sha: 3f2c…
+    state: open
+    fingerprint:
+      latest_comment_id: 1234567
+      latest_review_id: 7654321
+      review_threads: 3
+      unresolved_threads: 1
+      check_states:
+        - {name: build, state: success}
+      observed_at: 2026-11-13T05:00:00Z
+```
+
+After each clean reconcile, the daemon records a **baseline**. It uses the MCP
+fingerprint (source `mcp`) when it can get one. Otherwise it uses this
+agent-recorded fingerprint (source `agent`). The two are directly comparable.
+After a daemon restart, the in-memory baseline is seeded from the
+agent-recorded fingerprint. That way an unchanged PR isn't re-reviewed just
+because orch restarted.
+
+### Poll backoff
+
+The `#review` poll moves along `2m → 4m → 8m → 16m → 32m → 1h`:
+
+- **quiet**: the MCP fingerprint matches the baseline. The review agent is
+  not launched, and the poll moves one step slower.
+- **changed / no baseline**: the review agent runs, and the poll resets to 2m.
+- **unverified**: there is no MCP fingerprint (gateway or session down, a
+  tool call failed, or no PR recorded yet). The review agent still runs, so
+  no signal is hidden, but the poll moves one step slower. When the new
+  baseline taken after that run differs from the previous one, the poll
+  resets to 2m.
+- `:review` dispatches the review agent at once and resets the poll to 2m.
+
+The snapshot's `review_poll` shows the step (`backoff_index`), whether a
+baseline exists (`has_baseline`) and where it came from (`baseline_source`).
+See [state-snapshot.md](state-snapshot.md).
+
+### Log and audit events
+
+Each event below goes to the audit log (`--audit-log`). The gateway and
+session events also go to `daemon.log` beside it. Those lines start with
+`review gateway:` or `review MCP:`.
+
+| Audit event | Fields | Meaning |
+|---|---|---|
+| `review_gateway_created` | `id`, `url`, `endpoint`, `servers`, `gaps`? | The daemon's github-only gateway was minted. `gaps` lists anything the gateway isn't serving, for example github in `needs_auth`. `daemon.log` also prints a `WARNING` for each gap. |
+| `review_gateway_create_error` | `endpoint`, `attempt`, `retry_in`, `err` | Creating the gateway failed (including a stale gateway that couldn't be deleted). It is retried after `retry_in`. |
+| `review_gateway_stale_deleted` | `id`, `endpoint`, `created_at` | A gateway left behind by a previous run was deleted at startup. |
+| `review_gateway_stale_delete_error` | `id`, `endpoint`, `err` | A gateway left behind by a previous run couldn't be deleted. |
+| `review_gateway_record_error` | `id`?, `dir`, `err` | The gateway record couldn't be written or read. An unwritten record means the gateway leaks if orch crashes. An unreadable record is dropped. |
+| `review_gateway_invalidated` | `id`, `url` | The gateway was found gone and a new one will be minted. |
+| `review_gateway_deleted` | `id`, `endpoint` | The gateway was deleted, at shutdown or after being invalidated. |
+| `review_gateway_delete_error` | `id`, `endpoint`, `err` | Deleting the gateway failed. The record is kept, so the next startup deletes the gateway as stale. |
+| `review_mcp_session_opened` | `url`, `session` | The first MCP session was opened. |
+| `review_mcp_session_error` | `url`, `attempt`, `retry_in`, `err` | Opening or recreating a session failed. The next try is after `retry_in`. |
+| `review_mcp_gateway_gone` | `url`, `err` | Opening a session found the gateway gone. The gateway is invalidated. |
+| `review_mcp_session_lost` | `url`, `session`, `err` | A tool call found the session gone. It will be recreated. |
+| `review_mcp_session_recreate` | `attempt` | A lost session is being recreated. |
+| `review_mcp_session_recreated` | `url`, `session`, `attempts` | A lost session was recreated. |
+| `review_mcp_tool_error` | `path`, `tool`, `method`, `repo`, `pr`, `err` | A fingerprint tool call (or decoding its result) failed. |
+| `review_mcp_session_closed` / `review_mcp_session_close_error` | `url`, `session`, `err`? | The session was closed at shutdown, or closing it failed. |
+| `review_fingerprint_error` | `path`, `err` | No MCP fingerprint for the project this time, so the poll is *unverified*. `err` gives the cause: no gateway configured, a gateway or session that isn't available, or the failing tool call. |
+| `review_baseline` | `path`, `source`, `changed` | A baseline was recorded after a reconcile, from `mcp` or `agent`. |
+| `review_baseline_unavailable` | `path` | Neither source produced a fingerprint. The previous baseline stays. |
+| `review_poll_quiet` | `path`, `baseline`, `next` | Nothing changed. The agent was skipped and the poll slowed to `next`. |
+| `review_poll_fired` | `path`, `reason`, `next` | The review agent was dispatched. `reason` is `changed`, `no_baseline` or `unverified`. |
+| `review_poll_forced` | `path` | `:review` dispatched the agent at once. |
+
+To find out why reviews run on every tick, look for `review_poll_fired
+reason=unverified` and read the `review_fingerprint_error` and
+`review_gateway_*` / `review_mcp_*` events around it.
+
 ## Configuration
 
 | orch flag | Environment variable | Meaning |
@@ -383,6 +535,14 @@ Where to look: for ACP sessions, `acp-wrapper.log` next to orch's audit log
   (`sbx exec <sandbox> -- printenv MCP_URL`). If it is empty, check the
   causes above. If it is set, check `claude-acp-client`'s stderr for a
   registration warning.
+- **The daemon's fingerprint check fails.** Look in `daemon.log` for
+  `review gateway:` / `review MCP:` lines, and in the audit log for
+  `review_gateway_create_error`, `review_mcp_session_error` and
+  `review_mcp_tool_error`. If github shows up in `gaps` on
+  `review_gateway_created`, it isn't authorized: run `gateway authorize
+  github` on the host. The daemon keeps retrying with backoff, and reviews
+  still run in the meantime (the polls are unverified). See
+  [the daemon's own gateway](#the-daemons-own-gateway-pr-fingerprint-check).
 - **A tool from another server shows up, or one is missing.** The gateway
   serves exactly the record's `servers` (in
   `~/.workingman/gateways/<sandbox>.json`). If you change a task's

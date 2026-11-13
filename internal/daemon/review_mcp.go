@@ -20,7 +20,7 @@ import (
 
 // The PR fingerprint probe: GitHub MCP tool calls over the daemon's
 // github-only gateway (review_gateway.go), on one MCP session per daemon
-// (mcpgateway.Session). It replaces the host `gh pr view` probe, so the daemon
+// (mcpgateway.Session). It replaces the old host gh CLI probe, so the daemon
 // needs no local GitHub auth.
 //
 // Session lifecycle:

@@ -234,6 +234,39 @@ a sandbox starts, the agent runs without `MCP_URL`; this is logged in the
 acp-wrapper log, or as `mcp_gateway_failed` in the audit log for terminal-tab
 sandboxes.
 
+### The daemon's own github gateway (PR fingerprint check)
+
+With `--mcp-gateway-url` set, the daemon also mints **one github-only gateway
+of its own** at startup. It uses it for the cheap check that decides whether a
+watched PR changed and the review agent needs to run. The check calls the
+github MCP's `pull_request_read` over a single MCP session. It reads the head
+SHA, the latest comment and review ids, review-thread counts, and check
+states. **orch doesn't need the `gh` CLI or any local GitHub auth**:
+standalone-codemode holds the github credentials.
+
+- **Startup.** If a gateway from a crashed run is still recorded (in
+  `~/.workingman/gateways/daemon/orch-daemon.json`), it is deleted first, and
+  then a new gateway is minted. A failure is logged and retried with backoff
+  (5s to 5m). It never stops the daemon.
+- **Session.** The daemon opens one MCP session lazily and reuses it for every
+  tool call. If the session is lost, it is recreated, with backoff while the
+  attempts keep failing. If the gateway itself is gone (standalone-codemode
+  restarted), a new gateway is minted.
+- **Shutdown.** The session is closed and the gateway DELETEd. Both
+  `daemon.log` and the audit log record whether that worked.
+- **Fallback and backoff.** While the check is unavailable, review polls are
+  *unverified*. They still run the review agent, and the fingerprint the agent
+  records under `pull_requests[].fingerprint` in `project.yaml` serves as the
+  baseline. Polls that see no change back off from 2m through 4m, 8m, 16m and
+  32m up to 1h. A detected change or `:review` resets the poll to 2m.
+
+Audit events: `review_gateway_*` (gateway created, create error, stale
+deleted, deleted, delete error), `review_mcp_*` (session opened, error, lost,
+recreate, recreated, closed, tool error), and `review_fingerprint_error`
+(why a poll went unverified). See
+[docs/mcp-gateway.md](docs/mcp-gateway.md#the-daemons-own-gateway-pr-fingerprint-check)
+for the full table.
+
 ### By hand: `sbx-create.sh` / `sbx-rm.sh`
 
 To get the same wiring for a sandbox you start yourself, outside the daemon:

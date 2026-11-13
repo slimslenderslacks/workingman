@@ -333,8 +333,10 @@ The poll (`onReviewPoll`) uses a **change-detection gate** to avoid running
 an expensive review agent on every tick: `reviewPRFingerprint` reads each
 watched PR's head SHA, state, latest comment/review ids, review-thread counts
 and check states over the daemon's github-only MCP gateway (no sandbox, no
-`gh`) and hashes them with `project.PRsFingerprint`. That is compared with the
-**baseline** taken after the last clean reconcile (`recordReviewBaseline`):
+`gh`) and hashes them with `project.PRsFingerprint` (the gateway and session
+lifecycle and the audit events are in
+[docs/mcp-gateway.md](docs/mcp-gateway.md#the-daemons-own-gateway-pr-fingerprint-check)).
+That is compared with the **baseline** taken after the last clean reconcile (`recordReviewBaseline`):
 
 - **quiet** — MCP fingerprint equals the baseline: the cadence steps one rung
   slower and the review agent is *not* launched (`review_poll_quiet`).
