@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -21,11 +19,31 @@ import (
 
 // reviewPollSpecs is the adaptive backoff ladder for the #review poll: a project
 // entering reviewing polls at the fastest cadence (checks are running, comments
-// likely), and each quiet tick (the PR fingerprint unchanged since the last
-// reconcile) steps one rung slower, capped at the last entry. Any detected
-// change snaps it back to the front. This keeps a busy PR responsive while a
-// quiet one stops waking the daemon every couple of minutes.
-var reviewPollSpecs = []string{"@every 2m", "@every 5m", "@every 15m", "@every 30m"}
+// likely), and each tick that shows no change steps one rung slower — doubling
+// from 2m, capped at 1h. Any detected change (or a `:review` kick) snaps it
+// back to the front. This keeps a busy PR responsive while a quiet one stops
+// waking the daemon every couple of minutes. See onReviewPoll for which ticks
+// count as "no change".
+var reviewPollSpecs = []string{"@every 2m", "@every 4m", "@every 8m", "@every 16m", "@every 32m", "@every 1h"}
+
+// Sources of a review fingerprint baseline (reviewBaseline.source, surfaced as
+// the snapshot's review_poll.baseline_source).
+const (
+	// reviewFingerMCP is the daemon's own host-side GitHub MCP probe.
+	reviewFingerMCP = "mcp"
+	// reviewFingerAgent is the fingerprint the review agent recorded under
+	// project.yaml's pull_requests entries — the fallback when the MCP probe is
+	// unavailable. Both are project.PRsFingerprint hashes of the same canonical
+	// shape, so they compare directly.
+	reviewFingerAgent = "agent"
+)
+
+// reviewBaseline is the PR fingerprint as of the last reconcile, and which
+// source produced it.
+type reviewBaseline struct {
+	fp     string
+	source string
+}
 
 // transitionProjectComplete decides what "all tasks committed" means for a
 // project. A project that produced (or is expected to produce) a pull request
@@ -114,11 +132,26 @@ func (d *Daemon) ensureReviewPoll(projectPath string) {
 // it unregisters itself.
 //
 // Otherwise it applies the change-detection gate before spending the expensive
-// review agent: a cheap host-side `gh` fingerprint of the PR (head SHA +
-// updatedAt + check-rollup) stands in for "did anything happen." When the
-// fingerprint matches the last reconcile, the tick is quiet — the poll steps to
-// a slower cadence and does NOT launch the agent. A changed (or not-yet-known)
-// fingerprint runs the agent and snaps the cadence back to the front.
+// review agent: a cheap host-side GitHub MCP fingerprint of the PR (head SHA,
+// latest review/comment ids, thread counts, check states) stands in for "did
+// anything happen", compared against the baseline taken at the last reconcile
+// (see recordReviewBaseline; after a daemon restart the baseline is seeded from
+// the agent-recorded fingerprint in project.yaml). Three outcomes:
+//
+//   - quiet: the MCP fingerprint matches the baseline. The poll steps one rung
+//     slower and does NOT launch the agent.
+//   - changed / no baseline: the MCP fingerprint differs (or there is nothing
+//     to compare it with). The agent runs and the cadence snaps back to fast.
+//   - unverified: the MCP fingerprint is unavailable (gateway/session down, a
+//     tool call failed, or no PR recorded yet), so the daemon is blind. It
+//     fails open — the agent runs, so no PR signal is ever hidden — but the
+//     cadence still steps one rung slower instead of re-running the agent
+//     every 2m indefinitely. That backoff is safe because every unverified
+//     tick does run the agent, which sees the full PR state: it only bounds
+//     how quickly new activity is noticed (at worst one top rung, ~1h, or
+//     immediately on `:review`). Change detection moves to the end of the run:
+//     recordReviewBaseline compares the fingerprint the agent recorded with the
+//     previous baseline and snaps the cadence back to fast if it moved.
 func (d *Daemon) onReviewPoll(projectPath string) {
 	if d.scheduler == nil {
 		return
@@ -141,19 +174,29 @@ func (d *Daemon) onReviewPoll(projectPath string) {
 		d.audit.Log("review_poll_skip_busy", "path", projectPath)
 		return
 	}
+	var reason, spec string
 	if fp, ok := d.reviewFingerprint(projectPath, p); ok {
-		if prev, seen := d.lastReviewFinger(projectPath); seen && prev == fp {
-			spec := d.growReviewBackoff(projectPath)
+		prev, seen := d.reviewBaselineFor(projectPath, p)
+		if seen && prev.fp == fp {
+			spec = d.growReviewBackoff(projectPath)
 			d.rescheduleReviewPoll(projectPath, spec)
-			d.audit.Log("review_poll_quiet", "path", projectPath, "next", spec)
+			d.audit.Log("review_poll_quiet", "path", projectPath, "baseline", prev.source, "next", spec)
 			return
 		}
+		reason = "changed"
+		if !seen {
+			reason = "no_baseline"
+		}
+		// Reconcile now and return to the fast cadence.
+		d.resetReviewBackoff(projectPath)
+		spec = reviewPollSpecs[0]
+	} else {
+		// Blind: fail open (run the agent) but keep backing off; see above.
+		reason = "unverified"
+		spec = d.growReviewBackoff(projectPath)
 	}
-	// Changed, no baseline yet, no PR to fingerprint, or gh unavailable: reconcile
-	// now and return to the fast cadence.
-	d.resetReviewBackoff(projectPath)
-	d.rescheduleReviewPoll(projectPath, reviewPollSpecs[0])
-	d.audit.Log("review_poll_fired", "path", projectPath)
+	d.rescheduleReviewPoll(projectPath, spec)
+	d.audit.Log("review_poll_fired", "path", projectPath, "reason", reason, "next", spec)
 	d.dispatchReviewAgent(projectPath, p)
 }
 
@@ -161,7 +204,7 @@ func (d *Daemon) onReviewPoll(projectPath string) {
 // clears the one-shot ReviewNow request, snaps the poll cadence back to the
 // fast rung, and dispatches the review agent immediately — bypassing the poll's
 // change-detection gate so the reconcile happens now rather than at the next
-// (possibly 30m-away) tick.
+// (possibly 1h-away) tick.
 //
 // The flag is cleared as the daemon so the clearing write can't retrigger
 // dispatch, and cleared before the launch rather than after: the #review poll is
@@ -294,14 +337,7 @@ func (d *Daemon) afterReviewSession(projectPath string, waitErr error) {
 	switch {
 	case p.Status == project.StatusIdle && p.WatchingPR():
 		d.resetReviewFixCycles(projectPath)
-		// Record the PR fingerprint AS OF this reconcile, so scheduled polls can
-		// tell when something new has happened since (and skip the agent when
-		// nothing has). Computed post-run so the agent's own thread resolves —
-		// which bump the PR's updatedAt — are already folded into the baseline
-		// and don't self-trigger the next tick.
-		if fp, ok := d.reviewFingerprint(projectPath, p); ok {
-			d.storeReviewFinger(projectPath, fp)
-		}
+		d.recordReviewBaseline(projectPath, p)
 		d.audit.Log("review_clean", "path", projectPath)
 		// Intake (or a seed) that landed mid-review could not start a planner
 		// while this agent held the control dir (see dispatchReviewAgent), and
@@ -373,7 +409,7 @@ func (d *Daemon) resetReviewErrors(projectPath string) {
 }
 
 // reviewFingerprint returns the PR change-detection fingerprint, routing through
-// the test seam when one is installed and otherwise the real host `gh` probe.
+// the test seam when one is installed and otherwise the real GitHub MCP probe.
 func (d *Daemon) reviewFingerprint(projectPath string, p *project.Project) (string, bool) {
 	if d.reviewFingerprintFn != nil {
 		return d.reviewFingerprintFn(projectPath, p)
@@ -382,13 +418,16 @@ func (d *Daemon) reviewFingerprint(projectPath string, p *project.Project) (stri
 }
 
 // reviewPRFingerprint returns a cheap change-detection fingerprint for the
-// project's pull request, computed on the host via `gh` (no sandbox, no claude).
-// It hashes the fields that signal PR activity — head SHA (new commits),
-// updatedAt (new comments/reviews), and the check-run rollup (Actions results) —
-// so an unchanged fingerprint means nothing has happened since the last
-// reconcile. ok is false when there is no PR to fingerprint yet (the review
-// agent hasn't stamped one) or gh is unavailable; the caller treats that as
-// "can't gate — run the agent" so the optimization never hides a real signal.
+// project's pull requests, read on the host through the GitHub MCP on the
+// daemon's github-only gateway (review_mcp.go; no sandbox, no claude, no gh).
+// Each PR's head SHA, state, latest review/comment ids, review-thread counts
+// and check-run/status states are read into the canonical project.PullRequest
+// fingerprint shape — the one the review agent records — and hashed with
+// project.PRsFingerprint, so an unchanged value means nothing has happened
+// since the last reconcile. ok is false when there is no PR to fingerprint yet
+// (the review agent hasn't stamped one) or the MCP check failed; the caller
+// treats that as "can't gate — run the agent" so the optimization never hides
+// a real signal.
 func (d *Daemon) reviewPRFingerprint(projectPath string, p *project.Project) (string, bool) {
 	if len(p.PullRequests) == 0 {
 		return "", false
@@ -397,46 +436,96 @@ func (d *Daemon) reviewPRFingerprint(projectPath string, p *project.Project) (st
 	if base == nil {
 		base = context.Background()
 	}
-	h := sha256.New()
-	n := 0
-	for _, pr := range p.PullRequests {
-		if pr.Repo == "" || pr.Number == 0 {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(base, 20*time.Second)
-		out, err := exec.CommandContext(ctx, "gh", "pr", "view",
-			strconv.Itoa(pr.Number),
-			"--repo", pr.Repo,
-			"--json", "headRefOid,updatedAt,statusCheckRollup",
-		).Output()
-		cancel()
-		if err != nil {
-			// Can't gate reliably if any watched PR is unreadable — fail toward
-			// running the agent so we never miss a signal.
-			d.audit.Log("review_fingerprint_error", "path", projectPath, "repo", pr.Repo, "err", err.Error())
-			return "", false
-		}
-		h.Write([]byte(pr.Repo))
-		h.Write(out)
-		n++
-	}
-	if n == 0 {
+	m := d.reviewMCPClient()
+	if m == nil {
+		d.audit.Log("review_fingerprint_error", "path", projectPath, "err", errNoReviewGateway.Error())
 		return "", false
 	}
-	return hex.EncodeToString(h.Sum(nil)), true
+	prs, err := m.fingerprintPRs(base, projectPath, p.PullRequests)
+	if err != nil {
+		// Can't gate reliably if any watched PR is unreadable — fail toward
+		// running the agent so we never miss a signal.
+		d.audit.Log("review_fingerprint_error", "path", projectPath, "err", err.Error())
+		return "", false
+	}
+	return project.PRsFingerprint(prs)
 }
 
-func (d *Daemon) lastReviewFinger(projectPath string) (string, bool) {
-	d.reviewMu.Lock()
-	defer d.reviewMu.Unlock()
-	fp, ok := d.reviewFinger[projectPath]
-	return fp, ok
+// agentRecordedFingerprint is the project-level fingerprint of what the review
+// agent recorded under project.yaml's pull_requests entries at the end of its
+// last run. ok is false when no PR is recorded or any entry lacks a
+// fingerprint block.
+func agentRecordedFingerprint(p *project.Project) (string, bool) {
+	return project.PRsFingerprint(p.PullRequests)
 }
 
-func (d *Daemon) storeReviewFinger(projectPath, fp string) {
+// recordReviewBaseline records the PR fingerprint AS OF a clean reconcile, so
+// scheduled polls can tell when something new has happened since (and skip the
+// agent when nothing has). It is taken post-run so the agent's own actions
+// (thread resolves, replies) are already folded into the baseline and don't
+// self-trigger the next tick.
+//
+// The MCP probe is preferred; when it is unavailable the fingerprint the agent
+// just recorded in project.yaml stands in, so the daemon keeps a baseline even
+// while blind. A baseline that differs from the previous one (or is the first)
+// means the run saw something new: the poll cadence snaps back to fast. This
+// is how an unverified tick (see onReviewPoll) detects change. With neither
+// source available the previous baseline is left as is and the cadence keeps
+// backing off.
+func (d *Daemon) recordReviewBaseline(projectPath string, p *project.Project) {
+	var b reviewBaseline
+	if fp, ok := d.reviewFingerprint(projectPath, p); ok {
+		b = reviewBaseline{fp: fp, source: reviewFingerMCP}
+	} else if fp, ok := agentRecordedFingerprint(p); ok {
+		b = reviewBaseline{fp: fp, source: reviewFingerAgent}
+	} else {
+		d.audit.Log("review_baseline_unavailable", "path", projectPath)
+		return
+	}
+	changed := d.storeReviewFinger(projectPath, b)
+	d.audit.Log("review_baseline", "path", projectPath, "source", b.source, "changed", fmt.Sprintf("%t", changed))
+	if !changed {
+		return
+	}
+	d.resetReviewBackoff(projectPath)
+	// Only re-time a poll that is armed; never arm one nothing asked for.
+	if d.scheduler != nil && d.scheduler.Spec(reviewPollKey(projectPath)) != "" {
+		d.rescheduleReviewPoll(projectPath, reviewPollSpecs[0])
+	}
+}
+
+// reviewBaselineFor returns the in-memory baseline for projectPath. With none
+// (e.g. right after a daemon restart) it seeds one from the agent-recorded
+// fingerprint in project.yaml, so a restart doesn't force a dispatch when the
+// PR is exactly as the agent last saw it.
+func (d *Daemon) reviewBaselineFor(projectPath string, p *project.Project) (reviewBaseline, bool) {
+	if b, ok := d.lastReviewFinger(projectPath); ok {
+		return b, true
+	}
+	fp, ok := agentRecordedFingerprint(p)
+	if !ok {
+		return reviewBaseline{}, false
+	}
+	b := reviewBaseline{fp: fp, source: reviewFingerAgent}
+	d.storeReviewFinger(projectPath, b)
+	return b, true
+}
+
+func (d *Daemon) lastReviewFinger(projectPath string) (reviewBaseline, bool) {
 	d.reviewMu.Lock()
 	defer d.reviewMu.Unlock()
-	d.reviewFinger[projectPath] = fp
+	b, ok := d.reviewFinger[projectPath]
+	return b, ok
+}
+
+// storeReviewFinger records b as projectPath's baseline and reports whether the
+// fingerprint changed (a first baseline counts as a change).
+func (d *Daemon) storeReviewFinger(projectPath string, b reviewBaseline) bool {
+	d.reviewMu.Lock()
+	defer d.reviewMu.Unlock()
+	prev, had := d.reviewFinger[projectPath]
+	d.reviewFinger[projectPath] = b
+	return !had || prev.fp != b.fp
 }
 
 // growReviewBackoff advances the poll to the next slower cadence rung (capped at

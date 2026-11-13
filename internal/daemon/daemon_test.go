@@ -31,6 +31,12 @@ func (s *safeBuf) String() string {
 	return s.buf.String()
 }
 
+func (s *safeBuf) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf.Reset()
+}
+
 // waitFor polls the buffer until want appears or 2s elapses. Returns the
 // snapshot at the moment we either saw it or gave up, for use in error messages.
 func waitFor(t *testing.T, buf *safeBuf, want string) (bool, string) {

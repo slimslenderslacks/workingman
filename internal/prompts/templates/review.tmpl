@@ -19,6 +19,9 @@ agents do that on the tasks you create.
 SCOPE — operate ONLY on this project. The only project file you may modify is
 {{.ProjectPath}}; never read or write a sibling project's files.
 
+Wherever a step below says "exit", first record each PR's fingerprint
+(Step 6) in the same `project.yaml` write — every poll ends with it.
+
 ## Step 1 — read the project
 
 Read `project.yaml` for the project goal (`description`), its `repos`, its
@@ -70,6 +73,8 @@ one list entry per PR (open, merged, or closed since last poll):
       url: <html url>
       head_sha: <head commit sha>
       state: open        # or merged / closed
+      fingerprint:       # see "Step 6 — record the fingerprint"
+        ...
     - repo: <org/name>   # another repo's PR, if any
       number: <n>
       ...
@@ -200,6 +205,57 @@ one or more related fixes have committed — insert a push task to publish it:
   - Otherwise (PR open, nothing to address and nothing unpublished) → set
     `status: idle` (or leave it, if already there). The daemon keeps polling
     because at least one `pull_requests:` entry is still open.
+
+## Step 6 — record the fingerprint (EVERY poll, every PR)
+
+At the end of every poll — whatever status you settle on, including `blocked`
+and every early exit above — make sure each `pull_requests:` entry carries the
+fingerprint of the PR as you observed it this poll. The daemon compares it
+against its own check to decide whether the next poll needs an agent at all,
+so it must describe the PR's state now, AFTER any replies or `resolve_thread`
+calls you made this poll (re-read anything you changed). Write it alongside
+`head_sha` (which stays the head commit sha):
+
+  pull_requests:
+    - repo: <org/name>
+      number: <n>
+      url: <html url>
+      head_sha: <head commit sha>
+      state: open
+      fingerprint:
+        latest_comment_id: <n>
+        latest_review_id: <n>
+        review_threads: <n>
+        unresolved_threads: <n>
+        check_states:
+          - name: <check name>
+            state: <state>
+        observed_at: <RFC 3339 UTC timestamp, e.g. 2026-11-13T04:37:00Z>
+
+Where each field comes from (github MCP):
+
+  - `head_sha`: `pull_request_read` method `get` → `head.sha`.
+  - `latest_comment_id`: the largest numeric `id` across BOTH
+    `pull_request_read` method `get_review_comments` (inline code comments) and
+    `get_comments` (conversation comments on the PR). Omit (or 0) if there
+    are none.
+  - `latest_review_id`: the largest numeric `id` from `pull_request_read`
+    method `get_reviews`. Omit (or 0) if there are none.
+  - `review_threads` / `unresolved_threads`: the number of review threads from
+    `get_review_comments`, and how many of them have `isResolved: false`.
+  - `check_states`: one entry per check run AND commit status at the head SHA
+    — `pull_request_read` method `get_status` (and/or the `actions` check-run
+    tools for that SHA). `name` is the check run name (or status `context`);
+    `state` is the lowercase conclusion once completed (`success`, `failure`,
+    `cancelled`, `timed_out`, `skipped`, `neutral`, ...), otherwise the status
+    (`queued`, `in_progress`, `pending`). Sort the list by `name`. If a name
+    repeats, keep only the most recent run's state.
+  - `observed_at`: the current time, when you took these readings.
+
+Use numeric ids (not node ids). For a merged or closed PR, record what you
+read before it closed; if you didn't read its signals this poll, keep its
+previous `fingerprint:` block unchanged rather than inventing values. Never
+drop the `fingerprint:` block from an entry that had one.
 
 ## Task file schemas
 

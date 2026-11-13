@@ -41,6 +41,13 @@
 //   - [Client] — the /gateways HTTP API (Create, Delete, Alive).
 //   - [Manager] — mint/reuse/release policy over a Client and a Store.
 //   - [Store], [Record] — the persisted per-sandbox gateway state.
+//   - [Session] — a minimal MCP client (streamable HTTP, JSON-RPC 2.0) over
+//     one gateway URL: [OpenSession] (initialize + notifications/initialized,
+//     keeping Mcp-Session-Id), [Session.CallTool], [Session.Close]. JSON and
+//     SSE responses are both accepted. An error wrapping [ErrSessionLost]
+//     (404, 400 on a known session id, connection refused/reset) means open a
+//     new session; [ToolError] (isError: true) and [RPCError] leave the
+//     session usable. The daemon uses it for its review fingerprint check.
 //
 // # Collaborators
 //

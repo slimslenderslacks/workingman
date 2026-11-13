@@ -65,6 +65,17 @@
 //     becomes idle and watched; an adaptive #review poll compares PR
 //     fingerprints and runs the review agent on change, with fix-cycle and
 //     crash limits; merged PRs move the project to merged.
+//   - review_gateway.go: the daemon's own github-only MCP gateway
+//     ([WithReviewGateway]) for the PR fingerprint check: minted at Run (a
+//     stale one a crashed run recorded is deleted first), retried with
+//     backoff on failure, deleted at shutdown.
+//   - review_mcp.go: the PR fingerprint probe — github MCP pull_request_read
+//     calls on one lazily opened MCP session over that gateway, recreated
+//     with backoff when lost and closed at shutdown before the gateway.
+//     The daemon needs no gh CLI or local GitHub auth. The lifecycle, the
+//     fingerprint signals, the agent-recorded fallback, the poll backoff and
+//     the review_gateway_* / review_mcp_* / review_fingerprint_error audit
+//     events are documented in docs/mcp-gateway.md.
 //   - stop.go: status:stopped kills every session of the project and drops
 //     its schedules.
 //   - reaper.go: the stranded-session reaper, which closes sessions whose
@@ -96,7 +107,10 @@
 //     only instance.
 //   - [Option] — functional options for [New]: [WithRunner], [WithScheduler],
 //     [WithNotifier], [WithChannels], [WithStateFile], [WithRuntimeInfo],
-//     [WithWorkingmanAgent], [WithSessionIdleTimeout].
+//     [WithWorkingmanAgent], [WithSessionIdleTimeout], [WithReviewGateway].
+//   - [ReviewGatewayConfig] — the standalone-codemode root and record
+//     directory ([ReviewGatewayStateDir]) for the daemon's github-only
+//     gateway, given to [WithReviewGateway].
 //   - [ChannelSender] — interface for sending to a channel topic;
 //     *channels.Registry implements it. Given to [WithChannels].
 //   - [SessionInfo] — one live session as the TUI's sessions pane shows it;

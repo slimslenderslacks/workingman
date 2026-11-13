@@ -181,11 +181,20 @@ type ProjectLive struct {
 type ReviewPollInfo struct {
 	// Schedule is the currently registered poll spec (e.g. "@every 15m").
 	Schedule string `json:"schedule"`
-	// BackoffIndex is the rung on the adaptive cadence ladder (0 = fastest).
+	// BackoffIndex is the rung on the adaptive cadence ladder (0 = fastest,
+	// 2m doubling to a 1h cap). It steps up on every tick that shows no change —
+	// quiet ticks, and unverified ticks (MCP fingerprint unavailable) that still
+	// ran the agent — and resets to 0 on a detected change or a `:review` kick.
 	BackoffIndex int `json:"backoff_index"`
-	// HasBaseline is true once a PR fingerprint has been recorded, i.e. a poll
-	// has run and later quiet ticks can be recognised.
+	// HasBaseline is true once a PR fingerprint baseline exists: recorded after
+	// a clean reconcile (from the MCP probe, else the agent-recorded
+	// fingerprint), or seeded from project.yaml after a restart. Without one,
+	// no tick can be recognised as quiet.
 	HasBaseline bool `json:"has_baseline"`
+	// BaselineSource is where the baseline came from: "mcp" (the daemon's
+	// GitHub MCP probe) or "agent" (the fingerprint the review agent recorded
+	// in project.yaml). Empty without a baseline.
+	BaselineSource string `json:"baseline_source,omitempty"`
 }
 
 // SessionSnapshot is one agent session.

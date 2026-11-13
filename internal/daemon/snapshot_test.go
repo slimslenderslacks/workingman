@@ -221,9 +221,9 @@ func TestLiveSnapshotCarriesInMemoryState(t *testing.T) {
 	d.reviewFixCycles[alpha] = 4
 	d.reviewErrors[alpha] = 1
 	d.reviewBackoff[alpha] = 2
-	d.reviewFinger[alpha] = "fp"
+	d.reviewFinger[alpha] = reviewBaseline{fp: "fp", source: reviewFingerAgent}
 	d.reviewMu.Unlock()
-	if err := sched.Register(reviewPollKey(alpha), "@every 15m", func() {}); err != nil {
+	if err := sched.Register(reviewPollKey(alpha), "@every 8m", func() {}); err != nil {
 		t.Fatal(err)
 	}
 	if err := sched.Register(alpha, "@every 1h", func() {}); err != nil {
@@ -266,7 +266,7 @@ func TestLiveSnapshotCarriesInMemoryState(t *testing.T) {
 	if strings.Join(live.Sessions, ",") != "task,wolf" {
 		t.Errorf("live sessions = %v", live.Sessions)
 	}
-	if rp := live.ReviewPoll; rp == nil || rp.Schedule != "@every 15m" || rp.BackoffIndex != 2 || !rp.HasBaseline {
+	if rp := live.ReviewPoll; rp == nil || rp.Schedule != "@every 8m" || rp.BackoffIndex != 2 || !rp.HasBaseline || rp.BaselineSource != "agent" {
 		t.Errorf("review poll = %+v", rp)
 	}
 	if bl := findProject(t, s, "bravo").Live; bl == nil || bl.WolfInFlight || len(bl.Sessions) != 0 || bl.ReviewPoll != nil {

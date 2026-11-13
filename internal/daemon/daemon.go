@@ -84,13 +84,14 @@ type Daemon struct {
 	// and it must not penalise a long-lived PR that is merely being polled while
 	// idle (idle polls never touch this counter).
 	reviewMu        sync.Mutex
-	reviewFixCycles map[string]int    // keyed by project file path
-	reviewErrors    map[string]int    // consecutive review-agent crashes, keyed by project file path
-	reviewFinger    map[string]string // last PR fingerprint reconciled, keyed by project file path
-	reviewBackoff   map[string]int    // adaptive poll-interval index (into reviewPollSpecs), keyed by project file path
-	// reviewFingerprintFn, when set, overrides the host `gh` PR fingerprint used
-	// by the change-detection gate. Nil in production (uses the real gh probe);
-	// tests set it to exercise the gate without a network/gh dependency.
+	reviewFixCycles map[string]int            // keyed by project file path
+	reviewErrors    map[string]int            // consecutive review-agent crashes, keyed by project file path
+	reviewFinger    map[string]reviewBaseline // last PR fingerprint reconciled (and its source), keyed by project file path
+	reviewBackoff   map[string]int            // adaptive poll-interval index (into reviewPollSpecs), keyed by project file path
+	// reviewFingerprintFn, when set, overrides the GitHub MCP PR fingerprint
+	// used by the change-detection gate. Nil in production (uses the real MCP
+	// probe, review_mcp.go); tests set it to exercise the gate without a
+	// network/gateway dependency.
 	reviewFingerprintFn func(projectPath string, p *project.Project) (string, bool)
 	// reposWithCommitsFn, when set, overrides the git probe that lists repos
 	// whose branch has commits ahead of base (see reposWithCommits). Nil in
@@ -134,6 +135,18 @@ type Daemon struct {
 	// workingman is the workingman-agent supervision state; nil unless
 	// WithWorkingmanAgent. See workingman_agent.go.
 	workingman *workingmanAgent
+
+	// reviewGW is the daemon's own github-only MCP gateway for the PR
+	// fingerprint check; nil unless WithReviewGateway. See review_gateway.go.
+	// reviewGatewaySrc, when set, replaces it as what reviewGateway() returns
+	// (test seam).
+	reviewGW         *reviewGateway
+	reviewGatewaySrc reviewGatewaySource
+	// reviewMCPc is the daemon's one MCP session (over reviewGateway()) used
+	// by the PR fingerprint probe, created on first use; guarded by
+	// reviewMCPMu. See review_mcp.go.
+	reviewMCPMu sync.Mutex
+	reviewMCPc  *reviewMCP
 }
 
 const (
@@ -239,7 +252,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		cleanupInFlight:    map[string]bool{},
 		reviewFixCycles:    map[string]int{},
 		reviewErrors:       map[string]int{},
-		reviewFinger:       map[string]string{},
+		reviewFinger:       map[string]reviewBaseline{},
 		reviewBackoff:      map[string]int{},
 		dispatchChains:     map[string]chan struct{}{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
@@ -323,6 +336,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// rather than duplicated, and before the scan so a slow project dispatch
 	// can't delay it (nor it them).
 	d.beginWorkingmanAgent(ctx)
+	// Off the startup path: minting can take a while (or fail and back off),
+	// and nothing but the PR fingerprint check needs it.
+	d.startReviewGateway(ctx)
 	d.startupScan()
 	d.launchSleepyHead()
 	go d.reapLoop(ctx)
@@ -401,6 +417,11 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 func (d *Daemon) shutdown() {
 	defer d.writeFinalSnapshot()
 	d.watcher.Close()
+	// The MCP session lives on the review gateway: end it first.
+	d.closeReviewMCP()
+	if d.reviewGW != nil {
+		d.reviewGW.close()
+	}
 	if d.scheduler != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

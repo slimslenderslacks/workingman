@@ -16,6 +16,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/daemon"
+	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/power"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
@@ -230,6 +231,19 @@ func runDaemon(args []string) {
 	}
 	if *requireAC {
 		dopts = append(dopts, daemon.WithPowerSource(power.New(), 0))
+	}
+	if r.MCPGatewayURL != "" {
+		// The daemon's own github-only gateway, for the PR fingerprint check.
+		// Its record lives beside the per-sandbox ones, in a subdirectory the
+		// wrappers' sweep never looks at.
+		gwRoot, err := r.ResolveSessionsRoot()
+		if err != nil {
+			log.Fatal(err)
+		}
+		dopts = append(dopts, daemon.WithReviewGateway(daemon.ReviewGatewayConfig{
+			BaseURL:  r.MCPGatewayURL,
+			StateDir: daemon.ReviewGatewayStateDir(mcpgateway.StateDir(gwRoot)),
+		}))
 	}
 	dopts = append(dopts, ch.options(a)...)
 	stateFilePath, err := resolveStateFile(*stateFile, *sessionsRoot)
