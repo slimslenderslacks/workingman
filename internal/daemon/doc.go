@@ -65,6 +65,10 @@
 //     becomes idle and watched; an adaptive #review poll compares PR
 //     fingerprints and runs the review agent on change, with fix-cycle and
 //     crash limits; merged PRs move the project to merged.
+//   - review_gateway.go: the daemon's own github-only MCP gateway
+//     ([WithReviewGateway]) for the PR fingerprint check: minted at Run (a
+//     stale one a crashed run recorded is deleted first), retried with
+//     backoff on failure, deleted at shutdown.
 //   - stop.go: status:stopped kills every session of the project and drops
 //     its schedules.
 //   - reaper.go: the stranded-session reaper, which closes sessions whose

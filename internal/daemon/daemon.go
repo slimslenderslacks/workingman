@@ -134,6 +134,13 @@ type Daemon struct {
 	// workingman is the workingman-agent supervision state; nil unless
 	// WithWorkingmanAgent. See workingman_agent.go.
 	workingman *workingmanAgent
+
+	// reviewGW is the daemon's own github-only MCP gateway for the PR
+	// fingerprint check; nil unless WithReviewGateway. See review_gateway.go.
+	// reviewGatewaySrc, when set, replaces it as what reviewGateway() returns
+	// (test seam).
+	reviewGW         *reviewGateway
+	reviewGatewaySrc reviewGatewaySource
 }
 
 const (
@@ -323,6 +330,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// rather than duplicated, and before the scan so a slow project dispatch
 	// can't delay it (nor it them).
 	d.beginWorkingmanAgent(ctx)
+	// Off the startup path: minting can take a while (or fail and back off),
+	// and nothing but the PR fingerprint check needs it.
+	d.startReviewGateway(ctx)
 	d.startupScan()
 	d.launchSleepyHead()
 	go d.reapLoop(ctx)
@@ -401,6 +411,9 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 func (d *Daemon) shutdown() {
 	defer d.writeFinalSnapshot()
 	d.watcher.Close()
+	if d.reviewGW != nil {
+		d.reviewGW.close()
+	}
 	if d.scheduler != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
