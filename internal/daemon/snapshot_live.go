@@ -455,12 +455,12 @@ func (d *Daemon) projectLive(projectPath string, sessions []SessionSnapshot) *Pr
 	live.ReviewFixCycles = d.reviewFixCycles[projectPath]
 	live.ReviewErrors = d.reviewErrors[projectPath]
 	idx := d.reviewBackoff[projectPath]
-	_, hasBaseline := d.reviewFinger[projectPath]
+	baseline, hasBaseline := d.reviewFinger[projectPath]
 	d.reviewMu.Unlock()
 
 	if d.scheduler != nil {
 		if spec := d.scheduler.Spec(reviewPollKey(projectPath)); spec != "" {
-			live.ReviewPoll = &ReviewPollInfo{Schedule: spec, BackoffIndex: idx, HasBaseline: hasBaseline}
+			live.ReviewPoll = &ReviewPollInfo{Schedule: spec, BackoffIndex: idx, HasBaseline: hasBaseline, BaselineSource: baseline.source}
 		}
 		live.CronSchedule = d.scheduler.Spec(projectPath)
 	}

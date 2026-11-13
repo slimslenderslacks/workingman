@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
@@ -318,8 +319,8 @@ func TestReviewPollBacksOffWhenQuietAndResetsOnChange(t *testing.T) {
 
 	// Establish the baseline the way a clean reconcile does.
 	d.afterReviewSession(projectPath, nil)
-	if got, ok := d.lastReviewFinger(projectPath); !ok || got != "same" {
-		t.Fatalf("baseline fingerprint = (%q,%v), want (same,true)", got, ok)
+	if got, ok := d.lastReviewFinger(projectPath); !ok || got.fp != "same" || got.source != reviewFingerMCP {
+		t.Fatalf("baseline = (%+v,%v), want (same/mcp,true)", got, ok)
 	}
 	d.ensureReviewPoll(projectPath) // arm at base cadence
 	if sched.Spec(reviewPollKey(projectPath)) != reviewPollSpecs[0] {
@@ -502,5 +503,216 @@ func TestMergedTransition(t *testing.T) {
 	}
 	if got := run(t, project.StatusBlocked, merged, nil, true); got.Status != project.StatusBlocked {
 		t.Errorf("blocked project must not move to merged, got %q", got.Status)
+	}
+}
+
+// TestReviewPollSpecsDoubleToHourCap pins the backoff ladder's shape: it starts
+// at 2m, doubles each rung, and is capped at ~1h.
+func TestReviewPollSpecsDoubleToHourCap(t *testing.T) {
+	var prev time.Duration
+	for i, spec := range reviewPollSpecs {
+		d, err := time.ParseDuration(strings.TrimPrefix(spec, "@every "))
+		if err != nil {
+			t.Fatalf("spec %q: %v", spec, err)
+		}
+		switch {
+		case i == 0 && d != 2*time.Minute:
+			t.Errorf("base rung = %v, want 2m", d)
+		case i > 0 && i < len(reviewPollSpecs)-1 && d != 2*prev:
+			t.Errorf("rung %d = %v, want double %v", i, d, prev)
+		case i == len(reviewPollSpecs)-1 && (d != time.Hour || d <= prev || d > 2*prev):
+			t.Errorf("cap rung = %v after %v, want 1h", d, prev)
+		}
+		prev = d
+	}
+}
+
+// reviewWatchedProject writes an idle-and-watching project with one PR. fp,
+// when non-nil, is the fingerprint the review agent recorded for it.
+func reviewWatchedProject(t *testing.T, root string, fp *project.PRFingerprint) (string, *project.Project) {
+	t.Helper()
+	projectPath := filepath.Join(root, "project.yaml")
+	p := &project.Project{
+		Description: "x", Branch: "b", Status: project.StatusIdle, Review: true,
+		Repos: []project.Repo{{Org: "docker", Name: "gateway"}},
+		PullRequests: []project.PullRequest{{
+			Repo: "docker/gateway", Number: 1, State: "open", HeadSHA: "abc", Fingerprint: fp,
+		}},
+	}
+	if err := project.SaveAs(projectPath, p, project.WriterAgent); err != nil {
+		t.Fatalf("SaveAs: %v", err)
+	}
+	return projectPath, p
+}
+
+// TestReviewPollComparesMCPFingerprint: with an MCP baseline, an equal MCP
+// fingerprint is quiet (no dispatch, one rung slower) and a different one
+// dispatches and snaps the cadence back to fast.
+func TestReviewPollComparesMCPFingerprint(t *testing.T) {
+	root := t.TempDir()
+	d, buf, sched := newReviewDaemon(t, root)
+	projectPath, _ := reviewWatchedProject(t, root, nil)
+	fp := "one"
+	d.reviewFingerprintFn = func(string, *project.Project) (string, bool) { return fp, true }
+
+	d.afterReviewSession(projectPath, nil) // clean reconcile records the baseline
+	if b, ok := d.lastReviewFinger(projectPath); !ok || b.fp != "one" || b.source != reviewFingerMCP {
+		t.Fatalf("baseline = (%+v,%v), want MCP baseline \"one\"", b, ok)
+	}
+	d.rescheduleReviewPoll(projectPath, reviewPollSpecs[0])
+
+	buf.Reset()
+	d.onReviewPoll(projectPath)
+	if strings.Contains(buf.String(), "review_poll_fired") || !strings.Contains(buf.String(), "review_poll_quiet") {
+		t.Errorf("unchanged fingerprint should be quiet:\n%s", buf.String())
+	}
+	if got := sched.Spec(reviewPollKey(projectPath)); got != reviewPollSpecs[1] {
+		t.Errorf("cadence after quiet tick = %q, want %q", got, reviewPollSpecs[1])
+	}
+
+	fp = "two"
+	buf.Reset()
+	d.onReviewPoll(projectPath)
+	if !strings.Contains(buf.String(), "review_poll_fired") || !strings.Contains(buf.String(), "reason=changed") {
+		t.Errorf("changed fingerprint should dispatch:\n%s", buf.String())
+	}
+	if got := sched.Spec(reviewPollKey(projectPath)); got != reviewPollSpecs[0] {
+		t.Errorf("cadence after change = %q, want fast %q", got, reviewPollSpecs[0])
+	}
+}
+
+// TestReviewPollSeedsBaselineFromAgentFingerprint: after a restart (no
+// in-memory baseline) the agent-recorded fingerprint in project.yaml is the
+// baseline, so an MCP probe showing the PR exactly as the agent last saw it is
+// quiet rather than a forced dispatch.
+func TestReviewPollSeedsBaselineFromAgentFingerprint(t *testing.T) {
+	root := t.TempDir()
+	d, buf, sched := newReviewDaemon(t, root)
+	recorded := &project.PRFingerprint{LatestCommentID: 7, CheckStates: []project.CheckState{{Name: "ci", State: "success"}}}
+	projectPath, p := reviewWatchedProject(t, root, recorded)
+	agentFP, ok := agentRecordedFingerprint(p)
+	if !ok {
+		t.Fatal("precondition: agent fingerprint should be usable")
+	}
+	mcpFP := agentFP
+	d.reviewFingerprintFn = func(string, *project.Project) (string, bool) { return mcpFP, true }
+	d.rescheduleReviewPoll(projectPath, reviewPollSpecs[0])
+
+	d.onReviewPoll(projectPath)
+	if !strings.Contains(buf.String(), "review_poll_quiet") || !strings.Contains(buf.String(), "baseline=agent") {
+		t.Errorf("MCP fingerprint equal to the agent-recorded one should be quiet:\n%s", buf.String())
+	}
+	if b, ok := d.lastReviewFinger(projectPath); !ok || b.source != reviewFingerAgent {
+		t.Errorf("baseline = (%+v,%v), want seeded from agent", b, ok)
+	}
+	if rp := d.projectLive(projectPath, nil).ReviewPoll; rp == nil || !rp.HasBaseline || rp.BaselineSource != "agent" || rp.BackoffIndex != 1 {
+		t.Errorf("snapshot review_poll = %+v, want has_baseline/agent at rung 1", rp)
+	}
+
+	// Something new on the PR: the MCP probe no longer matches → dispatch.
+	mcpFP = "different"
+	buf.Reset()
+	d.onReviewPoll(projectPath)
+	if !strings.Contains(buf.String(), "reason=changed") {
+		t.Errorf("expected a changed dispatch:\n%s", buf.String())
+	}
+	if got := sched.Spec(reviewPollKey(projectPath)); got != reviewPollSpecs[0] {
+		t.Errorf("cadence = %q, want fast", got)
+	}
+}
+
+// TestReviewPollUnverifiedFailsOpenWithBackoff: with the MCP check unavailable
+// every tick still dispatches the agent (fail open) but the cadence keeps
+// backing off to the cap instead of running every 2m; the agent-recorded
+// fingerprint becomes the baseline, and a change in it snaps back to fast.
+func TestReviewPollUnverifiedFailsOpenWithBackoff(t *testing.T) {
+	root := t.TempDir()
+	d, buf, sched := newReviewDaemon(t, root)
+	projectPath, _ := reviewWatchedProject(t, root, nil)
+	d.reviewFingerprintFn = func(string, *project.Project) (string, bool) { return "", false }
+	d.ensureReviewPoll(projectPath)
+
+	for i := 1; i <= len(reviewPollSpecs); i++ {
+		buf.Reset()
+		d.onReviewPoll(projectPath)
+		if !strings.Contains(buf.String(), "review_poll_fired") || !strings.Contains(buf.String(), "reason=unverified") {
+			t.Fatalf("tick %d: unverified poll must still dispatch:\n%s", i, buf.String())
+		}
+		want := reviewPollSpecs[min(i, len(reviewPollSpecs)-1)]
+		if got := sched.Spec(reviewPollKey(projectPath)); got != want {
+			t.Fatalf("tick %d: cadence = %q, want %q", i, got, want)
+		}
+	}
+
+	// Neither source: the clean reconcile records no baseline, cadence untouched.
+	d.afterReviewSession(projectPath, nil)
+	if _, ok := d.lastReviewFinger(projectPath); ok {
+		t.Errorf("baseline recorded with no fingerprint source")
+	}
+	if !strings.Contains(buf.String(), "review_baseline_unavailable") {
+		t.Errorf("expected review_baseline_unavailable:\n%s", buf.String())
+	}
+	if rp := d.projectLive(projectPath, nil).ReviewPoll; rp == nil || rp.HasBaseline || rp.BackoffIndex != len(reviewPollSpecs)-1 {
+		t.Errorf("snapshot review_poll = %+v, want capped, no baseline", rp)
+	}
+
+	// The agent records a fingerprint: it becomes the (first) baseline, which
+	// counts as a change → fast cadence.
+	record := func(id int64) { reviewWatchedProject(t, root, &project.PRFingerprint{LatestCommentID: id}) }
+	record(1)
+	d.afterReviewSession(projectPath, nil)
+	if b, ok := d.lastReviewFinger(projectPath); !ok || b.source != reviewFingerAgent {
+		t.Fatalf("baseline = (%+v,%v), want agent", b, ok)
+	}
+	if got := sched.Spec(reviewPollKey(projectPath)); got != reviewPollSpecs[0] {
+		t.Errorf("cadence after first agent baseline = %q, want fast", got)
+	}
+
+	// Unchanged agent fingerprint after another blind tick: keep backing off.
+	d.onReviewPoll(projectPath)
+	d.afterReviewSession(projectPath, nil)
+	if got := sched.Spec(reviewPollKey(projectPath)); got != reviewPollSpecs[1] {
+		t.Errorf("cadence after unchanged agent fingerprint = %q, want %q", got, reviewPollSpecs[1])
+	}
+
+	// The agent saw something new: snap back.
+	d.onReviewPoll(projectPath)
+	record(2)
+	d.afterReviewSession(projectPath, nil)
+	if got := sched.Spec(reviewPollKey(projectPath)); got != reviewPollSpecs[0] {
+		t.Errorf("cadence after changed agent fingerprint = %q, want fast", got)
+	}
+	if rp := d.projectLive(projectPath, nil).ReviewPoll; rp == nil || rp.BackoffIndex != 0 || !rp.HasBaseline {
+		t.Errorf("snapshot review_poll = %+v, want rung 0 with baseline", rp)
+	}
+}
+
+// TestRecordReviewBaselinePrefersMCP: when both sources exist the MCP probe
+// is the baseline; the agent-recorded fingerprint is only the fallback.
+func TestRecordReviewBaselinePrefersMCP(t *testing.T) {
+	root := t.TempDir()
+	d, _, _ := newReviewDaemon(t, root)
+	projectPath, p := reviewWatchedProject(t, root, &project.PRFingerprint{LatestReviewID: 3})
+	d.reviewFingerprintFn = func(string, *project.Project) (string, bool) { return "mcp-fp", true }
+	d.recordReviewBaseline(projectPath, p)
+	if b, ok := d.lastReviewFinger(projectPath); !ok || b.fp != "mcp-fp" || b.source != reviewFingerMCP {
+		t.Errorf("baseline = (%+v,%v), want mcp-fp/mcp", b, ok)
+	}
+}
+
+// TestReviewBackoffGrowCapReset pins the rung arithmetic directly.
+func TestReviewBackoffGrowCapReset(t *testing.T) {
+	root := t.TempDir()
+	d, _, _ := newReviewDaemon(t, root)
+	path := filepath.Join(root, "project.yaml")
+	for i := 1; i < len(reviewPollSpecs)+3; i++ {
+		want := reviewPollSpecs[min(i, len(reviewPollSpecs)-1)]
+		if got := d.growReviewBackoff(path); got != want {
+			t.Fatalf("grow %d = %q, want %q", i, got, want)
+		}
+	}
+	d.resetReviewBackoff(path)
+	if got := d.growReviewBackoff(path); got != reviewPollSpecs[1] {
+		t.Errorf("grow after reset = %q, want %q", got, reviewPollSpecs[1])
 	}
 }

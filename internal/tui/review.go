@@ -25,7 +25,7 @@ import (
 //     is the manual path for a project that finished before it had a
 //     reviewable PR (or before this feature existed).
 //   - idle, already watching → the loop is already running but the PR poll may
-//     be sitting on a slow backoff rung (up to 30m). Set the one-shot
+//     be sitting on a slow backoff rung (up to 1h). Set the one-shot
 //     ReviewNow flag so the daemon runs the review agent immediately (see
 //     Project.ReviewNow).
 //

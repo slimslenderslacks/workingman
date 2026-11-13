@@ -330,16 +330,35 @@ behavior regardless of `WatchingPR()`.
 `#review` scheduler entry and kicks an immediate review-agent run.
 
 The poll (`onReviewPoll`) uses a **change-detection gate** to avoid running
-an expensive review agent on every tick: `reviewPRFingerprint` hashes each
-watched PR's `headRefOid`, `updatedAt`, and `statusCheckRollup` (via `gh pr
-view`, no sandbox needed). If the fingerprint is unchanged since the last
-reconcile, the tick is "quiet" — the cadence steps to the next, slower rung
-and the review agent is *not* launched. A changed (or not-yet-known)
-fingerprint runs the agent and snaps the cadence back to the fastest rung.
-The backoff ladder, `reviewPollSpecs`, is:
+an expensive review agent on every tick: `reviewPRFingerprint` reads each
+watched PR's head SHA, state, latest comment/review ids, review-thread counts
+and check states over the daemon's github-only MCP gateway (no sandbox, no
+`gh`) and hashes them with `project.PRsFingerprint`. That is compared with the
+**baseline** taken after the last clean reconcile (`recordReviewBaseline`):
+
+- **quiet** — MCP fingerprint equals the baseline: the cadence steps one rung
+  slower and the review agent is *not* launched (`review_poll_quiet`).
+- **changed / no baseline** — the agent runs and the cadence snaps back to the
+  fastest rung (`review_poll_fired reason=changed|no_baseline`).
+- **unverified** — the MCP fingerprint is unavailable (gateway/session down, a
+  tool call failed, or no PR recorded yet). The gate fails open — the agent
+  runs, so no signal is hidden — but the cadence *still* steps one rung slower
+  (`review_poll_fired reason=unverified`) rather than re-running the agent
+  every 2m indefinitely. This is safe because each such tick does run the
+  agent, which sees the full PR state; the backoff only bounds how quickly new
+  activity is noticed (at most one top rung, or immediately on `:review`).
+
+The baseline prefers the MCP probe and falls back to the fingerprint the
+review agent records under `pull_requests[].fingerprint` in `project.yaml`
+(same canonical shape, directly comparable). After a daemon restart the
+in-memory baseline is seeded from that agent-recorded fingerprint, so a quiet
+PR is not re-reviewed just because the daemon restarted. A new baseline that
+differs from the previous one also snaps the cadence back to fast — that is
+how change is detected while the MCP probe is down. The backoff ladder,
+`reviewPollSpecs`, is:
 
 ```
-@every 2m → @every 5m → @every 15m → @every 30m (capped)
+@every 2m → 4m → 8m → 16m → 32m → @every 1h (capped)
 ```
 
 A `:review` command on an already-watching project sets `ReviewNow`, which

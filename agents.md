@@ -596,11 +596,14 @@ and a PR actually being merged.)*
 committed and either `p.Review` is set or the project has repos and hasn't
 opted out (`p.NoReview`) and isn't an idle recurring-cron project. From there,
 `ensureReviewPoll` registers an adaptive-backoff cron poll
-(`reviewPollSpecs`: 2m/5m/15m/30m, keyed `projectPath + "#review"`) and kicks
-an immediate reconcile. `onReviewPoll` re-fires it on each tick unless a cheap
-host-side `gh pr view` fingerprint (head SHA + `updatedAt` + check rollup)
-shows nothing changed since the last reconcile, in which case it only backs
-off the cadence without launching an agent. A `:review` command
+(`reviewPollSpecs`: 2m/4m/8m/16m/32m/1h, keyed `projectPath + "#review"`) and
+kicks an immediate reconcile. `onReviewPoll` re-fires it on each tick unless a
+cheap host-side GitHub MCP fingerprint (head SHA, latest comment/review ids,
+thread counts, check states) matches the baseline from the last reconcile, in
+which case it only backs off the cadence without launching an agent. When the
+MCP probe is unavailable it falls back to the fingerprint the review agent
+recorded in `project.yaml` as the baseline, and fails open (runs the agent)
+while still backing off. A `:review` command
 (`ReviewNow`) or a poll detecting change snaps the cadence back to the front
 and dispatches immediately (`dispatchReviewAgent`, deduped against any
 project-root session already running).

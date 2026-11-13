@@ -84,10 +84,10 @@ type Daemon struct {
 	// and it must not penalise a long-lived PR that is merely being polled while
 	// idle (idle polls never touch this counter).
 	reviewMu        sync.Mutex
-	reviewFixCycles map[string]int    // keyed by project file path
-	reviewErrors    map[string]int    // consecutive review-agent crashes, keyed by project file path
-	reviewFinger    map[string]string // last PR fingerprint reconciled, keyed by project file path
-	reviewBackoff   map[string]int    // adaptive poll-interval index (into reviewPollSpecs), keyed by project file path
+	reviewFixCycles map[string]int            // keyed by project file path
+	reviewErrors    map[string]int            // consecutive review-agent crashes, keyed by project file path
+	reviewFinger    map[string]reviewBaseline // last PR fingerprint reconciled (and its source), keyed by project file path
+	reviewBackoff   map[string]int            // adaptive poll-interval index (into reviewPollSpecs), keyed by project file path
 	// reviewFingerprintFn, when set, overrides the GitHub MCP PR fingerprint
 	// used by the change-detection gate. Nil in production (uses the real MCP
 	// probe, review_mcp.go); tests set it to exercise the gate without a
@@ -252,7 +252,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		cleanupInFlight:    map[string]bool{},
 		reviewFixCycles:    map[string]int{},
 		reviewErrors:       map[string]int{},
-		reviewFinger:       map[string]string{},
+		reviewFinger:       map[string]reviewBaseline{},
 		reviewBackoff:      map[string]int{},
 		dispatchChains:     map[string]chan struct{}{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,

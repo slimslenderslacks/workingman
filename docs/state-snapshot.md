@@ -136,7 +136,7 @@ Optional fields are omitted when empty.
 | `review_agent_in_flight` | a review agent run is active |
 | `planning_failures`, `project_failures` | consecutive cycles that didn't advance the project (circuit breakers at 3) |
 | `review_fix_cycles`, `review_errors` | consecutive review fix cycles (cap 10) / review-agent crashes (cap 5) |
-| `review_poll` | `{schedule, backoff_index, has_baseline}` when a PR poll is armed; `backoff_index` 0 is the fastest rung |
+| `review_poll` | `{schedule, backoff_index, has_baseline, baseline_source}` when a PR poll is armed. `backoff_index` is the rung on the 2m→4m→8m→16m→32m→1h ladder (0 = fastest): it steps up on every tick that shows no change — quiet ticks, and "unverified" ticks where the MCP fingerprint was unavailable (those still run the review agent) — and resets to 0 on a detected change or a `:review` kick. `has_baseline` is true once a fingerprint baseline exists (recorded after a clean reconcile, or seeded from the agent-recorded fingerprint in `project.yaml` after a restart); `baseline_source` is `mcp` (daemon GitHub MCP probe) or `agent` (agent-recorded fallback), omitted without a baseline |
 | `cron_schedule` | cron spec registered with the scheduler |
 
 ### `sessions[]`

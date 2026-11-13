@@ -228,7 +228,7 @@ type Project struct {
 	// ReviewNow is the one-shot *request* flag behind `:review` on a project
 	// that is already idle-and-watching (see WatchingPR): "run the review
 	// agent now" instead of waiting for the next scheduled poll. The PR poll
-	// backs off to as slow as 30m when a PR is quiet (see reviewPollSpecs), so
+	// backs off to as slow as 1h when a PR is quiet (see reviewPollSpecs), so
 	// a human who wants an on-demand reconcile needs a way to jump the queue.
 	//
 	// It follows the same request-flag contract as Cleanup: the TUI sets it and
