@@ -366,8 +366,8 @@ daemon ignores its own fsnotify events.
   (projects, tasks, the wolf, the logs) for a human on a messaging channel, and,
   when asked (after confirming), changes it by editing the orch roots: stop/start
   a work stream, summon the wolf, retry a task, unblock a project, queue intake
-  work, start a new project. On automatically when `channels.yaml` has an
-  inbound-capable channel; the snapshot, logs and every session's stream are
+  work, start a new project. On automatically whenever `--acp-kit` is set
+  (with or without channels; talk to it from the TUI too); the snapshot, logs and every session's stream are
   mounted read-only. See [agents.md §8](agents.md#8-workingman-agent).
 - **State snapshot** (`--state-file`, `orch status`): the daemon's in-memory
   state (live sessions, wolf in flight, failure counters, review polls)

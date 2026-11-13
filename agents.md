@@ -773,9 +773,9 @@ run's flags, not by any project. It appears in the TUI session list like any
 other session.
 
 **Flag.** `orch --workingman-agent[=auto|on|off]`. The default `auto` turns it
-on only when `--acp-kit` is set **and** `channels.yaml` has an enabled
-inbound-capable channel (`channels.Config.HasInboundChannel`) — until a human
-can message it there is nobody to answer. `--workingman-agent` / `=on` forces it
+on whenever `--acp-kit` is set, whether or not `channels.yaml` configures any
+channels: a human can talk to it from its TUI session tab as well as from an
+inbound channel. `--workingman-agent` / `=on` forces it
 on (and is a startup error without `--acp-kit`); `=off` disables it.
 
 **Attaching.** `Daemon.WorkingmanAgentSession()` returns the live session's

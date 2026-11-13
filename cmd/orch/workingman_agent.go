@@ -38,12 +38,12 @@ func (f *workingmanFlag) Set(s string) error {
 }
 
 // workingmanAgentEnabled decides whether the daemon runs the workingman agent,
-// and says why (for the audit log). Default off until a human can actually talk
-// to it: auto turns it on only when an inbound-capable channel is configured,
-// since otherwise nobody can ask it anything. It always needs the ACP launcher
-// (--acp-kit): the agent is a persistent sandboxed session with read-only
-// mounts, which the legacy terminal-tab path cannot provide.
-func workingmanAgentEnabled(mode workingmanFlag, ch *daemonChannels, acpKit string) (bool, string) {
+// and says why (for the audit log). auto turns it on whenever --acp-kit is set,
+// with or without channels: a human can talk to it from the local TUI as well
+// as from an inbound channel. It always needs the ACP launcher (--acp-kit): the
+// agent is a persistent sandboxed session with read-only mounts, which the
+// legacy terminal-tab path cannot provide.
+func workingmanAgentEnabled(mode workingmanFlag, acpKit string) (bool, string) {
 	switch mode {
 	case workingmanOff:
 		return false, "--workingman-agent=off"
@@ -56,8 +56,5 @@ func workingmanAgentEnabled(mode workingmanFlag, ch *daemonChannels, acpKit stri
 	if acpKit == "" {
 		return false, "auto: no --acp-kit"
 	}
-	if ch == nil || !ch.enabled() || !ch.cfg.HasInboundChannel() {
-		return false, "auto: no inbound-capable channel configured"
-	}
-	return true, "auto: inbound-capable channel configured"
+	return true, "auto: --acp-kit set"
 }
