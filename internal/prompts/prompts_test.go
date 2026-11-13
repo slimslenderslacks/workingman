@@ -386,6 +386,20 @@ func TestRenderReview(t *testing.T) {
 		"status: idle",              // the status it settles at either way
 		"merged or closed",          // the terminal condition
 		"updated_by: agent",         // write convention
+		// The fingerprint block it records on every poll for the daemon's
+		// change detection (project.PRFingerprint's YAML keys) and where each
+		// field comes from in the github MCP.
+		"fingerprint:",
+		"latest_comment_id:",
+		"latest_review_id:",
+		"review_threads:",
+		"unresolved_threads:",
+		"check_states:",
+		"observed_at:",
+		"get_review_comments",
+		"get_comments",
+		"get_reviews",
+		"get_status",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in review prompt:\n%s", want, out)

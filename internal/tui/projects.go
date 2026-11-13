@@ -570,7 +570,7 @@ func projectViewEqual(a, b ProjectView) bool {
 		return false
 	}
 	for i := range a.PullRequests {
-		if a.PullRequests[i] != b.PullRequests[i] {
+		if !a.PullRequests[i].Equal(b.PullRequests[i]) {
 			return false
 		}
 	}

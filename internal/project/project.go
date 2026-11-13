@@ -286,13 +286,31 @@ type Project struct {
 // PullRequest is the review agent's record of one GitHub pull request that backs
 // a project's branch (a project may have several — one per repo — see
 // Project.PullRequests). It is agent-written (stamped on each poll) and read by
-// the TUI; State is one of "open", "merged", "closed".
+// the TUI; State is one of "open", "merged", "closed". Fingerprint is the
+// review agent's record of the PR activity it observed on that poll (see
+// PRFingerprint); together with HeadSHA it is the agent-side baseline for the
+// daemon's change detection.
 type PullRequest struct {
-	Repo    string `yaml:"repo"`
-	Number  int    `yaml:"number"`
-	URL     string `yaml:"url,omitempty"`
-	HeadSHA string `yaml:"head_sha,omitempty"`
-	State   string `yaml:"state,omitempty"`
+	Repo        string         `yaml:"repo"`
+	Number      int            `yaml:"number"`
+	URL         string         `yaml:"url,omitempty"`
+	HeadSHA     string         `yaml:"head_sha,omitempty"`
+	State       string         `yaml:"state,omitempty"`
+	Fingerprint *PRFingerprint `yaml:"fingerprint,omitempty"`
+}
+
+// Equal reports whether pr and o record the same PR state, comparing the
+// Fingerprint block by value (PullRequest isn't == comparable through the
+// pointer in a useful way).
+func (pr PullRequest) Equal(o PullRequest) bool {
+	if pr.Repo != o.Repo || pr.Number != o.Number || pr.URL != o.URL ||
+		pr.HeadSHA != o.HeadSHA || pr.State != o.State {
+		return false
+	}
+	if pr.Fingerprint == nil || o.Fingerprint == nil {
+		return pr.Fingerprint == nil && o.Fingerprint == nil
+	}
+	return pr.Fingerprint.Equal(*o.Fingerprint)
 }
 
 // Empty reports whether the file is the unpopulated placeholder the project

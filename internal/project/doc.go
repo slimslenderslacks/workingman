@@ -33,7 +33,9 @@
 //   - [Repo] — one repo entry; accepts the {org, name} mapping or the
 //     "org/name[@base]" shorthand.
 //   - [PullRequest] — one PR the review agent is watching, stamped on each
-//     poll.
+//     poll, with the [PRFingerprint] it observed. [PullRequest.CanonicalFingerprint]
+//     and [PRsFingerprint] give the comparable encoding shared with the
+//     daemon's own MCP-probed fingerprint.
 //   - [BlockedSession] — blocked-session.yaml, the wolf agent's running
 //     diagnosis of why the project is blocked, kept across wolf runs.
 //   - [PlannedSnapshot] — last-planned.yaml, the daemon-only copy of the
