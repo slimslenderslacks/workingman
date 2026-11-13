@@ -100,7 +100,7 @@ orch whatsapp setup        # credentials, owner allowlist, webhook; prints what 
 orch whatsapp status       # masked config, Graph reachability, webhook listener
 orch whatsapp test         # send a test message to the owner
 
-# the workingman agent turns itself on when --acp-kit is set and an inbound channel exists
+# the workingman agent turns itself on whenever --acp-kit is set
 orch --root ~/orch --acp-kit <kit> --headless
 ```
 
@@ -500,7 +500,7 @@ Free tunnels change their URL on restart; re-register the callback when it does.
 | Messages sent from the phone get no reply | sender not in `allow_from` (audit/`channels.log`: `sender_not_allowlisted`); webhook not subscribed to `messages`; signature failures (`rejected_signature` in `/health` — wrong app secret); app still in development and the sender isn't a recipient |
 | Wolf started but no WhatsApp message | outside the 24-hour window (`channel_send_error`, 131047): message the number once, then retry; no `wolf` (or `*`) route; rate-limited (`wolf_start_suppressed`); the start message is sent only once the session really started |
 | Replying to the wolf message says the wolf ended / is from an earlier session | the wolf session ended or was relaunched; reply to the newer message, or `/wolf` |
-| "The workingman agent is starting up, try again in a minute." | agent not running yet or being relaunched (it restarts with 5s→5m backoff): check `workingman_agent_*` audit events; it needs `--acp-kit` and `--workingman-agent` (auto-on only with an inbound channel) |
+| "The workingman agent is starting up, try again in a minute." | agent not running yet or being relaunched (it restarts with 5s→5m backoff): check `workingman_agent_*` audit events; it needs `--acp-kit` and `--workingman-agent` (auto-on whenever `--acp-kit` is set) |
 | `/wolf` says the wolf cannot be attached | the wolf runs on the host in a terminal tab (`--wolf-host`); only ACP wolves can be tuned into |
 | Wolf never starts working under `--headless` | nobody sends a wolf its opening prompt headless; run the TUI |
 | Reply says "I cancelled it" | the turn exceeded `router.turn_timeout` |

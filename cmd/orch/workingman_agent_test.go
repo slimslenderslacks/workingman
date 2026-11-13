@@ -3,8 +3,6 @@ package main
 import (
 	"flag"
 	"testing"
-
-	"github.com/slimslenderslacks/work/internal/channels"
 )
 
 func parseWorkingmanFlag(t *testing.T, args ...string) workingmanFlag {
@@ -41,36 +39,20 @@ func TestWorkingmanFlagParsing(t *testing.T) {
 	}
 }
 
-func chWith(t *testing.T, yaml string) *daemonChannels {
-	t.Helper()
-	cfg, err := channels.Parse([]byte(yaml))
-	if err != nil {
-		t.Fatalf("parse channels config: %v", err)
-	}
-	return &daemonChannels{reg: channels.NewRegistry(), cfg: cfg}
-}
-
 func TestWorkingmanAgentEnabled(t *testing.T) {
-	inbound := chWith(t, "channels:\n  whatsapp:\n    type: whatsapp\n")
-	disabled := chWith(t, "channels:\n  whatsapp:\n    type: whatsapp\n    enabled: false\n")
-
 	for _, tc := range []struct {
 		name string
 		mode workingmanFlag
-		ch   *daemonChannels
 		kit  string
 		want bool
 	}{
-		{"auto, no channels", workingmanAuto, &daemonChannels{}, "kit", false},
-		{"auto, nil channels", workingmanAuto, nil, "kit", false},
-		{"auto, only a disabled channel", workingmanAuto, disabled, "kit", false},
-		{"auto, inbound channel", workingmanAuto, inbound, "kit", true},
-		{"auto, inbound channel but no ACP kit", workingmanAuto, inbound, "", false},
-		{"off wins over an inbound channel", workingmanOff, inbound, "kit", false},
-		{"on without channels", workingmanOn, &daemonChannels{}, "kit", true},
-		{"on without ACP kit", workingmanOn, &daemonChannels{}, "", false},
+		{"auto with ACP kit", workingmanAuto, "kit", true},
+		{"auto without ACP kit", workingmanAuto, "", false},
+		{"off wins over the ACP kit", workingmanOff, "kit", false},
+		{"on with ACP kit", workingmanOn, "kit", true},
+		{"on without ACP kit", workingmanOn, "", false},
 	} {
-		got, why := workingmanAgentEnabled(tc.mode, tc.ch, tc.kit)
+		got, why := workingmanAgentEnabled(tc.mode, tc.kit)
 		if got != tc.want {
 			t.Errorf("%s: enabled = %v (%s), want %v", tc.name, got, why, tc.want)
 		}

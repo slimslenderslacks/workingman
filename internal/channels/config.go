@@ -320,8 +320,7 @@ var inboundTypes = map[string]bool{"whatsapp": true, "signal": true}
 func (c ChannelConfig) InboundCapable() bool { return c.IsEnabled() && inboundTypes[c.Type] }
 
 // HasInboundChannel reports whether at least one enabled channel can receive
-// messages. The daemon uses it to decide whether a human can be asking
-// questions at all, and so whether the workingman agent has anyone to answer.
+// messages, i.e. whether a human can be asking questions over a channel at all.
 func (c *Config) HasInboundChannel() bool {
 	if c == nil {
 		return false

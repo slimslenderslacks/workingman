@@ -332,7 +332,7 @@ echo back and are not treated as the owner typing.
 | Duplicate messages | two signal-cli instances (or a second linked device running the same bot) on the same account |
 | Rate-limit warnings (`signal: rate limited`) | Signal throttled sends; the channel waits and retries once, then reports a send error |
 | Replying to the wolf message is treated as a plain message | the reply was made in a group (not quoted), or to a message the daemon did not send; reply to the `🐺` message itself |
-| Workingman agent "starting up" / never answers | see the [channels.md troubleshooting](channels.md#troubleshooting): it needs `--acp-kit` and an enabled inbound channel |
+| Workingman agent "starting up" / never answers | see the [channels.md troubleshooting](channels.md#troubleshooting): it needs `--acp-kit` (and, to reach it from Signal, an enabled inbound channel) |
 
 Logs: the audit log (`channel_*`, `router_*`, `wolf_*` events) and `channels.log`
 beside it. signal-cli's own log is the place for registration, rate-limit and

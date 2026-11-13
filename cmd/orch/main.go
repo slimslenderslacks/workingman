@@ -115,7 +115,7 @@ func runDaemon(args []string) {
 	wolfIdleTimeout := fs.Duration("wolf-idle-timeout", 0, "end an ACP wolf after this long with no ACP traffic (0 = default 24h, negative = never)")
 	channelsConfig := fs.String("channels-config", "", "messaging-channels config (default ~/.workingman/channels.yaml, or $WORKINGMAN_CHANNELS_CONFIG). A missing file disables channels and the daemon behaves exactly as without them")
 	var workingmanMode workingmanFlag
-	fs.Var(&workingmanMode, "workingman-agent", `run the workingman agent: a persistent assistant in its own sandbox that answers questions about the orch state and, on request, edits the orch roots (projects, tasks, intake). "auto" (default) turns it on when --acp-kit is set and channels.yaml has an inbound-capable channel; --workingman-agent / =on forces it on (requires --acp-kit); =off disables it`)
+	fs.Var(&workingmanMode, "workingman-agent", `run the workingman agent: a persistent assistant in its own sandbox that answers questions about the orch state and, on request, edits the orch roots (projects, tasks, intake). "auto" (default) turns it on whenever --acp-kit is set, with or without channels; --workingman-agent / =on forces it on (requires --acp-kit); =off disables it`)
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	mcpGatewayURL := fs.String("mcp-gateway-url", os.Getenv("WORKINGMAN_MCP_GATEWAY_URL"), "base URL of the host's standalone-codemode gateway, e.g. http://localhost:3333 (default $WORKINGMAN_MCP_GATEWAY_URL). When set, every sandbox gets its own sub-gateway (POST /gateways) over the task's static_mcps — or --mcp-gateway-servers when a task names none — exposed inside it as MCP_URL (localhost rewritten to host.docker.internal), with the gateway's port allowed in its network policy; the gateway is DELETEd when the sandbox is removed. Empty disables the gateway (and MCP_URL)")
 	mcpGatewayStatic := fs.Bool("mcp-gateway-static", os.Getenv("WORKINGMAN_MCP_GATEWAY_STATIC") == "1", "give no sandbox a dynamic gateway (default false, or true when $WORKINGMAN_MCP_GATEWAY_STATIC=1). By default the wolf and task agents' gateways are dynamic: they also serve mcp-find and mcp-add over the whole catalog")
@@ -250,7 +250,7 @@ func runDaemon(args []string) {
 			}),
 		)
 	}
-	if on, why := workingmanAgentEnabled(workingmanMode, ch, *acpKit); on {
+	if on, why := workingmanAgentEnabled(workingmanMode, *acpKit); on {
 		dopts = append(dopts, daemon.WithWorkingmanAgent(daemon.WorkingmanAgentConfig{
 			AuditLog: absPath(*auditPath),
 		}))
