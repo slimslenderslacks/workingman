@@ -282,6 +282,25 @@ its session directory.
 DELETE failures are only logged. A leaked sub-gateway costs memory in
 standalone-codemode until it restarts.
 
+## Talking MCP to a gateway from Go
+
+Sandboxed agents reach their gateway through acp-kit. Host-side Go code (the
+daemon's review fingerprint check) uses `mcpgateway.OpenSession(ctx,
+gw.URL, …)` instead: a small streamable-HTTP MCP client with no third-party
+dependencies. It sends `initialize`, keeps the `Mcp-Session-Id` header and
+sends `notifications/initialized`; `CallTool` accepts both `application/json`
+and `text/event-stream` responses; `Close` DELETEs the session best-effort.
+
+Errors fall into three kinds:
+
+- `errors.Is(err, mcpgateway.ErrSessionLost)` — HTTP 404, 400 on a request
+  carrying a session id, or connection refused/reset. The session (and maybe
+  the gateway) is gone; open a new one.
+- `*mcpgateway.ToolError` — the tool returned `isError: true`. The session
+  still works.
+- `*mcpgateway.RPCError` — a JSON-RPC error, such as an unknown tool. The
+  session still works.
+
 ## Configuration
 
 | orch flag | Environment variable | Meaning |
