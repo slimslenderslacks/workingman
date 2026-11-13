@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -114,8 +112,9 @@ func (d *Daemon) ensureReviewPoll(projectPath string) {
 // it unregisters itself.
 //
 // Otherwise it applies the change-detection gate before spending the expensive
-// review agent: a cheap host-side `gh` fingerprint of the PR (head SHA +
-// updatedAt + check-rollup) stands in for "did anything happen." When the
+// review agent: a cheap host-side GitHub MCP fingerprint of the PR (head SHA,
+// latest review/comment ids, thread counts, check states) stands in for "did
+// anything happen." When the
 // fingerprint matches the last reconcile, the tick is quiet — the poll steps to
 // a slower cadence and does NOT launch the agent. A changed (or not-yet-known)
 // fingerprint runs the agent and snaps the cadence back to the front.
@@ -149,7 +148,7 @@ func (d *Daemon) onReviewPoll(projectPath string) {
 			return
 		}
 	}
-	// Changed, no baseline yet, no PR to fingerprint, or gh unavailable: reconcile
+	// Changed, no baseline yet, no PR to fingerprint, or the MCP check failed: reconcile
 	// now and return to the fast cadence.
 	d.resetReviewBackoff(projectPath)
 	d.rescheduleReviewPoll(projectPath, reviewPollSpecs[0])
@@ -373,7 +372,7 @@ func (d *Daemon) resetReviewErrors(projectPath string) {
 }
 
 // reviewFingerprint returns the PR change-detection fingerprint, routing through
-// the test seam when one is installed and otherwise the real host `gh` probe.
+// the test seam when one is installed and otherwise the real GitHub MCP probe.
 func (d *Daemon) reviewFingerprint(projectPath string, p *project.Project) (string, bool) {
 	if d.reviewFingerprintFn != nil {
 		return d.reviewFingerprintFn(projectPath, p)
@@ -382,13 +381,16 @@ func (d *Daemon) reviewFingerprint(projectPath string, p *project.Project) (stri
 }
 
 // reviewPRFingerprint returns a cheap change-detection fingerprint for the
-// project's pull request, computed on the host via `gh` (no sandbox, no claude).
-// It hashes the fields that signal PR activity — head SHA (new commits),
-// updatedAt (new comments/reviews), and the check-run rollup (Actions results) —
-// so an unchanged fingerprint means nothing has happened since the last
-// reconcile. ok is false when there is no PR to fingerprint yet (the review
-// agent hasn't stamped one) or gh is unavailable; the caller treats that as
-// "can't gate — run the agent" so the optimization never hides a real signal.
+// project's pull requests, read on the host through the GitHub MCP on the
+// daemon's github-only gateway (review_mcp.go; no sandbox, no claude, no gh).
+// Each PR's head SHA, state, latest review/comment ids, review-thread counts
+// and check-run/status states are read into the canonical project.PullRequest
+// fingerprint shape — the one the review agent records — and hashed with
+// project.PRsFingerprint, so an unchanged value means nothing has happened
+// since the last reconcile. ok is false when there is no PR to fingerprint yet
+// (the review agent hasn't stamped one) or the MCP check failed; the caller
+// treats that as "can't gate — run the agent" so the optimization never hides
+// a real signal.
 func (d *Daemon) reviewPRFingerprint(projectPath string, p *project.Project) (string, bool) {
 	if len(p.PullRequests) == 0 {
 		return "", false
@@ -397,33 +399,19 @@ func (d *Daemon) reviewPRFingerprint(projectPath string, p *project.Project) (st
 	if base == nil {
 		base = context.Background()
 	}
-	h := sha256.New()
-	n := 0
-	for _, pr := range p.PullRequests {
-		if pr.Repo == "" || pr.Number == 0 {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(base, 20*time.Second)
-		out, err := exec.CommandContext(ctx, "gh", "pr", "view",
-			strconv.Itoa(pr.Number),
-			"--repo", pr.Repo,
-			"--json", "headRefOid,updatedAt,statusCheckRollup",
-		).Output()
-		cancel()
-		if err != nil {
-			// Can't gate reliably if any watched PR is unreadable — fail toward
-			// running the agent so we never miss a signal.
-			d.audit.Log("review_fingerprint_error", "path", projectPath, "repo", pr.Repo, "err", err.Error())
-			return "", false
-		}
-		h.Write([]byte(pr.Repo))
-		h.Write(out)
-		n++
-	}
-	if n == 0 {
+	m := d.reviewMCPClient()
+	if m == nil {
+		d.audit.Log("review_fingerprint_error", "path", projectPath, "err", errNoReviewGateway.Error())
 		return "", false
 	}
-	return hex.EncodeToString(h.Sum(nil)), true
+	prs, err := m.fingerprintPRs(base, projectPath, p.PullRequests)
+	if err != nil {
+		// Can't gate reliably if any watched PR is unreadable — fail toward
+		// running the agent so we never miss a signal.
+		d.audit.Log("review_fingerprint_error", "path", projectPath, "err", err.Error())
+		return "", false
+	}
+	return project.PRsFingerprint(prs)
 }
 
 func (d *Daemon) lastReviewFinger(projectPath string) (string, bool) {

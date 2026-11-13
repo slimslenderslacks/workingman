@@ -88,9 +88,10 @@ type Daemon struct {
 	reviewErrors    map[string]int    // consecutive review-agent crashes, keyed by project file path
 	reviewFinger    map[string]string // last PR fingerprint reconciled, keyed by project file path
 	reviewBackoff   map[string]int    // adaptive poll-interval index (into reviewPollSpecs), keyed by project file path
-	// reviewFingerprintFn, when set, overrides the host `gh` PR fingerprint used
-	// by the change-detection gate. Nil in production (uses the real gh probe);
-	// tests set it to exercise the gate without a network/gh dependency.
+	// reviewFingerprintFn, when set, overrides the GitHub MCP PR fingerprint
+	// used by the change-detection gate. Nil in production (uses the real MCP
+	// probe, review_mcp.go); tests set it to exercise the gate without a
+	// network/gateway dependency.
 	reviewFingerprintFn func(projectPath string, p *project.Project) (string, bool)
 	// reposWithCommitsFn, when set, overrides the git probe that lists repos
 	// whose branch has commits ahead of base (see reposWithCommits). Nil in
@@ -141,6 +142,11 @@ type Daemon struct {
 	// (test seam).
 	reviewGW         *reviewGateway
 	reviewGatewaySrc reviewGatewaySource
+	// reviewMCPc is the daemon's one MCP session (over reviewGateway()) used
+	// by the PR fingerprint probe, created on first use; guarded by
+	// reviewMCPMu. See review_mcp.go.
+	reviewMCPMu sync.Mutex
+	reviewMCPc  *reviewMCP
 }
 
 const (
@@ -411,6 +417,8 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 func (d *Daemon) shutdown() {
 	defer d.writeFinalSnapshot()
 	d.watcher.Close()
+	// The MCP session lives on the review gateway: end it first.
+	d.closeReviewMCP()
 	if d.reviewGW != nil {
 		d.reviewGW.close()
 	}

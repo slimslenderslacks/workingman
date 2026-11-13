@@ -69,6 +69,9 @@
 //     ([WithReviewGateway]) for the PR fingerprint check: minted at Run (a
 //     stale one a crashed run recorded is deleted first), retried with
 //     backoff on failure, deleted at shutdown.
+//   - review_mcp.go: the PR fingerprint probe — github MCP pull_request_read
+//     calls on one lazily opened MCP session over that gateway, recreated
+//     with backoff when lost and closed at shutdown before the gateway.
 //   - stop.go: status:stopped kills every session of the project and drops
 //     its schedules.
 //   - reaper.go: the stranded-session reaper, which closes sessions whose
