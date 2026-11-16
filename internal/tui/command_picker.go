@@ -32,14 +32,14 @@ var projectCommands = []projectCommand{
 	{"dir", "dir", "open a shell in the workspace sandbox"},
 	{"session", "session", "open/resume an interactive claude session"},
 	{"wolf", "wolf", "summon the wolf to investigate"},
-	{"orch", "orch", "open a terminal tab in this work stream's orch directory"},
-	{"workspace", "workspace", "open a terminal tab at the root of this work stream's wsp workspace"},
+	{"orch", "orch", "open a terminal in this work stream's orch directory"},
+	{"workspace", "workspace", "open a terminal at this work stream's wsp workspace root"},
 	{"review", "review", "watch this work stream's PR (or poll it now)"},
 	{"cleanup", "cleanup", "prepare this work stream for archiving"},
 	{"archive", "archive", "archive this work stream"},
-	{"stop", "stop", "pause this work stream and kill its running agents"},
+	{"stop", "stop", "pause this work stream and kill its agents"},
 	{"start", "start", "resume a stopped work stream"},
-	{"hide", "hide", "hide this work stream from the gallery (tp shows hidden)"},
+	{"hide", "hide", "hide this work stream (tp shows hidden)"},
 	{"show", "show", "unhide a hidden work stream"},
 }
 
@@ -251,28 +251,43 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 // accent as the sessions pane's selection so the "active choice" reads the same
 // way across the UI.
 func (m model) renderCommandPickerModal() string {
+	merged := m.selectedProjectMerged()
+	descs := make([]string, len(projectCommands))
+	labelWidth := 0
+	for i, c := range projectCommands {
+		descs[i] = c.desc
+		if merged && c.key == "cleanup" {
+			descs[i] = "merged — ready to :cleanup/archive"
+		}
+		labelWidth = max(labelWidth, lipgloss.Width(c.label))
+	}
+
+	// Labels are padded to a common width so the descriptions line up in a
+	// column, and the modal is sized to its widest row so no command wraps.
+	const sep = "  —  "
+	hint := "j/k: move  •  enter: run  •  esc: cancel"
+	contentWidth := lipgloss.Width(hint)
 	var b strings.Builder
 	b.WriteString(paneTitleStyle.Render("Commands"))
 	b.WriteString("\n\n")
-	merged := m.selectedProjectMerged()
 	for i, c := range projectCommands {
 		marker := "  "
-		desc := c.desc
-		if merged && c.key == "cleanup" {
-			desc = "merged — ready to :cleanup/archive"
-		}
-		line := c.label + "  —  " + dimStyle.Render(desc)
+		label := c.label
 		if i == m.cmdPickerIdx {
 			marker = "▸ "
-			line = sessionRowSelectedStyle.Render(c.label) + "  —  " + dimStyle.Render(desc)
+			label = sessionRowSelectedStyle.Render(label)
 		}
-		b.WriteString(marker + line)
+		pad := strings.Repeat(" ", labelWidth-lipgloss.Width(c.label))
+		line := marker + label + pad + sep + dimStyle.Render(descs[i])
+		contentWidth = max(contentWidth, lipgloss.Width(line))
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render("j/k: move  •  enter: run  •  esc: cancel"))
+	b.WriteString(hintStyle.Render(hint))
 
-	width := 60
+	// lipgloss's Width includes padding but not the border.
+	width := contentWidth + modalBorder.GetHorizontalPadding()
 	if m.width > 0 && m.width-4 < width {
 		width = m.width - 4
 	}
