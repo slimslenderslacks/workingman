@@ -13,6 +13,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/session"
+	"github.com/slimslenderslacks/work/internal/task"
 	"github.com/slimslenderslacks/work/internal/workspace"
 )
 
@@ -1060,5 +1061,78 @@ func TestStartFailureReadsWrapperError(t *testing.T) {
 	}
 	if got := r.StartFailure(p); got != "push preflight FAILED" {
 		t.Errorf("failed: StartFailure = %q, want the recorded error", got)
+	}
+}
+
+// A task's harness selects the kit/template its sandbox is built from. Empty
+// (and the explicit default name) resolve to the Runner's Kit/Image and are
+// recorded in session.json; any other name fails the launch instead of
+// silently running the default harness.
+func TestACPLaunchResolvesHarness(t *testing.T) {
+	const image = "slimslenderslacks/claude-code-acp:0.90.0"
+	for _, tc := range []struct {
+		harness string
+		wantErr bool
+	}{
+		{harness: ""},
+		{harness: task.HarnessDefault},
+		{harness: "codex-acp", wantErr: true},
+	} {
+		t.Run("harness="+tc.harness, func(t *testing.T) {
+			orchDir := t.TempDir()
+			projectPath := filepath.Join(orchDir, "project.yaml")
+			if err := os.WriteFile(projectPath, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sessionsRoot := t.TempDir()
+			acp := &fakeLauncher{}
+			r := &Runner{
+				Workspaces:   workspace.NewStub(t.TempDir()),
+				Launcher:     &fakeLauncher{},
+				AcpLauncher:  acp,
+				Kit:          "kit-ref",
+				Image:        image,
+				SessionsRoot: sessionsRoot,
+			}
+			_, err := r.Start(context.Background(), Plan{
+				Kind:        agent.TaskAgent,
+				Branch:      "feat-x",
+				ProjectPath: projectPath,
+				TaskPath:    filepath.Join(orchDir, "tasks", "first.yaml"),
+				TaskName:    "first",
+				Harness:     tc.harness,
+			})
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "unknown harness") {
+					t.Fatalf("Start err = %v, want unknown harness", err)
+				}
+				if acp.last.Name != "" {
+					t.Errorf("launched despite unknown harness: %+v", acp.last)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got := argValue(acp.last.Command, "--kit"); got != "kit-ref" {
+				t.Errorf("--kit = %q, want kit-ref", got)
+			}
+			if got := argValue(acp.last.Command, "--template"); got != image {
+				t.Errorf("--template = %q, want %q", got, image)
+			}
+			rec, err := session.Store{Root: sessionsRoot}.Read(acp.last.Name)
+			if err != nil {
+				t.Fatalf("read session.json: %v", err)
+			}
+			if rec.Harness != task.HarnessDefault || rec.Template != image {
+				t.Errorf("session harness/template = %q/%q, want %q/%q", rec.Harness, rec.Template, task.HarnessDefault, image)
+			}
+		})
+	}
+}
+
+func TestHarnessTemplateDefaultsToStockClaude(t *testing.T) {
+	if got := (Harness{Kit: "k"}).Template(); got != "claude" {
+		t.Errorf("Template() with no image = %q, want claude", got)
 	}
 }

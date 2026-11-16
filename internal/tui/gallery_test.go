@@ -131,7 +131,8 @@ func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
 			Tasks: []TaskView{
 				{
 					Name:       "fetch-readme",
-					Model:      "default",
+					Model:      "claude-opus-5-5",
+					Harness:    "slimslenderslacks/claude-code-acp:0.90.0",
 					StaticMCPs: []string{"github", "web-search"},
 					Policies: []policy.Rule{
 						{Action: policy.ActionDeny, Kind: policy.KindNetwork, Resource: "**"},
@@ -150,15 +151,23 @@ func TestRenderTasksTableShowsModelMCPsAndRules(t *testing.T) {
 
 	view := m.View()
 	// Column header is rendered above the data rows.
-	for _, want := range []string{"name", "model", "mcps", "rules", "status"} {
+	for _, want := range []string{"name", "model", "harness", "mcps", "rules", "status"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing column header %q:\n%s", want, view)
 		}
 	}
 	// First row's cell values are all present.
-	for _, want := range []string{"fetch-readme", "default", "github,web-search", "2"} {
+	// The resolved model is shown verbatim; the harness template drops its
+	// registry/org path to fit the column.
+	for _, want := range []string{"fetch-readme", "claude-opus-5-5", "claude-code-acp:0.90.0", "github,web-search", "2"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view missing cell %q:\n%s", want, view)
+		}
+	}
+	// A task with neither recorded falls back to the requested defaults.
+	for _, want := range []string{task.ModelDefault, task.HarnessDefault} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view missing default %q for the bare task:\n%s", want, view)
 		}
 	}
 	// Second row's mcps + rules show the empty-value placeholder.
@@ -595,5 +604,35 @@ func TestOptionGlyphSwitchesColumn(t *testing.T) {
 	m = step.(model)
 	if m.focus != paneProjectDetail {
 		t.Fatalf("¬ glyph did not switch to yaml column: focus = %v", m.focus)
+	}
+}
+
+func TestShortHarness(t *testing.T) {
+	for in, want := range map[string]string{
+		"slimslenderslacks/claude-code-acp:0.90.0": "claude-code-acp:0.90.0",
+		"docker.io/a/b:1":                          "b:1",
+		"claude-acp":                               "claude-acp",
+		"":                                         "",
+		"weird/":                                   "weird/",
+	} {
+		if got := shortHarness(in); got != want {
+			t.Errorf("shortHarness(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The harness column is among the first informational columns to give way on
+// a narrow pane, before age and model.
+func TestTaskColumnWidthsShrinksHarnessBeforeModel(t *testing.T) {
+	c := taskColumnWidths(taskColMinTotalWidth)
+	if c.harness != taskColHarnessDefault || c.model != taskColModelDefault {
+		t.Fatalf("at min total width, harness/model = %d/%d, want defaults", c.harness, c.model)
+	}
+	narrow := taskColumnWidths(taskColMinNameWidth + taskColModelDefault + taskColStatusDefault + 2*taskColGap + taskColAgeDefault + taskColGap)
+	if narrow.harness != 0 || narrow.mcps != 0 {
+		t.Errorf("narrow: harness/mcps = %d/%d, want 0/0", narrow.harness, narrow.mcps)
+	}
+	if narrow.model != taskColModelDefault {
+		t.Errorf("narrow: model = %d, want %d (shrinks after harness)", narrow.model, taskColModelDefault)
 	}
 }

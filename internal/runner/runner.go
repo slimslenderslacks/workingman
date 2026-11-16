@@ -78,6 +78,13 @@ type Plan struct {
 	// task.ModelDefault leaves claude on its own default. See task.Task.Model.
 	Model string
 
+	// Harness forwards the task's harness field: which agent harness (kit +
+	// sbx template) the session's sandbox is built from. Empty or
+	// task.HarnessDefault selects the Runner's configured Kit/Image — the
+	// claude ACP kit, the only harness implemented today; any other name fails
+	// the launch (see Runner.resolveHarness). See task.Task.Harness.
+	Harness string
+
 	// Replan asks the planning agent to re-plan the project's existing tasks
 	// rather than treat them as settled — set by the daemon on a cron firing.
 	// Only the planning agent's prompt reads it. See project.Project.Replan.
@@ -938,8 +945,9 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 	if sandboxName == "" {
 		return nil, fmt.Errorf("runner: acp launch for kind %s needs a ProjectPath to derive a sandbox name", p.Kind)
 	}
-	if strings.TrimSpace(r.Kit) == "" {
-		return nil, fmt.Errorf("runner: acp launch requires Kit (the acp-kit reference)")
+	h, err := r.resolveHarness(p.Harness)
+	if err != nil {
+		return nil, err
 	}
 
 	sessionsRoot, err := r.sessionsRoot()
@@ -966,7 +974,9 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		UpdatedAt:   now,
 		SocketPath:  store.SocketPath(sessionID),
 		Workspaces:  workspaces,
-		Kit:         r.Kit,
+		Kit:         h.Kit,
+		Harness:     h.Name,
+		Template:    h.Template(),
 		ProjectPath: p.ProjectPath,
 		TaskPath:    p.TaskPath,
 		Kind:        p.Kind.String(),
@@ -976,7 +986,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
 	}
 
-	command := r.acpWrapperCommand(sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, r.MCPServersFor(p), r.MCPGatewayDynamic(p.Kind), p.Policies, p.TaskPath, p.Model, p.SaveSandbox, p.Persistent, p.Pushes())
+	command := r.acpWrapperCommand(h, sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, r.MCPServersFor(p), r.MCPGatewayDynamic(p.Kind), p.Policies, p.TaskPath, p.Model, p.SaveSandbox, p.Persistent, p.Pushes())
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionID,
@@ -1001,10 +1011,49 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 	return sess, nil
 }
 
+// Harness is a resolved agent harness: the acp-kit and sbx template an ACP
+// session's sandbox is built from. Name is the harness's identity
+// (task.HarnessDefault for the claude ACP kit); Kit and Image are what reach
+// `acp-wrapper --kit` / `--template`.
+type Harness struct {
+	Name  string
+	Kit   string
+	Image string
+}
+
+// Template is the sbx template the harness creates sandboxes from: Image, or
+// the stock claude template when no prebuilt image is configured. It matches
+// what acp-wrapper records as the task's resolved_harness.
+func (h Harness) Template() string {
+	if img := strings.TrimSpace(h.Image); img != "" {
+		return img
+	}
+	return "claude"
+}
+
+// resolveHarness maps a requested harness name (a task's `harness:`, empty for
+// the default) to the kit and template to launch with. Only the claude ACP kit
+// — the Runner's configured Kit on its Image — exists today; the indirection is
+// here so a planner can later pick a different harness per task by adding an
+// entry, without touching the launch path.
+func (r *Runner) resolveHarness(name string) (Harness, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = task.HarnessDefault
+	}
+	if name != task.HarnessDefault {
+		return Harness{}, fmt.Errorf("runner: unknown harness %q (only %q is available)", name, task.HarnessDefault)
+	}
+	if strings.TrimSpace(r.Kit) == "" {
+		return Harness{}, fmt.Errorf("runner: acp launch requires Kit (the acp-kit reference)")
+	}
+	return Harness{Name: name, Kit: r.Kit, Image: r.Image}, nil
+}
+
 // acpWrapperCommand builds the argv that launches one acp-wrapper host process
 // for an ACP session. The wrapper resolves --workspace paths to absolute itself,
 // but they already are (workspace.Manager and the orch dir both yield abs paths).
-func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, mcpServers []string, mcpDynamic bool, policies []policy.Rule, taskPath, model string, saveSandbox, persistent, push bool) []string {
+func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRoot, projectPath, kind string, workspaces, mcpServers []string, mcpDynamic bool, policies []policy.Rule, taskPath, model string, saveSandbox, persistent, push bool) []string {
 	bin := r.AcpWrapperPath
 	if bin == "" {
 		bin = "acp-wrapper"
@@ -1012,15 +1061,16 @@ func (r *Runner) acpWrapperCommand(sessionID, sandboxName, sessionsRoot, project
 	args := []string{
 		bin,
 		"--session-id", sessionID,
-		"--kit", r.Kit,
+		"--kit", h.Kit,
 		"--sandbox", sandboxName,
 		"--sessions-root", sessionsRoot,
 	}
-	// The prebuilt image is kind-independent: every ACP session shares one Kit
-	// and one sandbox shape, so there is nothing to branch on here (see
-	// Runner.Image). Omitted entirely when unset so the argv — and the stock
-	// `sbx create` behaviour — are byte-identical to before.
-	if img := strings.TrimSpace(r.Image); img != "" {
+	// The prebuilt image comes from the session's harness, not its kind: today
+	// every ACP session runs the one claude-acp harness, so they all share one
+	// Kit and one sandbox shape (see Runner.Image). Omitted entirely when unset
+	// so the argv — and the stock `sbx create` behaviour — are byte-identical to
+	// before.
+	if img := strings.TrimSpace(h.Image); img != "" {
 		args = append(args, "--template", img)
 	}
 	if persistent {

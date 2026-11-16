@@ -2327,52 +2327,54 @@ func taskDepTree(tasks []TaskView, selPath string, width, maxLines int) []string
 // with. Computed once per render from the pane's inner width so the header
 // and every data row share the same alignment.
 type taskColumns struct {
-	name, model, mcps, rules, deps, age, status int
+	name, model, harness, mcps, rules, deps, age, status int
 }
 
-// Column gap is one space; seven columns means six gaps.
+// Column gap is one space; eight columns means seven gaps.
 const (
-	taskColGap           = 1
-	taskColGaps          = 6
-	taskColModelDefault  = 10
-	taskColMCPsDefault   = 18
-	taskColRulesDefault  = 6
-	taskColDepsDefault   = 6
-	taskColAgeDefault    = 5
-	taskColStatusDefault = 10
-	taskColMinNameWidth  = 4
-	taskColMinTotalWidth = taskColMinNameWidth + taskColModelDefault + taskColMCPsDefault + taskColRulesDefault + taskColDepsDefault + taskColAgeDefault + taskColStatusDefault + taskColGaps*taskColGap
+	taskColGap            = 1
+	taskColGaps           = 7
+	taskColModelDefault   = 16
+	taskColHarnessDefault = 22
+	taskColMCPsDefault    = 18
+	taskColRulesDefault   = 6
+	taskColDepsDefault    = 6
+	taskColAgeDefault     = 5
+	taskColStatusDefault  = 10
+	taskColMinNameWidth   = 4
+	taskColMinTotalWidth  = taskColMinNameWidth + taskColModelDefault + taskColHarnessDefault + taskColMCPsDefault + taskColRulesDefault + taskColDepsDefault + taskColAgeDefault + taskColStatusDefault + taskColGaps*taskColGap
 )
 
-// taskColumnWidths sizes the seven columns to fill innerWidth. The model,
-// mcps, rules, deps, age and status columns get fixed defaults; the name
-// column takes whatever's left. When the pane is too narrow to honour the
+// taskColumnWidths sizes the eight columns to fill innerWidth. The model,
+// harness, mcps, rules, deps, age and status columns get fixed defaults; the
+// name column takes whatever's left. When the pane is too narrow to honour the
 // defaults, columns shrink in this order — mcps (verbose) → deps → rules →
-// age → model — before name drops below its minimum. mcps, rules, deps and
-// age can all drop to 0 — they're informational, so truncating them to
-// nothing is better than crowding name and status.
+// harness → age → model — before name drops below its minimum. All but status
+// can drop to 0 — they're informational, so truncating them to nothing is
+// better than crowding name and status.
 func taskColumnWidths(innerWidth int) taskColumns {
 	c := taskColumns{
-		name:   0,
-		model:  taskColModelDefault,
-		mcps:   taskColMCPsDefault,
-		rules:  taskColRulesDefault,
-		deps:   taskColDepsDefault,
-		age:    taskColAgeDefault,
-		status: taskColStatusDefault,
+		name:    0,
+		model:   taskColModelDefault,
+		harness: taskColHarnessDefault,
+		mcps:    taskColMCPsDefault,
+		rules:   taskColRulesDefault,
+		deps:    taskColDepsDefault,
+		age:     taskColAgeDefault,
+		status:  taskColStatusDefault,
 	}
 	required := func() int {
 		gaps := 0
-		for _, n := range []int{c.model, c.mcps, c.rules, c.deps, c.age, c.status} {
+		for _, n := range []int{c.model, c.harness, c.mcps, c.rules, c.deps, c.age, c.status} {
 			if n > 0 {
 				gaps++
 			}
 		}
-		return c.model + c.mcps + c.rules + c.deps + c.age + c.status + gaps*taskColGap
+		return c.model + c.harness + c.mcps + c.rules + c.deps + c.age + c.status + gaps*taskColGap
 	}
 	// Shrink the optional informational columns when there isn't enough
-	// room. Order: mcps (verbose) → deps (verbose) → rules (small) → age
-	// (small) → model (small).
+	// room. Order: mcps (verbose) → deps (verbose) → rules (small) → harness
+	// (the same for every task today) → age (small) → model.
 	for innerWidth-required() < taskColMinNameWidth && c.mcps > 0 {
 		c.mcps--
 	}
@@ -2381,6 +2383,9 @@ func taskColumnWidths(innerWidth int) taskColumns {
 	}
 	for innerWidth-required() < taskColMinNameWidth && c.rules > 0 {
 		c.rules--
+	}
+	for innerWidth-required() < taskColMinNameWidth && c.harness > 0 {
+		c.harness--
 	}
 	for innerWidth-required() < taskColMinNameWidth && c.age > 0 {
 		c.age--
@@ -2403,6 +2408,7 @@ func renderTaskHeader(c taskColumns) string {
 	cells := []string{
 		padCell("name", c.name),
 		padCell("model", c.model),
+		padCell("harness", c.harness),
 		padCell("mcps", c.mcps),
 		padCell("rules", c.rules),
 		padCell("deps", c.deps),
@@ -2443,7 +2449,9 @@ const (
 )
 
 // renderTaskRow lays one task out as a row in the table: name | model |
-// mcps | rules | deps | age | status. Each cell is padded to its column
+// harness | mcps | rules | deps | age | status. model and harness are what the
+// task actually ran under once known (TaskView mirrors task.DisplayModel /
+// DisplayHarness), otherwise what it requested. Each cell is padded to its column
 // width so the columns line up; columns sized to 0 by taskColumnWidths drop
 // out entirely. pending is the row's already-computed pendingDeps count —
 // how many of its dependencies aren't committed yet — rendered in the deps
@@ -2459,10 +2467,14 @@ const (
 func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) string {
 	model := t.Model
 	if model == "" {
-		// Defensive: TaskView already mirrors task.Load()'s backfill, but
-		// nothing in this file guarantees that path was taken — display
-		// "default" so a stray empty value doesn't render as a blank cell.
-		model = "default"
+		// Defensive: TaskView already resolves this (task.DisplayModel), but
+		// nothing in this file guarantees that path was taken — display the
+		// requested default so a stray empty value doesn't render blank.
+		model = task.ModelDefault
+	}
+	harness := shortHarness(t.Harness)
+	if harness == "" {
+		harness = task.HarnessDefault
 	}
 	mcps := strings.Join(t.StaticMCPs, ",")
 	if mcps == "" {
@@ -2485,6 +2497,7 @@ func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) s
 	cells := []string{
 		padCell(truncate(t.Name, c.name), c.name),
 		padCell(truncate(model, c.model), c.model),
+		padCell(truncate(harness, c.harness), c.harness),
 		padCell(truncate(mcps, c.mcps), c.mcps),
 		padCell(truncate(rules, c.rules), c.rules),
 		padCell(truncate(deps, c.deps), c.deps),
@@ -2502,7 +2515,7 @@ func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) s
 	// Re-emit non-status cells as plain and recolour just the status cell so
 	// the table tints stay subtle.
 	if c.status > 0 {
-		nonStatus := nonEmpty(cells[:6])
+		nonStatus := nonEmpty(cells[:7])
 		joined := strings.Join(nonStatus, gap)
 		statusCell := taskStatusStyle(t.Status).Render(truncate(status, c.status))
 		statusCell = padCell(statusCell, c.status)
@@ -2512,6 +2525,18 @@ func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) s
 		return joined + gap + statusCell
 	}
 	return plain
+}
+
+// shortHarness elides a harness for the narrow column: an sbx template image
+// reference loses its registry/org path ("slimslenderslacks/claude-code-acp:0.90.0"
+// → "claude-code-acp:0.90.0"), which is identical across today's templates
+// and would otherwise eat the whole cell before the distinguishing part. The
+// task file's resolved_harness keeps the full reference.
+func shortHarness(h string) string {
+	if i := strings.LastIndex(h, "/"); i >= 0 && i < len(h)-1 {
+		return h[i+1:]
+	}
+	return h
 }
 
 // formatAge renders d as a compact, single-unit-pair age string in the
@@ -2543,7 +2568,7 @@ func formatAge(d time.Duration) string {
 func (c taskColumns) totalWidth() int {
 	w := 0
 	gaps := 0
-	for _, n := range []int{c.name, c.model, c.mcps, c.rules, c.deps, c.age, c.status} {
+	for _, n := range []int{c.name, c.model, c.harness, c.mcps, c.rules, c.deps, c.age, c.status} {
 		if n > 0 {
 			w += n
 			gaps++

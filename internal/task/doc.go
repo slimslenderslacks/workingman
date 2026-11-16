@@ -7,7 +7,10 @@
 // written by the planning, task, commit and review agents and by the daemon.
 // [Load] backfills Model to [ModelDefault] and records the file path in
 // Task.Path; callers keep that path instead of rebuilding it from the name,
-// because filenames may carry sort prefixes.
+// because filenames may carry sort prefixes. Model and Harness are what the
+// planner *requested*; ResolvedModel and ResolvedHarness are what the task
+// actually ran under, recorded by the acp-wrapper via [Update] (see
+// [Task.DisplayModel] and [Task.DisplayHarness]).
 //
 // A task name is lowercase kebab-case and becomes half of the task's sandbox
 // name "<work-stream>-<task-name>", which must fit [sbx.MaxNameLen]. So there

@@ -59,6 +59,12 @@ type hub struct {
 	// reader writes it, so no mutex is needed.
 	log io.Writer
 
+	// observe, when non-nil, is shown every agent stdout frame before it is
+	// broadcast — how the wrapper learns the concrete model the agent runs
+	// under (see runRecorder). Only run's single stdout reader calls it, and it
+	// must not retain or mutate the frame.
+	observe func(frame []byte)
+
 	// mu guards clients, closed, everConnected. broadcast, registration, and
 	// teardown all take it, so a client is never sent a frame after it has been
 	// removed.
@@ -165,6 +171,9 @@ func (h *hub) run(stdout io.Reader) {
 		h.touch()
 		if h.log != nil {
 			_, _ = h.log.Write(frame)
+		}
+		if h.observe != nil {
+			h.observe(frame)
 		}
 		h.broadcast(frame)
 		return true

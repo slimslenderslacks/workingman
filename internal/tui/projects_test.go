@@ -676,3 +676,31 @@ func taskCountsEqual(a, b map[task.Status]int) bool {
 	}
 	return true
 }
+
+// A task that has run shows the concrete model and harness it ran under
+// (resolved_model / resolved_harness); one that hasn't shows what it requested.
+func TestTasksForPrefersResolvedModelAndHarness(t *testing.T) {
+	dir := t.TempDir()
+	if err := task.Save(filepath.Join(dir, "ran.yaml"), &task.Task{
+		Name: "ran", Status: task.StatusSuccess, Model: task.ModelDefault,
+		ResolvedModel: "claude-opus-5-5", ResolvedHarness: "slimslenderslacks/claude-code-acp:0.90.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Save(filepath.Join(dir, "pending.yaml"), &task.Task{
+		Name: "pending", Status: task.StatusReady, Model: task.ModelDefault,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, views := tasksFor(dir)
+	got := map[string]TaskView{}
+	for _, v := range views {
+		got[v.Name] = v
+	}
+	if v := got["ran"]; v.Model != "claude-opus-5-5" || v.Harness != "slimslenderslacks/claude-code-acp:0.90.0" {
+		t.Errorf("ran: model/harness = %q/%q", v.Model, v.Harness)
+	}
+	if v := got["pending"]; v.Model != task.ModelDefault || v.Harness != task.HarnessDefault {
+		t.Errorf("pending: model/harness = %q/%q, want %q/%q", v.Model, v.Harness, task.ModelDefault, task.HarnessDefault)
+	}
+}

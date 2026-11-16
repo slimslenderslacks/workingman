@@ -339,6 +339,26 @@ Task agents retry up to 3 times on `status: failed`. After the 3rd failure
 the project goes `status: blocked`, you get an osascript notification, and
 a wolf agent launches.
 
+#### Model and harness
+
+The TUI's Tasks table shows, per task, the **model** and **harness** it
+actually ran under rather than what it asked for:
+
+- `model:` in the task file is the *requested* model (`default` lets claude
+  pick; an alias like `opus` or a full id also works). Once the agent starts,
+  `acp-wrapper` records the concrete model claude-agent-acp reports for the
+  session (the `_claude/model` it attaches to each `usage_update`) as
+  `resolved_model:` — e.g. `claude-opus-5-5`.
+- `harness:` (optional) names the agent harness the task's sandbox is built
+  from. Empty means the daemon's default, `claude-acp`: the `--acp-kit` kit
+  layered onto the `--acp-image` template. It is the only harness today; any
+  other name fails the launch. When the sandbox is created the wrapper records
+  the sbx template it used as `resolved_harness:` (the `-t` image, or `claude`
+  for the stock template). The column drops the image's registry/org path.
+
+A task that hasn't run yet shows its requested values (`default` /
+`claude-acp`).
+
 ### 4. Stop
 
 `Ctrl-C` the daemon. ACP sessions keep running for the next orch to reconnect

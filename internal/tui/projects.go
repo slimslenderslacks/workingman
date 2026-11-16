@@ -103,8 +103,15 @@ type ProjectView struct {
 // slice fields make TaskView not directly comparable (==), so projectViewEqual
 // compares them element-wise.
 type TaskView struct {
-	Name       string
-	Model      string
+	Name string
+	// Model is the model the task ran under once known (resolved_model,
+	// e.g. "claude-opus-5-5"), else the requested one ("default" for a task
+	// that hasn't run yet). See task.Task.DisplayModel.
+	Model string
+	// Harness is the sbx template the task's sandbox was created from once
+	// known (resolved_harness), else the requested harness name — "claude-acp"
+	// unless the task's `harness:` names another. See task.Task.DisplayHarness.
+	Harness    string
 	StaticMCPs []string
 	Policies   []policy.Rule
 	Status     task.Status
@@ -321,12 +328,6 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 			continue
 		}
 		counts[t.Status]++
-		// task.Load() backfills Model to "default", but mirror the defaulting
-		// here for display safety in case a task reaches us another way.
-		model := t.Model
-		if model == "" {
-			model = task.ModelDefault
-		}
 		// An unnamed seed (just written from an intake file, not yet named by
 		// planning) still gets a row — under its filename stem — so the user
 		// sees their new task land instead of the pane appearing to lose
@@ -345,7 +346,8 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 		}
 		tasks = append(tasks, TaskView{
 			Name:        name,
-			Model:       model,
+			Model:       t.DisplayModel(),
+			Harness:     t.DisplayHarness(),
 			StaticMCPs:  append([]string(nil), t.StaticMCPs...),
 			Policies:    append([]policy.Rule(nil), t.Policies...),
 			Status:      t.Status,
@@ -598,7 +600,7 @@ func projectViewEqual(a, b ProjectView) bool {
 // longer directly comparable with ==. Order matters for both slices since
 // rule order is meaningful and MCP order is what the planner wrote.
 func taskViewEqual(a, b TaskView) bool {
-	if a.Name != b.Name || a.Model != b.Model || a.Status != b.Status || a.Path != b.Path ||
+	if a.Name != b.Name || a.Model != b.Model || a.Harness != b.Harness || a.Status != b.Status || a.Path != b.Path ||
 		!a.CompletedAt.Equal(b.CompletedAt) {
 		return false
 	}

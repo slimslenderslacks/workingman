@@ -268,6 +268,8 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		SaveSandbox: t.SaveSandbox,
 		// Commit runs under the task's model for now; it may get its own later.
 		Model: t.Model,
+		// ...and in the task's harness: it shares the task's sandbox.
+		Harness: t.Harness,
 		// Only a push task publishes: it pushes the commit-only fixes earlier
 		// review tasks accumulated in the worktree to the remote PR branch. Every
 		// other task's commit stays local (ordinary work is published by the

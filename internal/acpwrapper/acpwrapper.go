@@ -946,6 +946,12 @@ func Run(ctx context.Context, c Config) error {
 	}
 	c.SandboxName = sandboxName
 
+	// Record on the task what it is actually running under: the harness (the
+	// sbx template the sandbox was created from) now, the concrete model once
+	// the agent reports it (observed on the stdout fan-out below).
+	rec := newRunRecorder(c)
+	rec.setHarness(c.Harness())
+
 	// Per-sandbox MCP gateway → MCP_URL (see ensureMCPGateway), then release
 	// the gateways of sandboxes that have since disappeared.
 	c.mcpURL = ensureMCPGateway(ctx, execCommand, c)
@@ -1097,7 +1103,15 @@ func Run(ctx context.Context, c Config) error {
 		exitWhenEmpty: c.ExitWhenEmpty,
 		idleTimeout:   c.IdleTimeout,
 		endIdle:       func() { endSession("idle timeout") },
+		observe:       rec.observeFrame,
 	})
+	if m := rec.Model(); m != "" {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: agent ran under model %s (harness %s)\n", c.SessionID, m, c.Harness())
+	}
+	// Re-assert resolved_model/resolved_harness now that the agent can no
+	// longer rewrite its task file, before the retention check and the
+	// daemon's session-end handling read it.
+	rec.flush()
 
 	// The agent has exited: tear the sandbox down so per-task sandboxes don't
 	// accumulate across a project's run — unless we're shutting down on a
@@ -1137,6 +1151,8 @@ type serveOptions struct {
 	// with no ACP traffic (see hub.watchIdle).
 	idleTimeout time.Duration
 	endIdle     func()
+	// observe, when non-nil, sees every agent stdout frame (see hub.observe).
+	observe func(frame []byte)
 }
 
 // serve bridges TUI connections on ln to the one sandboxed ACP client's stdio
@@ -1152,6 +1168,7 @@ type serveOptions struct {
 // copy of every agent frame for reconnect replay (see hub.log).
 func serve(ctx context.Context, ln net.Listener, procStdin io.WriteCloser, procStdout io.Reader, logW io.Writer, opts serveOptions) {
 	h := newHub(procStdin, logW)
+	h.observe = opts.observe
 	if opts.exitWhenEmpty {
 		h.enableExitWhenEmpty(procStdin)
 	}
