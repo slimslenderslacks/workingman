@@ -96,3 +96,5 @@ The workingman agent is an always-on assistant, reachable over a messaging chann
 # ssh agent
 
 Agents run in sandboxes whose ssh agent is whatever agent sandboxd was started with. The daemon therefore needs a usable, non-interactive `SSH_AUTH_SOCK` (the private agent started by `start.sh`) both for commit signing and for the commit agent's `git push` to ssh remotes. If sandboxd is restarted without it, new sandboxes get an empty agent and push fails.
+
+1Password is consulted exactly once per daemon lifetime: `start.sh` runs `op read` to load the key into the private agent, which then holds it in memory until start.sh exits. Nothing after startup calls `op` — not the per-session signing/push preflights (they query the forwarded agent with `ssh-add -l`), not `check-signing.sh` (its sandboxd restart rebinds sandboxd to the same in-memory agent), and not orch's host-side git: at startup orch sets `GIT_SSH_COMMAND` with `-o IdentityAgent=SSH_AUTH_SOCK` and `gpg.ssh.program=ssh-keygen` (via `GIT_CONFIG_*`) in its own environment, so wsp/git children never reach 1Password's agent or `op-ssh-sign` even when the user's ssh/git config points at them.

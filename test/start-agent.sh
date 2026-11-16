@@ -8,6 +8,7 @@ ssh-keygen -q -t ed25519 -N '' -f "$T/key" -C test
 cat > "$T/bin/op" <<STUB
 #!/usr/bin/env bash
 [ "\$1" = read ] || exit 2
+echo x >> "$T/op-calls"
 cat "$T/key"
 STUB
 chmod +x "$T/bin/op"
@@ -20,6 +21,7 @@ pid="$(sed -n 's/^SSH_AGENT_PID=//p' <<<"$out")"
 case "$sock" in "$T"/orch-ssh.*/agent.sock) ;; *) fail "SSH_AUTH_SOCK not the private agent: $sock" ;; esac
 grep -q 'ED25519' <<<"$out" || fail "key not loaded"
 grep -q 'PRIVATE KEY' <<<"$out" && fail "private key leaked"
+[ "$(wc -l < "$T/op-calls")" -eq 1 ] || fail "op called $(wc -l < "$T/op-calls") times; want exactly 1"
 ! kill -0 "$pid" 2>/dev/null || fail "agent $pid still running"
 [ ! -e "$sock" ] && [ ! -e "$(dirname "$sock")" ] || fail "socket dir not removed"
 

@@ -36,6 +36,14 @@ fi
 # OP_SERVICE_ACCOUNT_TOKEN, or have an already-unlocked CLI session — otherwise
 # this step needs the human again. Override the key location with
 # ORCH_SSH_KEY_REF (an op:// secret reference to an openssh-format private key).
+#
+# This `op read` is the ONLY `op` call in workingman, and it runs exactly once
+# per start.sh. The key then lives only in the private agent's memory for the
+# life of the daemon: nothing re-reads it — not orch, acp-wrapper, the
+# preflights, nor check-signing.sh's sandboxd restart, which rebinds sandboxd
+# to this same in-memory agent. orch also pins its host-side git/ssh to this
+# agent (GIT_SSH_COMMAND IdentityAgent, gpg.ssh.program=ssh-keygen) so a
+# 1Password IdentityAgent/op-ssh-sign in the user's ssh/git config never fires.
 ORCH_SSH_KEY_REF="${ORCH_SSH_KEY_REF:-op://Personal/SSH github/private key?ssh-format=openssh}"
 
 AGENT_DIR=""

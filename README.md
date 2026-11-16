@@ -117,6 +117,17 @@ unattended runs would hang.
   signing and ssh push will fail. orch never falls back to 1Password's agent.
 - `./check-signing.sh` diagnoses sandboxd forwarding an empty agent and can
   restart sandboxd with the private agent's socket.
+- **One `op` call per daemon lifetime.** start.sh's `op read` is the only `op`
+  call in workingman. Afterwards the key lives only in the private agent's
+  memory: per-session preflights, commits, pushes, and check-signing.sh's
+  sandboxd restart all reuse that agent and never call `op`. Fixing an empty
+  *private* agent means restarting start.sh (one new `op` read).
+- orch pins its own host-side git/ssh (wsp clones and fetches, `git fetch`)
+  to the private agent: it sets `GIT_SSH_COMMAND="ssh -o IdentityAgent=SSH_AUTH_SOCK"`
+  (overriding a 1Password `IdentityAgent` in `~/.ssh/config`) and appends
+  `gpg.ssh.program=ssh-keygen` via `GIT_CONFIG_*` (so 1Password's `op-ssh-sign`
+  is never run), logged as `host_git_env` audit events. Without this every
+  host-side ssh fetch could trigger a 1Password fingerprint prompt.
 
 ## Build
 
