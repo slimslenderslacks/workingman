@@ -14,17 +14,11 @@ import (
 
 // fakeInteractive records the calls the model makes and returns canned results.
 type fakeInteractive struct {
-	shellCalls   []string
 	sessionCalls []string
 	orchCalls    []string
 	wsCalls      []string
 	target       string
 	err          error
-}
-
-func (f *fakeInteractive) OpenShell(_ context.Context, projectPath string) (string, error) {
-	f.shellCalls = append(f.shellCalls, projectPath)
-	return f.target, f.err
 }
 
 func (f *fakeInteractive) OpenSession(_ context.Context, projectPath string) (string, error) {
@@ -79,8 +73,8 @@ func TestOrchAndWorkspaceCommandsLaunch(t *testing.T) {
 			if len(calls) != 1 || calls[0] != projPath {
 				t.Errorf("calls = %v, want [%q]", calls, projPath)
 			}
-			if len(fake.shellCalls)+len(fake.sessionCalls) != 0 {
-				t.Errorf("unexpected shell/session calls")
+			if len(fake.sessionCalls) != 0 {
+				t.Errorf("unexpected session calls")
 			}
 			next, _ := m.handleInteractiveLaunched(launched)
 			if got := next.(model).statusMsg; !strings.Contains(got, "new tab") || !strings.Contains(got, key) {
@@ -127,32 +121,28 @@ func TestOrchAndWorkspaceCommandsMissingDir(t *testing.T) {
 	}
 }
 
-func TestDirCommandLaunchesShell(t *testing.T) {
-	fake := &fakeInteractive{target: "shell-widget"}
-	m, projPath := selectProject(t, t.TempDir(), "widget")
+// :dir was removed (it duplicated :workspace); it is now just an unknown
+// command and must not reach the launcher.
+func TestDirCommandIsUnknown(t *testing.T) {
+	fake := &fakeInteractive{}
+	m, _ := selectProject(t, t.TempDir(), "widget")
 	m.interactive = fake
-
-	m, cmd := runProjectCommand(t, m, "dir")
-	if m.mode != modeNormal {
-		t.Fatalf("mode = %v, want modeNormal", m.mode)
+	m = openCommandPicker(t, m)
+	next, cmd := m.dispatchProjectCommand("dir")
+	m = next.(model)
+	if cmd != nil {
+		t.Errorf("expected no launch command for :dir")
 	}
-	if cmd == nil {
-		t.Fatal("expected a launch command, got nil")
+	if m.statusMsg != "unknown command: dir" {
+		t.Errorf("statusMsg = %q, want unknown command", m.statusMsg)
 	}
-	// Running the command performs the launch and yields the result message.
-	msg := cmd()
-	launched, ok := msg.(interactiveLaunchedMsg)
-	if !ok {
-		t.Fatalf("cmd returned %T, want interactiveLaunchedMsg", msg)
+	if len(fake.sessionCalls)+len(fake.orchCalls)+len(fake.wsCalls) != 0 {
+		t.Errorf("launcher must not be called for :dir")
 	}
-	if launched.kind != "shell" || launched.target != "shell-widget" {
-		t.Errorf("launched = %+v, want shell → shell-widget", launched)
-	}
-	if len(fake.shellCalls) != 1 || fake.shellCalls[0] != projPath {
-		t.Errorf("OpenShell calls = %v, want [%q]", fake.shellCalls, projPath)
-	}
-	if len(fake.sessionCalls) != 0 {
-		t.Errorf("OpenShell must not call OpenSession; got %v", fake.sessionCalls)
+	for _, c := range projectCommands {
+		if c.key == "dir" {
+			t.Errorf("dir must not be listed in the command picker")
+		}
 	}
 }
 
@@ -175,10 +165,10 @@ func TestSessionCommandLaunchesSession(t *testing.T) {
 }
 
 func TestInteractiveCommandsRequireLauncher(t *testing.T) {
-	// With no launcher wired (standalone tui), :dir reports unavailable.
+	// With no launcher wired (standalone tui), :workspace reports unavailable.
 	m, _ := selectProject(t, t.TempDir(), "widget")
 	m.interactive = nil
-	m, cmd := runProjectCommand(t, m, "dir")
+	m, cmd := runDirCommand(t, m, "workspace")
 	if cmd != nil {
 		t.Errorf("expected no launch command without a launcher")
 	}
@@ -238,8 +228,8 @@ func TestInteractiveLaunchedWarnsWhenTabAlreadyOpen(t *testing.T) {
 func TestInteractiveLaunchedWarnsWhenAlreadyOpenTabCannotBeFocused(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	next, _ := m.handleInteractiveLaunched(interactiveLaunchedMsg{
-		kind: "shell",
-		err: &terminal.AlreadyOpenError{Name: "shell-widget", Title: "widget",
+		kind: "workspace",
+		err: &terminal.AlreadyOpenError{Name: "workspace-widget", Title: "widget",
 			FocusErr: fmt.Errorf("ghostty on linux: %w", terminal.ErrFocusUnsupported)},
 	})
 	m = next.(model)
@@ -252,7 +242,7 @@ func TestInteractiveLaunchedWarnsWhenAlreadyOpenTabCannotBeFocused(t *testing.T)
 
 func TestInteractiveLaunchedSurfacesError(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
-	next, cmd := m.handleInteractiveLaunched(interactiveLaunchedMsg{kind: "shell", err: errors.New("boom")})
+	next, cmd := m.handleInteractiveLaunched(interactiveLaunchedMsg{kind: "workspace", err: errors.New("boom")})
 	m = next.(model)
 	if cmd != nil {
 		t.Errorf("expected no attach command on error")
@@ -292,7 +282,7 @@ func TestCommandPickerModalRenders(t *testing.T) {
 	m = focusProjectsPane(t, m)
 	m = openCommandPicker(t, m)
 	view := m.View()
-	for _, want := range []string{"Commands", "dir", "session", "wolf"} {
+	for _, want := range []string{"Commands", "session", "wolf", "workspace"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("picker view missing %q; got:\n%s", want, view)
 		}

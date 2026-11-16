@@ -772,8 +772,8 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 }
 
 // InteractiveSpec describes an ad-hoc interactive sandbox session opened on the
-// user's request from the TUI — the `:dir` shell and the `:session` claude
-// session — in a terminal tab of its own. Unlike Start's agent launches these
+// user's request from the TUI — the `:orch`/`:workspace` shells and the
+// `:session` claude session — in a terminal tab of its own. Unlike Start's agent launches these
 // have no task/lifecycle and no daemon session tracking: the runner just ensures
 // the sandbox exists, wraps Inner in `sbx exec -it`, and hands the tab to the
 // launcher.
@@ -781,7 +781,7 @@ type InteractiveSpec struct {
 	// SandboxName is the sbx sandbox to create/reuse, deterministic per work
 	// stream so re-opening the tab lands in the same sandbox. Empty means
 	// run the command directly on the host (no sandbox, no `sbx exec`) — that's
-	// how `:dir` opens a plain host shell in the workspace dir.
+	// how `:orch`/`:workspace` open a plain host shell in a directory.
 	SandboxName string
 	// Workspaces are the host paths to bind-mount (first is primary). Required
 	// when SandboxName is set; ignored for a host command (empty SandboxName).
@@ -819,8 +819,8 @@ type InteractiveSpec struct {
 }
 
 // LaunchInteractive opens an interactive session in a new terminal tab and
-// returns its session name. It is the shared machinery behind the TUI's `:dir`
-// and `:session` commands. When the launcher reports the session's tab is
+// returns its session name. It is the shared machinery behind the TUI's
+// `:session`, `:orch` and `:workspace` commands. When the launcher reports the session's tab is
 // already open (a *terminal.AlreadyOpenError: it focused that tab instead of
 // opening a second), that error is returned alongside the name so the caller
 // can warn the user.
@@ -834,7 +834,8 @@ type InteractiveSpec struct {
 // `:session` sandbox persists and claude resumes the same conversation on the
 // next open.
 //
-// When spec.SandboxName is empty (`:dir`), the command runs directly on the
+// When spec.SandboxName is empty (`:orch`/`:workspace`), the
+// command runs directly on the
 // host — no sandbox, no `sbx exec` — in spec.Cwd. That's a plain host shell.
 func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (string, error) {
 	if r.Launcher == nil {

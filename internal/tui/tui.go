@@ -149,8 +149,8 @@ type model struct {
 	// (standalone/test models) makes dismissal drop the tab only.
 	acpRemove func(id string) error
 
-	// interactive opens the ad-hoc `:dir` shell and `:session` claude windows
-	// for a work stream. Wired by Run in integrated daemon mode; nil in
+	// interactive opens the ad-hoc `:session` claude window and `:orch` /
+	// `:workspace` shells for a work stream. Wired by Run in integrated daemon mode; nil in
 	// standalone `orch tui` (and most tests), where those commands report that
 	// interactive sessions aren't available.
 	interactive InteractiveLauncher
@@ -2700,7 +2700,7 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, sessi
 		ch = WatchProjects(tuiCtx, roots, time.Second)
 	}
 	m := newModel(ch, sessCh, newTabAttacher(tabs))
-	// The `:dir`/`:session` commands need a launcher wired to the daemon's
+	// The `:session`/`:orch`/`:workspace` commands need a launcher wired to the daemon's
 	// runner (integrated mode). Standalone `orch tui` passes nil and those
 	// commands report they're unavailable.
 	m.interactive = interactive

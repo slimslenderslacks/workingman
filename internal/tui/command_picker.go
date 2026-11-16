@@ -29,7 +29,6 @@ type projectCommand struct {
 // shortcut for them isn't worth it. `workspace` likewise shares "w" with `wolf`,
 // which is listed first and so keeps the shortcut; `workspace` needs j/k + enter.
 var projectCommands = []projectCommand{
-	{"dir", "dir", "open a shell in the workspace sandbox"},
 	{"session", "session", "open/resume an interactive claude session"},
 	{"wolf", "wolf", "summon the wolf to investigate"},
 	{"orch", "orch", "open a terminal in this work stream's orch directory"},
@@ -232,8 +231,6 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.statusMsg = "showing " + name
-	case "dir":
-		return m.openInteractive("shell")
 	case "session":
 		return m.openInteractive("session")
 	case "orch":

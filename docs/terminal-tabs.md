@@ -8,7 +8,6 @@ the terminal orch runs in**:
 | session | opened by | session name | tab title |
 |---|---|---|---|
 | host wolf (`--wolf-host`) | the daemon, when the project blocks | `wolf-<branch>` | project name |
-| `:dir` shell (bash in the workspace, on the host) | the TUI command | `shell-<work-stream>` | project name |
 | `:session` claude (in the `session-<work-stream>` sandbox) | the TUI command | `session-<work-stream>` | project name |
 | `:orch` shell (bash in the work stream's orch directory) | the TUI command | `orch-<work-stream>` | project name |
 | `:workspace` shell (bash at the root of the wsp workspace) | the TUI command | `workspace-<work-stream>` | project name |
@@ -20,7 +19,7 @@ is the key orch uses to track the tab.
 ## One tab per session
 
 If a session's tab is already open, orch doesn't open a second one. Running
-`:dir`, `:session`, `:orch` or `:workspace` again for the same work stream:
+`:session`, `:orch` or `:workspace` again for the same work stream:
 
 1. leaves the existing tab running,
 2. switches to it (brings its window and the terminal to the front), and
@@ -90,7 +89,7 @@ The terminal is resolved when a tab is first needed, not at startup.
 
    A missing file is fine. An unsupported value or malformed YAML is an error.
 3. **Neither.** The launch that needed the tab fails with an error, shown in
-   the TUI footer for `:dir`/`:session`, or as `session_start_error` in the
+   the TUI footer for `:session`/`:orch`/`:workspace`, or as `session_start_error` in the
    audit log for the wolf:
 
    ```
@@ -195,14 +194,15 @@ Adding another terminal means implementing `terminal.Launcher`
 Build with `go build -o orch ./cmd/orch` and start orch from Ghostty
 (`./start.sh`, or `./orch --root … --acp-kit …`).
 
-1. **New tab.** Select a work stream and run `:dir`. Expect a new Ghostty tab
-   titled with the work stream's name, running bash in its workspace. The
-   footer reads `opened shell in a new tab → shell-<work-stream>`.
-2. **Duplicate.** Switch back to orch's tab and run `:dir` again. Expect no new
+1. **New tab.** Select a work stream whose workspace exists and run
+   `:workspace`. Expect a new Ghostty tab titled with the work stream's name,
+   running bash at its wsp workspace root. The footer reads
+   `opened workspace in a new tab → workspace-<work-stream>`.
+2. **Duplicate.** Switch back to orch's tab and run `:workspace` again. Expect no new
    tab: Ghostty switches to the existing one, and orch's footer shows the
    `⚠ … already open — switched to it` warning.
-3. **Reopen after close.** Close the shell tab (or `exit` in it), then run
-   `:dir` again. Expect a fresh tab.
+3. **Reopen after close.** Close the workspace tab (or `exit` in it), then run
+   `:workspace` again. Expect a fresh tab.
 4. **`:session`.** Same as steps 1–3, with a claude session in the
    `session-<work-stream>` sandbox, attached with `sbx run`. In it, `/mcp`
    lists only `okta-gateway`, with `mcp-find` and `mcp-add` and no servers
@@ -211,7 +211,7 @@ Build with `go build -o orch ./cmd/orch` and start orch from Ghostty
    project (`status: blocked`). Expect a tab titled with the project name
    running claude. Enter on the wolf's row in the sessions pane switches to
    that tab. Close the tab, and the row disappears within a second.
-6. **No terminal.** From Terminal.app with no settings file, `:dir` fails with
+6. **No terminal.** From Terminal.app with no settings file, `:workspace` fails with
    the `don't know how to open a terminal tab here …` error in the footer.
    Add `terminal: ghostty` to `~/.config/workingman/settings.yaml` and retry:
    the tab opens in Ghostty.

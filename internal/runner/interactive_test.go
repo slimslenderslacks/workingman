@@ -187,7 +187,7 @@ func TestLaunchInteractiveSessionReusesAndResumes(t *testing.T) {
 	}
 }
 
-// TestLaunchInteractiveHostShell covers the `:dir` path: an empty SandboxName
+// TestLaunchInteractiveHostShell covers the `:orch`/`:workspace` path: an empty SandboxName
 // runs the command directly on the host — no sandbox ensured, no `sbx exec`
 // wrapping — in the given cwd.
 func TestLaunchInteractiveHostShell(t *testing.T) {

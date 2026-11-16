@@ -44,7 +44,7 @@
 //     writes behind :wolf, :review, :cleanup, :stop/:start and :hide/:show.
 //   - archive.go — :archive: removes the wsp workspace, then moves the
 //     project directory to the sibling <root>.backup directory.
-//   - interactive.go — :dir, :session, :orch and :workspace through [InteractiveLauncher].
+//   - interactive.go — :session, :orch and :workspace through [InteractiveLauncher].
 //   - tab_attach.go — attaching to non-ACP sessions through [TabFocuser].
 //   - acpwatch.go — [WatchACPSessions]: discovers ACP sessions on disk,
 //     dials their sockets, sends the opening prompt and streams events.
@@ -59,7 +59,7 @@
 //     for project.yaml and tasks/*.yaml every second and sends a snapshot
 //     when something changed. Files that fail to parse are shown as error
 //     cards rather than dropped.
-//   - Project files, written. Every command except :archive, :dir,
+//   - Project files, written. Every command except :archive,
 //     :session, :orch and :workspace works by editing the selected project.yaml through
 //     internal/project and letting the daemon's fsnotify watch react: :wolf
 //     sets status blocked, :cleanup sets cleanup, :review sets review or
@@ -92,8 +92,8 @@
 //     sort key.
 //   - [SessionView] — one live agent session, adapted from the daemon's
 //     SessionInfo by cmd/orch so this package doesn't import internal/daemon.
-//   - [InteractiveLauncher] — interface for :dir, :session, :orch and :workspace; implemented in
-//     cmd/orch over the daemon's OpenInteractiveShell/OpenInteractiveSession.
+//   - [InteractiveLauncher] — interface for :session, :orch and :workspace; implemented in
+//     cmd/orch over the daemon's OpenInteractiveSession/OpenOrchDirTab/OpenWorkspaceDirTab.
 //   - [TabFocuser] — interface to focus a session's terminal tab; implemented
 //     by terminal.TabLauncher, shared with the daemon by cmd/orch.
 //   - [ScanProjects], [WatchProjects], [WatchACPSessions] — the data sources

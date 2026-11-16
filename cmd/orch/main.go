@@ -169,7 +169,7 @@ func runDaemon(args []string) {
 	agent.AugmentSearchPath(agent.DefaultPATHCandidates())
 
 	// Sessions that need a human at a real TTY — the --wolf-host wolf, the
-	// TUI's :dir/:session — open in a new tab of the user's terminal. The
+	// TUI's :session/:orch/:workspace — open in a new tab of the user's terminal. The
 	// terminal is resolved when a tab is first needed (detected from the
 	// environment, else ~/.config/workingman/settings.yaml), so an unknown
 	// terminal only fails the launch that needs one.
@@ -451,7 +451,7 @@ func runTUI(args []string) {
 	// sessions pane gets a nil source — the pane renders "(none)" in that
 	// case. To see live sessions, run `orch --root=...` (the integrated
 	// mode wires the daemon's WatchSessions into the TUI).
-	// Standalone tui has no daemon/runner, so :dir and :session are unavailable
+	// Standalone tui has no daemon/runner, so :session, :orch and :workspace are unavailable
 	// (nil launcher). Run `orch --root=...` for the integrated experience.
 	if err := tui.Run(ctx, roots, nil, "", nil, nil); err != nil {
 		log.Fatal(err)
@@ -462,10 +462,6 @@ func runTUI(args []string) {
 // tui.InteractiveLauncher interface, keeping the tui package decoupled from the
 // daemon the same way adaptSessionFeed does for the sessions feed.
 type interactiveLauncher struct{ d *daemon.Daemon }
-
-func (l interactiveLauncher) OpenShell(ctx context.Context, projectPath string) (string, error) {
-	return l.d.OpenInteractiveShell(ctx, projectPath)
-}
 
 func (l interactiveLauncher) OpenSession(ctx context.Context, projectPath string) (string, error) {
 	return l.d.OpenInteractiveSession(ctx, projectPath)
