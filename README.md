@@ -166,6 +166,34 @@ prebuilt image), which must be loaded into sbx first (`sbx template load`, see
 tail -f ~/orch/audit.log
 ```
 
+## LLM gateway and "Self-signed certificate detected"
+
+Every ACP agent talks to Claude through the LLM gateway
+(`ANTHROPIC_BASE_URL=https://llm.es.atko.services`) **only when** `sbx secret
+ls --json` lists a custom secret targeting `llm.es.atko.services` that is
+`global` or scoped to that sandbox; otherwise acp-wrapper leaves
+`ANTHROPIC_BASE_URL` unset and the agent goes to `api.anthropic.com` directly.
+On a network with a TLS-inspecting proxy (Okta's "Forward Trust" CA) that
+direct path presents a chain the sandbox does not trust, and every agent reply
+reads `Unable to connect to API: Self-signed certificate detected`. The sbx
+proxy re-signs the gateway host with its own CA (which sandboxes do trust), so
+the gateway path works.
+
+Keep the gateway secret **global**: sbx deletes a sandbox-scoped secret when
+that sandbox is removed, so a sandbox acp-wrapper recreates (the persistent
+`workingman-agent` sandbox is recreated whenever its kit, image or gateway
+settings drift) silently loses it. acp-wrapper warns about this before
+recreating, and every launch now runs an **LLM TLS preflight** — `curl` from
+inside the sandbox to the endpoint the agent will use — failing the launch
+with that diagnosis (`LLM TLS preflight FAILED` in `acp-wrapper.log`, and the
+session's error) instead of starting an agent that cannot reach the API.
+Check with:
+
+```bash
+sbx secret ls --json | jq '.custom_secrets[] | select(.targets | index("llm.es.atko.services")) | .scope'
+grep -E 'LLM gateway|LLM TLS' ~/orch/acp-wrapper.log | tail
+```
+
 ## MCP gateway (per-sandbox MCP servers)
 
 Sandboxes reach MCP servers through the host's

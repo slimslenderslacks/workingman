@@ -39,12 +39,21 @@ const GatewayBaseURLEnv = "ANTHROPIC_BASE_URL=https://" + LLMGatewayHost
 // globally or to that sandbox. sbx's proxy swaps the real credential in only
 // for requests to that host, so without one ANTHROPIC_BASE_URL must stay unset.
 func GatewaySecretConfigured(ctx context.Context, run RunFunc, sbxPath, sandbox string) (bool, error) {
+	global, scoped, err := GatewaySecretScopes(ctx, run, sbxPath, sandbox)
+	return global || scoped, err
+}
+
+// GatewaySecretScopes reports which custom secrets targeting LLMGatewayHost
+// apply to sandbox: a global one, and one scoped to sandbox itself. The
+// difference matters because sbx deletes a sandbox-scoped secret when that
+// sandbox is removed, so recreating the sandbox loses it.
+func GatewaySecretScopes(ctx context.Context, run RunFunc, sbxPath, sandbox string) (global, scoped bool, err error) {
 	if sbxPath == "" {
 		sbxPath = "sbx"
 	}
 	out, err := run(ctx, sbxPath, "secret", "ls", "--json")
 	if err != nil {
-		return false, fmt.Errorf("sbx secret ls: %w: %s", err, strings.TrimSpace(string(out)))
+		return false, false, fmt.Errorf("sbx secret ls: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	var data struct {
 		CustomSecrets []struct {
@@ -53,15 +62,18 @@ func GatewaySecretConfigured(ctx context.Context, run RunFunc, sbxPath, sandbox 
 		} `json:"custom_secrets"`
 	}
 	if err := json.Unmarshal(out, &data); err != nil {
-		return false, fmt.Errorf("decode sbx secret ls output: %w", err)
+		return false, false, fmt.Errorf("decode sbx secret ls output: %w", err)
 	}
 	for _, s := range data.CustomSecrets {
-		if s.Scope != "global" && s.Scope != sandbox {
+		if !slices.Contains(s.Targets, LLMGatewayHost) {
 			continue
 		}
-		if slices.Contains(s.Targets, LLMGatewayHost) {
-			return true, nil
+		switch s.Scope {
+		case "global":
+			global = true
+		case sandbox:
+			scoped = true
 		}
 	}
-	return false, nil
+	return global, scoped, nil
 }

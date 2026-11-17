@@ -118,8 +118,8 @@ func TestEnsureSandboxRecreatesOnHarnessDrift(t *testing.T) {
 			if _, err := ensureSandbox(context.Background(), f.run, c); err != nil {
 				t.Fatalf("ensureSandbox: %v", err)
 			}
-			if got := subcommands(f.calls); strings.Join(got, ",") != "ls,rm,create" {
-				t.Errorf("sbx calls = %v, want ls, rm, create", got)
+			if got := subcommands(f.calls); strings.Join(got, ",") != "ls,secret,rm,create" {
+				t.Errorf("sbx calls = %v, want ls, secret ls (scoped LLM secret check), rm, create", got)
 			}
 			if drift := c.harnessDrift(c.SandboxName); drift != "" {
 				t.Errorf("after recreate harnessDrift = %q, want none (create must record the harness)", drift)

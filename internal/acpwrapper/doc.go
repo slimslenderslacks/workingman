@@ -28,6 +28,9 @@
 // IdleTimeout. On exit the sandbox is removed unless the task's status, or
 // SaveSandbox, says to keep it for inspection. Before the agent starts, Run
 // also routes it through the LLM gateway when a gateway secret is configured,
+// checks from inside the sandbox that the API endpoint's TLS chain is trusted
+// (failing the launch rather than starting an agent that can only answer
+// "Self-signed certificate detected"),
 // checks that the SSH signing key is usable, and checks ssh push access for
 // sessions that will push.
 //

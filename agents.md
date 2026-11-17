@@ -719,6 +719,12 @@ server set / dynamic setting, refuses
 to start without `MCP_URL`, and verifies inside the sandbox that `okta-gateway`
 is registered and the stock `mcp-gateway` is gone before the agent starts. See
 [docs/mcp-gateway.md](docs/mcp-gateway.md#the-workingman-agents-sandbox).
+A recreate also drops any LLM gateway secret scoped to the
+`workingman-agent` sandbox (sbx deletes it with the sandbox), leaving the agent
+on the direct API, which a TLS-inspecting network breaks with "Self-signed
+certificate detected"; keep that secret global (see the README section on the LLM gateway).
+The LLM TLS preflight every ACP launch
+runs fails the launch with that diagnosis.
 
 **Mounts (read-only enforced by the mount).** The scratch dir is the agent's
 cwd and holds the usual `.orch/` handoff files. Every orch `--root` is a
