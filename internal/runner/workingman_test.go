@@ -293,8 +293,9 @@ func TestStartSleepyHeadAgent(t *testing.T) {
 }
 
 // The workingman agent's persistent sandbox must never fall back to the stock
-// mcp-gateway: with a gateway URL it is launched with --require-okta-gateway,
-// and with no default server set it still gets a (dynamic) gateway rather
+// mcp-gateway: with a gateway URL it is launched with --require-okta-gateway.
+// Its gateway is dynamic by default (the default servers plus mcp-find /
+// mcp-add); with no default server set it still gets a dynamic gateway rather
 // than none. Other kinds are unchanged.
 func TestWorkingmanAgentRequiresOktaGateway(t *testing.T) {
 	for _, tc := range []struct {
@@ -302,12 +303,16 @@ func TestWorkingmanAgentRequiresOktaGateway(t *testing.T) {
 		url         string
 		servers     []string
 		static      bool
+		wmStatic    bool
 		wantRequire bool
 		wantDynamic bool
 		wantServers []string
 	}{
-		{name: "default servers", url: "http://localhost:3333", servers: []string{"github"}, wantRequire: true, wantServers: []string{"github"}},
+		{name: "default servers, dynamic", url: "http://localhost:3333", servers: []string{"github"}, wantRequire: true, wantDynamic: true, wantServers: []string{"github"}},
+		{name: "workingman dynamic off", url: "http://localhost:3333", servers: []string{"github"}, wmStatic: true, wantRequire: true, wantServers: []string{"github"}},
+		{name: "default servers and static", url: "http://localhost:3333", servers: []string{"github"}, static: true, wantRequire: true, wantServers: []string{"github"}},
 		{name: "no servers gets a dynamic gateway", url: "http://localhost:3333", wantRequire: true, wantDynamic: true},
+		{name: "no servers, workingman dynamic off: still dynamic", url: "http://localhost:3333", wmStatic: true, wantRequire: true, wantDynamic: true},
 		{name: "no servers and static: no gateway", url: "http://localhost:3333", static: true},
 		{name: "no url: no gateway", servers: []string{"github"}},
 	} {
@@ -320,6 +325,8 @@ func TestWorkingmanAgentRequiresOktaGateway(t *testing.T) {
 				MCPGatewayURL:     tc.url,
 				MCPGatewayServers: tc.servers,
 				MCPGatewayStatic:  tc.static,
+
+				WorkingmanAgentMCPStatic: tc.wmStatic,
 			}
 			if _, err := r.Start(context.Background(), Plan{
 				Kind:       agent.WorkingmanAgent,

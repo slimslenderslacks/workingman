@@ -514,6 +514,12 @@ type Runner struct {
 	// every sandbox then gets only the servers it asked for.
 	MCPGatewayStatic bool
 
+	// WorkingmanAgentMCPStatic turns off just the workingman agent's dynamic
+	// gateway (orch --workingman-agent-mcp-dynamic=false): it then gets only
+	// MCPGatewayServers, with no mcp-find / mcp-add. The zero value keeps it
+	// dynamic, so the agent can add servers such as Slack mid-session.
+	WorkingmanAgentMCPStatic bool
+
 	// MCPGatewayReadyTimeout is how long a `:session` launch waits for a
 	// configured MCP gateway that is not answering yet; zero means
 	// mcpgateway.DefaultReadyTimeout.
@@ -1141,8 +1147,10 @@ func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRo
 	// The workingman agent's sandbox is persistent and reused across daemon
 	// restarts, so it is the one most likely to carry a stale kit; it must
 	// never silently run with the stock mcp-gateway server instead of
-	// okta-gateway. With no default servers it still gets a (dynamic)
-	// gateway rather than none, unless --mcp-gateway-static forbids that.
+	// okta-gateway. Its gateway is dynamic by default (MCPGatewayDynamic), so
+	// it can mcp-find / mcp-add servers beyond the default set; with no
+	// default servers it still gets a dynamic gateway rather than none,
+	// unless --mcp-gateway-static forbids that.
 	withGateway := len(mcpServers) > 0
 	if kind == agent.WorkingmanAgent.String() && strings.TrimSpace(r.MCPGatewayURL) != "" {
 		if !withGateway && !r.MCPGatewayStatic {
@@ -1178,11 +1186,15 @@ func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRo
 // any, otherwise the configured default set, MCPGatewayServers.
 // MCPGatewayDynamic reports whether kind's sandbox gateway is dynamic: it
 // also serves mcp-find and mcp-add over the whole catalog, so the agent can
-// find and attach servers beyond MCPServersFor. On by default for the wolf
-// and task agents; MCPGatewayStatic turns it off.
+// find and attach servers beyond MCPServersFor. On by default for the wolf,
+// task and workingman agents; MCPGatewayStatic turns it off for all of them,
+// WorkingmanAgentMCPStatic for the workingman agent only.
 func (r *Runner) MCPGatewayDynamic(kind agent.Kind) bool {
 	if r.MCPGatewayStatic {
 		return false
+	}
+	if kind == agent.WorkingmanAgent {
+		return !r.WorkingmanAgentMCPStatic
 	}
 	return kind == agent.WolfAgent || kind == agent.TaskAgent
 }

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,10 +27,17 @@ type harnessRecord struct {
 	Sandbox string `json:"sandbox"`
 	// Kit is the --kit reference; KitDigest the sha256 of its spec.yaml when
 	// it is a local kit directory (empty for a published ref).
-	Kit       string    `json:"kit"`
-	KitDigest string    `json:"kit_digest,omitempty"`
-	Image     string    `json:"image,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Kit       string `json:"kit"`
+	KitDigest string `json:"kit_digest,omitempty"`
+	Image     string `json:"image,omitempty"`
+	// MCPServers and MCPDynamic are the per-sandbox gateway it was set up
+	// for (Config.MCPGateway's Servers and Dynamic). A sandbox created for a
+	// different gateway — say a static one, before the workingman agent's
+	// gateway turned dynamic — is recreated rather than reused, so nothing
+	// registered against the old gateway lingers in it.
+	MCPServers []string  `json:"mcp_servers,omitempty"`
+	MCPDynamic bool      `json:"mcp_dynamic"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // harnessStateDir is where harness records live: a "sandboxes" directory
@@ -61,6 +69,9 @@ func (c Config) currentHarness(sandbox string) harnessRecord {
 		Kit:       c.KitPath,
 		KitDigest: kitDigest(c.KitPath),
 		Image:     strings.TrimSpace(c.TemplateImage),
+
+		MCPServers: slices.Clone(c.MCPGateway.Servers),
+		MCPDynamic: c.MCPGateway.Dynamic,
 	}
 }
 
@@ -105,7 +116,8 @@ func (c Config) removeHarness(sandbox string) {
 }
 
 // harnessDrift says why an existing sandbox was not built from the current
-// kit and image, or "" when it was. A sandbox with no record predates this
+// kit and image for the current gateway servers and dynamic setting, or ""
+// when it was. A sandbox with no record predates this
 // bookkeeping (or was made by hand), so its kit is unknown and it counts as
 // drifted.
 func (c Config) harnessDrift(sandbox string) string {
@@ -121,6 +133,10 @@ func (c Config) harnessDrift(sandbox string) string {
 		return fmt.Sprintf("kit %q changed since the sandbox was created (spec.yaml %s -> %s)", cur.Kit, short(rec.KitDigest), short(cur.KitDigest))
 	case rec.Image != cur.Image:
 		return fmt.Sprintf("created from image %q, now %q", orStock(rec.Image), orStock(cur.Image))
+	case !slices.Equal(rec.MCPServers, cur.MCPServers):
+		return fmt.Sprintf("created for MCP gateway servers [%s], now [%s]", strings.Join(rec.MCPServers, ","), strings.Join(cur.MCPServers, ","))
+	case rec.MCPDynamic != cur.MCPDynamic:
+		return fmt.Sprintf("created for an MCP gateway with dynamic=%v, now dynamic=%v", rec.MCPDynamic, cur.MCPDynamic)
 	}
 	return ""
 }
@@ -202,8 +218,9 @@ func requireOktaGateway(ctx context.Context, run commandFunc, c Config) error {
 	}
 	problem, recreate := oktaGatewayPreflight(ctx, run, c)
 	if problem == "" {
-		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: okta-gateway preflight OK (kit %s, template %s, MCP_URL %s)\n",
-			c.SessionID, c.KitPath, c.Harness(), c.mcpURL)
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: okta-gateway preflight OK (kit %s, template %s, MCP_URL %s, dynamic %v)\n",
+			c.SessionID, c.KitPath, c.Harness(), c.mcpURL, c.MCPGateway.Dynamic)
+		checkDynamicTools(ctx, c)
 		return nil
 	}
 	if !recreate {
@@ -219,6 +236,35 @@ func requireOktaGateway(ctx context.Context, run commandFunc, c Config) error {
 	}
 	return fmt.Errorf("acpwrapper: okta-gateway preflight FAILED for sandbox %q (kit %s, template %s): %s; removed the sandbox so the next launch recreates it",
 		c.SandboxName, c.KitPath, c.Harness(), problem)
+}
+
+// checkDynamicTools confirms, when the sandbox's gateway was asked to be
+// dynamic, that it actually serves mcp-find and mcp-add: it opens an MCP
+// session on the gateway's host-side URL and lists its tools. A gap is only
+// warned about — a gateway that ignores "dynamic" (an older
+// standalone-codemode) would not change on a re-mint or a recreate, and the
+// agent still has the gateway's servers.
+func checkDynamicTools(ctx context.Context, c Config) {
+	if !c.MCPGateway.Dynamic {
+		return
+	}
+	rec, ok, err := c.MCPGateway.Store.Load(c.SandboxName)
+	if err != nil || !ok || rec.URL == "" {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING cannot check the gateway's mcp-find/mcp-add: no gateway record for sandbox %q (%v)\n", c.SessionID, c.SandboxName, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	missing, err := mcpgateway.MissingDynamicTools(ctx, rec.URL, mcpgateway.SessionOptions{ClientName: "acp-wrapper"})
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING cannot list gateway %s tools to check mcp-find/mcp-add: %v\n", c.SessionID, rec.ID, err)
+	case len(missing) > 0:
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING gateway %s was minted dynamic but does not serve %s; the agent cannot add MCP servers itself (is standalone-codemode too old?)\n",
+			c.SessionID, rec.ID, strings.Join(missing, ", "))
+	default:
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: gateway %s is dynamic: serves %s\n", c.SessionID, rec.ID, strings.Join(mcpgateway.DynamicTools, ", "))
+	}
 }
 
 // AbsKit returns kit as an absolute path when it names an existing local

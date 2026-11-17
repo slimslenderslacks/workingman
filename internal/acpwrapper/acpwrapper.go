@@ -192,7 +192,8 @@ type Config struct {
 	// `okta-gateway` MCP server, rather than silently fall back to the stock
 	// sbx `mcp-gateway` one. Set for the persistent workingman agent, whose
 	// sandbox is reused across daemon restarts: an existing sandbox not built
-	// from the current kit and image (see harnessDrift) is recreated, a
+	// from the current kit and image, or for a different gateway server set
+	// or dynamic setting (see harnessDrift), is recreated, a
 	// launch with no MCP_URL fails, and a sandbox whose claude-acp-client does
 	// not leave okta-gateway registered and mcp-gateway gone
 	// (oktaGatewayPreflight) is removed and the launch failed, so the daemon's

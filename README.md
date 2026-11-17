@@ -208,11 +208,14 @@ Each time a sandbox is created (or reused):
    servers are the task's `static_mcps` when it lists any (each entry is a
    catalog server name), otherwise `--mcp-gateway-servers`. The review agent
    asks for `github`. Names the catalog doesn't have are dropped, with a
-   warning. If no servers are left, the sandbox gets no gateway. The wolf
-   and task agents get `"dynamic": true`, which adds `mcp-find` and
-   `mcp-add` over the whole catalog so the agent can attach servers beyond
-   that list; other agents get just their servers. `--mcp-gateway-static`
-   (or `WORKINGMAN_MCP_GATEWAY_STATIC=1`) turns dynamic gateways off. A
+   warning. If no servers are left, the sandbox gets no gateway. The wolf,
+   task and workingman agents get `"dynamic": true`, which adds `mcp-find`
+   and `mcp-add` over the whole catalog so the agent can attach servers
+   beyond that list (the workingman agent can, for example, `mcp-add` Slack
+   mid-session); other agents get just their servers. `--mcp-gateway-static`
+   (or `WORKINGMAN_MCP_GATEWAY_STATIC=1`) turns dynamic gateways off for
+   everyone; `--workingman-agent-mcp-dynamic=false` (or
+   `WORKINGMAN_AGENT_MCP_DYNAMIC=0`) only for the workingman agent. A
    recorded gateway is reused only if it was minted with the same setting.
 2. **The sandbox gets `MCP_URL`**: the returned URL, with a loopback host
    (`localhost`, `127.0.0.1`, `::1`) rewritten to `host.docker.internal`, same

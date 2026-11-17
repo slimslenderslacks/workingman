@@ -258,18 +258,28 @@ launched for it with `--require-okta-gateway`, which:
 
 - **records what each sandbox was built from.** On `sbx create` the wrapper
   writes `<sessions-root>/../sandboxes/<sandbox>.json` with the `--kit`
-  reference, the sha256 of the kit's `spec.yaml` (local kits) and the
-  `--template` image. The record is removed with the sandbox.
+  reference, the sha256 of the kit's `spec.yaml` (local kits), the
+  `--template` image, and the gateway it was set up for (`mcp_servers`,
+  `mcp_dynamic`). The record is removed with the sandbox.
 - **recreates a drifted sandbox.** An existing `workingman-agent` sandbox
   whose record names a different kit path, a changed `spec.yaml`, a
-  different image, or that has no record at all, is `sbx rm --force`d and
-  created again (`recreating sandbox "workingman-agent": …` in
-  `acp-wrapper.log`).
+  different image, different gateway servers or dynamic setting, or that has
+  no record at all, is `sbx rm --force`d and created again (`recreating
+  sandbox "workingman-agent": …` in `acp-wrapper.log`). Its gateway record
+  (`<sessions-root>/../gateways/workingman-agent.json`) is also compared on
+  every launch: one minted over other servers or with another `dynamic` is
+  DELETEd and re-minted.
 - **refuses to run without a gateway.** No `--mcp-gateway-url` (or a gateway
   that could not be minted) fails the launch instead of starting the agent
-  with `mcp-gateway`; the daemon retries with backoff. With an empty
-  `--mcp-gateway-servers` the workingman agent still gets a dynamic gateway
-  (`mcp-find` / `mcp-add`), unless `--mcp-gateway-static` is set.
+  with `mcp-gateway`; the daemon retries with backoff.
+- **gets a dynamic gateway.** The workingman agent's gateway is minted over
+  `--mcp-gateway-servers` (start.sh: `github`) with `"dynamic": true`, so it
+  also serves `mcp-find` / `mcp-add` and the agent can attach catalog
+  servers itself (e.g. Slack) mid-session.
+  `--workingman-agent-mcp-dynamic=false` (`WORKINGMAN_AGENT_MCP_DYNAMIC=0`)
+  makes it static again; `--mcp-gateway-static` turns every dynamic gateway
+  off. With an empty `--mcp-gateway-servers` it is dynamic regardless,
+  unless `--mcp-gateway-static` is set.
 - **verifies the result inside the sandbox** before the agent starts: the
   installed `claude-acp-client` must be one that removes `mcp-gateway`,
   `CLAUDE_ACP_REGISTER_ONLY=1 claude-acp-client` is run with `MCP_URL`, and
@@ -277,9 +287,14 @@ launched for it with `--require-okta-gateway`, which:
   mcp-gateway` must fail. A failure a fresh sandbox can fix removes the
   sandbox and fails the launch, so the retry recreates it
   (`okta-gateway preflight FAILED …`). A project-scope `mcp-gateway` (from
-  a `.mcp.json` the client never edits) is only warned about.
+  a `.mcp.json` the client never edits) is only warned about. For a dynamic
+  gateway it then opens an MCP session on the gateway and lists its tools:
+  `gateway <id> is dynamic: serves mcp-find, mcp-add` on success, a
+  `WARNING … does not serve mcp-find, mcp-add` (the agent still starts)
+  otherwise.
 
-The daemon audit-logs the kit, image, gateway URL and servers on
+The daemon audit-logs the kit, image, gateway URL, servers and
+`mcp_dynamic` on
 `workingman_agent_enabled` / `workingman_agent_started`, and
 `workingman_agent_no_mcp_gateway` when orch has no gateway URL.
 
@@ -532,7 +547,7 @@ values to the audit log as `mcp_gateway_config`.
 acp-wrapper flags (set by orch, so you normally don't pass them yourself):
 `--mcp-gateway-url`, `--mcp-server <name>` (repeatable),
 `--mcp-gateway-state <dir>`, `--mcp-gateway-wait <duration>` (default 2m),
-`--require-okta-gateway` (the workingman agent only).
+`--mcp-dynamic`, `--require-okta-gateway` (the workingman agent only).
 
 ## Troubleshooting
 

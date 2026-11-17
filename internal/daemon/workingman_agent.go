@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -373,6 +374,7 @@ func (d *Daemon) startWorkingmanAgent() error {
 			"image", d.runner.Image,
 			"mcp_gateway_url", d.runner.MCPGatewayURL,
 			"mcp_servers", strings.Join(d.runner.MCPServersFor(plan), ","),
+			"mcp_dynamic", strconv.FormatBool(d.runner.MCPGatewayDynamic(agent.WorkingmanAgent)),
 		)
 	}
 	return nil
@@ -396,6 +398,7 @@ func (d *Daemon) beginWorkingmanAgent(ctx context.Context) {
 			"detail", "no --mcp-gateway-url / WORKINGMAN_MCP_GATEWAY_URL: the workingman agent will have the stock mcp-gateway MCP server, not okta-gateway; start orch via start.sh or set the URL")
 	}
 	d.audit.Log("workingman_agent_enabled", "dir", d.workingman.dir,
-		"kit", d.runner.Kit, "image", d.runner.Image, "mcp_gateway_url", d.runner.MCPGatewayURL)
+		"kit", d.runner.Kit, "image", d.runner.Image, "mcp_gateway_url", d.runner.MCPGatewayURL,
+		"mcp_dynamic", strconv.FormatBool(d.runner.MCPGatewayDynamic(agent.WorkingmanAgent)))
 	go d.superviseWorkingmanAgent(ctx)
 }

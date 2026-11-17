@@ -2,11 +2,17 @@ package acpwrapper
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/slimslenderslacks/work/internal/mcpgateway"
 )
 
 func writeKit(t *testing.T, spec string) string {
@@ -74,6 +80,28 @@ func TestEnsureSandboxRecreatesOnHarnessDrift(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(c.KitPath, "spec.yaml"), []byte("v2"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+		}},
+		{name: "gateway turned dynamic", mutate: func(t *testing.T, c *Config) {
+			c.MCPGateway.Servers = []string{"github"}
+			c.saveHarness(c.SandboxName)
+			c.MCPGateway.Dynamic = true
+		}},
+		{name: "gateway servers changed", mutate: func(t *testing.T, c *Config) {
+			c.MCPGateway.Servers = []string{"github"}
+			c.MCPGateway.Dynamic = true
+			c.saveHarness(c.SandboxName)
+			c.MCPGateway.Servers = []string{"github", "slack"}
+		}},
+		{name: "record from before gateway bookkeeping", mutate: func(t *testing.T, c *Config) {
+			data := `{"sandbox":"workingman-agent","kit":"` + c.KitPath + `","kit_digest":"` + kitDigest(c.KitPath) + `","image":"` + c.TemplateImage + `"}`
+			if err := os.MkdirAll(harnessStateDir(c.SessionsRoot), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(c.harnessPath(c.SandboxName), []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			c.MCPGateway.Servers = []string{"github"}
+			c.MCPGateway.Dynamic = true
 		}},
 		{name: "image changed", mutate: func(t *testing.T, c *Config) {
 			c.TemplateImage = "slimslenderslacks/claude-code-acp:0.89.0"
@@ -218,4 +246,74 @@ func TestAbsKit(t *testing.T) {
 	if got := AbsKit("ghcr.io/x/acp-kit:1"); got != "ghcr.io/x/acp-kit:1" {
 		t.Errorf("published ref changed: %q", got)
 	}
+}
+
+// A dynamic gateway that serves mcp-find and mcp-add passes; one that does
+// not is reported (but does not fail the launch).
+func TestCheckDynamicTools(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tools []string
+		want  string
+	}{
+		{name: "dynamic", tools: []string{"get_me", "mcp-find", "mcp-add"}, want: "is dynamic: serves mcp-find, mcp-add"},
+		{name: "not dynamic", tools: []string{"get_me"}, want: "does not serve mcp-find, mcp-add"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				var msg struct {
+					ID     json.RawMessage `json:"id"`
+					Method string          `json:"method"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&msg)
+				var result any
+				switch msg.Method {
+				case "initialize":
+					w.Header().Set("Mcp-Session-Id", "s1")
+					result = map[string]any{"protocolVersion": mcpgateway.ProtocolVersion}
+				case "tools/list":
+					var tools []any
+					for _, n := range tc.tools {
+						tools = append(tools, map[string]any{"name": n})
+					}
+					result = map[string]any{"tools": tools}
+				default:
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": result})
+			}))
+			defer srv.Close()
+
+			c := harnessConfig(t, writeKit(t, "v1"))
+			c.MCPGateway = mcpgateway.Manager{Store: mcpgateway.Store{Dir: t.TempDir()}, Dynamic: true}
+			if err := c.MCPGateway.Store.Save(mcpgateway.Record{Sandbox: c.SandboxName, ID: "gw-1", URL: srv.URL + "/gateways/gw-1"}); err != nil {
+				t.Fatal(err)
+			}
+			out := captureStderr(t, func() { checkDynamicTools(context.Background(), c) })
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("stderr = %q, want %q", out, tc.want)
+			}
+		})
+	}
+}
+
+func captureStderr(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	f()
+	os.Stderr = old
+	w.Close()
+	data, _ := io.ReadAll(r)
+	return string(data)
 }

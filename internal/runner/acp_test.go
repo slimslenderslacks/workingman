@@ -311,24 +311,34 @@ func TestACPLaunchTaskAgentForwardsStaticMCPs(t *testing.T) {
 	}
 }
 
-// The wolf and task agents get dynamic gateways (mcp-find/mcp-add) by
-// default; every other kind, and every kind under MCPGatewayStatic, does not.
+// The wolf, task and workingman agents get dynamic gateways (mcp-find/mcp-add)
+// by default; every other kind, and every kind under MCPGatewayStatic, does
+// not. WorkingmanAgentMCPStatic turns off only the workingman agent's.
 func TestMCPGatewayDynamic(t *testing.T) {
 	r := &Runner{}
 	for kind, want := range map[agent.Kind]bool{
-		agent.WolfAgent:     true,
-		agent.TaskAgent:     true,
-		agent.PlanningAgent: false,
-		agent.CommitAgent:   false,
-		agent.ReviewAgent:   false,
-		agent.ProjectAgent:  false,
+		agent.WolfAgent:       true,
+		agent.TaskAgent:       true,
+		agent.WorkingmanAgent: true,
+		agent.PlanningAgent:   false,
+		agent.CommitAgent:     false,
+		agent.ReviewAgent:     false,
+		agent.ProjectAgent:    false,
 	} {
 		if got := r.MCPGatewayDynamic(kind); got != want {
 			t.Errorf("MCPGatewayDynamic(%s) = %v, want %v", kind, got, want)
 		}
 	}
+	r.WorkingmanAgentMCPStatic = true
+	if r.MCPGatewayDynamic(agent.WorkingmanAgent) {
+		t.Error("MCPGatewayDynamic(workingman) with WorkingmanAgentMCPStatic = true, want false")
+	}
+	if !r.MCPGatewayDynamic(agent.TaskAgent) || !r.MCPGatewayDynamic(agent.WolfAgent) {
+		t.Error("WorkingmanAgentMCPStatic must not change the wolf and task agents")
+	}
+	r.WorkingmanAgentMCPStatic = false
 	r.MCPGatewayStatic = true
-	for _, kind := range []agent.Kind{agent.WolfAgent, agent.TaskAgent} {
+	for _, kind := range []agent.Kind{agent.WolfAgent, agent.TaskAgent, agent.WorkingmanAgent} {
 		if r.MCPGatewayDynamic(kind) {
 			t.Errorf("MCPGatewayDynamic(%s) with MCPGatewayStatic = true, want false", kind)
 		}

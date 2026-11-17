@@ -711,8 +711,11 @@ snapshot gives it no work stream / project path. `session.json` carries
 
 **MCP.** Because its sandbox is reused across every daemon restart, it is
 launched with `acp-wrapper --require-okta-gateway` whenever orch has a gateway
-URL (a dynamic gateway when `--mcp-gateway-servers` is empty): the wrapper
-recreates the sandbox when it was built from a different kit or image, refuses
+URL. Its gateway is dynamic (`--mcp-gateway-servers` plus `mcp-find` /
+`mcp-add`, so it can attach servers such as Slack itself) unless
+`--workingman-agent-mcp-dynamic=false` or `--mcp-gateway-static`: the wrapper
+recreates the sandbox when it was built from a different kit, image or gateway
+server set / dynamic setting, refuses
 to start without `MCP_URL`, and verifies inside the sandbox that `okta-gateway`
 is registered and the stock `mcp-gateway` is gone before the agent starts. See
 [docs/mcp-gateway.md](docs/mcp-gateway.md#the-workingman-agents-sandbox).

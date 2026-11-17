@@ -191,10 +191,16 @@ export ACP_IMAGE="${ACP_IMAGE-slimslenderslacks/claude-code-acp:0.90.0}"
 # standalone-codemode gateway (see "MCP gateway" in README.md). Without a URL
 # orch sets no MCP_URL, so acp-kit keeps the stock `mcp-gateway` MCP server
 # instead of `okta-gateway`. The servers are the default set for a task with
-# no static_mcps; wolf and task gateways also get mcp-find/mcp-add over the
-# whole catalog. Set WORKINGMAN_MCP_GATEWAY_URL="" to turn the gateway off.
+# no static_mcps, and the workingman agent's starting set; wolf, task and
+# workingman-agent gateways also get mcp-find/mcp-add over the whole catalog,
+# so those agents can attach more servers (e.g. Slack) themselves.
+# WORKINGMAN_AGENT_MCP_DYNAMIC=0 makes the workingman agent's gateway static;
+# WORKINGMAN_MCP_GATEWAY_STATIC=1 makes every gateway static. Changing either
+# recreates the persistent workingman-agent sandbox on its next launch.
+# Set WORKINGMAN_MCP_GATEWAY_URL="" to turn the gateway off.
 export WORKINGMAN_MCP_GATEWAY_URL="${WORKINGMAN_MCP_GATEWAY_URL-http://localhost:3333}"
 export WORKINGMAN_MCP_GATEWAY_SERVERS="${WORKINGMAN_MCP_GATEWAY_SERVERS-github}"
+export WORKINGMAN_AGENT_MCP_DYNAMIC="${WORKINGMAN_AGENT_MCP_DYNAMIC-1}"
 # The gateway listens only after attaching its whole catalog, so right after
 # a restart it refuses connections for a while. orch relaunches agents (a
 # blocked project's wolf, say) as soon as it starts, so wait for the gateway
@@ -223,7 +229,7 @@ fi
 
 # Say which kit, image and gateway this run uses: the usual answer to "why does
 # a sandbox have mcp-gateway instead of okta-gateway" is one of these three.
-echo "start: acp-kit=$ACP_KIT acp-image=${ACP_IMAGE:-<stock claude template>} mcp-gateway-url=${WORKINGMAN_MCP_GATEWAY_URL:-<none: sandboxes keep mcp-gateway>} mcp-gateway-servers=${WORKINGMAN_MCP_GATEWAY_SERVERS:-<none>}" >&2
+echo "start: acp-kit=$ACP_KIT acp-image=${ACP_IMAGE:-<stock claude template>} mcp-gateway-url=${WORKINGMAN_MCP_GATEWAY_URL:-<none: sandboxes keep mcp-gateway>} mcp-gateway-servers=${WORKINGMAN_MCP_GATEWAY_SERVERS:-<none>} workingman-agent-mcp-dynamic=$WORKINGMAN_AGENT_MCP_DYNAMIC" >&2
 
 # Run orch as a child (not exec) so the EXIT trap can stop the private agent.
 # Forward INT/TERM to it for a clean shutdown and preserve its exit status.
