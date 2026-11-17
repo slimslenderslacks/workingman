@@ -42,17 +42,10 @@ func dirCommandCases(f *fakeInteractive) map[string]*[]string {
 	return map[string]*[]string{"orch": &f.orchCalls, "workspace": &f.wsCalls}
 }
 
-// The `w` shortcut belongs to wolf, so :workspace is picked by moving the
-// highlight; :orch's `o` shortcut works directly.
+// runDirCommand picks :orch / :workspace from the `:` menu by highlight + enter.
 func runDirCommand(t *testing.T, m model, key string) (model, tea.Cmd) {
 	t.Helper()
-	if key == "orch" {
-		return runProjectCommand(t, m, key)
-	}
-	m = openCommandPicker(t, m)
-	m.cmdPickerIdx = projectCommandIndex(key)
-	step, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	return step.(model), cmd
+	return runProjectCommand(t, m, key)
 }
 
 func TestOrchAndWorkspaceCommandsLaunch(t *testing.T) {

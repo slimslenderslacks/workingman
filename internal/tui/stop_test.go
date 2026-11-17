@@ -172,11 +172,7 @@ func TestRequestStartWithoutProjectErrors(t *testing.T) {
 }
 
 // TestCommandPickerStopAndStart is the end-to-end proof through
-// dispatchProjectCommand rather than requestStop/requestStart directly. It
-// calls dispatchProjectCommand with the literal command key instead of going
-// through runProjectCommand's first-letter shortcut: "stop"/"start" share
-// "session"'s "s" (see projectCommands), so the shortcut path would run
-// `session` instead — j/k + enter is how a real user reaches these two.
+// dispatchProjectCommand rather than requestStop/requestStart directly.
 func TestCommandPickerStopAndStart(t *testing.T) {
 	m, path := selectProject(t, t.TempDir(), "widget") // seeded status:done
 

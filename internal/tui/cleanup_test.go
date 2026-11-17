@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/slimslenderslacks/work/internal/project"
 )
 
@@ -141,34 +143,52 @@ func TestCommandPickerListsCleanupNextToArchive(t *testing.T) {
 	}
 }
 
-// TestProjectCommandFirstLettersAreUnique guards the picker's shortcut
-// contract: handleCommandPickerKey runs the first command whose key starts with
-// the typed rune, so two commands sharing a first letter would make one of them
-// unreachable by keyboard — silently, since the menu would still list both.
-//
-// stop/start/show are a deliberate, documented exception (see
-// projectCommands): all three start with "s", which `session` already owns and
-// is reached far more
-// often, so they're only reachable via j/k + enter. `workspace` is exempt for
-// the same reason: `wolf` owns "w". Exempting them from this
-// check keeps that a one-place decision instead of a test failure someone has
-// to rediscover the reasoning for.
-func TestProjectCommandFirstLettersAreUnique(t *testing.T) {
-	exempt := map[string]bool{"stop": true, "start": true, "show": true, "workspace": true}
-	seen := map[byte]string{}
+// TestCommandPickerIgnoresFirstLetters guards that the picker has no letter
+// shortcuts: typing a command's first letter must neither dispatch it nor
+// close the menu. j and k are excluded — they're the navigation keys.
+func TestCommandPickerIgnoresFirstLetters(t *testing.T) {
 	for _, c := range projectCommands {
-		if c.key == "" {
-			t.Fatalf("projectCommands has an entry with an empty key")
-		}
-		if exempt[c.key] {
+		r := rune(c.key[0])
+		if r == 'j' || r == 'k' {
 			continue
 		}
-		if prev, dup := seen[c.key[0]]; dup {
-			t.Errorf("commands %q and %q share the first letter %q; one is unreachable by shortcut",
-				prev, c.key, string(c.key[0]))
-			continue
-		}
-		seen[c.key[0]] = c.key
+		t.Run(c.key, func(t *testing.T) {
+			fake := &fakeInteractive{target: "t"}
+			m, path := selectProject(t, t.TempDir(), "widget")
+			m.interactive = fake
+			m = openCommandPicker(t, m)
+			idx := m.cmdPickerIdx
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			step, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			m = step.(model)
+
+			if m.mode != modeCommandPicker {
+				t.Errorf("typing %q: mode = %v, want the picker to stay open", string(r), m.mode)
+			}
+			if m.cmdPickerIdx != idx {
+				t.Errorf("typing %q moved the highlight %d -> %d", string(r), idx, m.cmdPickerIdx)
+			}
+			if cmd != nil {
+				t.Errorf("typing %q returned a command; want no-op", string(r))
+			}
+			if m.statusMsg != "" {
+				t.Errorf("typing %q set statusMsg = %q; want no-op", string(r), m.statusMsg)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Errorf("typing %q modified project.yaml", string(r))
+			}
+			if len(fake.sessionCalls)+len(fake.orchCalls)+len(fake.wsCalls) != 0 {
+				t.Errorf("typing %q launched an interactive window", string(r))
+			}
+		})
 	}
 }
 

@@ -48,13 +48,34 @@ func openCommandPicker(t *testing.T, m model) model {
 	return m
 }
 
-// runProjectCommand opens the `:` menu and runs the command with the given key
-// via its first-letter shortcut, returning the resulting model and any command
-// (e.g. an interactive launch) the dispatch produced.
+// runProjectCommand opens the `:` menu, moves the highlight to the command with
+// the given key using j/k exactly as a user would, and presses enter, returning
+// the resulting model and any command (e.g. an interactive launch) the
+// dispatch produced.
 func runProjectCommand(t *testing.T, m model, key string) (model, tea.Cmd) {
 	t.Helper()
 	m = openCommandPicker(t, m)
-	step, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(key[0])}})
+	want := -1
+	for i, c := range projectCommands {
+		if c.key == key {
+			want = i
+		}
+	}
+	if want < 0 {
+		t.Fatalf("no project command %q", key)
+	}
+	for m.cmdPickerIdx != want {
+		r := 'j'
+		if m.cmdPickerIdx > want {
+			r = 'k'
+		}
+		step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = step.(model)
+		if m.mode != modeCommandPicker {
+			t.Fatalf("navigating to %q left the picker (mode = %v)", key, m.mode)
+		}
+	}
+	step, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	return step.(model), cmd
 }
 

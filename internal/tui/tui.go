@@ -37,8 +37,8 @@ const (
 	modeNormal uiMode = iota
 	// modeCommandPicker is the menu shown after `:` on the work-streams pane.
 	// It lists the project commands (dir/session/wolf/orch/workspace/review/cleanup/archive/
-	// stop/start); the user moves with j/k, runs one with enter (or its first
-	// letter), and cancels with esc. It replaces the old free-form `:command`
+	// stop/start); the user moves with j/k, runs the highlighted one with
+	// enter, and cancels with esc. It replaces the old free-form `:command`
 	// line so the commands are discoverable rather than memorised.
 	modeCommandPicker
 	// modeConfirmArchive is the yes/no confirmation shown after `:archive`.

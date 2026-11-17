@@ -10,8 +10,8 @@ import (
 )
 
 // projectCommand is one row of the `:` command-picker menu. key is the
-// canonical command name dispatchProjectCommand switches on and doubles as the
-// first-letter keyboard shortcut; label/desc are what the menu shows.
+// canonical command name dispatchProjectCommand switches on; label/desc are what
+// the menu shows.
 type projectCommand struct {
 	key   string
 	label string
@@ -22,12 +22,9 @@ type projectCommand struct {
 // display order. Every entry is a work-stream action; the ones that need a
 // selected work stream report "no work stream selected" when run without one
 // (dispatchProjectCommand enforces that), so the menu stays complete rather
-// than shifting rows as selection changes. Each key has a unique first letter,
-// so typing that letter runs the command directly — except stop/start/show,
-// which all share `session`'s "s" and so are only reachable via j/k + enter;
-// those were the names asked for, and shadowing the far more common `session`
-// shortcut for them isn't worth it. `workspace` likewise shares "w" with `wolf`,
-// which is listed first and so keeps the shortcut; `workspace` needs j/k + enter.
+// than shifting rows as selection changes. There are no letter shortcuts: a
+// command only runs once it has been highlighted (j/k or arrows) and confirmed
+// with enter, so a stray keystroke can't fire one by accident.
 var projectCommands = []projectCommand{
 	{"session", "session", "open/resume an interactive claude session"},
 	{"wolf", "wolf", "summon the wolf to investigate"},
@@ -65,8 +62,9 @@ func (m model) selectedProjectMerged() bool {
 }
 
 // handleCommandPickerKey drives the `:` command menu: j/k (or arrows) move the
-// highlight, enter runs the highlighted command, a command's first letter runs
-// it directly, and esc dismisses the menu without doing anything.
+// highlight, enter runs the highlighted command, and esc dismisses the menu
+// without doing anything. Every other key is ignored — in particular, typing a
+// command's first letter does not run it.
 func (m model) handleCommandPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -84,14 +82,6 @@ func (m model) handleCommandPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		return m.dispatchProjectCommand(projectCommands[m.cmdPickerIdx].key)
-	}
-	// First-letter shortcut: run the matching command outright.
-	if len(msg.Runes) == 1 {
-		for _, c := range projectCommands {
-			if rune(c.key[0]) == msg.Runes[0] {
-				return m.dispatchProjectCommand(c.key)
-			}
-		}
 	}
 	return m, nil
 }
