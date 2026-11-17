@@ -173,7 +173,7 @@ other value and re-blocks the project. Use exactly one of:
 Each task's `status:` field is also enum-checked. Valid values:
 
   - `ready`     — eligible for dispatch when its deps are committed
-  - `running`   — the task agent is mid-run (the daemon manages this)
+  - `running`   — an agent is mid-run (the daemon writes this at dispatch)
   - `success`   — task finished, awaiting commit
   - `failed`    — task crashed; the daemon retries up to a budget
   - `blocked`   — explicit user-input-required signal from the agent

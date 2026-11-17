@@ -37,7 +37,7 @@ func TestProjectAgentEndToEnd(t *testing.T) {
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
 
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestStatusReadyTriggersPlanningAgent(t *testing.T) {
 		Audit:    a,
 		Command:  func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestPlanningAgentSeesPendingIntakeFiles(t *testing.T) {
 		Audit:    a,
 		Command:  func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestNumericPrefixTaskFilenames(t *testing.T) {
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestResumeStuckSuccessTask(t *testing.T) {
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestStartupScanDispatchesExistingProject(t *testing.T) {
 		Audit:    a,
 		Command:  func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestProjectAgentHandoffToPlanning(t *testing.T) {
 		Audit:    a,
 		Command:  func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestDuplicateEmptyEventDoesNotLaunchTwice(t *testing.T) {
 		// touch the file again.
 		Command: func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 30"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -235,6 +235,11 @@ Set `model: default` on every task you write. This field is reserved for
 future per-task model selection; for now "default" is the only supported
 value.
 
+`harness:` is optional — leave it out. Empty means the default `claude-acp`
+harness (the only one available today); any other value fails the task's
+launch. Do not write `resolved_model:` or `resolved_harness:` either: the
+daemon records those once a task runs.
+
 You are in workspace: {{.Workspace}}
 {{if .Worktree}}
 The project's repositories are checked out at: {{.Worktree}}

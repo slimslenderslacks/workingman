@@ -77,7 +77,7 @@ func startDaemon(t *testing.T, root string) (*safeBuf, context.CancelFunc) {
 	t.Helper()
 	buf := &safeBuf{}
 	a := audit.New(buf)
-	d, err := New([]string{root}, a)
+	d, err := newDaemon(t, []string{root}, a)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -391,4 +391,19 @@ func TestWorkspaceReposForCombinesAndFlags(t *testing.T) {
 		!got[1].Create || got[1].Visibility != "public" {
 		t.Errorf("new repo = %+v, want Create=true visibility=public", got[1])
 	}
+}
+
+// newDaemon is New for tests: it closes the daemon's inotify watcher on
+// cleanup. Many tests build a Daemon without ever calling Run (whose shutdown
+// closes it), and each leaked watcher holds one of the per-user inotify
+// instances (fs.inotify.max_user_instances, often 128) — leak enough and New
+// fails with "too many open files". Close is idempotent, and this cleanup is
+// registered before any the test adds, so it runs after Run has returned.
+func newDaemon(t *testing.T, roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
+	t.Helper()
+	d, err := New(roots, a, opts...)
+	if d != nil {
+		t.Cleanup(func() { _ = d.watcher.Close() })
+	}
+	return d, err
 }

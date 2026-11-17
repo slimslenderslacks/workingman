@@ -314,3 +314,69 @@ func TestInvalidStatusRejected(t *testing.T) {
 		t.Errorf("Load accepted invalid status")
 	}
 }
+
+// A requested `model: default` stays the requested value; the concrete model
+// the agent ran under lives in resolved_model and wins for display. Likewise
+// for harness. Both resolved fields are omitted until set.
+func TestResolvedModelAndHarnessRoundTrip(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "x.yaml")
+	if err := writeRaw(dst, "name: x\nstatus: ready\nmodel: default\n"); err != nil {
+		t.Fatalf("writeRaw: %v", err)
+	}
+	tk, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := tk.DisplayModel(); got != ModelDefault {
+		t.Errorf("DisplayModel before run = %q, want %q", got, ModelDefault)
+	}
+	if got := tk.DisplayHarness(); got != HarnessDefault {
+		t.Errorf("DisplayHarness before run = %q, want %q", got, HarnessDefault)
+	}
+	if err := Save(dst, tk); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, _ := os.ReadFile(dst)
+	for _, k := range []string{"resolved_model", "resolved_harness", "harness:"} {
+		if strings.Contains(string(data), k) {
+			t.Errorf("unset %s should be omitted; got:\n%s", k, data)
+		}
+	}
+
+	if err := Update(dst, func(t *Task) bool {
+		t.ResolvedModel = "claude-opus-5-5"
+		t.ResolvedHarness = "slimslenderslacks/claude-code-acp:0.90.0"
+		return true
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := Load(dst)
+	if err != nil {
+		t.Fatalf("Load after Update: %v", err)
+	}
+	if got.Model != ModelDefault {
+		t.Errorf("Model = %q, want the requested %q kept", got.Model, ModelDefault)
+	}
+	if got.DisplayModel() != "claude-opus-5-5" {
+		t.Errorf("DisplayModel = %q, want claude-opus-5-5", got.DisplayModel())
+	}
+	if got.DisplayHarness() != "slimslenderslacks/claude-code-acp:0.90.0" {
+		t.Errorf("DisplayHarness = %q, want the template", got.DisplayHarness())
+	}
+}
+
+// Update only writes when fn reports a change.
+func TestUpdateSkipsUnchanged(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "x.yaml")
+	raw := "name: x\nstatus: ready\n"
+	if err := writeRaw(dst, raw); err != nil {
+		t.Fatalf("writeRaw: %v", err)
+	}
+	if err := Update(dst, func(*Task) bool { return false }); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	data, _ := os.ReadFile(dst)
+	if string(data) != raw {
+		t.Errorf("file rewritten on a no-op Update:\n%s", data)
+	}
+}

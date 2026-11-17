@@ -27,6 +27,7 @@ type fakeMCP struct {
 	expired   bool // answer 404 to every request carrying the session id
 	staleCode int  // status for an expired session; 0 means 404
 	tool      func(name string, args map[string]any) map[string]any
+	toolPages [][]string // tools/list answers, one page each
 }
 
 func (f *fakeMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +79,25 @@ func (f *fakeMCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
 		return
+	case "tools/list":
+		cursor, _ := msg.Params["cursor"].(string)
+		page := 0
+		if cursor != "" {
+			fmt.Sscanf(cursor, "p%d", &page)
+		}
+		if page >= len(f.toolPages) {
+			result = map[string]any{"tools": []any{}}
+			break
+		}
+		var tools []any
+		for _, name := range f.toolPages[page] {
+			tools = append(tools, map[string]any{"name": name})
+		}
+		res := map[string]any{"tools": tools}
+		if page+1 < len(f.toolPages) {
+			res["nextCursor"] = fmt.Sprintf("p%d", page+1)
+		}
+		result = res
 	case "tools/call":
 		args, _ := msg.Params["arguments"].(map[string]any)
 		res := f.tool(msg.Params["name"].(string), args)
@@ -252,5 +272,37 @@ func TestReadSSEResponseErrors(t *testing.T) {
 	m, err := readSSEResponse(strings.NewReader("data: {\"jsonrpc\":\"2.0\",\n"+"data: \"id\":3,\"result\":{\"ok\":true}}"), id)
 	if err != nil || string(m.Result) != `{"ok":true}` {
 		t.Errorf("multi-line data without trailing blank line: %v, %v", m, err)
+	}
+}
+
+// ListTools follows nextCursor; MissingDynamicTools reports which of
+// mcp-find / mcp-add a gateway lacks and closes its session.
+func TestListToolsAndMissingDynamicTools(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		pages [][]string
+		want  []string
+	}{
+		{name: "dynamic over two pages", pages: [][]string{{"get_pull_request", "mcp-find"}, {"mcp-add"}}},
+		{name: "static", pages: [][]string{{"get_pull_request"}}, want: []string{"mcp-find", "mcp-add"}},
+		{name: "half", pages: [][]string{{"mcp-find"}}, want: []string{"mcp-add"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newFakeMCP(t, false)
+			f.toolPages = tc.pages
+			got, err := MissingDynamicTools(ctx, srv.URL, SessionOptions{})
+			if err != nil {
+				t.Fatalf("MissingDynamicTools: %v", err)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("missing = %v, want %v", got, tc.want)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if !f.deleted {
+				t.Error("session not closed")
+			}
+		})
 	}
 }

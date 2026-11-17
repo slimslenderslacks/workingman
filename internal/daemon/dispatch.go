@@ -782,8 +782,8 @@ func (d *Daemon) startSessionTracked(key string, plan runner.Plan, onEnd func(er
 // against an agent writing status:success immediately before exiting.
 //
 // Logging captures both agent-driven writes (an agent updating its task
-// mid-flight or at completion) and daemon-driven writes (retry resets in
-// handleTaskFailure). Both are useful audit trail.
+// mid-flight or at completion) and daemon-driven writes (the running mark at
+// dispatch, retry resets in handleTaskFailure). Both are useful audit trail.
 func (d *Daemon) handleTask(path string) {
 	t, err := task.Load(path)
 	if err != nil {
@@ -1235,7 +1235,7 @@ func firstUncommittedSuccess(g *taskgraph.Graph) *task.Task {
 }
 
 // launchTaskAgent dispatches the first ready task to a task agent in a fresh
-// workspace. On session end the daemon re-reads the task file and, if the
+// workspace, marking it running on disk first (markTaskRunning). On session end the daemon re-reads the task file and, if the
 // agent wrote status:success, launches the commit agent for the same task.
 func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task.Task) {
 	if d.runner == nil {
@@ -1261,10 +1261,20 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 		Policies:    t.Policies,
 		SaveSandbox: t.SaveSandbox,
 		Model:       t.Model,
+		Harness:     t.Harness,
 	}
-	err := d.startSession(projectPath, plan, func(error) {
+	// Persist ready → running before the (possibly slow) launch, so the task
+	// file — and the TUI — say running while the workspace is provisioned and
+	// the agent works, and a concurrent dispatch's Ready() can't pick it again.
+	marked := d.markTaskRunning(t)
+	tracked, err := d.startSessionTracked(projectPath, plan, func(error) {
 		d.afterTaskSession(projectPath, plan.TaskPath, p)
 	})
+	// No agent of ours is working the task (the launch failed, or a racing
+	// session for something else claimed the slot): undo the running write.
+	if marked && (err != nil || (!tracked && !d.taskSessionLive(projectPath, t.Name))) {
+		d.releaseRunningTask(plan.TaskPath, "launch_failed")
+	}
 	if err != nil {
 		d.transitionProjectBlocked(projectPath, p,
 			fmt.Sprintf("task agent failed to start for %q: %v", t.Name, err))

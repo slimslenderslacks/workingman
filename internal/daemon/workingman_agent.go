@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
@@ -368,6 +370,11 @@ func (d *Daemon) startWorkingmanAgent() error {
 			"session", d.sessionName(workingmanSessionKey),
 			"sandbox", runner.WorkingmanAgentSandbox,
 			"dir", w.dir,
+			"kit", d.runner.Kit,
+			"image", d.runner.Image,
+			"mcp_gateway_url", d.runner.MCPGatewayURL,
+			"mcp_servers", strings.Join(d.runner.MCPServersFor(plan), ","),
+			"mcp_dynamic", strconv.FormatBool(d.runner.MCPGatewayDynamic(agent.WorkingmanAgent)),
 		)
 	}
 	return nil
@@ -382,6 +389,16 @@ func (d *Daemon) beginWorkingmanAgent(ctx context.Context) {
 		d.audit.Log("workingman_agent_unavailable", "reason", "needs a runner with an ACP launcher (--acp-kit)")
 		return
 	}
-	d.audit.Log("workingman_agent_enabled", "dir", d.workingman.dir)
+	if strings.TrimSpace(d.runner.MCPGatewayURL) == "" {
+		// Without a gateway URL the sandbox gets no MCP_URL, and acp-kit then
+		// leaves the stock mcp-gateway server in place of okta-gateway. Running
+		// orch directly (not via start.sh) without WORKINGMAN_MCP_GATEWAY_URL
+		// is the usual way to get here.
+		d.audit.Log("workingman_agent_no_mcp_gateway",
+			"detail", "no --mcp-gateway-url / WORKINGMAN_MCP_GATEWAY_URL: the workingman agent will have the stock mcp-gateway MCP server, not okta-gateway; start orch via start.sh or set the URL")
+	}
+	d.audit.Log("workingman_agent_enabled", "dir", d.workingman.dir,
+		"kit", d.runner.Kit, "image", d.runner.Image, "mcp_gateway_url", d.runner.MCPGatewayURL,
+		"mcp_dynamic", strconv.FormatBool(d.runner.MCPGatewayDynamic(agent.WorkingmanAgent)))
 	go d.superviseWorkingmanAgent(ctx)
 }

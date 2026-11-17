@@ -185,7 +185,10 @@ nothing else. Finishes by setting `status: working` with `updated_by: agent`.
    `--static-mcp` flags) and `policies:`
    (sbx policy rules, `action`/`type`/`resource`, applied in declaration order
    right after `sbx create`) fields, plus the fixed status enums for both
-   project and task, and `model: default` on every new task.
+   project and task, and `model: default` on every new task. An optional
+   per-task `harness:` picks the agent harness; empty (the norm) means the
+   daemon's default `claude-acp` (the `--acp-kit` kit on `--acp-image`), the
+   only one implemented — `Runner.resolveHarness` rejects any other name.
 
 **Completion signal / lifecycle.** `afterPlanningSession` releases the planning
 slot, then mirrors the project
@@ -226,6 +229,13 @@ Does the actual code work in the workspace. Writes only `status:
 success|failed` (+ `failure_reason` on failure) back to its task file — it
 must NOT commit, push, or touch `project.yaml`; that's the commit agent's and
 daemon's job.
+The agent's `acp-wrapper` also annotates the task file (via `task.Update`,
+`internal/acpwrapper/record.go`): `resolved_harness:` (the sbx template the
+sandbox was created from) once the sandbox exists, and `resolved_model:` (the
+concrete model id claude-agent-acp reports in `usage_update._meta
+["_claude/model"]`) on the first usage report, re-asserted after the agent
+exits. `model:`/`harness:` stay the requested values; the TUI shows the
+resolved ones when present.
 
 **Prompt structure (`task.tmpl`).** Short and direct — this is the exact text
 this very orchestrator run received (see `.orch/instructions.md` in this
@@ -698,6 +708,23 @@ under the session-map key `"workingman-agent"` — not a project path and not a
 `path#marker` key, so `ListSessions` labels its row `workingman` and the
 snapshot gives it no work stream / project path. `session.json` carries
 `kind: workingman`, no `project_path`, no `task_path`.
+
+**MCP.** Because its sandbox is reused across every daemon restart, it is
+launched with `acp-wrapper --require-okta-gateway` whenever orch has a gateway
+URL. Its gateway is dynamic (`--mcp-gateway-servers` plus `mcp-find` /
+`mcp-add`, so it can attach servers such as Slack itself) unless
+`--workingman-agent-mcp-dynamic=false` or `--mcp-gateway-static`: the wrapper
+recreates the sandbox when it was built from a different kit, image or gateway
+server set / dynamic setting, refuses
+to start without `MCP_URL`, and verifies inside the sandbox that `okta-gateway`
+is registered and the stock `mcp-gateway` is gone before the agent starts. See
+[docs/mcp-gateway.md](docs/mcp-gateway.md#the-workingman-agents-sandbox).
+A recreate also drops any LLM gateway secret scoped to the
+`workingman-agent` sandbox (sbx deletes it with the sandbox), leaving the agent
+on the direct API, which a TLS-inspecting network breaks with "Self-signed
+certificate detected"; keep that secret global (see the README section on the LLM gateway).
+The LLM TLS preflight every ACP launch
+runs fails the launch with that diagnosis.
 
 **Mounts (read-only enforced by the mount).** The scratch dir is the agent's
 cwd and holds the usual `.orch/` handoff files. Every orch `--root` is a

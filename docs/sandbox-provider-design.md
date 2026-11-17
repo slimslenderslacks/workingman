@@ -132,7 +132,7 @@ argv.
   - `sessions.go`: `SessionInfo.SandboxName`, which matches the name in
     `sbx ls`.
   - `interactive.go`: `:session` uses the sandbox `session-<work-stream>` and
-    mounts the worktree and the orch dir. `:dir` runs on the host.
+    mounts the worktree and the orch dir. `:orch`/`:workspace` run on the host.
 - **`internal/session/session.go`**: `SandboxName`, `SandboxID`
   ("sbx's own identifier", currently unused), `SigningBroken`, `PushBroken`.
 - **`internal/task/task.go`**: `StaticMCPs`, `Policies`, `SaveSandbox`

@@ -82,9 +82,9 @@
 //     agent finished or went idle but whose acp-wrapper never exited.
 //   - reconcile.go: at startup, adopts ACP sessions left on disk by a
 //     previous orch process so they are not dispatched twice.
-//   - interactive.go: [Daemon.OpenInteractiveShell] and
-//     [Daemon.OpenInteractiveSession], which back the TUI's :dir and :session
-//     commands.
+//   - interactive.go: [Daemon.OpenInteractiveSession],
+//     [Daemon.OpenOrchDirTab] and [Daemon.OpenWorkspaceDirTab], which back the
+//     TUI's :session, :orch and :workspace commands.
 //   - workingman_agent.go: supervises the always-on workingman agent
 //     ([WithWorkingmanAgent]), restarting it with backoff.
 //   - channels_notify.go: wolf start and end messages on the `wolf` channel

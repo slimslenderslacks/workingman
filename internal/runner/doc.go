@@ -41,8 +41,8 @@
 // POSTed before `sbx create` and the network policy is applied before the
 // first `sbx exec`; see docs/mcp-gateway.md.
 //
-// [Runner.LaunchInteractive] opens the TUI's ad-hoc `:dir` (host shell) and
-// `:session` (claude in a per-work-stream sandbox) tabs. It sets up git
+// [Runner.LaunchInteractive] opens the TUI's ad-hoc `:orch`/`:workspace` (host
+// shell) and `:session` (claude in a per-work-stream sandbox) tabs. It sets up git
 // identity and SSH commit signing, and these sessions have no daemon lifecycle.
 //
 // Names are deterministic, so a relaunch after a restart reuses the same
@@ -78,6 +78,6 @@
 // for interactive tabs), internal/task (model defaults) and internal/audit.
 // Used by internal/daemon, which calls Start, UsesACP, StartFailure,
 // SessionLogPath, ResolveSessionsRoot and ACPSandboxNameFor, and routes the
-// TUI's `:dir`/`:session` requests to LaunchInteractive. cmd/orch builds the
+// TUI's `:session`/`:orch`/`:workspace` requests to LaunchInteractive. cmd/orch builds the
 // Runner and hands it to the daemon. See agents.md and docs/terminal-tabs.md.
 package runner

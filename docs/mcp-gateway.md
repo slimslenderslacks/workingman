@@ -247,6 +247,77 @@ To move a kept sandbox to the new image, remove it with
 from the current `ACP_IMAGE`. You can also remove `mcp-gateway` from it by
 hand: `sbx exec <sandbox> -- claude mcp remove --scope user mcp-gateway`.
 
+### The workingman agent's sandbox
+
+The workingman agent is the one sandbox that is reused indefinitely: it is
+always named `workingman-agent`, its mounts are the same on every run, and it
+is relaunched by every daemon start. Before this was guarded, a
+`workingman-agent` sandbox created once from an old kit or image kept that
+kit's `claude-acp-client` (and so `mcp-gateway`) for good. Now acp-wrapper is
+launched for it with `--require-okta-gateway`, which:
+
+- **records what each sandbox was built from.** On `sbx create` the wrapper
+  writes `<sessions-root>/../sandboxes/<sandbox>.json` with the `--kit`
+  reference, the sha256 of the kit's `spec.yaml` (local kits), the
+  `--template` image, and the gateway it was set up for (`mcp_servers`,
+  `mcp_dynamic`). The record is removed with the sandbox.
+- **recreates a drifted sandbox.** An existing `workingman-agent` sandbox
+  whose record names a different kit path, a changed `spec.yaml`, a
+  different image, different gateway servers or dynamic setting, or that has
+  no record at all, is `sbx rm --force`d and created again (`recreating
+  sandbox "workingman-agent": …` in `acp-wrapper.log`). Its gateway record
+  (`<sessions-root>/../gateways/workingman-agent.json`) is also compared on
+  every launch: one minted over other servers or with another `dynamic` is
+  DELETEd and re-minted.
+- **refuses to run without a gateway.** No `--mcp-gateway-url` (or a gateway
+  that could not be minted) fails the launch instead of starting the agent
+  with `mcp-gateway`; the daemon retries with backoff.
+- **gets a dynamic gateway.** The workingman agent's gateway is minted over
+  `--mcp-gateway-servers` (start.sh: `github`) with `"dynamic": true`, so it
+  also serves `mcp-find` / `mcp-add` and the agent can attach catalog
+  servers itself (e.g. Slack) mid-session.
+  `--workingman-agent-mcp-dynamic=false` (`WORKINGMAN_AGENT_MCP_DYNAMIC=0`)
+  makes it static again; `--mcp-gateway-static` turns every dynamic gateway
+  off. With an empty `--mcp-gateway-servers` it is dynamic regardless,
+  unless `--mcp-gateway-static` is set.
+- **verifies the result inside the sandbox** before the agent starts: the
+  installed `claude-acp-client` must be one that removes `mcp-gateway`,
+  `CLAUDE_ACP_REGISTER_ONLY=1 claude-acp-client` is run with `MCP_URL`, and
+  `claude mcp get okta-gateway` must show `MCP_URL` while `claude mcp get
+  mcp-gateway` must fail. A failure a fresh sandbox can fix removes the
+  sandbox and fails the launch, so the retry recreates it
+  (`okta-gateway preflight FAILED …`). A project-scope `mcp-gateway` (from
+  a `.mcp.json` the client never edits) is only warned about. For a dynamic
+  gateway it then opens an MCP session on the gateway and lists its tools:
+  `gateway <id> is dynamic: serves mcp-find, mcp-add` on success, a
+  `WARNING … does not serve mcp-find, mcp-add` (the agent still starts)
+  otherwise.
+
+The daemon audit-logs the kit, image, gateway URL, servers and
+`mcp_dynamic` on
+`workingman_agent_enabled` / `workingman_agent_started`, and
+`workingman_agent_no_mcp_gateway` when orch has no gateway URL.
+
+### Where the kit comes from
+
+`--acp-kit` (start.sh's `ACP_KIT`) decides which `claude-acp-client` every
+new sandbox gets, so a stale kit is the most common cause of `mcp-gateway`.
+start.sh resolves it relative to **its own location**, not the shell's cwd:
+a sibling `../acp-kit` checkout next to the workingman checkout you run
+`start.sh` from, else `~/dev/repos/slimslenderslacks/acp-kit`, and an
+`ACP_KIT` already in the environment wins over both. So starting workingman
+from a different checkout (another wsp workspace, say) can pick a different
+— possibly stale — kit. orch makes a local `--acp-kit` absolute at startup
+(so a relative path does not depend on orch's cwd), and warns
+(`acp_kit_warning`, and on stderr) when the kit is missing, has a
+`spec.yaml` that predates okta-gateway, or has an `IMAGE_VERSION` that does
+not match `--acp-image`'s tag. start.sh prints the kit, image and gateway it
+resolved before starting orch.
+
+`WORKINGMAN_MCP_GATEWAY_URL` / `_SERVERS` get their defaults
+(`http://localhost:3333`, `github`) only in start.sh. Running `./orch`
+directly without them gives no sandbox an `MCP_URL`.
+
 ## Reuse, recreation, cleanup and restarts
 
 Gateway state is recorded per sandbox in
@@ -475,7 +546,8 @@ values to the audit log as `mcp_gateway_config`.
 
 acp-wrapper flags (set by orch, so you normally don't pass them yourself):
 `--mcp-gateway-url`, `--mcp-server <name>` (repeatable),
-`--mcp-gateway-state <dir>`, `--mcp-gateway-wait <duration>` (default 2m).
+`--mcp-gateway-state <dir>`, `--mcp-gateway-wait <duration>` (default 2m),
+`--mcp-dynamic`, `--require-okta-gateway` (the workingman agent only).
 
 ## Troubleshooting
 
@@ -526,11 +598,18 @@ Where to look: for ACP sessions, `acp-wrapper.log` next to orch's audit log
   the one in `--mcp-gateway-url`. If you changed the port after the sandbox
   was created, the reuse path re-applies the new rules, but a local or org
   **deny** rule overrides any allow. See `sbx policy log`.
-- **The agent still sees `mcp-gateway`.** Check whether the sandbox
-  predates the acp-kit change (see
+- **The agent still sees `mcp-gateway`.** Check, in order: that orch has a
+  gateway URL (`mcp_gateway_config` in the audit log; running `./orch`
+  without start.sh leaves it empty); which kit and image it used
+  (`daemon_start` / `workingman_agent_started`, and any `acp_kit_warning` —
+  see [Where the kit comes from](#where-the-kit-comes-from)); and whether
+  the sandbox predates the acp-kit change (see
   [Sandboxes created from the old image](#sandboxes-created-from-the-old-image)).
-  Check that `okta-gateway` registered: `mcp-gateway` is only removed once
-  it has. A project-scope entry from a repo's `.mcp.json` is never removed.
+  The workingman agent's sandbox is recreated and verified automatically
+  (see [The workingman agent's sandbox](#the-workingman-agents-sandbox));
+  look for `okta-gateway preflight` in `acp-wrapper.log`. Check that
+  `okta-gateway` registered: `mcp-gateway` is only removed once it has. A
+  project-scope entry from a repo's `.mcp.json` is never removed.
 - **`okta-gateway` is missing in Claude Code.** Check that `MCP_URL` is set
   (`sbx exec <sandbox> -- printenv MCP_URL`). If it is empty, check the
   causes above. If it is set, check `claude-acp-client`'s stderr for a

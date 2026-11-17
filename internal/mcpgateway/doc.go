@@ -43,7 +43,9 @@
 //   - [Store], [Record] — the persisted per-sandbox gateway state.
 //   - [Session] — a minimal MCP client (streamable HTTP, JSON-RPC 2.0) over
 //     one gateway URL: [OpenSession] (initialize + notifications/initialized,
-//     keeping Mcp-Session-Id), [Session.CallTool], [Session.Close]. JSON and
+//     keeping Mcp-Session-Id), [Session.CallTool], [Session.ListTools],
+//     [Session.Close]; [MissingDynamicTools] checks a gateway serves
+//     mcp-find / mcp-add (acp-wrapper's workingman-agent check). JSON and
 //     SSE responses are both accepted. An error wrapping [ErrSessionLost]
 //     (404, 400 on a known session id, connection refused/reset) means open a
 //     new session; [ToolError] (isError: true) and [RPCError] leave the

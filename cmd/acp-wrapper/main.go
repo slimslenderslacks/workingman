@@ -141,6 +141,7 @@ func main() {
 	mcpDynamic := fs.Bool("mcp-dynamic", false, "ask for a dynamic per-sandbox MCP gateway: it also serves mcp-find and mcp-add over the whole catalog, so the agent can find and attach servers beyond --mcp-server")
 	mcpGatewayWait := fs.Duration("mcp-gateway-wait", mcpgateway.DefaultReadyTimeout, "how long to wait for a configured --mcp-gateway-url that is not answering /healthz yet (e.g. just restarted) before failing the launch rather than starting the agent without its MCP gateway")
 	mcpGatewayState := fs.String("mcp-gateway-state", "", "directory recording each sandbox's MCP gateway so later launches can reuse or delete it (default: <sessions-root>/../gateways)")
+	requireOkta := fs.Bool("require-okta-gateway", false, "refuse to run without the okta-gateway MCP server (the persistent workingman agent): recreate an existing sandbox not built from the current --kit/--template, fail when no gateway is configured, and after setup verify inside the sandbox that okta-gateway is registered at MCP_URL and the stock mcp-gateway server is gone — removing the sandbox and failing the launch if not")
 	var staticMCPs namesFlag
 	fs.Var(&staticMCPs, "static-mcp", "deprecated and ignored: MCP servers now reach the sandbox through the --mcp-gateway-url gateway, not `sbx create --static-mcp`")
 	var policies policiesFlag
@@ -178,6 +179,7 @@ func main() {
 			Prefix:  "acp-wrapper: session " + *sessionID + ": mcpgateway: ",
 		},
 		MCPGatewayReadyTimeout: *mcpGatewayWait,
+		RequireOktaGateway:     *requireOkta,
 		Policies:               policies,
 		GitName:                gitName,
 		GitEmail:               gitEmail,

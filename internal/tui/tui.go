@@ -149,8 +149,8 @@ type model struct {
 	// (standalone/test models) makes dismissal drop the tab only.
 	acpRemove func(id string) error
 
-	// interactive opens the ad-hoc `:dir` shell and `:session` claude windows
-	// for a work stream. Wired by Run in integrated daemon mode; nil in
+	// interactive opens the ad-hoc `:session` claude window and `:orch` /
+	// `:workspace` shells for a work stream. Wired by Run in integrated daemon mode; nil in
 	// standalone `orch tui` (and most tests), where those commands report that
 	// interactive sessions aren't available.
 	interactive InteractiveLauncher
@@ -191,6 +191,14 @@ type model struct {
 	// waitForChordTimeout.
 	pendingKey string
 	pendingSeq int
+
+	// mouseCapture is whether the TUI is capturing the mouse (bubbletea cell
+	// motion), flipped at runtime by `m`. Off by default so the terminal's
+	// native click-drag selection works and text can be highlighted and
+	// copied; everything a click does (focus a pane, select a card/row,
+	// attach a session) is also bound to a key. Turning it on enables the
+	// click handling in handleMouse. See toggleMouse.
+	mouseCapture bool
 }
 
 func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, attacher tabAttacher) model {
@@ -221,6 +229,9 @@ func (m model) Init() tea.Cmd {
 	}
 	if m.acpCh != nil {
 		cmds = append(cmds, waitForACP(m.acpCh))
+	}
+	if m.mouseCapture {
+		cmds = append(cmds, tea.EnableMouseCellMotion)
 	}
 	if len(cmds) == 0 {
 		return nil
@@ -452,6 +463,10 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// restore the normal stacked layout if it's already maximized.
 		m.zoomed = !m.zoomed
 		m.statusMsg = ""
+	case "m":
+		return m.toggleMouse()
+	case "y":
+		return m.copySelection()
 	case "enter":
 		if m.focus == paneSessions {
 			return m.attachSelected()
@@ -557,6 +572,18 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "z":
 		m.acpToolsExpanded = !m.acpToolsExpanded
+	case "m":
+		// Same toggle as the main screen; the mode shows on this view's hint.
+		next, cmd := m.toggleMouse()
+		nm := next.(model)
+		nm.statusMsg = ""
+		return nm, cmd
+	case "y":
+		if t, ok := m.acp.selected(); ok {
+			if err := copyToClipboard(acpTranscriptText(t, m.acpToolsExpanded)); err != nil {
+				m.acpInputErr = "copy: " + err.Error()
+			}
+		}
 	case "x":
 		t, ok := m.acp.selected()
 		if !ok {
@@ -2327,52 +2354,54 @@ func taskDepTree(tasks []TaskView, selPath string, width, maxLines int) []string
 // with. Computed once per render from the pane's inner width so the header
 // and every data row share the same alignment.
 type taskColumns struct {
-	name, model, mcps, rules, deps, age, status int
+	name, model, harness, mcps, rules, deps, age, status int
 }
 
-// Column gap is one space; seven columns means six gaps.
+// Column gap is one space; eight columns means seven gaps.
 const (
-	taskColGap           = 1
-	taskColGaps          = 6
-	taskColModelDefault  = 10
-	taskColMCPsDefault   = 18
-	taskColRulesDefault  = 6
-	taskColDepsDefault   = 6
-	taskColAgeDefault    = 5
-	taskColStatusDefault = 10
-	taskColMinNameWidth  = 4
-	taskColMinTotalWidth = taskColMinNameWidth + taskColModelDefault + taskColMCPsDefault + taskColRulesDefault + taskColDepsDefault + taskColAgeDefault + taskColStatusDefault + taskColGaps*taskColGap
+	taskColGap            = 1
+	taskColGaps           = 7
+	taskColModelDefault   = 16
+	taskColHarnessDefault = 22
+	taskColMCPsDefault    = 18
+	taskColRulesDefault   = 6
+	taskColDepsDefault    = 6
+	taskColAgeDefault     = 5
+	taskColStatusDefault  = 10
+	taskColMinNameWidth   = 4
+	taskColMinTotalWidth  = taskColMinNameWidth + taskColModelDefault + taskColHarnessDefault + taskColMCPsDefault + taskColRulesDefault + taskColDepsDefault + taskColAgeDefault + taskColStatusDefault + taskColGaps*taskColGap
 )
 
-// taskColumnWidths sizes the seven columns to fill innerWidth. The model,
-// mcps, rules, deps, age and status columns get fixed defaults; the name
-// column takes whatever's left. When the pane is too narrow to honour the
+// taskColumnWidths sizes the eight columns to fill innerWidth. The model,
+// harness, mcps, rules, deps, age and status columns get fixed defaults; the
+// name column takes whatever's left. When the pane is too narrow to honour the
 // defaults, columns shrink in this order — mcps (verbose) → deps → rules →
-// age → model — before name drops below its minimum. mcps, rules, deps and
-// age can all drop to 0 — they're informational, so truncating them to
-// nothing is better than crowding name and status.
+// harness → age → model — before name drops below its minimum. All but status
+// can drop to 0 — they're informational, so truncating them to nothing is
+// better than crowding name and status.
 func taskColumnWidths(innerWidth int) taskColumns {
 	c := taskColumns{
-		name:   0,
-		model:  taskColModelDefault,
-		mcps:   taskColMCPsDefault,
-		rules:  taskColRulesDefault,
-		deps:   taskColDepsDefault,
-		age:    taskColAgeDefault,
-		status: taskColStatusDefault,
+		name:    0,
+		model:   taskColModelDefault,
+		harness: taskColHarnessDefault,
+		mcps:    taskColMCPsDefault,
+		rules:   taskColRulesDefault,
+		deps:    taskColDepsDefault,
+		age:     taskColAgeDefault,
+		status:  taskColStatusDefault,
 	}
 	required := func() int {
 		gaps := 0
-		for _, n := range []int{c.model, c.mcps, c.rules, c.deps, c.age, c.status} {
+		for _, n := range []int{c.model, c.harness, c.mcps, c.rules, c.deps, c.age, c.status} {
 			if n > 0 {
 				gaps++
 			}
 		}
-		return c.model + c.mcps + c.rules + c.deps + c.age + c.status + gaps*taskColGap
+		return c.model + c.harness + c.mcps + c.rules + c.deps + c.age + c.status + gaps*taskColGap
 	}
 	// Shrink the optional informational columns when there isn't enough
-	// room. Order: mcps (verbose) → deps (verbose) → rules (small) → age
-	// (small) → model (small).
+	// room. Order: mcps (verbose) → deps (verbose) → rules (small) → harness
+	// (the same for every task today) → age (small) → model.
 	for innerWidth-required() < taskColMinNameWidth && c.mcps > 0 {
 		c.mcps--
 	}
@@ -2381,6 +2410,9 @@ func taskColumnWidths(innerWidth int) taskColumns {
 	}
 	for innerWidth-required() < taskColMinNameWidth && c.rules > 0 {
 		c.rules--
+	}
+	for innerWidth-required() < taskColMinNameWidth && c.harness > 0 {
+		c.harness--
 	}
 	for innerWidth-required() < taskColMinNameWidth && c.age > 0 {
 		c.age--
@@ -2403,6 +2435,7 @@ func renderTaskHeader(c taskColumns) string {
 	cells := []string{
 		padCell("name", c.name),
 		padCell("model", c.model),
+		padCell("harness", c.harness),
 		padCell("mcps", c.mcps),
 		padCell("rules", c.rules),
 		padCell("deps", c.deps),
@@ -2443,7 +2476,9 @@ const (
 )
 
 // renderTaskRow lays one task out as a row in the table: name | model |
-// mcps | rules | deps | age | status. Each cell is padded to its column
+// harness | mcps | rules | deps | age | status. model and harness are what the
+// task actually ran under once known (TaskView mirrors task.DisplayModel /
+// DisplayHarness), otherwise what it requested. Each cell is padded to its column
 // width so the columns line up; columns sized to 0 by taskColumnWidths drop
 // out entirely. pending is the row's already-computed pendingDeps count —
 // how many of its dependencies aren't committed yet — rendered in the deps
@@ -2459,10 +2494,14 @@ const (
 func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) string {
 	model := t.Model
 	if model == "" {
-		// Defensive: TaskView already mirrors task.Load()'s backfill, but
-		// nothing in this file guarantees that path was taken — display
-		// "default" so a stray empty value doesn't render as a blank cell.
-		model = "default"
+		// Defensive: TaskView already resolves this (task.DisplayModel), but
+		// nothing in this file guarantees that path was taken — display the
+		// requested default so a stray empty value doesn't render blank.
+		model = task.ModelDefault
+	}
+	harness := shortHarness(t.Harness)
+	if harness == "" {
+		harness = task.HarnessDefault
 	}
 	mcps := strings.Join(t.StaticMCPs, ",")
 	if mcps == "" {
@@ -2485,6 +2524,7 @@ func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) s
 	cells := []string{
 		padCell(truncate(t.Name, c.name), c.name),
 		padCell(truncate(model, c.model), c.model),
+		padCell(truncate(harness, c.harness), c.harness),
 		padCell(truncate(mcps, c.mcps), c.mcps),
 		padCell(truncate(rules, c.rules), c.rules),
 		padCell(truncate(deps, c.deps), c.deps),
@@ -2502,7 +2542,7 @@ func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) s
 	// Re-emit non-status cells as plain and recolour just the status cell so
 	// the table tints stay subtle.
 	if c.status > 0 {
-		nonStatus := nonEmpty(cells[:6])
+		nonStatus := nonEmpty(cells[:7])
 		joined := strings.Join(nonStatus, gap)
 		statusCell := taskStatusStyle(t.Status).Render(truncate(status, c.status))
 		statusCell = padCell(statusCell, c.status)
@@ -2512,6 +2552,18 @@ func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) s
 		return joined + gap + statusCell
 	}
 	return plain
+}
+
+// shortHarness elides a harness for the narrow column: an sbx template image
+// reference loses its registry/org path ("slimslenderslacks/claude-code-acp:0.90.0"
+// → "claude-code-acp:0.90.0"), which is identical across today's templates
+// and would otherwise eat the whole cell before the distinguishing part. The
+// task file's resolved_harness keeps the full reference.
+func shortHarness(h string) string {
+	if i := strings.LastIndex(h, "/"); i >= 0 && i < len(h)-1 {
+		return h[i+1:]
+	}
+	return h
 }
 
 // formatAge renders d as a compact, single-unit-pair age string in the
@@ -2543,7 +2595,7 @@ func formatAge(d time.Duration) string {
 func (c taskColumns) totalWidth() int {
 	w := 0
 	gaps := 0
-	for _, n := range []int{c.name, c.model, c.mcps, c.rules, c.deps, c.age, c.status} {
+	for _, n := range []int{c.name, c.model, c.harness, c.mcps, c.rules, c.deps, c.age, c.status} {
 		if n > 0 {
 			w += n
 			gaps++
@@ -2626,7 +2678,11 @@ func (m model) renderFooter() string {
 		if m.showHidden {
 			hiddenHint = "tp: hide hidden"
 		}
-		base := "⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  tl/tr: toggle sessions/detail column  •  " + hiddenHint + "  •  enter/click: attach  •  q: quit"
+		mouseHint := "select mode (m: mouse clicks)"
+		if m.mouseCapture {
+			mouseHint = "mouse mode (m: select text)"
+		}
+		base := mouseHint + "  •  y: copy selected  •  ⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  tl/tr: toggle sessions/detail column  •  " + hiddenHint + "  •  enter/click: attach  •  q: quit"
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}
@@ -2662,7 +2718,9 @@ func paneName(p pane) string {
 // sessions root and feeds the `a`-key tab view one tab per live ACP session.
 // Run blocks until the user quits or ctx is cancelled.
 //
-// Mouse cell-motion is enabled so the sessions pane responds to clicks.
+// The mouse starts uncaptured so the terminal's native click-drag selection
+// works; `m` turns on cell-motion capture (click to focus/select/attach) and
+// back off — see model.mouseCapture.
 // Attaching to a non-ACP session focuses its terminal tab through tabs (nil
 // uses a default terminal.TabLauncher), so the TUI keeps running in its own
 // tab while the user works in the session's.
@@ -2675,7 +2733,7 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, sessi
 		ch = WatchProjects(tuiCtx, roots, time.Second)
 	}
 	m := newModel(ch, sessCh, newTabAttacher(tabs))
-	// The `:dir`/`:session` commands need a launcher wired to the daemon's
+	// The `:session`/`:orch`/`:workspace` commands need a launcher wired to the daemon's
 	// runner (integrated mode). Standalone `orch tui` passes nil and those
 	// commands report they're unavailable.
 	m.interactive = interactive
@@ -2695,7 +2753,6 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, sessi
 	p := tea.NewProgram(
 		m,
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 		tea.WithContext(tuiCtx),
 	)
 	if _, err := p.Run(); err != nil {

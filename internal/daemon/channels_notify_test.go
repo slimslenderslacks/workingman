@@ -80,7 +80,7 @@ func newChannelHarness(t *testing.T, copts ...ChannelOption) *channelHarness {
 		t.Fatal(err)
 	}
 	launcher := &capturingLauncher{}
-	d, err := New([]string{t.TempDir()}, audit.New(buf), WithChannels(reg, idx, copts...))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(buf), WithChannels(reg, idx, copts...))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestChannelsDisabledRegression(t *testing.T) {
 }
 
 func TestWithChannelsNilSenderLeavesChannelsOff(t *testing.T) {
-	d, err := New([]string{t.TempDir()}, audit.New(&safeBuf{}), WithChannels(nil, nil))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(&safeBuf{}), WithChannels(nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

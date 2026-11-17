@@ -84,7 +84,7 @@ the firing really started a cycle.
 - Go 1.22+
 - A terminal orch can open tabs in — [Ghostty](https://ghostty.org) (macOS via
   AppleScript, Linux via `ghostty +new-tab`), WezTerm or kitty. Sessions that
-  need a human at a TTY (the `--wolf-host` wolf, the TUI's `:dir`/`:session`; `:orch`/`:workspace` open plain tabs in the orch dir / wsp workspace)
+  need a human at a TTY (the `--wolf-host` wolf, the TUI's `:session`; `:orch`/`:workspace` open plain tabs in the orch dir / wsp workspace)
   open in a new tab titled after the project. orch detects the terminal it runs
   in; otherwise set `terminal: ghostty` in `~/.config/workingman/settings.yaml`.
   See [docs/terminal-tabs.md](docs/terminal-tabs.md).
@@ -117,6 +117,17 @@ unattended runs would hang.
   signing and ssh push will fail. orch never falls back to 1Password's agent.
 - `./check-signing.sh` diagnoses sandboxd forwarding an empty agent and can
   restart sandboxd with the private agent's socket.
+- **One `op` call per daemon lifetime.** start.sh's `op read` is the only `op`
+  call in workingman. Afterwards the key lives only in the private agent's
+  memory: per-session preflights, commits, pushes, and check-signing.sh's
+  sandboxd restart all reuse that agent and never call `op`. Fixing an empty
+  *private* agent means restarting start.sh (one new `op` read).
+- orch pins its own host-side git/ssh (wsp clones and fetches, `git fetch`)
+  to the private agent: it sets `GIT_SSH_COMMAND="ssh -o IdentityAgent=SSH_AUTH_SOCK"`
+  (overriding a 1Password `IdentityAgent` in `~/.ssh/config`) and appends
+  `gpg.ssh.program=ssh-keygen` via `GIT_CONFIG_*` (so 1Password's `op-ssh-sign`
+  is never run), logged as `host_git_env` audit events. Without this every
+  host-side ssh fetch could trigger a 1Password fingerprint prompt.
 
 ## Build
 
@@ -155,6 +166,34 @@ prebuilt image), which must be loaded into sbx first (`sbx template load`, see
 tail -f ~/orch/audit.log
 ```
 
+## LLM gateway and "Self-signed certificate detected"
+
+Every ACP agent talks to Claude through the LLM gateway
+(`ANTHROPIC_BASE_URL=https://llm.es.atko.services`) **only when** `sbx secret
+ls --json` lists a custom secret targeting `llm.es.atko.services` that is
+`global` or scoped to that sandbox; otherwise acp-wrapper leaves
+`ANTHROPIC_BASE_URL` unset and the agent goes to `api.anthropic.com` directly.
+On a network with a TLS-inspecting proxy (Okta's "Forward Trust" CA) that
+direct path presents a chain the sandbox does not trust, and every agent reply
+reads `Unable to connect to API: Self-signed certificate detected`. The sbx
+proxy re-signs the gateway host with its own CA (which sandboxes do trust), so
+the gateway path works.
+
+Keep the gateway secret **global**: sbx deletes a sandbox-scoped secret when
+that sandbox is removed, so a sandbox acp-wrapper recreates (the persistent
+`workingman-agent` sandbox is recreated whenever its kit, image or gateway
+settings drift) silently loses it. acp-wrapper warns about this before
+recreating, and every launch now runs an **LLM TLS preflight** — `curl` from
+inside the sandbox to the endpoint the agent will use — failing the launch
+with that diagnosis (`LLM TLS preflight FAILED` in `acp-wrapper.log`, and the
+session's error) instead of starting an agent that cannot reach the API.
+Check with:
+
+```bash
+sbx secret ls --json | jq '.custom_secrets[] | select(.targets | index("llm.es.atko.services")) | .scope'
+grep -E 'LLM gateway|LLM TLS' ~/orch/acp-wrapper.log | tail
+```
+
 ## MCP gateway (per-sandbox MCP servers)
 
 Sandboxes reach MCP servers through the host's
@@ -174,7 +213,20 @@ Point orch at it:
 `http://localhost:3333` and `WORKINGMAN_MCP_GATEWAY_SERVERS` to `github`, and
 warns if nothing answers at `<url>/healthz`. Set `WORKINGMAN_MCP_GATEWAY_URL=""`
 to run without the gateway. Without a URL, sandboxes get no `MCP_URL` and keep
-the stock `mcp-gateway` MCP server instead of `okta-gateway`.
+the stock `mcp-gateway` MCP server instead of `okta-gateway`. These defaults
+live only in `start.sh`: running `./orch` directly gets no gateway unless you
+pass the flags or export the variables.
+
+Which acp-kit a sandbox gets also matters: an older kit installs a
+`claude-acp-client` that never removes `mcp-gateway`. `start.sh` picks the kit
+relative to its own checkout (a sibling `../acp-kit`, else
+`~/dev/repos/slimslenderslacks/acp-kit`, unless `ACP_KIT` is set), so starting
+from a different checkout can pick a different kit. orch warns at startup
+(`acp_kit_warning`) about a stale kit or one whose `IMAGE_VERSION` doesn't match
+`--acp-image`, and the persistent workingman agent's sandbox is recreated
+whenever it was built from a different kit or image, then checked for
+`okta-gateway` before the agent starts. See
+[docs/mcp-gateway.md](docs/mcp-gateway.md#the-workingman-agents-sandbox).
 
 Each time a sandbox is created (or reused):
 
@@ -184,11 +236,14 @@ Each time a sandbox is created (or reused):
    servers are the task's `static_mcps` when it lists any (each entry is a
    catalog server name), otherwise `--mcp-gateway-servers`. The review agent
    asks for `github`. Names the catalog doesn't have are dropped, with a
-   warning. If no servers are left, the sandbox gets no gateway. The wolf
-   and task agents get `"dynamic": true`, which adds `mcp-find` and
-   `mcp-add` over the whole catalog so the agent can attach servers beyond
-   that list; other agents get just their servers. `--mcp-gateway-static`
-   (or `WORKINGMAN_MCP_GATEWAY_STATIC=1`) turns dynamic gateways off. A
+   warning. If no servers are left, the sandbox gets no gateway. The wolf,
+   task and workingman agents get `"dynamic": true`, which adds `mcp-find`
+   and `mcp-add` over the whole catalog so the agent can attach servers
+   beyond that list (the workingman agent can, for example, `mcp-add` Slack
+   mid-session); other agents get just their servers. `--mcp-gateway-static`
+   (or `WORKINGMAN_MCP_GATEWAY_STATIC=1`) turns dynamic gateways off for
+   everyone; `--workingman-agent-mcp-dynamic=false` (or
+   `WORKINGMAN_AGENT_MCP_DYNAMIC=0`) only for the workingman agent. A
    recorded gateway is reused only if it was minted with the same setting.
 2. **The sandbox gets `MCP_URL`**: the returned URL, with a loopback host
    (`localhost`, `127.0.0.1`, `::1`) rewritten to `host.docker.internal`, same
@@ -338,6 +393,26 @@ launches the **planning agent** in the same directory. It writes
 Task agents retry up to 3 times on `status: failed`. After the 3rd failure
 the project goes `status: blocked`, you get an osascript notification, and
 a wolf agent launches.
+
+#### Model and harness
+
+The TUI's Tasks table shows, per task, the **model** and **harness** it
+actually ran under rather than what it asked for:
+
+- `model:` in the task file is the *requested* model (`default` lets claude
+  pick; an alias like `opus` or a full id also works). Once the agent starts,
+  `acp-wrapper` records the concrete model claude-agent-acp reports for the
+  session (the `_claude/model` it attaches to each `usage_update`) as
+  `resolved_model:` — e.g. `claude-opus-5-5`.
+- `harness:` (optional) names the agent harness the task's sandbox is built
+  from. Empty means the daemon's default, `claude-acp`: the `--acp-kit` kit
+  layered onto the `--acp-image` template. It is the only harness today; any
+  other name fails the launch. When the sandbox is created the wrapper records
+  the sbx template it used as `resolved_harness:` (the `-t` image, or `claude`
+  for the stock template). The column drops the image's registry/org path.
+
+A task that hasn't run yet shows its requested values (`default` /
+`claude-acp`).
 
 ### 4. Stop
 
@@ -619,6 +694,8 @@ the tab's status line:
 | `⌥j` / `⌥k` (or `l` / `h`) | next / previous tab |
 | `z` | expand / collapse tool-call output |
 | `x` | dismiss a dead session's tab |
+| `y` | copy the selected tab's whole transcript (plain text) to the clipboard |
+| `m` | toggle mouse capture (see [Selecting and copying text](#selecting-and-copying-text)) |
 | `enter` (or `i`) | type a message to a conversational tab (the wolf) |
 | `esc` (or `a`) | back to the main view |
 | `q` | quit |
@@ -627,6 +704,27 @@ the tab's status line:
 (as on the main screen) or `h`/`l`. While typing a message, letters are text,
 so only `ctrl-f`/`ctrl-b` scroll; sending a message (`enter`) or `esc` stops typing and gives `j`/`k`/`G` back; press `enter` again to type another.
 Each tab keeps its own scroll position.
+
+## Selecting and copying text
+
+The TUI starts in **select mode**: it does not capture the mouse, so the
+terminal's own click-drag selection works everywhere — highlight any text
+(a path on a card, a task row, a transcript line) and copy it the way your
+terminal normally does (`⌘C`, `ctrl-shift-c`, or copy-on-select). Every click
+action has a key equivalent, so nothing is lost without the mouse.
+
+| Key | Effect |
+|-----|--------|
+| `m` | toggle **mouse mode**: clicks focus panes, select cards/task rows and attach sessions. Press `m` again for select mode |
+| `y` | copy the focused pane's selection to the clipboard: a session's tab name, a work stream's directory, a task's file path, or the detail pane's text. In the ACP view, the selected tab's transcript |
+
+The footer shows the current mode. In mouse mode most terminals still let you
+select text by holding a modifier while dragging — Shift in most terminals
+(GNOME Terminal, kitty, Alacritty, WezTerm, Windows Terminal), Option (⌥) in
+iTerm2 and Terminal.app. `y` copies via the OSC 52 escape sequence, so it
+works over ssh and inside tmux (with `set -g set-clipboard on`), but needs a
+terminal that supports it (iTerm2 asks you to allow clipboard access;
+Terminal.app does not support it — select with the mouse there instead).
 
 ## Hiding work streams
 

@@ -115,7 +115,7 @@ type mcpTestRig struct {
 func newMCPTestRig(t *testing.T) *mcpTestRig {
 	t.Helper()
 	r := &mcpTestRig{buf: &safeBuf{}, gw: &fakeMCPGateway{}}
-	d, err := New([]string{t.TempDir()}, audit.New(r.buf))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(r.buf))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestReviewMCPSessionOpenFailure(t *testing.T) {
 
 func TestReviewFingerprintWithoutGateway(t *testing.T) {
 	buf := &safeBuf{}
-	d, err := New([]string{t.TempDir()}, audit.New(buf))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(buf))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestReviewFingerprintWithoutGateway(t *testing.T) {
 	}
 	// No PR yet: nothing to fingerprint, nothing logged.
 	buf2 := &safeBuf{}
-	d2, _ := New([]string{t.TempDir()}, audit.New(buf2))
+	d2, _ := newDaemon(t, []string{t.TempDir()}, audit.New(buf2))
 	if _, ok := d2.reviewPRFingerprint("p", &project.Project{}); ok || buf2.String() != "" {
 		t.Errorf("no-PR fingerprint: ok=%v audit=%q", ok, buf2.String())
 	}
@@ -431,7 +431,7 @@ func TestReviewFingerprintWithoutGateway(t *testing.T) {
 // session is DELETEd while its gateway still exists, then the gateway goes.
 func TestShutdownClosesMCPSessionBeforeGateway(t *testing.T) {
 	buf := &safeBuf{}
-	d, err := New([]string{t.TempDir()}, audit.New(buf))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(buf))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -73,7 +73,7 @@ func newDirTabDaemon(t *testing.T, wsRoot string) (*Daemon, *dirTabLauncher, str
 		t.Fatal(err)
 	}
 	launcher := &dirTabLauncher{}
-	d, err := New([]string{t.TempDir()}, audit.New(&bytes.Buffer{}))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(&bytes.Buffer{}))
 	if err != nil {
 		t.Fatal(err)
 	}

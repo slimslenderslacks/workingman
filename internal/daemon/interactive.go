@@ -15,31 +15,6 @@ import (
 	"github.com/slimslenderslacks/work/internal/terminal"
 )
 
-// OpenInteractiveShell opens a plain bash shell in a new terminal tab on the host
-// (no sandbox) with the working directory set to the work stream's workspace
-// worktree. It returns the session name the TUI can focus the tab by. Backs the
-// TUI's `:dir` command. If the work stream's shell tab is already open it is
-// focused instead, and a *terminal.AlreadyOpenError is returned with the name.
-func (d *Daemon) OpenInteractiveShell(ctx context.Context, projectPath string) (string, error) {
-	return d.openInteractive(ctx, projectPath, false)
-}
-
-// OpenInteractiveSession opens (or resumes) the work stream's persistent
-// interactive claude session in its `session-<work-stream>` sandbox — both the
-// workspace worktree and the orch control dir mounted, cwd the worktree's root,
-// no prompt injected. It is not an ACP session: the sandbox is set up the way
-// sbx-create.sh does it (a dynamic MCP gateway with no servers preselected,
-// acp-kit's image and kit, the claude env) and attached to the tab's pty with
-// `sbx run`. The claude session id is derived deterministically from the work
-// stream name, so closing the tab and re-running the command resumes the same
-// conversation.
-// It returns the session name the TUI can focus the tab by. Backs the TUI's
-// `:session` command. Like OpenInteractiveShell, an already-open tab is focused
-// and reported with a *terminal.AlreadyOpenError.
-func (d *Daemon) OpenInteractiveSession(ctx context.Context, projectPath string) (string, error) {
-	return d.openInteractive(ctx, projectPath, true)
-}
-
 // OpenOrchDirTab opens a host shell in a new terminal tab whose working
 // directory is the work stream's orch directory (the project.md's parent).
 // Backs the TUI's `:orch` command. It fails, without opening a tab, when the
@@ -51,7 +26,7 @@ func (d *Daemon) OpenOrchDirTab(ctx context.Context, projectPath string) (string
 
 // OpenWorkspaceDirTab opens a host shell in a new terminal tab whose working
 // directory is the root of the work stream's wsp workspace. Backs the TUI's
-// `:workspace` command. Unlike `:dir` it never provisions: it fails, without
+// `:workspace` command. Unlike `:session` it never provisions: it fails, without
 // opening a tab, when the workspace does not exist.
 func (d *Daemon) OpenWorkspaceDirTab(ctx context.Context, projectPath string) (string, error) {
 	if d.runner == nil || d.runner.Workspaces == nil {
@@ -99,11 +74,19 @@ func (d *Daemon) openDirTab(ctx context.Context, kind, orchDir, dir string) (str
 	return target, nil
 }
 
-// openInteractive is the shared body of OpenInteractiveShell/Session. It loads
-// the project to learn its branch + repos, provisions (idempotently) or
-// resolves the workspace worktree, derives the sandbox/session names and the
-// inner command, and delegates the sandbox+tab launch to the runner.
-func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claudeSession bool) (string, error) {
+// OpenInteractiveSession opens (or resumes) the work stream's persistent
+// interactive claude session in its `session-<work-stream>` sandbox — both the
+// workspace worktree and the orch control dir mounted, cwd the worktree's root,
+// no prompt injected. It is not an ACP session: the sandbox is set up the way
+// sbx-create.sh does it (a dynamic MCP gateway with no servers preselected,
+// acp-kit's image and kit, the claude env) and attached to the tab's pty with
+// `sbx run`. The claude session id is derived deterministically from the work
+// stream name, so closing the tab and re-running the command resumes the same
+// conversation.
+// It returns the session name the TUI can focus the tab by. Backs the TUI's
+// `:session` command. If the work stream's session tab is already open it is
+// focused instead, and a *terminal.AlreadyOpenError is returned with the name.
+func (d *Daemon) OpenInteractiveSession(ctx context.Context, projectPath string) (string, error) {
 	if d.runner == nil {
 		return "", fmt.Errorf("interactive sessions need a runner (none configured)")
 	}
@@ -129,40 +112,28 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 		return "", fmt.Errorf("provision workspace for %q: %w", p.Branch, err)
 	}
 
-	var spec runner.InteractiveSpec
-	if claudeSession {
-		name := sanitizeSandboxName("session-" + workStream)
-		// Resolve the host git identity and SSH-signing config so a `:session`
-		// tab commits as the user and SSH-signs, just like the ACP commit
-		// agent. Both read from the host git config; Key() is empty unless the
-		// host is fully set up for SSH signing, and the runner preflights the
-		// forwarded agent before actually forcing commit.gpgsign on.
-		gitName, gitEmail := gitsign.Identity()
-		spec = runner.InteractiveSpec{
-			SandboxName: name,
-			// Mount both the worktree and the orch control dir, like the task
-			// agents, so the session can see the code and the project.yaml /
-			// tasks. cwd is the worktree.
-			Workspaces: []string{workspaceDir, orchDir},
-			Cwd:        workspaceDir,
-			// Open (or resume) a stable per-work-stream claude conversation. No
-			// prompt is injected — claude opens at its prompt awaiting the user.
-			ClaudeSessionID: sessionUUID(workStream),
-			Name:            "session-" + workStream,
-			Title:           workStream,
-			GitName:         gitName,
-			GitEmail:        gitEmail,
-			SigningKey:      gitsign.Resolve().Key(),
-		}
-	} else {
-		// `:dir` is a plain host shell (no sandbox) cd'd to the workspace dir —
-		// SandboxName empty tells the runner to run bash directly on the host.
-		spec = runner.InteractiveSpec{
-			Cwd:   workspaceDir,
-			Inner: []string{"bash"},
-			Name:  "shell-" + workStream,
-			Title: workStream,
-		}
+	name := sanitizeSandboxName("session-" + workStream)
+	// Resolve the host git identity and SSH-signing config so a `:session`
+	// tab commits as the user and SSH-signs, just like the ACP commit
+	// agent. Both read from the host git config; Key() is empty unless the
+	// host is fully set up for SSH signing, and the runner preflights the
+	// forwarded agent before actually forcing commit.gpgsign on.
+	gitName, gitEmail := gitsign.Identity()
+	spec := runner.InteractiveSpec{
+		SandboxName: name,
+		// Mount both the worktree and the orch control dir, like the task
+		// agents, so the session can see the code and the project.yaml /
+		// tasks. cwd is the worktree.
+		Workspaces: []string{workspaceDir, orchDir},
+		Cwd:        workspaceDir,
+		// Open (or resume) a stable per-work-stream claude conversation. No
+		// prompt is injected — claude opens at its prompt awaiting the user.
+		ClaudeSessionID: sessionUUID(workStream),
+		Name:            "session-" + workStream,
+		Title:           workStream,
+		GitName:         gitName,
+		GitEmail:        gitEmail,
+		SigningKey:      gitsign.Resolve().Key(),
 	}
 
 	target, err := d.runner.LaunchInteractive(ctx, spec)
@@ -170,7 +141,7 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 	if errors.As(err, &already) {
 		d.audit.Log("interactive_already_open",
 			"work_stream", workStream,
-			"kind", interactiveKindName(claudeSession),
+			"kind", "session",
 			"target", target,
 		)
 		return target, err
@@ -180,18 +151,11 @@ func (d *Daemon) openInteractive(ctx context.Context, projectPath string, claude
 	}
 	d.audit.Log("interactive_open",
 		"work_stream", workStream,
-		"kind", interactiveKindName(claudeSession),
+		"kind", "session",
 		"sandbox", spec.SandboxName,
 		"target", target,
 	)
 	return target, nil
-}
-
-func interactiveKindName(claudeSession bool) string {
-	if claudeSession {
-		return "session"
-	}
-	return "shell"
 }
 
 // sanitizeSandboxName rewrites characters sbx rejects (underscores) to hyphens

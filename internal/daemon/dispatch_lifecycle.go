@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -29,18 +30,22 @@ const maxTaskAttempts = 3
 //   - status:success   → launch commit agent
 //   - status:failed    → restart (if attempts < maxTaskAttempts) or block
 //   - status:running   → agent exited without writing a terminal status;
-//     treated the same as failed (the agent crashed)
-//   - status:ready     → same as running — agent never started
+//     treated the same as failed (the agent crashed). The daemon wrote
+//     running itself at dispatch (markTaskRunning), so this is the normal
+//     shape of a crash.
+//   - status:ready     → same as running — the dispatch-time running write
+//     failed and the agent never moved the task on
 //   - status:blocked   → the agent decided to block; project blocked
 //     immediately (no retry)
 //   - status:committed → task agent should not commit; treat as invariant
 //     violation and block
 func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Project) {
 	if d.isStopped(projectPath) {
-		// enforceStopped killed this session; the task file is left exactly as
-		// it was (most likely still status:ready — nothing here ever wrote
-		// status:running), so a plain `:start` naturally re-dispatches it. Retrying
-		// or blocking now would fight the stop and could clobber it.
+		// enforceStopped killed this session. Put the task back to ready (the
+		// status dispatch moved it off), so a plain `:start` naturally
+		// re-dispatches it without spending a retry. Retrying or blocking now
+		// would fight the stop and could clobber it.
+		d.releaseRunningTask(taskPath, "stopped")
 		d.audit.Log("session_end_skipped_stopped", "path", projectPath)
 		return
 	}
@@ -82,7 +87,8 @@ func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Proje
 // handleTaskFailure bumps Attempts and either resets the task to ready for
 // another run, or — if the retry budget is exhausted — leaves the task as
 // failed and blocks the project. The task file is written by the daemon, but
-// task files are not watched, so no fsnotify loop is created.
+// task-file events are observation-only (handleTask), so no fsnotify loop is
+// created. The relaunch moves the task straight on to running again.
 func (d *Daemon) handleTaskFailure(projectPath, taskPath string, p *project.Project, t *task.Task) {
 	if t.Attempts >= maxTaskAttempts {
 		d.audit.Log("task_retry_exhausted",
@@ -236,6 +242,108 @@ func (d *Daemon) dispatchReadyTask(projectPath string, p *project.Project, t *ta
 	d.launchTaskAgent(projectPath, p, t)
 }
 
+// markTaskRunning persists the ready → running transition for a task the
+// daemon is about to hand to an agent, so the task file (and with it the TUI
+// and the state snapshot, which render it verbatim) says running for as long as
+// an agent owns the task. It used to be left to the task agent, which might do
+// it late or never, so a working task could sit at ready for its whole run.
+//
+// Only a task still at ready on disk is moved — the caller's copy may be stale,
+// and a status anything other than ready belongs to someone else. Every other
+// field is preserved (task.Update). It reports whether it wrote running, so a
+// launch that then fails can undo exactly its own write (releaseRunningTask). A
+// save failure is logged, not fatal: the launch proceeds and the task simply
+// shows ready, as it always used to.
+func (d *Daemon) markTaskRunning(t *task.Task) bool {
+	marked := false
+	err := task.Update(t.Path, func(cur *task.Task) bool {
+		if cur.Status != task.StatusReady {
+			return false
+		}
+		cur.Status = task.StatusRunning
+		marked = true
+		return true
+	})
+	if err != nil {
+		d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
+		return false
+	}
+	if marked {
+		t.Status = task.StatusRunning
+		d.audit.Log("task_running", "task", t.Name)
+	}
+	return marked
+}
+
+// releaseRunningTask moves a task the daemon marked running back to ready
+// because no agent is (any longer) working it and no session-end callback will
+// judge the run: the launch failed, the project was stopped, or the session
+// that owned it was lost across a daemon restart. This is exactly the state the
+// task was in before markTaskRunning existed, so those paths re-dispatch it as
+// they always did — without spending a retry attempt. A task at any other
+// status is left alone. Best-effort: errors are logged.
+func (d *Daemon) releaseRunningTask(taskPath, why string) {
+	released := false
+	err := task.Update(taskPath, func(t *task.Task) bool {
+		if t.Status != task.StatusRunning {
+			return false
+		}
+		t.Status = task.StatusReady
+		released = true
+		return true
+	})
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			d.audit.Log("task_save_error", "task", taskPath, "err", err.Error())
+		}
+		return
+	}
+	if released {
+		d.audit.Log("task_released", "task", taskPath, "why", why)
+	}
+}
+
+// taskSessionLive reports whether the project's main slot holds a task or
+// commit agent session working the named task.
+func (d *Daemon) taskSessionLive(projectPath, taskName string) bool {
+	d.sessionsMu.Lock()
+	defer d.sessionsMu.Unlock()
+	e, ok := d.sessions[projectPath]
+	if !ok || e.taskName != taskName {
+		return false
+	}
+	return e.kind == agent.TaskAgent || e.kind == agent.CommitAgent
+}
+
+// releaseOrphanedTasks runs once per project at startup, after
+// reconcileSessions has adopted whatever sessions survived the restart: a
+// task still at running with no adopted session working it lost its agent
+// while no daemon was watching (the wrapper died, or a non-detachable session
+// was closed at shutdown), so nothing will ever call afterTaskSession for it.
+// It goes back to ready so the startup dispatch picks it up again — without
+// this, Ready() would skip it forever and the project would strand.
+func (d *Daemon) releaseOrphanedTasks(projectPath string) {
+	tasksDir := filepath.Join(filepath.Dir(projectPath), "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
+			continue
+		}
+		path := filepath.Join(tasksDir, e.Name())
+		t, err := task.Load(path)
+		if err != nil || t.Status != task.StatusRunning {
+			continue
+		}
+		if d.taskSessionLive(projectPath, t.Name) {
+			continue
+		}
+		d.releaseRunningTask(path, "orphaned")
+	}
+}
+
 // launchCommitAgent runs in the same workspace shape as a task agent — it
 // needs the repos checked out so it can `git commit` inside each one. On
 // session end the daemon re-reads the task and, if it reached committed,
@@ -268,6 +376,8 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		SaveSandbox: t.SaveSandbox,
 		// Commit runs under the task's model for now; it may get its own later.
 		Model: t.Model,
+		// ...and in the task's harness: it shares the task's sandbox.
+		Harness: t.Harness,
 		// Only a push task publishes: it pushes the commit-only fixes earlier
 		// review tasks accumulated in the worktree to the remote PR branch. Every
 		// other task's commit stays local (ordinary work is published by the
@@ -275,13 +385,19 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		// so the reviewer sees a coherent batch rather than a stream of commits).
 		PushBranch: t.IsPushTask(),
 	}
-	err := d.startSession(projectPath, plan, func(waitErr error) {
+	// A push task goes straight from ready to this agent, so the commit agent
+	// is what's running it; any other task is already at success.
+	marked := t.IsPushTask() && d.markTaskRunning(t)
+	tracked, err := d.startSessionTracked(projectPath, plan, func(waitErr error) {
 		startFailure := ""
 		if waitErr != nil {
 			startFailure = d.runner.StartFailure(plan)
 		}
 		d.afterCommitSession(projectPath, plan.TaskPath, p, startFailure)
 	})
+	if marked && (err != nil || (!tracked && !d.taskSessionLive(projectPath, t.Name))) {
+		d.releaseRunningTask(plan.TaskPath, "launch_failed")
+	}
 	if err != nil {
 		d.transitionProjectBlocked(projectPath, p,
 			fmt.Sprintf("commit agent failed to start for %q: %v", t.Name, err))

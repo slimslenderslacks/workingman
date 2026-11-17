@@ -26,10 +26,18 @@ const (
 	StatusCommitted Status = "committed"
 )
 
-// ModelDefault is the placeholder value every task carries today. The
-// planning agent writes this verbatim; Load() backfills it for tasks on
-// disk that pre-date the field.
+// ModelDefault is the *requested* model every task carries today: "let claude
+// pick its own default". The planning agent writes this verbatim; Load()
+// backfills it for tasks on disk that pre-date the field. It is never the model
+// a task actually ran under — that concrete id is recorded separately in
+// Task.ResolvedModel once the agent starts.
 const ModelDefault = "default"
+
+// HarnessDefault is the name of the harness every task runs under unless its
+// `harness:` field names another: the claude ACP kit layered onto the
+// daemon's configured sbx template (--acp-kit / --acp-image). An empty
+// Task.Harness means this one.
+const HarnessDefault = "claude-acp"
 
 // MaxNameLen is the ABSOLUTE maximum length of a task name — the ceiling no
 // name may exceed regardless of project. A task name flows into the task's sbx
@@ -225,6 +233,26 @@ type Task struct {
 	// continue to work without a planner rewrite.
 	Model string `yaml:"model"`
 
+	// ResolvedModel is the concrete model id the task's agent actually ran
+	// under (e.g. "claude-opus-5-5") — what Model resolved to once claude
+	// picked it. Written by the acp-wrapper as soon as the agent reports it
+	// (claude-agent-acp tags each usage_update with the model), so a
+	// requested "default" or alias ("opus") is made explicit. Empty until the
+	// task's agent has started; Model remains the requested value.
+	ResolvedModel string `yaml:"resolved_model,omitempty"`
+
+	// Harness optionally names the agent harness (sandbox template + kit) the
+	// task should run under. Empty means the daemon's configured default
+	// (HarnessDefault: the claude ACP kit on --acp-image), which is the only
+	// harness that works today; the field exists so a planner can later pick a
+	// different harness per task. An unknown name fails the launch.
+	Harness string `yaml:"harness,omitempty"`
+
+	// ResolvedHarness records the sbx template the task's sandbox was
+	// actually created from (the `sbx create -t` image, or "claude" for the
+	// stock template). Written by the acp-wrapper once the sandbox exists.
+	ResolvedHarness string `yaml:"resolved_harness,omitempty"`
+
 	// Source records the external signal this task exists to address, set by the
 	// review agent when it turns a PR review comment or a failed check into a
 	// task. It lets a later review poll correlate a live PR signal with a task it
@@ -272,6 +300,31 @@ type Source struct {
 	PR   int    `yaml:"pr"`
 }
 
+// DisplayModel is the model to show for the task: the concrete model it ran
+// under when known, otherwise the requested one.
+func (t *Task) DisplayModel() string {
+	if t.ResolvedModel != "" {
+		return t.ResolvedModel
+	}
+	if t.Model != "" {
+		return t.Model
+	}
+	return ModelDefault
+}
+
+// DisplayHarness is the harness to show for the task: the sbx template its
+// sandbox was created from when known, otherwise the requested harness name
+// (HarnessDefault when none was requested).
+func (t *Task) DisplayHarness() string {
+	if t.ResolvedHarness != "" {
+		return t.ResolvedHarness
+	}
+	if t.Harness != "" {
+		return t.Harness
+	}
+	return HarnessDefault
+}
+
 // SourceKindPush is the Source.Kind marking a push task: it carries no code work
 // of its own, it publishes the commit-only fixes other review tasks left in the
 // worktree. The review agent inserts one (depending on those fixes) to batch a
@@ -302,6 +355,21 @@ func Load(path string) (*Task, error) {
 		t.Model = ModelDefault
 	}
 	return &t, nil
+}
+
+// Update loads the task at path, applies fn and, when fn reports that it
+// changed something, saves the result back. It is how processes other than the
+// task's agent (the acp-wrapper recording the resolved model and harness)
+// annotate a task file without clobbering fields they don't own.
+func Update(path string, fn func(*Task) bool) error {
+	t, err := Load(path)
+	if err != nil {
+		return err
+	}
+	if !fn(t) {
+		return nil
+	}
+	return Save(path, t)
 }
 
 // Save writes t to path as YAML. It is the single choke point every Go writer

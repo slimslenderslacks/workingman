@@ -85,10 +85,9 @@ func TestStoppedGuardsSkipTaskSessionEnd(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	taskPath := filepath.Join(tasksDir, "manual-fix.yaml")
-	// Nothing in this codebase ever writes task status:running (see
-	// dispatch_lifecycle.go's afterTaskSession doc), so a task agent killed
-	// mid-run leaves its task exactly where it started: ready.
-	mustSaveTask(t, taskPath, &task.Task{Name: "manual-fix", Status: task.StatusReady})
+	// The daemon marked the task running at dispatch; the agent was killed
+	// before it wrote a terminal status.
+	mustSaveTask(t, taskPath, &task.Task{Name: "manual-fix", Status: task.StatusRunning})
 
 	if err := project.SaveAs(projectPath, &project.Project{
 		Description: "x", Branch: "b",
@@ -115,6 +114,15 @@ func TestStoppedGuardsSkipTaskSessionEnd(t *testing.T) {
 	}
 	if got.Status != project.StatusStopped {
 		t.Errorf("status = %q, want stopped left untouched", got.Status)
+	}
+	// The task goes back to ready, so `:start` re-dispatches it without having
+	// spent a retry.
+	gotTask, err := task.Load(taskPath)
+	if err != nil {
+		t.Fatalf("Load task: %v", err)
+	}
+	if gotTask.Status != task.StatusReady || gotTask.Attempts != 0 {
+		t.Errorf("task = status %q attempts %d, want ready/0", gotTask.Status, gotTask.Attempts)
 	}
 }
 
@@ -226,7 +234,7 @@ func TestStopKillsRunningTaskSession(t *testing.T) {
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 30"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r), WithScheduler(scheduler.New()))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r), WithScheduler(scheduler.New()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

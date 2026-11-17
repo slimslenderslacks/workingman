@@ -51,7 +51,7 @@ func newMissedFixture(t *testing.T, mutate func(*project.Project)) *missedFixtur
 
 func (f *missedFixture) newDaemon(t *testing.T) *Daemon {
 	t.Helper()
-	d, err := New([]string{f.root}, audit.New(&safeBuf{}),
+	d, err := newDaemon(t, []string{f.root}, audit.New(&safeBuf{}),
 		WithScheduler(scheduler.New()), WithCronState(f.statePath))
 	if err != nil {
 		t.Fatalf("New: %v", err)

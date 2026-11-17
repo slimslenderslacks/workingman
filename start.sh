@@ -36,6 +36,14 @@ fi
 # OP_SERVICE_ACCOUNT_TOKEN, or have an already-unlocked CLI session — otherwise
 # this step needs the human again. Override the key location with
 # ORCH_SSH_KEY_REF (an op:// secret reference to an openssh-format private key).
+#
+# This `op read` is the ONLY `op` call in workingman, and it runs exactly once
+# per start.sh. The key then lives only in the private agent's memory for the
+# life of the daemon: nothing re-reads it — not orch, acp-wrapper, the
+# preflights, nor check-signing.sh's sandboxd restart, which rebinds sandboxd
+# to this same in-memory agent. orch also pins its host-side git/ssh to this
+# agent (GIT_SSH_COMMAND IdentityAgent, gpg.ssh.program=ssh-keygen) so a
+# 1Password IdentityAgent/op-ssh-sign in the user's ssh/git config never fires.
 ORCH_SSH_KEY_REF="${ORCH_SSH_KEY_REF:-op://Personal/SSH github/private key?ssh-format=openssh}"
 
 AGENT_DIR=""
@@ -133,6 +141,17 @@ fi
 # Prefer a sibling acp-kit checkout (a wsp workspace) when there is one: the
 # kit's install step rewrites claude-acp-client on every `sbx create`, so an
 # older kit undoes the image's okta-gateway client.
+#
+# The kit is resolved from where THIS start.sh lives ($HERE), not from the
+# shell's cwd — but that still means the checkout you start from picks the
+# kit: start.sh in a wsp workspace with its own (possibly stale) ../acp-kit
+# uses that one, a checkout without one falls back to the path below, and an
+# ACP_KIT already in the environment wins over both. A kit whose
+# claude-acp-client predates okta-gateway leaves new sandboxes with the stock
+# mcp-gateway MCP server. orch warns about a stale or image-mismatched kit at
+# startup (acp_kit_warning in the audit log), and the workingman agent's
+# persistent sandbox is recreated whenever it was built from a different kit
+# or image than the current one (see docs/mcp-gateway.md).
 if [ -f "$HERE/../acp-kit/spec.yaml" ]; then
   export ACP_KIT="${ACP_KIT:-$(cd "$HERE/../acp-kit" && pwd)}"
 else
@@ -172,10 +191,16 @@ export ACP_IMAGE="${ACP_IMAGE-slimslenderslacks/claude-code-acp:0.90.0}"
 # standalone-codemode gateway (see "MCP gateway" in README.md). Without a URL
 # orch sets no MCP_URL, so acp-kit keeps the stock `mcp-gateway` MCP server
 # instead of `okta-gateway`. The servers are the default set for a task with
-# no static_mcps; wolf and task gateways also get mcp-find/mcp-add over the
-# whole catalog. Set WORKINGMAN_MCP_GATEWAY_URL="" to turn the gateway off.
+# no static_mcps, and the workingman agent's starting set; wolf, task and
+# workingman-agent gateways also get mcp-find/mcp-add over the whole catalog,
+# so those agents can attach more servers (e.g. Slack) themselves.
+# WORKINGMAN_AGENT_MCP_DYNAMIC=0 makes the workingman agent's gateway static;
+# WORKINGMAN_MCP_GATEWAY_STATIC=1 makes every gateway static. Changing either
+# recreates the persistent workingman-agent sandbox on its next launch.
+# Set WORKINGMAN_MCP_GATEWAY_URL="" to turn the gateway off.
 export WORKINGMAN_MCP_GATEWAY_URL="${WORKINGMAN_MCP_GATEWAY_URL-http://localhost:3333}"
 export WORKINGMAN_MCP_GATEWAY_SERVERS="${WORKINGMAN_MCP_GATEWAY_SERVERS-github}"
+export WORKINGMAN_AGENT_MCP_DYNAMIC="${WORKINGMAN_AGENT_MCP_DYNAMIC-1}"
 # The gateway listens only after attaching its whole catalog, so right after
 # a restart it refuses connections for a while. orch relaunches agents (a
 # blocked project's wolf, say) as soon as it starts, so wait for the gateway
@@ -202,12 +227,16 @@ if [ "$CHECK_AGENT" != 1 ] && [ -n "$WORKINGMAN_MCP_GATEWAY_URL" ]; then
   fi
 fi
 
+# Say which kit, image and gateway this run uses: the usual answer to "why does
+# a sandbox have mcp-gateway instead of okta-gateway" is one of these three.
+echo "start: acp-kit=$ACP_KIT acp-image=${ACP_IMAGE:-<stock claude template>} mcp-gateway-url=${WORKINGMAN_MCP_GATEWAY_URL:-<none: sandboxes keep mcp-gateway>} mcp-gateway-servers=${WORKINGMAN_MCP_GATEWAY_SERVERS:-<none>} workingman-agent-mcp-dynamic=$WORKINGMAN_AGENT_MCP_DYNAMIC" >&2
+
 # Run orch as a child (not exec) so the EXIT trap can stop the private agent.
 # Forward INT/TERM to it for a clean shutdown and preserve its exit status.
 "$HERE/orch" \
   --root ~/orch \
   --audit-log ~/orch/audit.log \
-  --acp-kit "${ACP_KIT:-$HERE/../acp-kit}" \
+  --acp-kit "$ACP_KIT" \
   --acp-image "$ACP_IMAGE" \
   --acp-wrapper "$HERE/acp-wrapper" <&0 &
 ORCH_PID=$!

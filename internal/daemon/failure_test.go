@@ -37,7 +37,7 @@ func setupRunnable(t *testing.T) (buf *safeBuf, root string, rec *notify.Recorde
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r), WithNotifier(rec))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r), WithNotifier(rec))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -101,8 +101,9 @@ func TestTaskFailureRetries(t *testing.T) {
 	if reloaded.Attempts != 1 {
 		t.Errorf("attempts = %d, want 1", reloaded.Attempts)
 	}
-	if reloaded.Status != task.StatusReady {
-		t.Errorf("status = %q, want ready", reloaded.Status)
+	// Reset to ready, then relaunched — which the daemon marks running.
+	if reloaded.Status != task.StatusRunning {
+		t.Errorf("status = %q, want running (relaunched)", reloaded.Status)
 	}
 	if reloaded.FailureReason != "" {
 		t.Errorf("failure_reason should be cleared on retry, got %q", reloaded.FailureReason)
@@ -226,7 +227,7 @@ func TestTaskAgentStartFailureBlocksProject(t *testing.T) {
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "true"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r), WithNotifier(rec))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r), WithNotifier(rec))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

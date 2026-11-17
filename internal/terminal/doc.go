@@ -4,8 +4,8 @@
 // Role: shared (daemon and TUI)
 //
 // Sessions that need a human at a real TTY each open in their own terminal tab,
-// titled after their work stream: the --wolf-host wolf, the TUI's `:dir` shell
-// and `:session` claude session, and every agent when orch runs without
+// titled after their work stream: the --wolf-host wolf, the TUI's `:orch`/`:workspace`
+// shells and `:session` claude session, and every agent when orch runs without
 // --acp-kit. ACP agents never get a tab.
 //
 // [Launcher] is the small interface the rest of orch uses ("open a tab titled X
@@ -39,7 +39,7 @@
 //
 // Uses internal/agent for Spec, Session and the Launcher interface it
 // implements. cmd/orch creates one TabLauncher and gives it to internal/runner
-// (as Runner.Launcher, for host-wolf and `:dir`/`:session` tabs) and to
+// (as Runner.Launcher, for host-wolf and `:session`/`:orch`/`:workspace` tabs) and to
 // internal/tui, which uses TabLauncher.Focus to attach to a session's tab and
 // turns ErrTabNotFound and ErrFocusUnsupported into footer warnings.
 // internal/runner and internal/daemon pass AlreadyOpenError back to the TUI.

@@ -24,6 +24,26 @@ sandbox has no `sbx`/`op`). Items marked **unverified** need a check on the host
 7. `commit.tmpl` push step runs plain `git -C <repo> push`; a rejected push
    (including auth failure) sets the task `blocked`.
 
+## 1Password (`op`) usage
+
+`op` is called exactly once, at startup: start.sh's `op read "$ORCH_SSH_KEY_REF"`
+(step 1). The key then lives only in the private agent's memory until start.sh
+exits. Every later consumer reuses that agent and never calls `op`:
+
+| Site | When | Touches `op`/1Password? |
+|------|------|-------------------------|
+| `start.sh` `op read \| ssh-add -` | once per start.sh | **yes — the only call** |
+| `start.sh` `sbx daemon stop/start -d`, `check-signing.sh --yes` | startup | no: binds sandboxd to the in-memory agent |
+| `check-signing.sh` (manual / cron) restart of sandboxd | on demand | no: re-reads the agent *socket* from start.sh's env, never the key |
+| `gitsign.Preflight` / `PushPreflight` (`sbx exec ... ssh-add -l`, `ssh -T`) | every ACP / `:session` launch | no: queries the forwarded agent |
+| sandbox `git commit` / `git push` | per commit / push | no: `gpg.ssh.program=ssh-keygen` + forwarded agent |
+| host-side `wsp` / `git fetch` (workspace provisioning) | per workspace create / repo add | no: orch sets `GIT_SSH_COMMAND=... -o IdentityAgent=SSH_AUTH_SOCK` and `gpg.ssh.program=ssh-keygen` at startup, overriding a 1Password `IdentityAgent` in `~/.ssh/config` or `op-ssh-sign` in git config |
+| `gitsign.Resolve` / `Identity` (`git config --get`) | per launch | no: reads config only |
+
+If the private agent itself is empty or dead, the only fix is restarting
+start.sh, which costs one new `op` read. `test/start-agent.sh` asserts start.sh
+calls `op` exactly once.
+
 ## Root-cause candidates (most likely first)
 
 1. **Push is never preflighted.** `gitsign.Preflight` / `signingPreflight` run only

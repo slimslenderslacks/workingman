@@ -120,6 +120,7 @@ func runDaemon(args []string) {
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	mcpGatewayURL := fs.String("mcp-gateway-url", os.Getenv("WORKINGMAN_MCP_GATEWAY_URL"), "base URL of the host's standalone-codemode gateway, e.g. http://localhost:3333 (default $WORKINGMAN_MCP_GATEWAY_URL). When set, every sandbox gets its own sub-gateway (POST /gateways) over the task's static_mcps — or --mcp-gateway-servers when a task names none — exposed inside it as MCP_URL (localhost rewritten to host.docker.internal), with the gateway's port allowed in its network policy; the gateway is DELETEd when the sandbox is removed. Empty disables the gateway (and MCP_URL)")
 	mcpGatewayStatic := fs.Bool("mcp-gateway-static", os.Getenv("WORKINGMAN_MCP_GATEWAY_STATIC") == "1", "give no sandbox a dynamic gateway (default false, or true when $WORKINGMAN_MCP_GATEWAY_STATIC=1). By default the wolf and task agents' gateways are dynamic: they also serve mcp-find and mcp-add over the whole catalog")
+	workingmanMCPDynamic := fs.Bool("workingman-agent-mcp-dynamic", os.Getenv("WORKINGMAN_AGENT_MCP_DYNAMIC") != "0", "give the workingman agent a dynamic gateway: --mcp-gateway-servers plus mcp-find and mcp-add over the whole catalog, so it can attach servers such as Slack mid-session (default true; false when $WORKINGMAN_AGENT_MCP_DYNAMIC=0). --mcp-gateway-static overrides it")
 	mcpGatewayServers := fs.String("mcp-gateway-servers", os.Getenv("WORKINGMAN_MCP_GATEWAY_SERVERS"), "comma-separated catalog server names requested for a sandbox's gateway when its task has no static_mcps (default $WORKINGMAN_MCP_GATEWAY_SERVERS). Empty means such sandboxes get no gateway")
 	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
 	requireAC := fs.Bool("require-ac", false, "pause dispatching new work and cron firings while the laptop is on battery (macOS, via pmset), resuming on AC; skipped cron ticks are recorded as missed. No-op off macOS. `orch service install` turns it on")
@@ -155,6 +156,25 @@ func runDaemon(args []string) {
 		a.Log("ssh_auth_sock_unusable",
 			"path", os.Getenv("SSH_AUTH_SOCK"),
 			"detail", "SSH_AUTH_SOCK is unset or the macOS launchd agent; commit signing will fail — start orch via start.sh so it runs with the private ssh-agent")
+	} else {
+		// Host-side git (wsp clones/fetches, applyBaseBranches' `git fetch`)
+		// must use the private agent too, never 1Password's: see
+		// pinHostGitToPrivateAgent.
+		for _, kv := range pinHostGitToPrivateAgent(os.Getenv, os.Setenv) {
+			a.Log("host_git_env", "set", kv)
+		}
+	}
+
+	// Resolve a local --acp-kit to an absolute path up front: every
+	// acp-wrapper (and session.json) gets this value, and a relative one would
+	// otherwise depend on the cwd orch happened to start in. A stale or
+	// mismatched kit is the usual reason a sandbox ends up with the stock
+	// mcp-gateway MCP server instead of okta-gateway, so say so loudly.
+	resolvedKit, kitWarnings := resolveAcpKit(*acpKit, *acpImage)
+	*acpKit = resolvedKit
+	for _, w := range kitWarnings {
+		fmt.Fprintln(os.Stderr, "orch: warning:", w)
+		a.Log("acp_kit_warning", "kit", *acpKit, "image", *acpImage, "detail", w)
 	}
 
 	wsMgr, err := buildWorkspaceManager(*workspaceMode, *stubRoot)
@@ -169,7 +189,7 @@ func runDaemon(args []string) {
 	agent.AugmentSearchPath(agent.DefaultPATHCandidates())
 
 	// Sessions that need a human at a real TTY — the --wolf-host wolf, the
-	// TUI's :dir/:session — open in a new tab of the user's terminal. The
+	// TUI's :session/:orch/:workspace — open in a new tab of the user's terminal. The
 	// terminal is resolved when a tab is first needed (detected from the
 	// environment, else ~/.config/workingman/settings.yaml), so an unknown
 	// terminal only fails the launch that needs one.
@@ -184,8 +204,11 @@ func runDaemon(args []string) {
 		MCPGatewayURL:     strings.TrimSpace(*mcpGatewayURL),
 		MCPGatewayServers: splitList(*mcpGatewayServers),
 		MCPGatewayStatic:  *mcpGatewayStatic,
+
+		WorkingmanAgentMCPStatic: !*workingmanMCPDynamic,
 	}
-	a.Log("mcp_gateway_config", "url", r.MCPGatewayURL, "default_servers", strings.Join(r.MCPGatewayServers, ","), "static", strconv.FormatBool(r.MCPGatewayStatic))
+	a.Log("mcp_gateway_config", "url", r.MCPGatewayURL, "default_servers", strings.Join(r.MCPGatewayServers, ","), "static", strconv.FormatBool(r.MCPGatewayStatic),
+		"workingman_agent_dynamic", strconv.FormatBool(r.MCPGatewayDynamic(agent.WorkingmanAgent)))
 
 	// When --acp-kit is set, non-interactive agents (planning/task/commit/
 	// archive) are launched as acp-wrapper-backed ACP sessions rather than
@@ -451,7 +474,7 @@ func runTUI(args []string) {
 	// sessions pane gets a nil source — the pane renders "(none)" in that
 	// case. To see live sessions, run `orch --root=...` (the integrated
 	// mode wires the daemon's WatchSessions into the TUI).
-	// Standalone tui has no daemon/runner, so :dir and :session are unavailable
+	// Standalone tui has no daemon/runner, so :session, :orch and :workspace are unavailable
 	// (nil launcher). Run `orch --root=...` for the integrated experience.
 	if err := tui.Run(ctx, roots, nil, "", nil, nil); err != nil {
 		log.Fatal(err)
@@ -462,10 +485,6 @@ func runTUI(args []string) {
 // tui.InteractiveLauncher interface, keeping the tui package decoupled from the
 // daemon the same way adaptSessionFeed does for the sessions feed.
 type interactiveLauncher struct{ d *daemon.Daemon }
-
-func (l interactiveLauncher) OpenShell(ctx context.Context, projectPath string) (string, error) {
-	return l.d.OpenInteractiveShell(ctx, projectPath)
-}
 
 func (l interactiveLauncher) OpenSession(ctx context.Context, projectPath string) (string, error) {
 	return l.d.OpenInteractiveSession(ctx, projectPath)
@@ -484,6 +503,57 @@ func (l interactiveLauncher) OpenWorkspaceDir(ctx context.Context, projectPath s
 // shell inherits. Any other value is assumed to be the private agent.
 func sshAgentUnusable(current string) bool {
 	return current == "" || strings.Contains(current, "com.apple.launchd")
+}
+
+// pinHostGitToPrivateAgent makes every host-side git/ssh the daemon spawns
+// (wsp, git, and their children inherit orch's environment) use the private
+// ssh-agent start.sh loaded once from 1Password, so nothing after startup ever
+// reaches 1Password and prompts for a fingerprint:
+//
+//   - GIT_SSH_COMMAND gets `-o IdentityAgent=SSH_AUTH_SOCK`. A typical
+//     1Password setup puts `IdentityAgent ~/Library/Group Containers/...1password.../agent.sock`
+//     in ~/.ssh/config, which overrides SSH_AUTH_SOCK, so every ssh fetch/clone
+//     would otherwise go through 1Password's agent. Command-line -o options win
+//     over ssh_config. An existing GIT_SSH_COMMAND is extended, not replaced.
+//   - gpg.ssh.program is forced to ssh-keygen (appended via GIT_CONFIG_COUNT/
+//     KEY_n/VALUE_n) so a host-side signed commit or tag never runs 1Password's
+//     op-ssh-sign; ssh-keygen signs through SSH_AUTH_SOCK, i.e. the private agent.
+//     Only gpg.ssh.program is set — not user.signingkey/gpg.format/commit.gpgsign,
+//     which gitsign.Resolve reads to decide whether sandboxes sign.
+//
+// Callers only invoke it when SSH_AUTH_SOCK is the private agent. It returns
+// the KEY=VALUE pairs it set, for the audit log.
+func pinHostGitToPrivateAgent(getenv func(string) string, setenv func(string, string) error) []string {
+	var set []string
+	put := func(k, v string) {
+		if setenv(k, v) == nil {
+			set = append(set, k+"="+v)
+		}
+	}
+	const agentOpt = "-o IdentityAgent=SSH_AUTH_SOCK"
+	switch cur := strings.TrimSpace(getenv("GIT_SSH_COMMAND")); {
+	case cur == "":
+		put("GIT_SSH_COMMAND", "ssh "+agentOpt)
+	case !strings.Contains(cur, "IdentityAgent"):
+		put("GIT_SSH_COMMAND", cur+" "+agentOpt)
+	}
+	n := 0
+	if c := strings.TrimSpace(getenv("GIT_CONFIG_COUNT")); c != "" {
+		v, err := strconv.Atoi(c)
+		if err != nil || v < 0 {
+			return set // malformed: leave git's own error alone
+		}
+		n = v
+	}
+	for i := 0; i < n; i++ {
+		if strings.EqualFold(getenv("GIT_CONFIG_KEY_"+strconv.Itoa(i)), "gpg.ssh.program") {
+			return set
+		}
+	}
+	put("GIT_CONFIG_KEY_"+strconv.Itoa(n), "gpg.ssh.program")
+	put("GIT_CONFIG_VALUE_"+strconv.Itoa(n), "ssh-keygen")
+	put("GIT_CONFIG_COUNT", strconv.Itoa(n+1))
+	return set
 }
 
 func buildWorkspaceManager(mode, stubRoot string) (workspace.Manager, error) {

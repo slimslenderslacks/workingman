@@ -164,6 +164,73 @@ func (s *Session) CallTool(ctx context.Context, name string, args map[string]any
 	return res, nil
 }
 
+// Tool is one entry of a tools/list result.
+type Tool struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// ListTools returns every tool the session's gateway serves, following
+// tools/list pagination (nextCursor) to the end.
+func (s *Session) ListTools(ctx context.Context) ([]Tool, error) {
+	var tools []Tool
+	cursor := ""
+	for page := 0; page < 100; page++ {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		raw, _, err := s.call(ctx, "tools/list", params)
+		if err != nil {
+			return nil, err
+		}
+		var res struct {
+			Tools      []Tool `json:"tools"`
+			NextCursor string `json:"nextCursor,omitempty"`
+		}
+		if err := json.Unmarshal(raw, &res); err != nil {
+			return nil, fmt.Errorf("mcp: decode tools/list result: %w", err)
+		}
+		tools = append(tools, res.Tools...)
+		if res.NextCursor == "" {
+			return tools, nil
+		}
+		cursor = res.NextCursor
+	}
+	return nil, fmt.Errorf("mcp: tools/list: too many pages")
+}
+
+// DynamicTools are the tools a dynamic gateway serves on top of its servers'
+// own: mcp-find searches the whole catalog, mcp-add attaches a server to the
+// session.
+var DynamicTools = []string{"mcp-find", "mcp-add"}
+
+// MissingDynamicTools opens a session at url, lists its tools and returns
+// which of DynamicTools it does not serve (empty when it serves them all).
+// The session is closed before returning.
+func MissingDynamicTools(ctx context.Context, url string, opts SessionOptions) ([]string, error) {
+	s, err := OpenSession(ctx, url, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = s.Close(ctx) }()
+	tools, err := s.ListTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	have := map[string]bool{}
+	for _, t := range tools {
+		have[t.Name] = true
+	}
+	var missing []string
+	for _, name := range DynamicTools {
+		if !have[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing, nil
+}
+
 // Close best-effort ends the session with DELETE. A server that does not
 // support it (405) or already forgot the session (404) is not an error.
 func (s *Session) Close(ctx context.Context) error {

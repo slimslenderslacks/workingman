@@ -42,7 +42,7 @@ func (e *AlreadyOpenError) Error() string {
 
 // TabLauncher opens each session in a new terminal tab and tracks it until the
 // command in the tab exits. It is the agent.Launcher for every non-ACP session
-// (the --wolf-host wolf, the TUI's `:dir`/`:session` windows).
+// (the --wolf-host wolf, the TUI's `:session`/`:orch`/`:workspace` windows).
 //
 // Tracking is file-based so it survives orch restarts: the command is wrapped so
 // it records its pid in <StateDir>/<name>.pid before exec'ing, and Open writes

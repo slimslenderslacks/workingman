@@ -49,7 +49,7 @@ func TestPushTaskDispatchesCommitAgent(t *testing.T) {
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

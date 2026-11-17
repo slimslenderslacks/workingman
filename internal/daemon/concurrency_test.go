@@ -105,7 +105,7 @@ func concurrencyTestDaemon(t *testing.T, mgr workspace.Manager) (*Daemon, *safeB
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	lch := &recordingLauncher{}
-	d, err := New([]string{t.TempDir()}, a, WithRunner(&runner.Runner{
+	d, err := newDaemon(t, []string{t.TempDir()}, a, WithRunner(&runner.Runner{
 		Workspaces: mgr,
 		Launcher:   lch,
 		Audit:      a,
@@ -253,7 +253,7 @@ func TestStartupScanFansOutAcrossProjects(t *testing.T) {
 	a := audit.New(buf)
 	lch := &recordingLauncher{}
 	root := t.TempDir()
-	d, err := New([]string{root}, a, WithRunner(&runner.Runner{
+	d, err := newDaemon(t, []string{root}, a, WithRunner(&runner.Runner{
 		Workspaces: mgr,
 		Launcher:   lch,
 		Audit:      a,

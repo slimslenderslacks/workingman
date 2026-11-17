@@ -78,6 +78,13 @@ type Session struct {
 	// for diagnostics and for relaunching an equivalent wrapper.
 	Kit string `json:"kit,omitempty"`
 
+	// Harness is the name of the agent harness the session runs under
+	// (task.HarnessDefault, the claude ACP kit, today) and Template the sbx
+	// template its sandbox is created from (the `sbx create -t` image, or
+	// "claude" for the stock template). Written by the runner at launch.
+	Harness  string `json:"harness,omitempty"`
+	Template string `json:"template,omitempty"`
+
 	// LogPath, when set, is the file the wrapper appends the raw ACP stream to.
 	// A reconnecting TUI can replay it to rebuild scrollback the live socket no
 	// longer carries (the socket only resumes the stream from "now").
