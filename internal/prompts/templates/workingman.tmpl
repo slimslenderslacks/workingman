@@ -117,14 +117,16 @@ Project status (`project.yaml` `status:`):
   nothing is dispatched until it is started again.
 
 Task status (`tasks/<name>.yaml` `status:`):
-- `ready` → `running` once every task in `depends_on` is `committed`.
+- `ready` → `running` once every task in `depends_on` is `committed`: the
+  daemon writes `running` itself when it dispatches the task's agent.
 - `running` → `success` (then a commit agent makes it `committed`), `failed`,
   or `blocked`.
 - `failed` is retried automatically (back to `ready`) until `attempts` reaches
   3; after that, or when a task reports `blocked`, the PROJECT becomes `blocked`
   and the wolf is summoned. `failure_reason` / `blocked_reason` say why.
 - A task still `running` with no live `task` session for its project means the
-  agent died; the daemon treats it like a failure.
+  agent died; the daemon treats it like a failure (or, after a daemon restart,
+  puts it back to `ready` and re-dispatches it).
 
 Agents: project, planning, task, commit, review, archive (cleanup), wolf, and
 you. "Reaped" in the audit log means the daemon terminated a session that

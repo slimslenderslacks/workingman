@@ -98,6 +98,20 @@ func (d *Daemon) reconcileSessions() {
 		projectPath := project.CanonicalPath(rec.ProjectPath)
 		sess := newReconciledSession(rec.ID, store, nil)
 		onEnd := func(error) { d.revisitProject(projectPath) }
+		if kind == agent.TaskAgent || kind == agent.CommitAgent {
+			// An adopted agent's end is not judged by afterTaskSession (its
+			// launch callback died with the previous daemon); the revisit just
+			// re-dispatches from disk. If it left its task at the running the
+			// daemon wrote at dispatch, put it back to ready first so that
+			// re-dispatch can see it — the pre-restart "re-run it" behaviour.
+			taskPath := rec.TaskPath
+			onEnd = func(error) {
+				if taskPath != "" {
+					d.releaseRunningTask(taskPath, "adopted_session_ended")
+				}
+				d.revisitProject(projectPath)
+			}
+		}
 		// The planner, the wolf and the archive agent each live in a slot of
 		// their own (see launchPlanningAgent / launchWolfAgent /
 		// launchArchiveAgent) so they can run in tandem with

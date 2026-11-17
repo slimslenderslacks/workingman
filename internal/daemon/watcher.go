@@ -68,6 +68,7 @@ func (d *Daemon) startupScan() {
 			go func(path string) {
 				defer wg.Done()
 				defer func() { <-sem }()
+				d.releaseOrphanedTasks(path)
 				d.revisitProject(path)
 			}(p)
 			return nil

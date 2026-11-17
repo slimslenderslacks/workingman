@@ -101,8 +101,9 @@ func TestTaskFailureRetries(t *testing.T) {
 	if reloaded.Attempts != 1 {
 		t.Errorf("attempts = %d, want 1", reloaded.Attempts)
 	}
-	if reloaded.Status != task.StatusReady {
-		t.Errorf("status = %q, want ready", reloaded.Status)
+	// Reset to ready, then relaunched — which the daemon marks running.
+	if reloaded.Status != task.StatusRunning {
+		t.Errorf("status = %q, want running (relaunched)", reloaded.Status)
 	}
 	if reloaded.FailureReason != "" {
 		t.Errorf("failure_reason should be cleared on retry, got %q", reloaded.FailureReason)

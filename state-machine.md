@@ -589,7 +589,7 @@ was down, so the daemon keeps its own history (`cron_missed.go`, persisted via
 ```mermaid
 stateDiagram-v2
     [*] --> ready: planning agent creates task
-    ready --> running: task agent dispatched\n(dependencies all committed)
+    ready --> running: daemon dispatches task agent\n(dependencies all committed)
     running --> success: task agent reports success
     running --> failed: task agent reports failure,\ncrashes, or is reaped
     running --> blocked: task agent reports blocked
@@ -602,9 +602,12 @@ stateDiagram-v2
 
     blocked --> [*]: project → blocked (wolf),\nno automatic retry
 
+    running --> ready: launch failed, project stopped,\nor agent lost across a daemon restart
+
     note right of running
-      A session-end callback that finds
-      status still "running" or "ready"
+      The daemon writes "running" itself at
+      dispatch. A session-end callback that
+      finds status still "running" or "ready"
       (agent crashed / never started)
       is handled identically to "failed".
     end note
@@ -642,6 +645,33 @@ phase entirely. Every other ready task goes to `launchTaskAgent`, which
 starts a task agent in a fresh (or existing, if `SaveSandbox` shared it)
 workspace.
 
+**The daemon writes `status: running` itself**, at dispatch
+(`markTaskRunning`, `internal/daemon/dispatch_lifecycle.go`), before the agent
+session is launched — task agents are not asked to. That is what the TUI and
+the state snapshot show for as long as an agent owns the task (they render the
+task file verbatim), and what keeps `Ready()` from picking the task a second
+time. The write goes through `task.Update` and only moves a task still at
+`ready` on disk, so every other field is preserved and a stale in-memory copy
+can't clobber a status someone else has since written. A push task is marked
+the same way when its commit agent is dispatched. The other direction,
+`running → ready` (`releaseRunningTask`), happens only when no agent is
+working the task and no session-end callback will judge the run, and never
+costs a retry attempt:
+
+- the launch fails after the write (`launchTaskAgent` / `launchCommitAgent`
+  undo it; the project blocks as before);
+- the project is `stopped` (`afterTaskSession`/`afterCommitSession`'s
+  stopped guard), so `:start` re-dispatches the task;
+- the daemon restarts: `startupScan` first releases any task still at
+  `running` that no adopted session is working (`releaseOrphanedTasks` — its
+  agent died while no daemon was watching), and an adopted task/commit
+  session's end callback releases its task before re-dispatching, since the
+  original `afterTaskSession` callback died with the previous daemon.
+
+A save failure on the running write is logged (`task_save_error`) and the
+launch goes ahead; the task then simply shows `ready` for its run, as it did
+before the daemon wrote the transition.
+
 Structural graph errors — an unknown dependency, a dependency cycle, or a
 genuine duplicate task name — are **not** repairable per-file and abort
 `taskgraph.Load` entirely; `loadTaskGraph` (`internal/daemon/dispatch.go`)
@@ -673,9 +703,12 @@ race where an agent writes `status:success` and exits before the daemon's
 session tracker observes the session ending.
 
 - **`success`** → `launchCommitAgent` (see below).
-- **`failed`, `running`, or `ready`** → `handleTaskFailure`. `running`/`ready`
-  mean the agent's session ended without ever writing a terminal status (it
-  crashed, or never started) — treated identically to an explicit `failed`.
+- **`failed`, `running`, or `ready`** → `handleTaskFailure`. `running` (the
+  daemon's dispatch-time mark) or `ready` (that mark failed to save) mean the
+  agent's session ended without ever writing a terminal status (it crashed,
+  or never started) — treated identically to an explicit `failed`. The retry
+  resets the task to `ready` and relaunches it, which marks it `running`
+  again.
 - **`blocked`** → the agent decided it can't proceed. The task's sandbox is
   retained (`retainSandbox`, sets `save_sandbox: true`) so the wolf can
   inspect it, and the project is blocked immediately — **no retry** regardless
