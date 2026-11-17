@@ -300,9 +300,115 @@ func TestRenderSessionBoxInteractiveBadge(t *testing.T) {
 func TestRenderSessionBoxShowsEveryFieldLabel(t *testing.T) {
 	view := SessionView{ID: "a", AgentName: "task", Project: "alpha", Status: "running"}
 	box := renderSessionBox(view, 40, time.Time{}, false)
-	for _, label := range []string{"project:", "task:", "status:", "age:", "sandbox:"} {
+	for _, label := range []string{"project:", "task:", "status:", "sandbox:", "harness:", "model:", "mounts:", "mcps:", "dynamic:"} {
 		if !strings.Contains(box, label) {
 			t.Errorf("box missing field label %q; got:\n%s", label, box)
+		}
+	}
+}
+
+// The box must render exactly sessionBoxContentRows content lines plus its
+// border, whatever the session carries, so sessionBoxAtY's fixed-height
+// hit-testing lines up with what's drawn.
+func TestRenderSessionBoxHasFixedHeight(t *testing.T) {
+	views := []SessionView{
+		{ID: "a", AgentName: "wolf", Project: "alpha", Status: "running", Interactive: true},
+		{
+			ID: "b", AgentName: "task", Project: "alpha", TaskName: "scaffold", Status: "running",
+			SandboxName: "alpha-scaffold", Harness: "org/claude-code-acp:0.90.0", Model: "claude-opus-5-5",
+			Mounts: []string{"/ws/alpha", "/orch/alpha:ro"}, MCPs: []string{"github", "gmail"}, MCPDynamic: true,
+		},
+	}
+	if got := len(sessionBoxFields(SessionView{}, time.Time{})); got != sessionBoxContentRows-1 {
+		t.Errorf("sessionBoxFields has %d rows, want sessionBoxContentRows-1 = %d", got, sessionBoxContentRows-1)
+	}
+	for _, v := range views {
+		for _, selected := range []bool{false, true} {
+			box := renderSessionBox(v, 34, time.Time{}, selected)
+			if got := lipgloss.Height(box); got != sessionBoxHeight {
+				t.Errorf("%s (selected=%v): box height = %d, want sessionBoxHeight = %d; got:\n%s",
+					v.ID, selected, got, sessionBoxHeight, box)
+			}
+		}
+	}
+}
+
+func TestRenderSessionBoxShowsSandboxConfig(t *testing.T) {
+	view := SessionView{
+		ID: "a", AgentName: "task", Project: "alpha", Status: "running",
+		SandboxName: "alpha-scaffold",
+		Harness:     "slimslenderslacks/claude-code-acp:0.90.0",
+		Model:       "claude-opus-5-5",
+		Mounts:      []string{"/Users/me/ws/alpha", "/Users/me/orch/alpha:ro"},
+		MCPs:        []string{"github", "gmail"},
+		MCPDynamic:  true,
+	}
+	box := renderSessionBox(view, 80, time.Time{}, false)
+	for _, want := range []string{
+		"harness:claude-code-acp:0.90.0",
+		"model:  claude-opus-5-5",
+		"mounts: alpha, alpha:ro",
+		"mcps:   github, gmail",
+		"dynamic:on",
+	} {
+		if !strings.Contains(box, want) {
+			t.Errorf("box missing %q; got:\n%s", want, box)
+		}
+	}
+	if strings.Contains(box, "slimslenderslacks/") {
+		t.Errorf("harness should drop the image's org prefix; got:\n%s", box)
+	}
+
+	view.MCPDynamic = false
+	if box := renderSessionBox(view, 80, time.Time{}, false); !strings.Contains(box, "dynamic:off") {
+		t.Errorf("sandboxed session without dynamic MCPs should show off; got:\n%s", box)
+	}
+}
+
+// A session that doesn't run in a sandbox shows em-dashes for all the
+// sandbox-config rows rather than blank values or a misleading "off".
+func TestRenderSessionBoxDashesSandboxConfigWhenUnset(t *testing.T) {
+	view := SessionView{ID: "a", AgentName: "wolf", Project: "alpha", Status: "running", Interactive: true}
+	box := renderSessionBox(view, 40, time.Time{}, false)
+	for _, label := range []string{"harness:", "model:", "mounts:", "mcps:", "dynamic:"} {
+		if !strings.Contains(box, padCell(label, sessionBoxLabelWidth)+"—") {
+			t.Errorf("unsandboxed box should dash %q; got:\n%s", label, box)
+		}
+	}
+}
+
+// Long mount/MCP lists truncate to the box instead of overflowing its border.
+func TestRenderSessionBoxTruncatesLongLists(t *testing.T) {
+	view := SessionView{
+		ID: "a", AgentName: "task", Project: "alpha", Status: "running", SandboxName: "s",
+		Mounts: []string{"/a/workspace-one", "/b/workspace-two", "/c/workspace-three"},
+		MCPs:   []string{"github", "gmail", "slack", "linear", "notion"},
+	}
+	const width = 34
+	box := renderSessionBox(view, width, time.Time{}, false)
+	for _, line := range strings.Split(box, "\n") {
+		if got := lipgloss.Width(line); got > width {
+			t.Errorf("box line %q width = %d, want <= %d", line, got, width)
+		}
+	}
+	if !strings.Contains(box, "mounts: workspace-one") || !strings.Contains(box, "mcps:   github") {
+		t.Errorf("truncated lists should keep their leading entries; got:\n%s", box)
+	}
+}
+
+func TestSessionMountsLabel(t *testing.T) {
+	cases := []struct {
+		mounts []string
+		want   string
+	}{
+		{nil, ""},
+		{[]string{"/ws/alpha"}, "alpha"},
+		{[]string{"/ws/alpha", "/orch/alpha-proj:ro"}, "alpha, alpha-proj:ro"},
+		{[]string{"/ws/alpha/"}, "alpha"},
+	}
+	for _, c := range cases {
+		if got := sessionMountsLabel(c.mounts); got != c.want {
+			t.Errorf("sessionMountsLabel(%v) = %q, want %q", c.mounts, got, c.want)
 		}
 	}
 }
