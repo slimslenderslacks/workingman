@@ -164,6 +164,18 @@ func runDaemon(args []string) {
 		}
 	}
 
+	// Resolve a local --acp-kit to an absolute path up front: every
+	// acp-wrapper (and session.json) gets this value, and a relative one would
+	// otherwise depend on the cwd orch happened to start in. A stale or
+	// mismatched kit is the usual reason a sandbox ends up with the stock
+	// mcp-gateway MCP server instead of okta-gateway, so say so loudly.
+	resolvedKit, kitWarnings := resolveAcpKit(*acpKit, *acpImage)
+	*acpKit = resolvedKit
+	for _, w := range kitWarnings {
+		fmt.Fprintln(os.Stderr, "orch: warning:", w)
+		a.Log("acp_kit_warning", "kit", *acpKit, "image", *acpImage, "detail", w)
+	}
+
 	wsMgr, err := buildWorkspaceManager(*workspaceMode, *stubRoot)
 	if err != nil {
 		log.Fatal(err)

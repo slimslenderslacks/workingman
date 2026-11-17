@@ -291,3 +291,55 @@ func TestStartSleepyHeadAgent(t *testing.T) {
 		}
 	}
 }
+
+// The workingman agent's persistent sandbox must never fall back to the stock
+// mcp-gateway: with a gateway URL it is launched with --require-okta-gateway,
+// and with no default server set it still gets a (dynamic) gateway rather
+// than none. Other kinds are unchanged.
+func TestWorkingmanAgentRequiresOktaGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		url         string
+		servers     []string
+		static      bool
+		wantRequire bool
+		wantDynamic bool
+		wantServers []string
+	}{
+		{name: "default servers", url: "http://localhost:3333", servers: []string{"github"}, wantRequire: true, wantServers: []string{"github"}},
+		{name: "no servers gets a dynamic gateway", url: "http://localhost:3333", wantRequire: true, wantDynamic: true},
+		{name: "no servers and static: no gateway", url: "http://localhost:3333", static: true},
+		{name: "no url: no gateway", servers: []string{"github"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acp := &fakeLauncher{}
+			r := &Runner{
+				AcpLauncher:       acp,
+				Kit:               "/kits/acp",
+				SessionsRoot:      filepath.Join(t.TempDir(), "sessions"),
+				MCPGatewayURL:     tc.url,
+				MCPGatewayServers: tc.servers,
+				MCPGatewayStatic:  tc.static,
+			}
+			if _, err := r.Start(context.Background(), Plan{
+				Kind:       agent.WorkingmanAgent,
+				WorkingDir: filepath.Join(t.TempDir(), "workingman-agent"),
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			cmd := acp.last.Command
+			if got := hasFlag(cmd, "--require-okta-gateway"); got != tc.wantRequire {
+				t.Errorf("--require-okta-gateway = %v, want %v: %v", got, tc.wantRequire, cmd)
+			}
+			if got := hasFlag(cmd, "--mcp-dynamic"); got != tc.wantDynamic {
+				t.Errorf("--mcp-dynamic = %v, want %v: %v", got, tc.wantDynamic, cmd)
+			}
+			if got := argValues(cmd, "--mcp-server"); !reflect.DeepEqual(got, tc.wantServers) {
+				t.Errorf("--mcp-server = %v, want %v", got, tc.wantServers)
+			}
+			if got, want := hasFlag(cmd, "--mcp-gateway-url"), tc.wantRequire; got != want {
+				t.Errorf("--mcp-gateway-url present = %v, want %v: %v", got, want, cmd)
+			}
+		})
+	}
+}

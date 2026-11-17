@@ -1138,7 +1138,21 @@ func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRo
 	// sets MCP_URL, allows its port and DELETEs it with the sandbox. Task
 	// static_mcps are NOT sent as `--static-mcp` any more; they name the
 	// gateway's servers (see MCPServersFor).
-	if u := strings.TrimSpace(r.MCPGatewayURL); u != "" && len(mcpServers) > 0 {
+	// The workingman agent's sandbox is persistent and reused across daemon
+	// restarts, so it is the one most likely to carry a stale kit; it must
+	// never silently run with the stock mcp-gateway server instead of
+	// okta-gateway. With no default servers it still gets a (dynamic)
+	// gateway rather than none, unless --mcp-gateway-static forbids that.
+	withGateway := len(mcpServers) > 0
+	if kind == agent.WorkingmanAgent.String() && strings.TrimSpace(r.MCPGatewayURL) != "" {
+		if !withGateway && !r.MCPGatewayStatic {
+			mcpDynamic, withGateway = true, true
+		}
+		if withGateway {
+			args = append(args, "--require-okta-gateway")
+		}
+	}
+	if u := strings.TrimSpace(r.MCPGatewayURL); u != "" && withGateway {
 		args = append(args, "--mcp-gateway-url", u)
 		for _, m := range mcpServers {
 			args = append(args, "--mcp-server", m)

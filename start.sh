@@ -141,6 +141,17 @@ fi
 # Prefer a sibling acp-kit checkout (a wsp workspace) when there is one: the
 # kit's install step rewrites claude-acp-client on every `sbx create`, so an
 # older kit undoes the image's okta-gateway client.
+#
+# The kit is resolved from where THIS start.sh lives ($HERE), not from the
+# shell's cwd — but that still means the checkout you start from picks the
+# kit: start.sh in a wsp workspace with its own (possibly stale) ../acp-kit
+# uses that one, a checkout without one falls back to the path below, and an
+# ACP_KIT already in the environment wins over both. A kit whose
+# claude-acp-client predates okta-gateway leaves new sandboxes with the stock
+# mcp-gateway MCP server. orch warns about a stale or image-mismatched kit at
+# startup (acp_kit_warning in the audit log), and the workingman agent's
+# persistent sandbox is recreated whenever it was built from a different kit
+# or image than the current one (see docs/mcp-gateway.md).
 if [ -f "$HERE/../acp-kit/spec.yaml" ]; then
   export ACP_KIT="${ACP_KIT:-$(cd "$HERE/../acp-kit" && pwd)}"
 else
@@ -210,12 +221,16 @@ if [ "$CHECK_AGENT" != 1 ] && [ -n "$WORKINGMAN_MCP_GATEWAY_URL" ]; then
   fi
 fi
 
+# Say which kit, image and gateway this run uses: the usual answer to "why does
+# a sandbox have mcp-gateway instead of okta-gateway" is one of these three.
+echo "start: acp-kit=$ACP_KIT acp-image=${ACP_IMAGE:-<stock claude template>} mcp-gateway-url=${WORKINGMAN_MCP_GATEWAY_URL:-<none: sandboxes keep mcp-gateway>} mcp-gateway-servers=${WORKINGMAN_MCP_GATEWAY_SERVERS:-<none>}" >&2
+
 # Run orch as a child (not exec) so the EXIT trap can stop the private agent.
 # Forward INT/TERM to it for a clean shutdown and preserve its exit status.
 "$HERE/orch" \
   --root ~/orch \
   --audit-log ~/orch/audit.log \
-  --acp-kit "${ACP_KIT:-$HERE/../acp-kit}" \
+  --acp-kit "$ACP_KIT" \
   --acp-image "$ACP_IMAGE" \
   --acp-wrapper "$HERE/acp-wrapper" <&0 &
 ORCH_PID=$!

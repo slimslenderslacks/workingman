@@ -185,7 +185,20 @@ Point orch at it:
 `http://localhost:3333` and `WORKINGMAN_MCP_GATEWAY_SERVERS` to `github`, and
 warns if nothing answers at `<url>/healthz`. Set `WORKINGMAN_MCP_GATEWAY_URL=""`
 to run without the gateway. Without a URL, sandboxes get no `MCP_URL` and keep
-the stock `mcp-gateway` MCP server instead of `okta-gateway`.
+the stock `mcp-gateway` MCP server instead of `okta-gateway`. These defaults
+live only in `start.sh`: running `./orch` directly gets no gateway unless you
+pass the flags or export the variables.
+
+Which acp-kit a sandbox gets also matters: an older kit installs a
+`claude-acp-client` that never removes `mcp-gateway`. `start.sh` picks the kit
+relative to its own checkout (a sibling `../acp-kit`, else
+`~/dev/repos/slimslenderslacks/acp-kit`, unless `ACP_KIT` is set), so starting
+from a different checkout can pick a different kit. orch warns at startup
+(`acp_kit_warning`) about a stale kit or one whose `IMAGE_VERSION` doesn't match
+`--acp-image`, and the persistent workingman agent's sandbox is recreated
+whenever it was built from a different kit or image, then checked for
+`okta-gateway` before the agent starts. See
+[docs/mcp-gateway.md](docs/mcp-gateway.md#the-workingman-agents-sandbox).
 
 Each time a sandbox is created (or reused):
 

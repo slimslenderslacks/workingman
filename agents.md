@@ -709,6 +709,14 @@ under the session-map key `"workingman-agent"` — not a project path and not a
 snapshot gives it no work stream / project path. `session.json` carries
 `kind: workingman`, no `project_path`, no `task_path`.
 
+**MCP.** Because its sandbox is reused across every daemon restart, it is
+launched with `acp-wrapper --require-okta-gateway` whenever orch has a gateway
+URL (a dynamic gateway when `--mcp-gateway-servers` is empty): the wrapper
+recreates the sandbox when it was built from a different kit or image, refuses
+to start without `MCP_URL`, and verifies inside the sandbox that `okta-gateway`
+is registered and the stock `mcp-gateway` is gone before the agent starts. See
+[docs/mcp-gateway.md](docs/mcp-gateway.md#the-workingman-agents-sandbox).
+
 **Mounts (read-only enforced by the mount).** The scratch dir is the agent's
 cwd and holds the usual `.orch/` handoff files. Every orch `--root` is a
 second, **writable** workspace (`Plan.WritableMounts`): the agent edits

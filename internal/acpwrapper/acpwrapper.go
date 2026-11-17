@@ -188,6 +188,17 @@ type Config struct {
 	// mcpgateway.DefaultReadyTimeout.
 	MCPGatewayReadyTimeout time.Duration
 
+	// RequireOktaGateway makes the session refuse to run without its
+	// `okta-gateway` MCP server, rather than silently fall back to the stock
+	// sbx `mcp-gateway` one. Set for the persistent workingman agent, whose
+	// sandbox is reused across daemon restarts: an existing sandbox not built
+	// from the current kit and image (see harnessDrift) is recreated, a
+	// launch with no MCP_URL fails, and a sandbox whose claude-acp-client does
+	// not leave okta-gateway registered and mcp-gateway gone
+	// (oktaGatewayPreflight) is removed and the launch failed, so the daemon's
+	// retry creates it afresh.
+	RequireOktaGateway bool
+
 	// Policies are sbx policy rules applied with `sbx policy ...` after the
 	// sandbox is created and before any `sbx exec`. Skipped on an existing
 	// sandbox because the sandbox name encodes the task identity, and so its
@@ -473,6 +484,9 @@ func (c *Config) normalize() error {
 	if strings.TrimSpace(c.KitPath) == "" {
 		return errors.New("acpwrapper: kit path is required (the acp-kit reference to install into the sandbox)")
 	}
+	// A relative local kit dir would be resolved by sbx against whatever the
+	// wrapper's cwd happens to be; pin it to an absolute path.
+	c.KitPath = AbsKit(c.KitPath)
 
 	if len(c.Workspaces) == 0 {
 		return errors.New("acpwrapper: at least one workspace is required")
@@ -600,6 +614,7 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING %v\n", c.SessionID, err)
 		c.MCPGateway.Discard(ctx, gw)
 	}
+	c.saveHarness(name)
 	return name, nil
 }
 
@@ -649,14 +664,22 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, erro
 		return "", fmt.Errorf("acpwrapper: sbx ls: %w", err)
 	}
 	if existing, ok := sandboxes[c.SandboxName]; ok {
-		if sameWorkspaceSet(existing, c.Workspaces) {
+		drift := ""
+		if c.RequireOktaGateway {
+			drift = c.harnessDrift(c.SandboxName)
+		}
+		if sameWorkspaceSet(existing, c.Workspaces) && drift == "" {
 			reapplyGatewayPolicies(ctx, run, c)
 			return c.SandboxName, nil
+		}
+		if drift != "" {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: recreating sandbox %q: %s\n", c.SessionID, c.SandboxName, drift)
 		}
 		if out, err := run(ctx, c.SbxPath, "rm", "--force", c.SandboxName); err != nil {
 			return "", fmt.Errorf("acpwrapper: sbx rm %s: %w: %s", c.SandboxName, err, strings.TrimSpace(string(out)))
 		}
 		c.MCPGateway.Release(ctx, c.SandboxName)
+		c.removeHarness(c.SandboxName)
 	}
 
 	return createSandbox(ctx, run, c, c.SandboxName)
@@ -836,6 +859,7 @@ func removeSandboxOnExit(ctx context.Context, run commandFunc, c Config, shuttin
 		return
 	}
 	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: removed sandbox %q\n", c.SessionID, c.SandboxName)
+	c.removeHarness(c.SandboxName)
 	// The sandbox is gone, so is the only user of its MCP gateway. A kept
 	// sandbox keeps its gateway: a relaunch reuses both.
 	c.MCPGateway.Release(ctx, c.SandboxName)
@@ -931,6 +955,11 @@ func Run(ctx context.Context, c Config) error {
 	// without MCP_URL for its whole life: wait for it, and fail the launch if
 	// it never comes up, so the daemon retries (and eventually blocks with
 	// this reason) instead of running an agent that cannot reach its MCPs.
+	if c.RequireOktaGateway && !c.MCPGateway.Enabled() {
+		err := errors.New("acpwrapper: okta-gateway required but no MCP gateway is configured (--mcp-gateway-url and --mcp-server/--mcp-dynamic); the agent would get the stock mcp-gateway server instead")
+		failRecord(store, c, createdAt, err)
+		return err
+	}
 	if err := c.MCPGateway.WaitReady(ctx, c.SandboxName, c.MCPGatewayReadyTimeout); err != nil {
 		err = fmt.Errorf("acpwrapper: MCP gateway (okta-gateway) unavailable, not starting the agent without it: %w", err)
 		failRecord(store, c, createdAt, err)
@@ -956,6 +985,12 @@ func Run(ctx context.Context, c Config) error {
 	// the gateways of sandboxes that have since disappeared.
 	c.mcpURL = ensureMCPGateway(ctx, execCommand, c)
 	sweepMCPGateways(ctx, execCommand, c)
+	if c.RequireOktaGateway {
+		if err := requireOktaGateway(ctx, execCommand, c); err != nil {
+			failRecord(store, c, createdAt, err)
+			return err
+		}
+	}
 
 	// Route the agent through the LLM gateway only when sbx can authenticate
 	// it there; otherwise leave ANTHROPIC_BASE_URL unset (the default API).
