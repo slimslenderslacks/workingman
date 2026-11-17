@@ -694,6 +694,8 @@ the tab's status line:
 | `⌥j` / `⌥k` (or `l` / `h`) | next / previous tab |
 | `z` | expand / collapse tool-call output |
 | `x` | dismiss a dead session's tab |
+| `y` | copy the selected tab's whole transcript (plain text) to the clipboard |
+| `m` | toggle mouse capture (see [Selecting and copying text](#selecting-and-copying-text)) |
 | `enter` (or `i`) | type a message to a conversational tab (the wolf) |
 | `esc` (or `a`) | back to the main view |
 | `q` | quit |
@@ -702,6 +704,27 @@ the tab's status line:
 (as on the main screen) or `h`/`l`. While typing a message, letters are text,
 so only `ctrl-f`/`ctrl-b` scroll; sending a message (`enter`) or `esc` stops typing and gives `j`/`k`/`G` back; press `enter` again to type another.
 Each tab keeps its own scroll position.
+
+## Selecting and copying text
+
+The TUI starts in **select mode**: it does not capture the mouse, so the
+terminal's own click-drag selection works everywhere — highlight any text
+(a path on a card, a task row, a transcript line) and copy it the way your
+terminal normally does (`⌘C`, `ctrl-shift-c`, or copy-on-select). Every click
+action has a key equivalent, so nothing is lost without the mouse.
+
+| Key | Effect |
+|-----|--------|
+| `m` | toggle **mouse mode**: clicks focus panes, select cards/task rows and attach sessions. Press `m` again for select mode |
+| `y` | copy the focused pane's selection to the clipboard: a session's tab name, a work stream's directory, a task's file path, or the detail pane's text. In the ACP view, the selected tab's transcript |
+
+The footer shows the current mode. In mouse mode most terminals still let you
+select text by holding a modifier while dragging — Shift in most terminals
+(GNOME Terminal, kitty, Alacritty, WezTerm, Windows Terminal), Option (⌥) in
+iTerm2 and Terminal.app. `y` copies via the OSC 52 escape sequence, so it
+works over ssh and inside tmux (with `set -g set-clipboard on`), but needs a
+terminal that supports it (iTerm2 asks you to allow clipboard access;
+Terminal.app does not support it — select with the mouse there instead).
 
 ## Hiding work streams
 

@@ -935,7 +935,11 @@ func (m model) renderACPView() string {
 	if m.acpToolsExpanded {
 		toolHint = "z: collapse tools"
 	}
-	hintText := "⌥j/⌥k: switch tab  •  j/k ^f/^b: scroll  •  G: follow  •  " + toolHint + "  •  esc: back  •  q: quit"
+	mouseHint := "m: mouse clicks"
+	if m.mouseCapture {
+		mouseHint = "m: select text"
+	}
+	hintText := "⌥j/⌥k: switch tab  •  j/k ^f/^b: scroll  •  G: follow  •  " + toolHint + "  •  y: copy transcript  •  " + mouseHint + "  •  esc: back  •  q: quit"
 	hint := hintStyle.Render(truncate(hintText, width))
 
 	if len(m.acp.tabs) == 0 {

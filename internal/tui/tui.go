@@ -191,6 +191,14 @@ type model struct {
 	// waitForChordTimeout.
 	pendingKey string
 	pendingSeq int
+
+	// mouseCapture is whether the TUI is capturing the mouse (bubbletea cell
+	// motion), flipped at runtime by `m`. Off by default so the terminal's
+	// native click-drag selection works and text can be highlighted and
+	// copied; everything a click does (focus a pane, select a card/row,
+	// attach a session) is also bound to a key. Turning it on enables the
+	// click handling in handleMouse. See toggleMouse.
+	mouseCapture bool
 }
 
 func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, attacher tabAttacher) model {
@@ -221,6 +229,9 @@ func (m model) Init() tea.Cmd {
 	}
 	if m.acpCh != nil {
 		cmds = append(cmds, waitForACP(m.acpCh))
+	}
+	if m.mouseCapture {
+		cmds = append(cmds, tea.EnableMouseCellMotion)
 	}
 	if len(cmds) == 0 {
 		return nil
@@ -452,6 +463,10 @@ func (m model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// restore the normal stacked layout if it's already maximized.
 		m.zoomed = !m.zoomed
 		m.statusMsg = ""
+	case "m":
+		return m.toggleMouse()
+	case "y":
+		return m.copySelection()
 	case "enter":
 		if m.focus == paneSessions {
 			return m.attachSelected()
@@ -557,6 +572,18 @@ func (m model) handleACPKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "z":
 		m.acpToolsExpanded = !m.acpToolsExpanded
+	case "m":
+		// Same toggle as the main screen; the mode shows on this view's hint.
+		next, cmd := m.toggleMouse()
+		nm := next.(model)
+		nm.statusMsg = ""
+		return nm, cmd
+	case "y":
+		if t, ok := m.acp.selected(); ok {
+			if err := copyToClipboard(acpTranscriptText(t, m.acpToolsExpanded)); err != nil {
+				m.acpInputErr = "copy: " + err.Error()
+			}
+		}
 	case "x":
 		t, ok := m.acp.selected()
 		if !ok {
@@ -2651,7 +2678,11 @@ func (m model) renderFooter() string {
 		if m.showHidden {
 			hiddenHint = "tp: hide hidden"
 		}
-		base := "⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  tl/tr: toggle sessions/detail column  •  " + hiddenHint + "  •  enter/click: attach  •  q: quit"
+		mouseHint := "select mode (m: mouse clicks)"
+		if m.mouseCapture {
+			mouseHint = "mouse mode (m: select text)"
+		}
+		base := mouseHint + "  •  y: copy selected  •  ⌥j/⌥k: switch center pane  •  ⌥h/⌥l: switch column  •  j/k: select in pane  •  " + zoomHint + "  •  tl/tr: toggle sessions/detail column  •  " + hiddenHint + "  •  enter/click: attach  •  q: quit"
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}
@@ -2687,7 +2718,9 @@ func paneName(p pane) string {
 // sessions root and feeds the `a`-key tab view one tab per live ACP session.
 // Run blocks until the user quits or ctx is cancelled.
 //
-// Mouse cell-motion is enabled so the sessions pane responds to clicks.
+// The mouse starts uncaptured so the terminal's native click-drag selection
+// works; `m` turns on cell-motion capture (click to focus/select/attach) and
+// back off — see model.mouseCapture.
 // Attaching to a non-ACP session focuses its terminal tab through tabs (nil
 // uses a default terminal.TabLauncher), so the TUI keeps running in its own
 // tab while the user works in the session's.
@@ -2720,7 +2753,6 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, sessi
 	p := tea.NewProgram(
 		m,
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 		tea.WithContext(tuiCtx),
 	)
 	if _, err := p.Run(); err != nil {

@@ -31,6 +31,11 @@
 // transcript (prompts, streamed text, tool calls, plans). Conversational
 // sessions such as the wolf accept typed messages there.
 //
+// The mouse is not captured by default, so the terminal's native click-drag
+// selection can highlight and copy any text. "m" toggles mouse capture (click
+// to focus/select/attach), and "y" copies the focused selection — or, in the
+// ACP view, the transcript — to the clipboard via OSC 52 (clipboard.go).
+//
 // # Files
 //
 //   - tui.go — the model, Update loop, key/mouse handling, layout and
@@ -49,6 +54,7 @@
 //   - acpwatch.go — [WatchACPSessions]: discovers ACP sessions on disk,
 //     dials their sockets, sends the opening prompt and streams events.
 //   - acptabs.go — the ACP tab view's pure state and rendering.
+//   - clipboard.go — "m" mouse-capture toggle and "y" OSC 52 copy.
 //   - filetime_*.go — file birth time per platform, for task ages.
 //
 // # Talking to the daemon
