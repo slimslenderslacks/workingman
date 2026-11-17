@@ -18,6 +18,7 @@ type Scheduler struct {
 	mu      sync.Mutex
 	entries map[string]cron.EntryID
 	specs   map[string]string
+	fns     map[string]func()
 }
 
 // New returns a Scheduler with no entries. It fires nothing until Start.
@@ -26,6 +27,7 @@ func New() *Scheduler {
 		cron:    cron.New(),
 		entries: map[string]cron.EntryID{},
 		specs:   map[string]string{},
+		fns:     map[string]func(){},
 	}
 }
 
@@ -54,6 +56,7 @@ func (s *Scheduler) Register(key, spec string, fn func()) error {
 	}
 	s.entries[key] = id
 	s.specs[key] = spec
+	s.fns[key] = fn
 	return nil
 }
 
@@ -65,6 +68,36 @@ func (s *Scheduler) Unregister(key string) {
 		s.cron.Remove(id)
 		delete(s.entries, key)
 		delete(s.specs, key)
+		delete(s.fns, key)
+	}
+}
+
+// Rearm re-seeds every registered entry so its next-run time is computed from
+// the current wall clock, keeping each key, spec and callback. It fires no
+// callbacks itself: entries are removed and re-added, and a freshly added
+// entry's Next is Schedule.Next(now), which is strictly in the future.
+//
+// Why this exists: robfig/cron v3 arms a single time.Timer for
+// entries[0].Next.Sub(now), computed once when the entry set last changed.
+// Go timers run on the monotonic clock, which does not advance while macOS is
+// asleep (mach_absolute_time stops), so after a suspend the timer fires
+// late by roughly the sleep duration, and "@every" entries (whose Next is
+// derived from a monotonic-bearing time.Now()) drift the same way. Cron-spec
+// entries compare Next against wall time on wake, so they are correct once the
+// timer fires, but the wake itself is delayed. Calling Rearm after a detected
+// clock jump re-arms the timer against the wall clock. Entries whose spec
+// fails to re-parse (cannot happen for specs Register accepted) are left as-is.
+func (s *Scheduler) Rearm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, spec := range s.specs {
+		fn := s.fns[key]
+		id, err := s.cron.AddFunc(spec, fn)
+		if err != nil {
+			continue
+		}
+		s.cron.Remove(s.entries[key])
+		s.entries[key] = id
 	}
 }
 

@@ -346,6 +346,11 @@ func (d *Daemon) sleepWatchLoop(ctx context.Context) {
 			now := d.clock().Round(0)
 			if clockJumped(prev, now, every) {
 				d.audit.Log("clock_jump", "gap", now.Sub(prev).Round(time.Second).String())
+				// The cron timer runs on the monotonic clock, which pauses
+				// during sleep; re-arm it against the wall clock.
+				if d.scheduler != nil {
+					d.scheduler.Rearm()
+				}
 				d.detectMissedTracked(now)
 			}
 			prev = now

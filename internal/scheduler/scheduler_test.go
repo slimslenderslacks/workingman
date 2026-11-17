@@ -163,3 +163,67 @@ func TestTicksBetweenInvalidSpec(t *testing.T) {
 		t.Fatal("expected error for invalid spec")
 	}
 }
+
+func TestRearmKeepsEntriesAndDoesNotFire(t *testing.T) {
+	s := New()
+	var n int32
+	if err := s.Register("k", "@every 1h", func() { atomic.AddInt32(&n, 1) }); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	s.Start()
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+
+	before := s.cron.Entries()
+	s.Rearm()
+	s.Rearm()
+	after := s.cron.Entries()
+	if len(before) != 1 || len(after) != 1 {
+		t.Fatalf("entries before=%d after=%d, want 1 each", len(before), len(after))
+	}
+	if s.Spec("k") != "@every 1h" {
+		t.Errorf("spec = %q, want preserved", s.Spec("k"))
+	}
+	if !after[0].Next.After(time.Now()) {
+		t.Errorf("next %v not in the future", after[0].Next)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := atomic.LoadInt32(&n); got != 0 {
+		t.Errorf("Rearm fired callback %d times, want 0", got)
+	}
+}
+
+func TestRearmKeepsCallbackFiring(t *testing.T) {
+	s := New()
+	var n int32
+	if err := s.Register("k", "@every 1s", func() { atomic.AddInt32(&n, 1) }); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	s.Start()
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+	s.Rearm()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&n) >= 1 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Error("callback did not fire after Rearm")
+}
+
+func TestRearmThenUnregister(t *testing.T) {
+	s := New()
+	if err := s.Register("k", "@every 1h", func() {}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	s.Rearm()
+	s.Unregister("k")
+	if got := len(s.cron.Entries()); got != 0 {
+		t.Errorf("entries = %d after Rearm+Unregister, want 0", got)
+	}
+}
+
+func TestRearmEmpty(t *testing.T) {
+	New().Rearm()
+}
