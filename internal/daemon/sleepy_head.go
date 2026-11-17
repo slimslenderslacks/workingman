@@ -108,7 +108,7 @@ func (d *Daemon) catchUpProject(projectPath string) {
 		return
 	}
 	d.audit.Log("catchup_fired", "path", projectPath, "spec", p.Cron)
-	d.onCronFired(projectPath)
+	d.runCron(projectPath, p)
 }
 
 // catchupInstruction is the text the sleepy-head prompt embeds for step 3. A

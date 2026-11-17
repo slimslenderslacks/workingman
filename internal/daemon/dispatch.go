@@ -904,8 +904,25 @@ func (d *Daemon) onCronFired(projectPath string) {
 		d.audit.Log("cron_skipped_battery", "path", projectPath, "spec", p.Cron)
 		return
 	}
-	d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
+	// Check-and-stamp is atomic under catchupMu so a timer fire racing a
+	// catch-up (which stamps under the same lock) cannot run the slot twice.
+	catchupMu.Lock()
+	// An exhausted schedule skips the dedupe so runCron's entry check can
+	// unschedule it.
+	if p.CronStopReason() == "" && d.cronSlotHandled(projectPath, p, d.clock()) {
+		catchupMu.Unlock()
+		d.audit.Log("cron_fire_deduped", "path", projectPath, "spec", p.Cron)
+		return
+	}
 	d.recordCronFire(projectPath, d.clock())
+	catchupMu.Unlock()
+	d.runCron(projectPath, p)
+}
+
+// runCron is the body of a cron firing, after the firing has been stamped (by
+// onCronFired, or by catchUpProject's claim).
+func (d *Daemon) runCron(projectPath string, p *project.Project) {
+	d.audit.Log("cron_fired", "path", projectPath, "spec", p.Cron)
 
 	// Entry check: the budget on disk may already be spent (a restart that
 	// re-registered from a stale read, or a schedule left over from before the
