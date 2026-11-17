@@ -3,8 +3,8 @@
 # sbx sandboxes.
 #
 # Background: the orch commit agent SSH-signs commits using a key held by the
-# private ssh-agent that start.sh starts (key loaded from 1Password via
-# `op`, never on disk) and exports as SSH_AUTH_SOCK. sbx exposes an agent inside
+# private ssh-agent that start.sh starts (key loaded from 1Password by
+# op-read with a service account, never on disk) and exports as SSH_AUTH_SOCK. sbx exposes an agent inside
 # every sandbox at /run/ssh-agent.sock, but only by proxying whatever agent the
 # *sandboxd daemon* was launched with. If Docker Desktop later restarts sandboxd
 # (an update, a crash, a sleep/wake that bounces the VM), it comes back bound to

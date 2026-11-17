@@ -14,7 +14,10 @@ Three scripts drive the local setup:
 | AGENT_DIR | ssh agent.sock location |
 | AGENT_PID | ssh agent pid |
 | ORCH_PID | orch daemon pid |
-| ORCH_SSH_KEY_REF | where do we get our signing key |
+| ORCH_SSH_KEY_REF | op:// reference to the openssh-format signing key; default `op://workingman/SSH github/private key?ssh-format=openssh` (must be in a vault the service account can read — never Personal) |
+| ORCH_OP_READ | op-read binary that resolves ORCH_SSH_KEY_REF; default `$HERE/op-read` |
+| OP_SERVICE_ACCOUNT_TOKEN | 1Password service account token; when unset, read from the macOS keychain |
+| OP_SA_KEYCHAIN_SERVICE / OP_SA_KEYCHAIN_ACCOUNT / OP_SA_KEYCHAIN | keychain item holding the token; default service `workingman:service_account`, account `jim.clark`, default keychain search list |
 | SSH_AUTH_SOCK | |
 | ACP_KIT | $HOME/dev/repos/slimslenderslacks/acp-kit |
 | ACP_IMAGE | slimslenderslacks/claude-code-acp:0.90.0 |
@@ -23,7 +26,7 @@ Three scripts drive the local setup:
 
 ### checks
 
-* orch and acp-wrapper binaries are built and up to date
+* orch, acp-wrapper and op-read binaries are built and up to date
 * make sure we have an ssh agent.sock on the host for commit signing
 * make sure we have an sbx binary on the path and a running daemon
 * the check-signing.sh script probes that we can sign something from within a sandbox (and that github will accept it), and also that we can reach and auth github.com
@@ -32,7 +35,9 @@ Three scripts drive the local setup:
 
 * what signing key should be added to an ssh agent?
     * we use /tmp/orch-ssh.XXXXXX/agent.sock
-    * how do we load the private key into this agent? 1password?
+    * the private key is loaded by `op-read "$ORCH_SSH_KEY_REF" | ssh-add -`: op-read resolves the op:// reference with the 1Password Go SDK as a service account (no `op` CLI, no signin)
+    * the service account token is `OP_SERVICE_ACCOUNT_TOKEN`, else the macOS keychain; seed it with `security add-generic-password -U -a jim.clark -s workingman:service_account -w`
+    * the key item must be in a shared vault granted to the service account (service accounts cannot read Personal)
 
 ### orch binary
 
