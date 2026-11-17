@@ -109,6 +109,7 @@ func TestEnterOnSessionsPaneAttachesSelected(t *testing.T) {
 		{ID: "b", AgentName: "task", Project: "bravo", TabName: "task-bravo"},
 	}})
 	m = step.(model)
+	m = focusSessionsPane(t, m)
 	// Move selection to b (right moves selection within the sessions pane),
 	// then press Enter.
 	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
@@ -145,6 +146,7 @@ func TestAttachResultErrorSetsStatusMsg(t *testing.T) {
 		{ID: "a", TabName: "task-alpha"},
 	}})
 	m = step.(model)
+	m = focusSessionsPane(t, m)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	resMsg := runCmd(t, cmd)
 	final, _ := m.Update(resMsg)

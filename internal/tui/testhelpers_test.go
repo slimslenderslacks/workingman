@@ -33,6 +33,15 @@ func focusProjectsPane(t *testing.T, m model) model {
 	return m
 }
 
+// focusSessionsPane focuses the sessions (agent) pane directly. The TUI
+// starts with Projects focused (see newModel), so tests exercising the
+// sessions pane's keys (j/k selection, Enter-to-attach) set it up first.
+func focusSessionsPane(t *testing.T, m model) model {
+	t.Helper()
+	m.focus = paneSessions
+	return m
+}
+
 // openCommandPicker presses `:` and asserts the command menu opened. `:`
 // opens the picker regardless of which pane is focused (see
 // TestColonOpensCommandPickerFromAnyPane), so callers don't need to focus

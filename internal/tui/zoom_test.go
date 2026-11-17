@@ -8,7 +8,7 @@ import (
 )
 
 // zoomTestModel builds a fully-populated, sized model so View renders every
-// pane. Default focus is paneSessions (see newModel).
+// pane, with the sessions pane focused (newModel itself starts on Projects).
 func zoomTestModel() model {
 	m := newModel(nil, nil, &fakeAttacher{})
 	// Wide enough that the sessions left column and tasks right column both
@@ -20,6 +20,7 @@ func zoomTestModel() model {
 	m.projSel = "/a"
 	m.sessions = []SessionView{{ID: "s", AgentName: "task", Project: "alpha", Status: "running"}}
 	m.sessSel = "s"
+	m.focus = paneSessions
 	return m
 }
 

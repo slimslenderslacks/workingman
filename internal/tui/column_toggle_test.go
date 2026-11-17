@@ -84,6 +84,7 @@ func TestTChordFallsThroughToFreshKeyWhenNotLR(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
 	step, _ := m.Update(sessionsMsg{views: []SessionView{{ID: "a"}, {ID: "b"}}})
 	m = step.(model)
+	m = focusSessionsPane(t, m)
 
 	m = pressKey(m, "t")
 	m = pressKey(m, "j") // not l/r: abandons t, then moves the session selection

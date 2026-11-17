@@ -327,3 +327,30 @@ func TestMouseClickOnTaskRowSelectsIt(t *testing.T) {
 			m.taskSel, secondRowPath, firstRowPath)
 	}
 }
+
+// TestInitialFocusIsProjects pins the startup focus: the TUI always opens on
+// the Projects (work streams) pane, never the sessions/agent pane, and the
+// first projects/sessions snapshots and the initial window size don't move
+// it elsewhere.
+func TestInitialFocusIsProjects(t *testing.T) {
+	m := newModel(make(<-chan []ProjectView), make(<-chan []SessionView), &fakeAttacher{})
+	if m.focus != paneProjects {
+		t.Fatalf("newModel focus = %v, want paneProjects", m.focus)
+	}
+	if m.lastCenterFocus != paneProjects {
+		t.Fatalf("newModel lastCenterFocus = %v, want paneProjects", m.lastCenterFocus)
+	}
+
+	for _, msg := range []tea.Msg{
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		sessionsMsg{views: []SessionView{{ID: "a", AgentName: "task"}, {ID: "b", AgentName: "project"}}},
+		projectsMsg{views: []ProjectView{{Name: "alpha", Path: "/a", Status: "working"}}},
+		sessionsMsg{views: []SessionView{{ID: "b", AgentName: "project"}}},
+	} {
+		step, _ := m.Update(msg)
+		m = step.(model)
+		if m.focus != paneProjects {
+			t.Fatalf("after %T, focus = %v, want paneProjects", msg, m.focus)
+		}
+	}
+}

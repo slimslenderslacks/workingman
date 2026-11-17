@@ -207,7 +207,7 @@ func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, attacher
 	// to the empty state so the pane shows "(none)" instead of an endless
 	// "(loading…)".
 	return model{
-		focus:           paneSessions,
+		focus:           paneProjects,
 		projCh:          projCh,
 		sessCh:          sessCh,
 		sessLoaded:      sessCh == nil,

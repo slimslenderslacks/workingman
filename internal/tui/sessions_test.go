@@ -94,6 +94,7 @@ func TestSessionsMsgPreservesSelectionAcrossRefresh(t *testing.T) {
 		{ID: "c", AgentName: "wolf"},
 	}})
 	m = step1.(model)
+	m = focusSessionsPane(t, m)
 	// Move selection to "b".
 	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step2.(model)
@@ -117,6 +118,7 @@ func TestSessionsMsgFallsBackWhenSelectionDisappears(t *testing.T) {
 		{ID: "a"}, {ID: "b"},
 	}})
 	m = step1.(model)
+	m = focusSessionsPane(t, m)
 	step2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = step2.(model)
 	if m.sessSel != "b" {
