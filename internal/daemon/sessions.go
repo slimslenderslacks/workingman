@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -58,6 +59,19 @@ type SessionInfo struct {
 	// detail. Matches the name visible in `sbx ls` — underscores already
 	// normalized to hyphens.
 	SandboxName string
+	// Harness is the sbx template the session's sandbox was created from (cf.
+	// task.Task.DisplayHarness), Model the model the agent was launched under
+	// (task.ModelDefault when none was requested), and Mounts the host paths
+	// mounted into the sandbox — the first is the agent's working directory,
+	// read-only ones carry runner.ReadOnlySuffix. MCPs are the servers its MCP
+	// gateway was minted with and MCPDynamic whether that gateway also lets the
+	// agent mcp-find/mcp-add more. All empty/false for a session that does not
+	// run in a sandbox.
+	Harness    string
+	Model      string
+	Mounts     []string
+	MCPs       []string
+	MCPDynamic bool
 }
 
 // ListSessions returns a snapshot of every session the daemon is currently
@@ -86,6 +100,11 @@ func (d *Daemon) ListSessions() []SessionInfo {
 			StartedAt:   entry.startedAt,
 			TaskName:    entry.taskName,
 			Interactive: entry.kind.Interactive(),
+			Harness:     entry.config.Harness,
+			Model:       entry.config.Model,
+			Mounts:      slices.Clone(entry.config.Mounts),
+			MCPs:        slices.Clone(entry.config.MCPs),
+			MCPDynamic:  entry.config.MCPDynamic,
 		}
 		if d.runner != nil && d.runner.UsesACP(entry.kind) {
 			info.SandboxName = runner.ACPSandboxNameFor(entry.kind, key, entry.taskName)
@@ -168,5 +187,10 @@ func sessionInfoEqual(a, b SessionInfo) bool {
 		a.StartedAt.Equal(b.StartedAt) &&
 		a.TaskName == b.TaskName &&
 		a.Interactive == b.Interactive &&
-		a.SandboxName == b.SandboxName
+		a.SandboxName == b.SandboxName &&
+		a.Harness == b.Harness &&
+		a.Model == b.Model &&
+		slices.Equal(a.Mounts, b.Mounts) &&
+		slices.Equal(a.MCPs, b.MCPs) &&
+		a.MCPDynamic == b.MCPDynamic
 }

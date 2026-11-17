@@ -33,6 +33,17 @@ type SessionView struct {
 	// surfaces it in its own column so the user can correlate a row with
 	// the underlying `sbx` resource.
 	SandboxName string
+	// Harness, Model, Mounts, MCPs and MCPDynamic describe how the session's
+	// sandbox was set up: the sbx template it was created from, the model the
+	// agent runs under, the host paths mounted into it (first = working dir,
+	// read-only ones suffixed ":ro"), the MCP servers its gateway was minted
+	// with, and whether that gateway is dynamic (mcp-find/mcp-add). All
+	// empty/false for a session that does not run in a sandbox.
+	Harness    string
+	Model      string
+	Mounts     []string
+	MCPs       []string
+	MCPDynamic bool
 }
 
 // reconcileSelection returns the session ID the pane should keep highlighted

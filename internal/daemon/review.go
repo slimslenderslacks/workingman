@@ -242,6 +242,9 @@ func (d *Daemon) dispatchReviewAgent(projectPath string, p *project.Project) {
 	d.launchReviewAgent(projectPath, p)
 }
 
+// reviewStaticMCPs is the review agent's MCP gateway server set: GitHub only.
+var reviewStaticMCPs = []string{"github"}
+
 // launchReviewAgent starts the review agent in the project's control directory
 // with the github MCP attached. Like the planning agent it runs autonomously
 // (ACP, `claude --print`) and needs no wsp workspace: it reads the project goal
@@ -260,7 +263,7 @@ func (d *Daemon) launchReviewAgent(projectPath string, p *project.Project) {
 		TasksDir:    filepath.Join(root, "tasks"),
 		Branch:      p.Branch,
 		Repos:       workspaceReposFor(p),
-		StaticMCPs:  []string{"github"},
+		StaticMCPs:  reviewStaticMCPs,
 		Policies:    reviewNetworkPolicies(),
 	}
 	d.audit.Log("review_dispatch", "path", projectPath, "branch", p.Branch)
