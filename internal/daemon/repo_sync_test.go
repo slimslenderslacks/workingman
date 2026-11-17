@@ -59,7 +59,7 @@ func newRepoSyncTestDaemon(t *testing.T, mgr workspace.Manager) (*Daemon, *safeB
 	if mgr != nil {
 		opts = append(opts, WithRunner(&runner.Runner{Workspaces: mgr}))
 	}
-	d, err := New([]string{t.TempDir()}, a, opts...)
+	d, err := newDaemon(t, []string{t.TempDir()}, a, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

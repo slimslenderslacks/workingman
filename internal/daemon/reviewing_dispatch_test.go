@@ -248,7 +248,7 @@ func TestIdleWatchingProjectDispatchesReadyTaskAgent(t *testing.T) {
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r), WithScheduler(scheduler.New()))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r), WithScheduler(scheduler.New()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

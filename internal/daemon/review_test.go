@@ -26,7 +26,7 @@ func newReviewDaemon(t *testing.T, root string) (*Daemon, *safeBuf, *scheduler.S
 	t.Helper()
 	buf := &safeBuf{}
 	sched := scheduler.New()
-	d, err := New([]string{root}, audit.New(buf), WithScheduler(sched))
+	d, err := newDaemon(t, []string{root}, audit.New(buf), WithScheduler(sched))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -43,7 +43,7 @@ func reviewDispatchDaemon(t *testing.T) (*Daemon, *recordingLauncher, string) {
 	stubRoot := t.TempDir()
 	a := audit.New(&safeBuf{})
 	lch := &recordingLauncher{}
-	d, err := New([]string{root}, a,
+	d, err := newDaemon(t, []string{root}, a,
 		WithScheduler(scheduler.New()),
 		WithRunner(&runner.Runner{
 			Workspaces: workspace.NewStub(stubRoot),

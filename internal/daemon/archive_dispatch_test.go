@@ -90,7 +90,7 @@ func archiveTestDaemon(t *testing.T) (*Daemon, *recordingLauncher, *safeBuf, str
 	a := audit.New(buf)
 	stubRoot := t.TempDir()
 	lch := &recordingLauncher{}
-	d, err := New([]string{t.TempDir()}, a, WithRunner(&runner.Runner{
+	d, err := newDaemon(t, []string{t.TempDir()}, a, WithRunner(&runner.Runner{
 		Workspaces: workspace.NewStub(stubRoot),
 		Launcher:   lch,
 		Audit:      a,
@@ -359,7 +359,7 @@ func TestSingleCleanupProducesOneArchiveSession(t *testing.T) {
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	lch := &recordingLauncher{}
-	d, err := New([]string{root}, a, WithRunner(&runner.Runner{
+	d, err := newDaemon(t, []string{root}, a, WithRunner(&runner.Runner{
 		Workspaces: workspace.NewStub(stubRoot),
 		Launcher:   lch,
 		Audit:      a,
@@ -444,7 +444,7 @@ func TestCleanupDispatchesArchiveAgentUnderACP(t *testing.T) {
 	stubRoot := t.TempDir()
 	lch := &recordingLauncher{}
 	acp := &recordingLauncher{}
-	d, err := New([]string{t.TempDir()}, a, WithRunner(&runner.Runner{
+	d, err := newDaemon(t, []string{t.TempDir()}, a, WithRunner(&runner.Runner{
 		Workspaces:   workspace.NewStub(stubRoot),
 		Launcher:     lch,
 		AcpLauncher:  acp,

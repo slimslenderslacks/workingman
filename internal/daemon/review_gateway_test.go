@@ -310,7 +310,7 @@ func TestReviewGatewayDaemonLifecycle(t *testing.T) {
 	_ = store.Save(mcpgateway.Record{Sandbox: reviewGatewayKey, BaseURL: srv.URL, ID: "old-1", URL: srv.URL + "/gateways/old-1"})
 
 	buf := &safeBuf{}
-	d, err := New([]string{t.TempDir()}, audit.New(buf), WithReviewGateway(ReviewGatewayConfig{BaseURL: srv.URL, StateDir: stateDir}))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(buf), WithReviewGateway(ReviewGatewayConfig{BaseURL: srv.URL, StateDir: stateDir}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestReviewGatewayDaemonStartsDespiteCreateFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 	buf := &safeBuf{}
-	d, err := New([]string{t.TempDir()}, audit.New(buf), WithReviewGateway(ReviewGatewayConfig{BaseURL: srv.URL, StateDir: t.TempDir()}))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(buf), WithReviewGateway(ReviewGatewayConfig{BaseURL: srv.URL, StateDir: t.TempDir()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestReviewGatewayDaemonStartsDespiteCreateFailure(t *testing.T) {
 }
 
 func TestWithReviewGatewayEmptyURLDisabled(t *testing.T) {
-	d, err := New([]string{t.TempDir()}, audit.New(&safeBuf{}), WithReviewGateway(ReviewGatewayConfig{}))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(&safeBuf{}), WithReviewGateway(ReviewGatewayConfig{}))
 	if err != nil {
 		t.Fatal(err)
 	}

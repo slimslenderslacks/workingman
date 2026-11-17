@@ -147,7 +147,7 @@ func TestReconcileSessionsDiscoversOnDiskSession(t *testing.T) {
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{AcpLauncher: stubLauncher{}, SessionsRoot: sessionsRoot}
-	d, err := New([]string{root}, a, WithRunner(r))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestReconcileSessionsAdoptsWolfUnderWolfKey(t *testing.T) {
 	}
 
 	buf := &safeBuf{}
-	d, err := New([]string{root}, audit.New(buf), WithRunner(&runner.Runner{AcpLauncher: stubLauncher{}, SessionsRoot: sessionsRoot}))
+	d, err := newDaemon(t, []string{root}, audit.New(buf), WithRunner(&runner.Runner{AcpLauncher: stubLauncher{}, SessionsRoot: sessionsRoot}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestReconcileSessionsAdoptsArchiveUnderArchiveKey(t *testing.T) {
 
 	buf := &safeBuf{}
 	lch := &recordingLauncher{}
-	d, err := New([]string{root}, audit.New(buf), WithRunner(&runner.Runner{
+	d, err := newDaemon(t, []string{root}, audit.New(buf), WithRunner(&runner.Runner{
 		Workspaces:   workspace.NewStub(t.TempDir()),
 		Launcher:     lch,
 		AcpLauncher:  lch,

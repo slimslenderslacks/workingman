@@ -119,7 +119,7 @@ func newWMHarness(t *testing.T, cfg WorkingmanAgentConfig, failFirst int, extra 
 		WithWorkingmanAgent(cfg),
 	}
 	opts = append(opts, extra...)
-	d, err := New([]string{root}, a, opts...)
+	d, err := newDaemon(t, []string{root}, a, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestWorkingmanAgentUnavailableWithoutACP(t *testing.T) {
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	r := &runner.Runner{Launcher: spawningLauncher{}} // no AcpLauncher
-	d, err := New([]string{t.TempDir()}, a, WithRunner(r), WithWorkingmanAgent(WorkingmanAgentConfig{}))
+	d, err := newDaemon(t, []string{t.TempDir()}, a, WithRunner(r), WithWorkingmanAgent(WorkingmanAgentConfig{}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestWorkingmanAgentDirMustBeOutsideRoots(t *testing.T) {
 	l := &wmLauncher{}
 	r := &runner.Runner{Launcher: spawningLauncher{}, AcpLauncher: l, Kit: "kit", SessionsRoot: t.TempDir()}
 	for _, dir := range []string{filepath.Join(root, "scratch"), root, filepath.Dir(root)} {
-		_, err := New([]string{root}, audit.New(&safeBuf{}), WithRunner(r), WithWorkingmanAgent(WorkingmanAgentConfig{Dir: dir}))
+		_, err := newDaemon(t, []string{root}, audit.New(&safeBuf{}), WithRunner(r), WithWorkingmanAgent(WorkingmanAgentConfig{Dir: dir}))
 		if err == nil || !strings.Contains(err.Error(), "overlaps watched root") {
 			t.Errorf("Dir %q: err = %v, want an overlap error", dir, err)
 		}

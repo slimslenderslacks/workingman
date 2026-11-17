@@ -53,7 +53,7 @@ func (s *stubSession) Close() error {
 func newTestDaemon(t *testing.T) (*Daemon, context.CancelFunc) {
 	t.Helper()
 	buf := &safeBuf{}
-	d, err := New([]string{t.TempDir()}, audit.New(buf))
+	d, err := newDaemon(t, []string{t.TempDir()}, audit.New(buf))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

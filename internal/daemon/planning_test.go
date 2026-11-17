@@ -22,7 +22,7 @@ func newPlanningTestDaemon(t *testing.T, ctx context.Context) (*Daemon, *safeBuf
 	buf := &safeBuf{}
 	a := audit.New(buf)
 	rec := &notify.Recorder{}
-	d, err := New([]string{t.TempDir()}, a, WithNotifier(rec))
+	d, err := newDaemon(t, []string{t.TempDir()}, a, WithNotifier(rec))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

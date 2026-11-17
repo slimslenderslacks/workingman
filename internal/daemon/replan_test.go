@@ -21,7 +21,7 @@ func startReplanDaemon(t *testing.T, root string) (*Daemon, *safeBuf, *scheduler
 	t.Helper()
 	buf := &safeBuf{}
 	sched := scheduler.New()
-	d, err := New([]string{root}, audit.New(buf), WithScheduler(sched))
+	d, err := newDaemon(t, []string{root}, audit.New(buf), WithScheduler(sched))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

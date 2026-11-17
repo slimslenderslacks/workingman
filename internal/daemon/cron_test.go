@@ -34,7 +34,7 @@ func TestCronReevaluatesProject(t *testing.T) {
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a,
+	d, err := newDaemon(t, []string{root}, a,
 		WithRunner(r),
 		WithScheduler(scheduler.New()),
 	)
@@ -86,7 +86,7 @@ func startCronDaemon(t *testing.T, root string) (*safeBuf, *scheduler.Scheduler)
 	t.Helper()
 	buf := &safeBuf{}
 	sched := scheduler.New()
-	d, err := New([]string{root}, audit.New(buf), WithScheduler(sched))
+	d, err := newDaemon(t, []string{root}, audit.New(buf), WithScheduler(sched))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestCronUnregistersOnProjectDone(t *testing.T) {
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "true"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r), WithScheduler(sched))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r), WithScheduler(sched))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

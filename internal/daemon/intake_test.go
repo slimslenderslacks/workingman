@@ -232,7 +232,7 @@ func TestHasPendingIntakeReArmsRestingProject(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			buf := &safeBuf{}
-			d, err := New([]string{root}, audit.New(buf))
+			d, err := newDaemon(t, []string{root}, audit.New(buf))
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}

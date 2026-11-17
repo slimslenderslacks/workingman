@@ -37,7 +37,7 @@ func setupRunnable(t *testing.T) (buf *safeBuf, root string, rec *notify.Recorde
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "sleep 1"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r), WithNotifier(rec))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r), WithNotifier(rec))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestTaskAgentStartFailureBlocksProject(t *testing.T) {
 		Audit:      a,
 		Command:    func(_ agent.Kind, _ string) []string { return []string{"sh", "-c", "true"} },
 	}
-	d, err := New([]string{root}, a, WithRunner(r), WithNotifier(rec))
+	d, err := newDaemon(t, []string{root}, a, WithRunner(r), WithNotifier(rec))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

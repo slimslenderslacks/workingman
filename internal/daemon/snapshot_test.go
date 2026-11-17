@@ -190,7 +190,7 @@ func TestLiveSnapshotCarriesInMemoryState(t *testing.T) {
 	root := writeFixtureRoot(t)
 	auditBuf := &safeBuf{}
 	sched := scheduler.New()
-	d, err := New([]string{root}, audit.New(auditBuf),
+	d, err := newDaemon(t, []string{root}, audit.New(auditBuf),
 		WithScheduler(sched),
 		WithRuntimeInfo(RuntimeInfo{WorkspaceManager: "stub", AcpKit: "kit-ref", Headless: true, AuditLog: "/x/audit.log"}),
 		WithStateFile(filepath.Join(t.TempDir(), "state", "snapshot.json"), 5),
@@ -285,7 +285,7 @@ func TestLiveSnapshotACPSessionLocation(t *testing.T) {
 	root := writeFixtureRoot(t)
 	sessRoot := t.TempDir()
 	r := &runner.Runner{AcpLauncher: stubLauncher{}, SessionsRoot: sessRoot}
-	d, err := New([]string{root}, audit.New(&safeBuf{}), WithRunner(r))
+	d, err := newDaemon(t, []string{root}, audit.New(&safeBuf{}), WithRunner(r))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,14 +462,14 @@ func TestNewRejectsStateFileInsideRoot(t *testing.T) {
 		filepath.Join(root, "state", "snapshot.json"),
 		root,
 	} {
-		if _, err := New([]string{root}, audit.New(&safeBuf{}), WithStateFile(p, 0)); err == nil {
+		if _, err := newDaemon(t, []string{root}, audit.New(&safeBuf{}), WithStateFile(p, 0)); err == nil {
 			t.Errorf("New accepted state file %s inside root %s", p, root)
 		} else if !strings.Contains(err.Error(), "outside") {
 			t.Errorf("unhelpful error for %s: %v", p, err)
 		}
 	}
 	sibling := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-state", "snapshot.json")
-	d, err := New([]string{root}, audit.New(&safeBuf{}), WithStateFile(sibling, 0))
+	d, err := newDaemon(t, []string{root}, audit.New(&safeBuf{}), WithStateFile(sibling, 0))
 	if err != nil {
 		t.Fatalf("sibling dir with shared name prefix wrongly rejected: %v", err)
 	}
@@ -509,7 +509,7 @@ func TestSnapshotWritesNeverTouchTheWatchedRoots(t *testing.T) {
 	}()
 
 	auditBuf := &safeBuf{}
-	d, err := New([]string{root}, audit.New(auditBuf), WithStateFile(stateFile, 0))
+	d, err := newDaemon(t, []string{root}, audit.New(auditBuf), WithStateFile(stateFile, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +619,7 @@ func readSnapshotFile(t *testing.T, path string) *Snapshot {
 func TestDaemonPublishesAndRefreshesOnSessionChange(t *testing.T) {
 	root := writeFixtureRoot(t)
 	stateFile := filepath.Join(t.TempDir(), "state", "snapshot.json")
-	d, err := New([]string{root}, audit.New(&safeBuf{}), WithStateFile(stateFile, 0))
+	d, err := newDaemon(t, []string{root}, audit.New(&safeBuf{}), WithStateFile(stateFile, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +682,7 @@ func waitSnapshot(t *testing.T, path, what string, pred func(*Snapshot) bool) {
 func TestPublishSkipsUnchangedContentButHeartbeats(t *testing.T) {
 	root := writeFixtureRoot(t)
 	stateFile := filepath.Join(t.TempDir(), "snapshot.json")
-	d, err := New([]string{root}, audit.New(&safeBuf{}), WithStateFile(stateFile, 0))
+	d, err := newDaemon(t, []string{root}, audit.New(&safeBuf{}), WithStateFile(stateFile, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
