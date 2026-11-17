@@ -201,6 +201,34 @@ func (d *Daemon) recordCronFire(projectPath string, at time.Time) {
 	}
 }
 
+// cronSlotHandled reports whether a timer firing at now is stale: no tick of
+// p's spec lies in (baseline, now], where the baseline is the last recorded fire
+// (else when the schedule was first observed). A catch-up stamps LastFired=now,
+// so the late timer fire for the slot it covered finds no tick after it, while a
+// normal on-time fire still has its own slot after the previous fire. Callers
+// hold catchupMu so the check and the following stamp are one step.
+func (d *Daemon) cronSlotHandled(projectPath string, p *project.Project, now time.Time) bool {
+	s := d.cronHistory
+	if s == nil || p.Cron == "" {
+		return false
+	}
+	s.mu.Lock()
+	e := s.data.Projects[projectPath]
+	var base time.Time
+	if e != nil {
+		base = e.LastFired
+		if e.Observed.After(base) {
+			base = e.Observed
+		}
+	}
+	s.mu.Unlock()
+	if base.IsZero() {
+		return false
+	}
+	n, _, err := scheduler.TicksBetween(p.Cron, base, now, 1)
+	return err == nil && n == 0
+}
+
 // trackCron makes sure a registered schedule has a baseline, so ticks from
 // before the daemon knew about it are never reported as missed.
 func (d *Daemon) trackCron(projectPath string) {
@@ -305,10 +333,11 @@ func (d *Daemon) detectMissedAtStartup() {
 
 // detectMissedTracked re-evaluates every tracked schedule after a suspected
 // sleep, reloading each project file for its current spec and stop condition.
-func (d *Daemon) detectMissedTracked(now time.Time) {
+// It reports whether any schedule newly fell behind.
+func (d *Daemon) detectMissedTracked(now time.Time) bool {
 	s := d.cronHistory
 	if s == nil {
-		return
+		return false
 	}
 	s.mu.Lock()
 	paths := make([]string, 0, len(s.data.Projects))
@@ -316,10 +345,27 @@ func (d *Daemon) detectMissedTracked(now time.Time) {
 		paths = append(paths, path)
 	}
 	s.mu.Unlock()
+	found := false
 	for _, path := range paths {
-		if p, err := project.Load(path); err == nil {
-			d.evaluateMissed(path, p, now)
+		if p, err := project.Load(path); err == nil && d.evaluateMissed(path, p, now) {
+			found = true
 		}
+	}
+	return found
+}
+
+// catchUpAfterWake does for a miss noticed while running what startup does for
+// one noticed at launch: dispatch sleepy-head. A daemon with no runner has no
+// agent to dispatch, so it fires each behind project's catch-up directly.
+// Either way onCronFired's rules apply: only idle projects start a cycle, and
+// the run is charged against cron_max_runs once.
+func (d *Daemon) catchUpAfterWake() {
+	if d.runner != nil {
+		d.launchSleepyHead()
+		return
+	}
+	for _, m := range d.MissedSchedules() {
+		d.catchUpProject(m.ProjectPath)
 	}
 }
 
@@ -346,7 +392,14 @@ func (d *Daemon) sleepWatchLoop(ctx context.Context) {
 			now := d.clock().Round(0)
 			if clockJumped(prev, now, every) {
 				d.audit.Log("clock_jump", "gap", now.Sub(prev).Round(time.Second).String())
-				d.detectMissedTracked(now)
+				// The cron timer runs on the monotonic clock, which pauses
+				// during sleep; re-arm it against the wall clock.
+				if d.scheduler != nil {
+					d.scheduler.Rearm()
+				}
+				if d.detectMissedTracked(now) {
+					d.catchUpAfterWake()
+				}
 			}
 			prev = now
 		}
