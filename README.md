@@ -760,9 +760,8 @@ daemon's fsnotify handler acts on them; hiding must do the opposite — written
 as the agent it would be routed like any other project change, which on a
 `blocked` work stream would re-summon the wolf just for hiding a card.
 
-`:show` is one of the three commands (with `:stop` and `:start`) that has no
-first-letter shortcut in the `:` menu — `session` owns the `s` — so pick it
-with `j`/`k` and `enter`.
+Like every command in the `:` menu, `:show` has no letter shortcut — highlight
+it with `j`/`k` (or the arrow keys) and press `enter`.
 
 ## Cleanup and archiving
 

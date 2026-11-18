@@ -190,6 +190,10 @@ type sessionEntry struct {
 	kind      agent.Kind
 	startedAt time.Time
 	taskName  string
+	// config is how the runner set the session up (harness, model, mounts,
+	// MCP gateway), surfaced through SessionInfo. Zero for a session that runs
+	// on the host.
+	config runner.SessionConfig
 }
 
 // Option configures a Daemon at construction; pass any number to New.
@@ -479,6 +483,12 @@ func (d *Daemon) detachable(kind agent.Kind) bool {
 // it) terminated abnormally. Callers that can recover from a failed launch —
 // notably the planning agent — inspect it; the others ignore it.
 func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, taskName string, onEnd func(error)) bool {
+	return d.trackConfiguredSession(key, sess, kind, taskName, runner.SessionConfig{}, onEnd)
+}
+
+// trackConfiguredSession is trackSession for a session whose launch config is
+// known; cfg is stored with the entry so ListSessions can surface it.
+func (d *Daemon) trackConfiguredSession(key string, sess agent.Session, kind agent.Kind, taskName string, cfg runner.SessionConfig, onEnd func(error)) bool {
 	d.sessionsMu.Lock()
 	if _, ok := d.sessions[key]; ok {
 		d.sessionsMu.Unlock()
@@ -489,6 +499,7 @@ func (d *Daemon) trackSession(key string, sess agent.Session, kind agent.Kind, t
 		kind:      kind,
 		startedAt: time.Now(),
 		taskName:  taskName,
+		config:    cfg,
 	}
 	d.sessionsMu.Unlock()
 	d.markSnapshotDirty()

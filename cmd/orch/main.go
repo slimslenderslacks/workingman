@@ -421,6 +421,11 @@ func adaptSessionFeed(ctx context.Context, in <-chan []daemon.SessionInfo) <-cha
 						TaskName:    s.TaskName,
 						Interactive: s.Interactive,
 						SandboxName: s.SandboxName,
+						Harness:     s.Harness,
+						Model:       s.Model,
+						Mounts:      s.Mounts,
+						MCPs:        s.MCPs,
+						MCPDynamic:  s.MCPDynamic,
 					}
 				}
 				select {

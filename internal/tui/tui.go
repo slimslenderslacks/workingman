@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,8 +38,8 @@ const (
 	modeNormal uiMode = iota
 	// modeCommandPicker is the menu shown after `:` on the work-streams pane.
 	// It lists the project commands (dir/session/wolf/orch/workspace/review/cleanup/archive/
-	// stop/start); the user moves with j/k, runs one with enter (or its first
-	// letter), and cancels with esc. It replaces the old free-form `:command`
+	// stop/start); the user moves with j/k, runs the highlighted one with
+	// enter, and cancels with esc. It replaces the old free-form `:command`
 	// line so the commands are discoverable rather than memorised.
 	modeCommandPicker
 	// modeConfirmArchive is the yes/no confirmation shown after `:archive`.
@@ -206,7 +207,7 @@ func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, attacher
 	// to the empty state so the pane shows "(none)" instead of an endless
 	// "(loading…)".
 	return model{
-		focus:           paneSessions,
+		focus:           paneProjects,
 		projCh:          projCh,
 		sessCh:          sessCh,
 		sessLoaded:      sessCh == nil,
@@ -1229,11 +1230,14 @@ var (
 const sessionBoxLabelWidth = 8
 
 // sessionBoxContentRows is the header line (marker + agent, with the
-// interactive badge) plus one label:value line per field (project, task,
-// status, age, sandbox). sessionBoxHeight adds the box's own top+bottom
-// border on top of that, mirroring cardDisplayRows for project cards.
+// interactive badge) plus one label:value line per field in sessionBoxFields
+// (project, task, status+age, sandbox, harness, model, mounts, mcps,
+// dynamic). Every box renders every row — empty values show an em-dash — so
+// the height is fixed and sessionBoxAtY can hit-test by simple division.
+// sessionBoxHeight adds the box's own top+bottom border on top of that,
+// mirroring cardDisplayRows for project cards.
 const (
-	sessionBoxContentRows = 6
+	sessionBoxContentRows = 10
 	sessionBoxHeight      = sessionBoxContentRows + paneChromeRows
 )
 
@@ -1268,13 +1272,7 @@ func renderSessionBox(s SessionView, width int, now time.Time, selected bool) st
 	}
 
 	lines := []string{header}
-	for _, f := range []struct{ label, value string }{
-		{"project", s.Project},
-		{"task", s.TaskName},
-		{"status", sessionStatusText(s)},
-		{"age", sessionAge(s.StartedAt, now)},
-		{"sandbox", sessionSandboxLabel(s)},
-	} {
+	for _, f := range sessionBoxFields(s, now) {
 		// Truncate before styling so the byte-slicing in truncate never
 		// tears an ANSI escape sequence.
 		value := truncate(f.value, inner-sessionBoxLabelWidth)
@@ -1284,6 +1282,74 @@ func renderSessionBox(s SessionView, width int, now time.Time, selected bool) st
 		lines = append(lines, padCell(f.label+":", sessionBoxLabelWidth)+value)
 	}
 	return style.Render(strings.Join(lines, "\n"))
+}
+
+// sessionBoxField is one label:value row of a session box.
+type sessionBoxField struct{ label, value string }
+
+// sessionBoxFields lists a session box's label:value rows, in display order.
+// The age rides on the status row rather than getting its own line, which
+// keeps the box from growing a row for every field the sandbox config added.
+// Its length must equal sessionBoxContentRows-1 (the header is the other row).
+func sessionBoxFields(s SessionView, now time.Time) []sessionBoxField {
+	return []sessionBoxField{
+		{"project", s.Project},
+		{"task", s.TaskName},
+		{"status", sessionStatusText(s) + " · " + sessionAge(s.StartedAt, now)},
+		{"sandbox", sessionSandboxLabel(s)},
+		{"harness", orDash(sessionHarnessLabel(s.Harness))},
+		{"model", orDash(s.Model)},
+		{"mounts", orDash(sessionMountsLabel(s.Mounts))},
+		{"mcps", orDash(strings.Join(s.MCPs, ", "))},
+		{"dynamic", sessionDynamicLabel(s)},
+	}
+}
+
+// orDash returns v, or an em-dash when v is empty, so unset fields on
+// non-sandboxed sessions read as "not applicable" rather than a blank gap.
+func orDash(v string) string {
+	if v == "" {
+		return "—"
+	}
+	return v
+}
+
+// sessionHarnessLabel abbreviates a harness template image to its last path
+// segment ("slimslenderslacks/claude-code-acp:0.90.0" -> "claude-code-acp:0.90.0"):
+// the registry/org prefix is the same for every session and would eat the
+// narrow column before the part that tells harnesses apart.
+func sessionHarnessLabel(h string) string {
+	if i := strings.LastIndex(h, "/"); i >= 0 {
+		return h[i+1:]
+	}
+	return h
+}
+
+// sessionMountsLabel renders mounted host paths as comma-joined base names,
+// keeping a read-only mount's ":ro" suffix so it stays distinguishable.
+func sessionMountsLabel(mounts []string) string {
+	names := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		suffix := ""
+		if strings.HasSuffix(m, ":ro") {
+			m, suffix = strings.TrimSuffix(m, ":ro"), ":ro"
+		}
+		names = append(names, filepath.Base(m)+suffix)
+	}
+	return strings.Join(names, ", ")
+}
+
+// sessionDynamicLabel is the dynamic-MCP field's text: on/off for a session
+// that runs in a sandbox (and so has an MCP gateway), else an em-dash.
+func sessionDynamicLabel(s SessionView) string {
+	switch {
+	case s.MCPDynamic:
+		return "on"
+	case s.SandboxName != "" || s.Harness != "":
+		return "off"
+	default:
+		return "—"
+	}
 }
 
 // sessionBoxMaxRows returns how many session boxes fit within a left column

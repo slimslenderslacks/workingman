@@ -7,6 +7,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/project"
+	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
@@ -75,7 +76,7 @@ func (d *Daemon) reconcileSessions() {
 				continue
 			}
 			sess := newReconciledSession(rec.ID, store, nil)
-			if d.trackSession(workingmanSessionKey, sess, kind, "", func(error) { d.workingman.signalEnded() }) {
+			if d.trackConfiguredSession(workingmanSessionKey, sess, kind, "", d.reconciledConfig(rec, kind), func(error) { d.workingman.signalEnded() }) {
 				d.audit.Log("session_reconciled", "key", workingmanSessionKey, "kind", rec.Kind, "id", rec.ID)
 			}
 			continue
@@ -86,7 +87,7 @@ func (d *Daemon) reconcileSessions() {
 			// so launchSleepyHead doesn't start a second wrapper on the same
 			// session id beside it.
 			sess := newReconciledSession(rec.ID, store, nil)
-			if d.trackSession(sleepyHeadSessionKey, sess, kind, "", func(error) { d.audit.Log("sleepy_head_ended") }) {
+			if d.trackConfiguredSession(sleepyHeadSessionKey, sess, kind, "", d.reconciledConfig(rec, kind), func(error) { d.audit.Log("sleepy_head_ended") }) {
 				d.audit.Log("session_reconciled", "key", sleepyHeadSessionKey, "kind", rec.Kind, "id", rec.ID)
 			}
 			continue
@@ -146,7 +147,7 @@ func (d *Daemon) reconcileSessions() {
 			key = archiveSessionKey(projectPath)
 			onEnd = func(waitErr error) { d.afterArchiveSession(projectPath, waitErr) }
 		}
-		if d.trackSession(key, sess, kind, taskNameFor(rec.TaskPath), onEnd) {
+		if d.trackConfiguredSession(key, sess, kind, taskNameFor(rec.TaskPath), d.reconciledConfig(rec, kind), onEnd) {
 			d.audit.Log("session_reconciled", "key", key, "kind", rec.Kind, "id", rec.ID)
 		} else if kind == agent.ArchiveAgent {
 			// Already tracked, so nothing will run afterArchiveSession for this
@@ -172,6 +173,34 @@ func taskNameFor(taskPath string) string {
 		return ""
 	}
 	return t.Name
+}
+
+// reconciledConfig rebuilds the launch config of an adopted ACP session from
+// what is still on disk: the template and mounts its session.json recorded,
+// and — for task and commit agents — the model and static_mcps of its task
+// file. The MCP servers are re-derived the way the daemon picks them at
+// launch (the review agent's github-only set, else the task's static_mcps,
+// else the runner's defaults), since session.json does not record them.
+func (d *Daemon) reconciledConfig(rec session.Session, kind agent.Kind) runner.SessionConfig {
+	h, ok := d.runner.DefaultHarness()
+	if !ok {
+		h = runner.Harness{Name: rec.Harness}
+	}
+	plan := runner.Plan{Kind: kind}
+	if kind == agent.ReviewAgent {
+		plan.StaticMCPs = reviewStaticMCPs
+	}
+	if rec.TaskPath != "" {
+		if t, err := task.Load(rec.TaskPath); err == nil {
+			plan.Model = t.Model
+			plan.StaticMCPs = t.StaticMCPs
+		}
+	}
+	cfg := d.runner.ACPSessionConfig(h, kind, rec.Workspaces, d.runner.MCPServersFor(plan), d.runner.MCPGatewayDynamic(kind), plan.Model)
+	if rec.Template != "" {
+		cfg.Harness = rec.Template
+	}
+	return cfg
 }
 
 // reconciledSandboxProbe reports whether the named sbx sandbox still exists.

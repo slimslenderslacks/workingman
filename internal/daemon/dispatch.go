@@ -759,7 +759,7 @@ func (d *Daemon) startSession(key string, plan runner.Plan, onEnd func(error)) e
 // session was actually tracked. It is false (with a nil error) when another
 // session claimed key first and the freshly started one was closed again.
 func (d *Daemon) startSessionTracked(key string, plan runner.Plan, onEnd func(error)) (bool, error) {
-	sess, err := d.runner.Start(d.ctx, plan)
+	sess, cfg, err := d.runner.StartConfigured(d.ctx, plan)
 	if err != nil {
 		d.audit.Log("session_start_error",
 			"kind", plan.Kind.String(),
@@ -768,7 +768,7 @@ func (d *Daemon) startSessionTracked(key string, plan runner.Plan, onEnd func(er
 		)
 		return false, err
 	}
-	if !d.trackSession(key, sess, plan.Kind, plan.TaskName, onEnd) {
+	if !d.trackConfiguredSession(key, sess, plan.Kind, plan.TaskName, cfg, onEnd) {
 		_ = sess.Close()
 		return false, nil
 	}

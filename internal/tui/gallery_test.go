@@ -585,8 +585,7 @@ func TestOptionGlyphSwitchesPane(t *testing.T) {
 // "alt+h"/"alt+l".
 func TestOptionGlyphSwitchesColumn(t *testing.T) {
 	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
-	m.focus = paneProjects // default focus (paneSessions) is already the alt-h target
-	m.rightVisible = true  // right column is hidden by default; show it so ¬ has somewhere to land
+	m.rightVisible = true // right column is hidden by default; show it so ¬ has somewhere to land
 
 	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'˙'}})
 	m = step.(model)

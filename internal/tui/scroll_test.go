@@ -83,7 +83,8 @@ func TestSessionsPaneScrollsToSelection(t *testing.T) {
 	m.sessions = sessions
 	m.sessSel = sessions[15].ID
 
-	out := m.renderSessions(m.width, 10)
+	// Room for two boxes, so most of the 20 sessions are off-screen.
+	out := m.renderSessions(m.width, paneChromeRows+2*sessionBoxHeight)
 	if !strings.Contains(out, "agent-15") {
 		t.Errorf("selected session agent-15 should be visible after scrolling; got:\n%s", out)
 	}

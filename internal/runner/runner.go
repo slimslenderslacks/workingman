@@ -586,12 +586,22 @@ func projectNameFromPath(projectPath string) string {
 // through Launcher. It is non-blocking: it returns the Session once the
 // launcher accepts it. The caller owns Wait/Close on the returned Session.
 func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
+	sess, _, err := r.StartConfigured(ctx, p)
+	return sess, err
+}
+
+// StartConfigured is Start that also reports the launched session's
+// SessionConfig — the harness, model, mounts and MCP gateway it was actually
+// set up with — so the daemon can surface them alongside the session. The
+// config is the zero value for a session that runs on the host.
+func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, SessionConfig, error) {
+	var cfg SessionConfig
 	if p.Kind == agent.WorkingmanAgent {
 		// It only makes sense as a persistent ACP session in a sandbox of its
 		// own: the legacy terminal-tab path has no read-only mounts, so refusing is the
 		// safe answer rather than silently launching it with write access.
 		if !r.UsesACP(p.Kind) {
-			return nil, fmt.Errorf("runner: the workingman agent needs an ACP launcher (--acp-kit)")
+			return nil, cfg, fmt.Errorf("runner: the workingman agent needs an ACP launcher (--acp-kit)")
 		}
 		if p.SessionName == "" {
 			p.SessionName = WorkingmanAgentSession
@@ -599,7 +609,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		p.Persistent = true
 		if p.WorkingDir != "" {
 			if err := os.MkdirAll(p.WorkingDir, 0o755); err != nil {
-				return nil, fmt.Errorf("runner: workingman scratch dir: %w", err)
+				return nil, cfg, fmt.Errorf("runner: workingman scratch dir: %w", err)
 			}
 		}
 	}
@@ -613,13 +623,13 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		p.Persistent = true
 		if p.WorkingDir != "" {
 			if err := os.MkdirAll(p.WorkingDir, 0o755); err != nil {
-				return nil, fmt.Errorf("runner: sleepy-head scratch dir: %w", err)
+				return nil, cfg, fmt.Errorf("runner: sleepy-head scratch dir: %w", err)
 			}
 		}
 	}
 	workingDir, err := r.resolveWorkingDir(ctx, p)
 	if err != nil {
-		return nil, err
+		return nil, cfg, err
 	}
 
 	// Planning runs in the project's orch dir, but it needs to read source
@@ -630,7 +640,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	// idempotent, so the task agent's later call returns the same dir.
 	planningWorktree, err := r.resolvePlanningWorktree(ctx, p)
 	if err != nil {
-		return nil, err
+		return nil, cfg, err
 	}
 	// A sandboxed (ACP) wolf gets the same worktree mount so it can read the
 	// source behind a block it can no longer reach via the host. Best-effort:
@@ -671,7 +681,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 	}
 	instructions, err := prompts.Render(p.Kind, data)
 	if err != nil {
-		return nil, err
+		return nil, cfg, err
 	}
 
 	ctxFile := setup.Context{
@@ -699,7 +709,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		SessionsRoot:            p.Observe.SessionsRoot,
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {
-		return nil, err
+		return nil, cfg, err
 	}
 
 	// Non-interactive agents back ACP claude sessions via acp-wrapper when the
@@ -725,7 +735,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 		workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
 		gw, err := r.mcpGateway(r.MCPServersFor(p), r.MCPGatewayDynamic(p.Kind))
 		if err != nil {
-			return nil, err
+			return nil, cfg, err
 		}
 		if err := r.Sandbox(ctx, SandboxSpec{
 			Name:       sandboxName,
@@ -733,9 +743,20 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 			Policies:   p.Policies,
 			MCPGateway: gw,
 		}); err != nil {
-			return nil, fmt.Errorf("runner: sandbox: %w", err)
+			return nil, cfg, fmt.Errorf("runner: sandbox: %w", err)
 		}
 		mcpEnv := r.ensureMCPGateway(ctx, gw, sandboxName)
+		cfg = SessionConfig{
+			// DefaultSandboxCreator builds every terminal-tab sandbox from the
+			// stock claude template.
+			Harness: Harness{}.Template(),
+			Model:   displayModel(p.Model),
+			Mounts:  append([]string(nil), workspaces...),
+		}
+		if gw.Enabled() {
+			cfg.MCPs = append([]string(nil), gw.Servers...)
+			cfg.MCPDynamic = gw.Dynamic
+		}
 		if r.Audit != nil {
 			r.Audit.Log("sandbox_ensured",
 				"name", sandboxName,
@@ -765,7 +786,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 
 	sess, err := r.Launcher.Launch(ctx, spec)
 	if err != nil {
-		return nil, fmt.Errorf("runner: launch: %w", err)
+		return nil, cfg, fmt.Errorf("runner: launch: %w", err)
 	}
 	if r.Audit != nil {
 		r.Audit.Log("session_started",
@@ -774,7 +795,7 @@ func (r *Runner) Start(ctx context.Context, p Plan) (agent.Session, error) {
 			"workspace", workingDir,
 		)
 	}
-	return sess, nil
+	return sess, cfg, nil
 }
 
 // InteractiveSpec describes an ad-hoc interactive sandbox session opened on the
@@ -947,19 +968,19 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 //
 // Unlike the terminal-tab path, this does NOT call r.Sandbox or wrap the command in
 // `sbx exec` — the wrapper owns sandbox creation end-to-end.
-func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorktree string) (agent.Session, error) {
+func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorktree string) (agent.Session, SessionConfig, error) {
 	sandboxName := ACPSandboxNameFor(p.Kind, p.ProjectPath, p.TaskName)
 	if sandboxName == "" {
-		return nil, fmt.Errorf("runner: acp launch for kind %s needs a ProjectPath to derive a sandbox name", p.Kind)
+		return nil, SessionConfig{}, fmt.Errorf("runner: acp launch for kind %s needs a ProjectPath to derive a sandbox name", p.Kind)
 	}
 	h, err := r.resolveHarness(p.Harness)
 	if err != nil {
-		return nil, err
+		return nil, SessionConfig{}, err
 	}
 
 	sessionsRoot, err := r.sessionsRoot()
 	if err != nil {
-		return nil, err
+		return nil, SessionConfig{}, err
 	}
 	sessionID := acpSessionID(p)
 	workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
@@ -990,10 +1011,11 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		Persistent:  p.Persistent,
 	}
 	if err := store.Write(rec); err != nil {
-		return nil, fmt.Errorf("runner: write initial session.json: %w", err)
+		return nil, SessionConfig{}, fmt.Errorf("runner: write initial session.json: %w", err)
 	}
 
-	command := r.acpWrapperCommand(h, sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, r.MCPServersFor(p), r.MCPGatewayDynamic(p.Kind), p.Policies, p.TaskPath, p.Model, p.SaveSandbox, p.Persistent, p.Pushes())
+	mcpServers, mcpDynamic := r.MCPServersFor(p), r.MCPGatewayDynamic(p.Kind)
+	command := r.acpWrapperCommand(h, sessionID, sandboxName, sessionsRoot, p.ProjectPath, p.Kind.String(), workspaces, mcpServers, mcpDynamic, p.Policies, p.TaskPath, p.Model, p.SaveSandbox, p.Persistent, p.Pushes())
 	spec := agent.Spec{
 		Kind:      p.Kind,
 		Name:      sessionID,
@@ -1005,7 +1027,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		// The wrapper never started, so no one will clean up the record we just
 		// wrote — remove it so a restarting TUI doesn't discover a dead session.
 		_ = store.Remove(sessionID)
-		return nil, fmt.Errorf("runner: acp launch: %w", err)
+		return nil, SessionConfig{}, fmt.Errorf("runner: acp launch: %w", err)
 	}
 	if r.Audit != nil {
 		r.Audit.Log("acp_session_started",
@@ -1015,7 +1037,61 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 			"workspaces", strings.Join(workspaces, ","),
 		)
 	}
-	return sess, nil
+	return sess, r.ACPSessionConfig(h, p.Kind, workspaces, mcpServers, mcpDynamic, p.Model), nil
+}
+
+// SessionConfig is how a launched agent session was set up, as the TUI's
+// sessions pane shows it. The zero value describes a session that runs on the
+// host (no sandbox): it has no harness, mounts or MCP gateway.
+type SessionConfig struct {
+	// Harness is the sbx template the session's sandbox was created from —
+	// what acp-wrapper records as a task's resolved_harness (see
+	// task.Task.DisplayHarness).
+	Harness string
+	// Model is the model the agent was asked to run under; task.ModelDefault
+	// when the plan named none.
+	Model string
+	// Mounts are the host paths mounted into the sandbox, the first being the
+	// agent's working directory; a read-only mount carries ReadOnlySuffix.
+	Mounts []string
+	// MCPs are the catalog servers the sandbox's MCP gateway was minted with,
+	// and MCPDynamic whether that gateway also serves mcp-find/mcp-add. Both
+	// are empty/false when the session has no gateway.
+	MCPs       []string
+	MCPDynamic bool
+}
+
+// ACPSessionConfig is the SessionConfig of an ACP session launched (or, for a
+// reconciling daemon, previously launched) under harness h with these
+// workspaces and requested gateway servers — the same values startACP hands
+// acp-wrapper, after the gateway rules of acpGateway.
+func (r *Runner) ACPSessionConfig(h Harness, kind agent.Kind, workspaces, mcpServers []string, mcpDynamic bool, model string) SessionConfig {
+	cfg := SessionConfig{
+		Harness: h.Template(),
+		Model:   displayModel(model),
+		Mounts:  append([]string(nil), workspaces...),
+	}
+	if ok, servers, dynamic := r.acpGateway(kind.String(), mcpServers, mcpDynamic); ok {
+		cfg.MCPs = append([]string(nil), servers...)
+		cfg.MCPDynamic = dynamic
+	}
+	return cfg
+}
+
+// DefaultHarness is the harness an ACP session launches under when its plan
+// names none. ok is false when the Runner has no Kit configured.
+func (r *Runner) DefaultHarness() (Harness, bool) {
+	h, err := r.resolveHarness("")
+	return h, err == nil
+}
+
+// displayModel is the model to report for a plan's Model: task.ModelDefault
+// when it names none.
+func displayModel(m string) string {
+	if m = strings.TrimSpace(m); m != "" {
+		return m
+	}
+	return task.ModelDefault
 }
 
 // Harness is a resolved agent harness: the acp-kit and sbx template an ACP
@@ -1151,17 +1227,12 @@ func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRo
 	// it can mcp-find / mcp-add servers beyond the default set; with no
 	// default servers it still gets a dynamic gateway rather than none,
 	// unless --mcp-gateway-static forbids that.
-	withGateway := len(mcpServers) > 0
-	if kind == agent.WorkingmanAgent.String() && strings.TrimSpace(r.MCPGatewayURL) != "" {
-		if !withGateway && !r.MCPGatewayStatic {
-			mcpDynamic, withGateway = true, true
-		}
-		if withGateway {
-			args = append(args, "--require-okta-gateway")
-		}
+	withGateway, mcpServers, mcpDynamic := r.acpGateway(kind, mcpServers, mcpDynamic)
+	if withGateway && kind == agent.WorkingmanAgent.String() {
+		args = append(args, "--require-okta-gateway")
 	}
-	if u := strings.TrimSpace(r.MCPGatewayURL); u != "" && withGateway {
-		args = append(args, "--mcp-gateway-url", u)
+	if withGateway {
+		args = append(args, "--mcp-gateway-url", strings.TrimSpace(r.MCPGatewayURL))
 		for _, m := range mcpServers {
 			args = append(args, "--mcp-server", m)
 		}
@@ -1179,6 +1250,23 @@ func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRo
 		args = append(args, "--workspace", w)
 	}
 	return args
+}
+
+// acpGateway resolves whether an ACP session of kind gets a per-sandbox MCP
+// gateway and, if so, with which servers and whether it is dynamic: a gateway
+// needs MCPGatewayURL and at least one server, except that the workingman agent
+// falls back to a dynamic gateway with none unless MCPGatewayStatic forbids it.
+func (r *Runner) acpGateway(kind string, mcpServers []string, mcpDynamic bool) (bool, []string, bool) {
+	if strings.TrimSpace(r.MCPGatewayURL) == "" {
+		return false, nil, false
+	}
+	if len(mcpServers) == 0 {
+		if kind != agent.WorkingmanAgent.String() || r.MCPGatewayStatic {
+			return false, nil, false
+		}
+		mcpDynamic = true
+	}
+	return true, mcpServers, mcpDynamic
 }
 
 // MCPServersFor is the catalog server names requested for p's per-sandbox

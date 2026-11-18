@@ -126,9 +126,10 @@ func TestEndToEndDaemonAndTUI(t *testing.T) {
 			err, auditBuf.String(), outBuf.String())
 	}
 
-	// Press Enter: the sessions pane is the default focus, so this triggers
-	// the attach code path. The stubbed attacher records the target name
+	// The TUI starts on the Projects pane; alt-h moves focus to the sessions
+	// column, and Enter there triggers the attach code path. The stubbed attacher records the target name
 	// without touching the terminal or os/exec.
+	prog.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}, Alt: true})
 	prog.Send(tea.KeyMsg{Type: tea.KeyEnter})
 
 	if err := waitForCondition(2*time.Second, func() bool { return att.count() >= 1 }); err != nil {

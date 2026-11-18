@@ -179,9 +179,8 @@ func TestCommandPickerHideSetsFlag(t *testing.T) {
 	}
 }
 
-// TestCommandPickerShowClearsFlag has to dispatch by key rather than by
-// first-letter shortcut: "show" shares its "s" with `session`, which owns the
-// shortcut (see projectCommands).
+// TestCommandPickerShowClearsFlag checks that `:show` clears the hide flag a
+// prior `:hide` set.
 func TestCommandPickerShowClearsFlag(t *testing.T) {
 	root := t.TempDir()
 	m, projPath := selectProject(t, root, "widget")
