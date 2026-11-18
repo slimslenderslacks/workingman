@@ -2,12 +2,12 @@
 
 Diagnosis of "the commit agent cannot push to ssh remotes". This is a code-reading
 diagnosis; nothing here was reproduced against a live sandboxd (the diagnosing
-sandbox has no `sbx`/`op`). Items marked **unverified** need a check on the host.
+sandbox has no `sbx` and no 1Password service account token). Items marked **unverified** need a check on the host.
 
 ## How SSH_AUTH_SOCK flows
 
 1. `start.sh` starts a private `ssh-agent` (`$TMPDIR/orch-ssh.*/agent.sock`),
-   loads one key into it from 1Password (`op read "$ORCH_SSH_KEY_REF" | ssh-add -`),
+   loads one key into it from 1Password (`op-read "$ORCH_SSH_KEY_REF" | ssh-add -`),
    and exports `SSH_AUTH_SOCK` to that socket.
 2. It then runs `sbx daemon stop; sbx daemon start -d` (output discarded, `|| true`)
    so **sandboxd inherits that SSH_AUTH_SOCK**.
@@ -24,15 +24,16 @@ sandbox has no `sbx`/`op`). Items marked **unverified** need a check on the host
 7. `commit.tmpl` push step runs plain `git -C <repo> push`; a rejected push
    (including auth failure) sets the task `blocked`.
 
-## 1Password (`op`) usage
+## 1Password usage
 
-`op` is called exactly once, at startup: start.sh's `op read "$ORCH_SSH_KEY_REF"`
-(step 1). The key then lives only in the private agent's memory until start.sh
-exits. Every later consumer reuses that agent and never calls `op`:
+1Password is read exactly once, at startup: start.sh's
+`op-read "$ORCH_SSH_KEY_REF"` (step 1). The key then lives only in the private
+agent's memory until start.sh exits. Every later consumer reuses that agent and
+never reaches 1Password:
 
-| Site | When | Touches `op`/1Password? |
-|------|------|-------------------------|
-| `start.sh` `op read \| ssh-add -` | once per start.sh | **yes — the only call** |
+| Site | When | Touches 1Password? |
+|------|------|--------------------|
+| `start.sh` `op-read \| ssh-add -` | once per start.sh | **yes — the only call** |
 | `start.sh` `sbx daemon stop/start -d`, `check-signing.sh --yes` | startup | no: binds sandboxd to the in-memory agent |
 | `check-signing.sh` (manual / cron) restart of sandboxd | on demand | no: re-reads the agent *socket* from start.sh's env, never the key |
 | `gitsign.Preflight` / `PushPreflight` (`sbx exec ... ssh-add -l`, `ssh -T`) | every ACP / `:session` launch | no: queries the forwarded agent |
@@ -41,8 +42,42 @@ exits. Every later consumer reuses that agent and never calls `op`:
 | `gitsign.Resolve` / `Identity` (`git config --get`) | per launch | no: reads config only |
 
 If the private agent itself is empty or dead, the only fix is restarting
-start.sh, which costs one new `op` read. `test/start-agent.sh` asserts start.sh
-calls `op` exactly once.
+start.sh, which costs one new `op-read`. `test/start-agent.sh` (with a stub
+op-read via `ORCH_OP_READ`) asserts start.sh calls it exactly once.
+
+### op-read: Go SDK + service account
+
+`op-read` (`cmd/op-read`, logic in `internal/onepassword`) replaces the `op`
+CLI. It uses the 1Password Go SDK (`github.com/1password/onepassword-sdk-go`,
+pure Go, no CGO), authenticated as a 1Password **service account**, so there
+is no `op signin`, unlocked CLI session or biometric prompt. It writes the
+secret to stdout only, for start.sh to pipe into `ssh-add -`; errors name the
+reference, never the token or the key.
+
+- **Token.** `OP_SERVICE_ACCOUNT_TOKEN` if set (CI, sandboxes, tests);
+  otherwise, on macOS,
+  `security find-generic-password -a jim.clark -s workingman:service_account -w`
+  (service, account and keychain overridable with `OP_SA_KEYCHAIN_SERVICE`,
+  `OP_SA_KEYCHAIN_ACCOUNT`, `OP_SA_KEYCHAIN`). Seed the item once (it prompts
+  for the token; `-U` replaces an existing item):
+
+  ```sh
+  security add-generic-password -U -a jim.clark -s workingman:service_account -w
+  ```
+
+  To keep it in a separate keychain file instead of the login keychain, add it
+  there with Keychain Access and set `OP_SA_KEYCHAIN=<name>.keychain-db`.
+  standalone-codemode's gateway reads the same item.
+- **Reference.** `ORCH_SSH_KEY_REF`, default
+  `op://workingman/SSH github/private key?ssh-format=openssh`. A service account
+  only sees vaults it has been granted and **never a Personal vault**, so the
+  SSH key item has to be moved or copied into a shared vault (here
+  `workingman`) that the service account can read.
+- **Format.** The SDK's `Secrets().Resolve` honours `?ssh-format=openssh` on an
+  SSH key's private key field. As a belt-and-braces fallback, if a reference
+  asks for that format but the value comes back as a PKCS#1/PKCS#8/SEC 1 PEM
+  key, op-read converts it to OpenSSH with `golang.org/x/crypto/ssh` before
+  writing it, so ssh-agent always gets an openssh-format key.
 
 ## Root-cause candidates (most likely first)
 

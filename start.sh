@@ -11,7 +11,7 @@ if [ "${1:-}" = "--check-agent" ]; then
   shift
 fi
 
-# Rebuild orch and acp-wrapper from source so the running binaries always match
+# Rebuild orch, acp-wrapper and op-read from source so the running binaries always match
 # HEAD. The daemon execs acp-wrapper fresh per session, so a stale binary here
 # silently changes agent behaviour (commit signing, sandbox wiring) until
 # someone remembers to `task build` — a footgun we hit more than once. go's
@@ -21,8 +21,8 @@ fi
 if [ "$CHECK_AGENT" = 1 ]; then
   :
 elif command -v go >/dev/null 2>&1; then
-  echo "building orch and acp-wrapper from source..."
-  ( cd "$HERE" && go build -o orch ./cmd/orch && go build -o acp-wrapper ./cmd/acp-wrapper )
+  echo "building orch, acp-wrapper and op-read from source..."
+  ( cd "$HERE" && go build -o orch ./cmd/orch && go build -o acp-wrapper ./cmd/acp-wrapper && go build -o op-read ./cmd/op-read )
 else
   echo "start: warning: go not found on PATH; launching prebuilt binaries (may be stale)" >&2
 fi
@@ -32,19 +32,29 @@ fi
 # run a private ssh-agent used only by this daemon and load the key into it
 # straight from 1Password, never touching disk.
 #
-# NOTE: `op` must be able to authenticate non-interactively here — set
-# OP_SERVICE_ACCOUNT_TOKEN, or have an already-unlocked CLI session — otherwise
-# this step needs the human again. Override the key location with
-# ORCH_SSH_KEY_REF (an op:// secret reference to an openssh-format private key).
+# The key is read by op-read (cmd/op-read), which uses the 1Password Go SDK
+# authenticated as a 1Password *service account* — no `op` CLI, no `op signin`,
+# no biometric prompt. Its token comes from OP_SERVICE_ACCOUNT_TOKEN if set,
+# else the macOS keychain item with service "workingman:service_account" and
+# account "jim.clark" (override with OP_SA_KEYCHAIN_SERVICE /
+# OP_SA_KEYCHAIN_ACCOUNT / OP_SA_KEYCHAIN). Seed it once with
 #
-# This `op read` is the ONLY `op` call in workingman, and it runs exactly once
+#   security add-generic-password -U -a jim.clark -s workingman:service_account -w
+#
+# ORCH_SSH_KEY_REF is the op:// secret reference to the openssh-format private
+# key. A service account cannot see a Personal vault, so the item must live in
+# a shared vault granted to the service account (default: vault "workingman").
+# ORCH_OP_READ overrides the op-read binary (tests point it at a stub).
+#
+# This op-read is the ONLY 1Password call in workingman, and it runs exactly once
 # per start.sh. The key then lives only in the private agent's memory for the
 # life of the daemon: nothing re-reads it — not orch, acp-wrapper, the
 # preflights, nor check-signing.sh's sandboxd restart, which rebinds sandboxd
 # to this same in-memory agent. orch also pins its host-side git/ssh to this
 # agent (GIT_SSH_COMMAND IdentityAgent, gpg.ssh.program=ssh-keygen) so a
 # 1Password IdentityAgent/op-ssh-sign in the user's ssh/git config never fires.
-ORCH_SSH_KEY_REF="${ORCH_SSH_KEY_REF:-op://Personal/SSH github/private key?ssh-format=openssh}"
+ORCH_SSH_KEY_REF="${ORCH_SSH_KEY_REF:-op://workingman/SSH github/private key?ssh-format=openssh}"
+ORCH_OP_READ="${ORCH_OP_READ:-$HERE/op-read}"
 
 AGENT_DIR=""
 AGENT_PID=""
@@ -77,15 +87,16 @@ start_private_agent() {
     exit 1
   fi
 
-  if ! command -v op >/dev/null 2>&1; then
-    echo "start: error: 1Password CLI 'op' not found on PATH; cannot load the signing key" >&2
+  if [ ! -x "$ORCH_OP_READ" ]; then
+    echo "start: error: $ORCH_OP_READ not found or not executable; cannot load the signing key. Build it with 'task op-read' (or 'go build -o op-read ./cmd/op-read')." >&2
     exit 1
   fi
-  # The key flows op -> pipe -> ssh-add; never a file, argv, or stdout.
-  # (pipefail makes a failed `op read` fail the pipeline.)
-  if ! op read "$ORCH_SSH_KEY_REF" | SSH_AUTH_SOCK="$sock" ssh-add - >/dev/null 2>&1; then
+  # The key flows op-read -> pipe -> ssh-add; never a file, argv, or stdout.
+  # op-read's own errors (no token, no access to the vault) go to stderr.
+  # (pipefail makes a failed op-read fail the pipeline.)
+  if ! "$ORCH_OP_READ" "$ORCH_SSH_KEY_REF" | SSH_AUTH_SOCK="$sock" ssh-add - >/dev/null 2>&1; then
     echo "start: error: failed to read the key from 1Password ($ORCH_SSH_KEY_REF) and load it into the private agent." >&2
-    echo "start: 'op' must authenticate non-interactively (OP_SERVICE_ACCOUNT_TOKEN or an unlocked CLI session)." >&2
+    echo "start: op-read needs a 1Password service account token (OP_SERVICE_ACCOUNT_TOKEN, or the keychain item workingman:service_account / jim.clark) for a service account that can read that vault; see docs/ssh-agent.md." >&2
     exit 1
   fi
   if ! SSH_AUTH_SOCK="$sock" ssh-add -l >/dev/null 2>&1; then

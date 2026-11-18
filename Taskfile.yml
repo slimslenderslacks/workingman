@@ -5,8 +5,8 @@ tasks:
     deps: [build]
 
   build:
-    desc: Build orch and acp-wrapper into the repo root
-    deps: [orch, acp-wrapper]
+    desc: Build orch, acp-wrapper and op-read into the repo root
+    deps: [orch, acp-wrapper, op-read]
 
   orch:
     desc: Build the orch daemon
@@ -32,6 +32,18 @@ tasks:
     generates:
       - acp-wrapper
 
+  op-read:
+    desc: Build op-read, which start.sh uses to load the signing key from 1Password (Go SDK, service account)
+    cmds:
+      - go build -o op-read ./cmd/op-read
+    sources:
+      - cmd/op-read/**/*.go
+      - internal/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - op-read
+
   test:
     desc: Run go vet and the Go test suite (mirrors ci.yml)
     cmds:
@@ -52,4 +64,4 @@ tasks:
   clean:
     desc: Remove built binaries
     cmds:
-      - rm -f orch acp-wrapper
+      - rm -f orch acp-wrapper op-read

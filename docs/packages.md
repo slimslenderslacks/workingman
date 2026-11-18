@@ -32,6 +32,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/gitsign` | shared | Package gitsign makes a sandboxed agent commit as the host user, SSH-sign those commits, and check that the SSH agent forwarded into the sandbox can sign and push. | — | `Config`, `PushResult`, `RunFunc` |
 | `internal/mcpgateway` | shared | Package mcpgateway gives every sandbox workingman creates its own MCP gateway: a sub-gateway of the host's standalone-codemode gateway, minted with POST /gateways and torn down with DELETE /gateways/{id}. | — | `Client`, `Content`, `Gateway`, `Manager`, `RPCError`, `Record`, `ServerState`, `Session`, `SessionOptions`, `Store`, `Tool`, `ToolError`, `ToolResult`, `UnknownServersError` |
 | `internal/notify` | daemon | Package notify is the daemon's user-notification interface: how an agent that needs human attention reaches a person. | `Sender`, `TopicSender` | `Async`, `Call`, `Multi`, `Noop`, `Osascript`, `Recorder` |
+| `internal/onepassword` | daemon | Package onepassword reads secrets from 1Password through the 1Password Go SDK (github.com/1password/onepassword-sdk-go), authenticated as a service account, so nothing in workingman needs the `op` CLI, `op signin` or a biometric unlock. | `Resolver` | `KeychainItem`, `KeychainLookup`, `TokenSource` |
 | `internal/policy` | shared | Package policy defines the per-task sandbox policy rules (allow or deny one network or filesystem resource pattern) and turns them into `sbx policy` commands. | — | `Action`, `Kind`, `Rule` |
 | `internal/power` | daemon | Package power reports whether the host is running on AC power or battery, so the daemon can stand down while a laptop is unplugged. | `Source` | `ACSource`, `Pmset` |
 | `internal/project` | shared | Package project is the data model and on-disk format of a work stream's project.yaml, plus the two sidecar records the daemon and the wolf agent keep next to it. | — | `BlockedSession`, `CheckState`, `PRFingerprint`, `PlannedSnapshot`, `Project`, `PullRequest`, `Repo`, `Status`, `Writer` |
@@ -58,6 +59,7 @@ imported. The `cmd/` binaries are the entry points.
 graph LR
   subgraph grp_entry["entry"]
     cmd_acp_wrapper["cmd/acp-wrapper"]
+    cmd_op_read["cmd/op-read"]
     cmd_orch["cmd/orch"]
   end
   subgraph grp_daemon["daemon"]
@@ -73,6 +75,7 @@ graph LR
     internal_channels_whatsapp_setup["channels/whatsapp/setup"]
     internal_daemon["daemon"]
     internal_notify["notify"]
+    internal_onepassword["onepassword"]
     internal_power["power"]
     internal_prompts["prompts"]
     internal_router["router"]
@@ -105,6 +108,7 @@ graph LR
   cmd_acp_wrapper --> internal_gitsign
   cmd_acp_wrapper --> internal_mcpgateway
   cmd_acp_wrapper --> internal_policy
+  cmd_op_read --> internal_onepassword
   cmd_orch --> internal_agent
   cmd_orch --> internal_audit
   cmd_orch --> internal_channels
@@ -193,9 +197,9 @@ graph LR
   internal_tui --> internal_workspace
 
   classDef entry fill:#e8e8e8,stroke:#555,stroke-width:2px,color:#000
-  class cmd_acp_wrapper,cmd_orch entry
+  class cmd_acp_wrapper,cmd_op_read,cmd_orch entry
   classDef daemon fill:#dbe9ff,stroke:#2f6fd6,color:#000
-  class internal_acpchat,internal_agent,internal_audit,internal_channels,internal_channels_channeltest,internal_channels_signal,internal_channels_signal_setup,internal_channels_whatsapp,internal_channels_whatsapp_bridge,internal_channels_whatsapp_setup,internal_daemon,internal_notify,internal_power,internal_prompts,internal_router,internal_runner,internal_scheduler,internal_service,internal_setup,internal_taskgraph daemon
+  class internal_acpchat,internal_agent,internal_audit,internal_channels,internal_channels_channeltest,internal_channels_signal,internal_channels_signal_setup,internal_channels_whatsapp,internal_channels_whatsapp_bridge,internal_channels_whatsapp_setup,internal_daemon,internal_notify,internal_onepassword,internal_power,internal_prompts,internal_router,internal_runner,internal_scheduler,internal_service,internal_setup,internal_taskgraph daemon
   classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
   class internal_tui tui
   classDef shared fill:#fff1cc,stroke:#c99a06,color:#000
@@ -211,6 +215,7 @@ The same graph as text: each package's internal imports and importers.
 | Package | Imports | Imported by |
 |---|---|---|
 | `cmd/acp-wrapper` | `acpwrapper`, `gitsign`, `mcpgateway`, `policy` | — |
+| `cmd/op-read` | `onepassword` | — |
 | `cmd/orch` | `agent`, `audit`, `channels`, `channels/signal`, `channels/signal/setup`, `channels/whatsapp`, `channels/whatsapp/setup`, `daemon`, `mcpgateway`, `notify`, `power`, `router`, `runner`, `scheduler`, `service`, `session`, `terminal`, `tui`, `workspace` | — |
 | `internal/acpchat` | `acpclient`, `session` | `router` |
 | `internal/acpclient` | — | `acpchat`, `tui` |
@@ -228,6 +233,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/gitsign` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `runner` |
 | `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `cmd/orch`, `acpwrapper`, `daemon`, `runner` |
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
+| `internal/onepassword` | — | `cmd/op-read` |
 | `internal/policy` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `mcpgateway`, `runner`, `task`, `tui` |
 | `internal/power` | — | `cmd/orch`, `daemon` |
 | `internal/project` | — | `acpwrapper`, `daemon`, `tui` |
