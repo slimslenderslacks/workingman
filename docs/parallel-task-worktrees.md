@@ -812,11 +812,631 @@ It is visible only in the audit log (`integration_conflict`,
 
 ## Scheduler & dispatch
 
-_To be written (task `design-scheduler-dispatch`)._
+This section changes the daemon so that a project can run several ready tasks
+at once. Two limits apply: a per-project concurrency limit and an optional
+global cap. Integration is still serialized through **one commit queue per
+project**. It builds on [Worktrees](#worktrees) (each task gets an isolated
+checkout cut from the shared tip when it is dispatched) and on
+[Integration & conflicts](#integration--conflicts) (one integration per
+project at a time; `committed` means "integrated and verified").
+
+`internal/scheduler` keeps its current job: it stays the keyed cron wrapper
+(§2 of current behavior). Parallel dispatch is a daemon concern. The new
+policy code goes in `internal/taskgraph` (which tasks *may* run) and
+`internal/daemon` (which tasks *do* run, and when). No change to
+`internal/scheduler` is needed.
+
+### S1. Invariants
+
+1. **A dependent starts only after its dependencies are integrated.**
+   `taskgraph.Ready` keeps its `depsCommitted` rule unchanged. A dependency at
+   `success` (finished, waiting in the commit queue) does **not** satisfy
+   `depends_on`. A dependent therefore never starts from a tip that lacks the
+   work it depends on (W4).
+2. **At most one integration per project.** There is one commit agent per
+   project, and push tasks share that same queue.
+3. **At most `limit` tasks in flight per project.** "In flight" means a task
+   at `running` or at `success` (see S3).
+4. **No two in-flight tasks overlap,** going by their independence hints
+   ([Planning independence hints](#planning-independence-hints)). A task
+   without hints overlaps everything.
+5. **State lives on disk.** Every scheduling decision is derived from the
+   task files plus the live session map, as today. The queue and the slots
+   can be rebuilt after a restart without any persisted scheduler state.
+
+With `limit: 1` (the default), invariants 3 and 4 collapse to today's strict
+task₁ → commit₁ → task₂ → … pipeline. The only difference is that each task
+now works in its own worktree.
+
+### S2. Session slots
+
+The single main slot (bare project path) is split into separate slots. Each
+slot keeps the existing `path + "#marker"` convention, so `filepath.Dir(key)`
+still returns the control dir. The reaper's `stageComplete` and
+`killProjectSessions` (prefix match on `path#`) keep working without changes.
+
+| Slot key | Holder | Cardinality |
+|---|---|---|
+| `<path>` (bare) | project agent, review agent | 1 (unchanged) |
+| `<path>#task:<task-name>` | task agent for that task | one per in-flight task |
+| `<path>#commit` | commit agent (including push tasks) | 1: **the commit queue's head** |
+| `#planning`, `#wolf`, `#archive` | unchanged | unchanged |
+
+Call sites that asked "is the main slot busy?" now ask one of two narrower
+questions:
+
+- **`d.projectBusy(path)`** is true if any of the bare slot, a `#task:*`
+  slot or `#commit` is live. The review agent and the review poll use it
+  (`review.go:onReviewPoll`, `dispatchReviewAgent`), because the review agent
+  must still never overlap task or commit work. So does
+  `launchProjectRootAgent`.
+- **`launchPlanningAgent`** keeps its current rule. It waits for the bare
+  slot (project or review agent). It runs alongside task and commit slots,
+  which is `runsAlongsidePlanning` generalized to key prefixes. A cron re-plan
+  (`p.Replan`) waits for `projectBusy`.
+- **`taskSessionLive(path, name)`** checks `#task:<name>` for a task agent,
+  and `#commit` with `taskName == name` for a commit agent. It no longer reads
+  `sessions[path].taskName`.
+- **`launchTaskAgent`** dedups on its own `#task:<name>` key. A second
+  dispatch of the same task is impossible twice over: `markTaskRunning`
+  only moves a task that is still at `ready`, and `git worktree add` refuses a
+  branch that is already checked out (W4).
+
+### S3. Concurrency limits
+
+**Per project.** There is a new optional `project.yaml` field
+`max_parallel_tasks` (the schema belongs to
+[Schema/state changes](#schemastate-changes)):
+
+- Absent, `0` or `1` means **1**, so existing project files behave exactly as
+  they do today.
+- It is written by a human (or the TUI/workingman agent on request). The
+  planner may *recommend* a value in its summary but does not set it (H4).
+  Concurrency costs sandboxes and money, and that is the user's call.
+- It is read fresh on every scheduling pass (`project.Load`), so an edit
+  takes effect at the next session end or project event. Lowering it never
+  kills anything; the project simply stops admitting work until it is under
+  the new limit.
+
+**What counts against it.** Tasks at `running` plus tasks at `success`
+(queued or integrating). Counting `success` is deliberate:
+
+- At `limit: 1` it reproduces today's pipeline exactly. The next task cannot
+  start until the previous one is integrated, so it always starts from a tip
+  that holds everything before it, and conflicts are impossible.
+- It bounds how far work can run ahead of integration. Every queued task is
+  a rebase that has not happened yet. Letting a slow commit queue pile up
+  queued tasks raises the conflict rate (I4) for no throughput gain.
+- A ready push task counts as one in-flight entry from dispatch to
+  `committed`, as it does today (it is marked `running` when its commit agent
+  launches).
+
+`failed` and `blocked` tasks don't count. A retry moves the task back to
+`ready` and it competes for a slot again. In practice `handleTaskFailure`
+relaunches it straight away, because its own slot has just been freed.
+
+**Global cap.** There is a new daemon flag `--max-parallel-tasks N` (the
+`orch` flag set in `cmd/orch/main.go`, plumbed as
+`daemon.WithMaxParallelTasks`), defaulting to `0`, which means no cap.
+
+- It bounds **task agents across all projects**, because each one is a
+  sandbox plus a model session.
+- Today cross-project task concurrency is already unbounded (one per
+  project), so a default of 0 changes nothing. `orch service install` may set
+  a finite default later.
+- Commit agents, planners, the wolf and review agents do **not** take global
+  tokens. Commit agents are short. Starving them would hold back the very
+  integrations that free task slots. The other kinds aren't task work.
+- Tokens are an in-memory counter in `Daemon` (`taskTokens`, guarded by its
+  own mutex). A token is taken inside the scheduling lock (S4), before
+  `markTaskRunning`. It is released when the task's session ends
+  (`afterTaskSession`, before routing), on a failed launch, or when an
+  adopted session ends.
+- When a project wants a slot but no token is free, the project is recorded
+  in `capDeferred` (the same shape as `powerDeferred`) and logs
+  `task_deferred_cap`. Every token release revisits the deferred projects
+  (`go d.revisitProject(p)`), oldest deferral first, so projects take turns
+  in arrival order rather than by luck.
+
+The effective number of new task agents a pass may start is
+`min(limit − inflight(project), free global tokens)`.
+
+### S4. One scheduling pass
+
+`dispatchReadyOrPending` becomes `schedule(path, p)`, and `ready[0]` stops
+being special. Every entry point that today picks "the next thing" calls it:
+
+- `dispatchNextTask` (`working`);
+- `dispatchPendingTasks` (`idle` manual tasks);
+- `afterTaskSession`, for the success path and after `handleTaskFailure`;
+- `afterCommitSession`;
+- the startup scan;
+- power and cap resume.
+
+```
+schedule(path, p):
+  lock d.schedMu[path]                          // per-project
+  if deferForPower(path): return                // S6
+  if p.Status not in {working, idle}: return    // blocked/stopped: nothing new
+  g := loadTaskGraph(path)                      // fresh from disk, as today
+  if g.AllCommitted(): unlock; transitionProjectComplete (unless deferToPlanner); return
+
+  // 1. Commit queue: at most one integration.
+  if !commitBusy[path]:
+      if head := commitQueueHead(g); head != nil:
+          commitBusy[path] = true               // reservation (like beginCleanup)
+          launch commit agent for head (after unlock)
+
+  // 2. Task slots.
+  inflight := g.InFlight()                      // running ∪ success, from disk
+  free := limit(p) - len(inflight)
+  for t in g.Runnable(inflight):                // Ready() ∩ no-overlap, priority order (H3)
+      if free == 0: break
+      if !takeToken(): capDeferred[path]; break
+      if markTaskRunning(t): free--; launch task agent for t (after unlock)
+      else: releaseToken()
+
+  // 3. Nothing doing?
+  if nothing launched && len(inflight) == 0 && !commitBusy[path] && no live #task:* session:
+      stuck-graph handling (below)
+  unlock; perform the launches
+```
+
+Notes:
+
+- **Why a lock is needed now.** Session-end callbacks run on each session's
+  own `trackConfiguredSession` goroutine, **outside** the per-directory
+  fsnotify chain (`dispatchEvent`). With N task agents ending at about the
+  same time, two passes could both count `inflight = limit − 1` and each
+  admit a task. `markTaskRunning`'s compare-and-set prevents the *same* task
+  from being dispatched twice, but not over-admission. `d.schedMu` is a
+  `map[string]*sync.Mutex`, held only for the decide-and-reserve step. The
+  slow part, `StartConfigured` (wsp, `git worktree add`, sandbox create), runs
+  after unlocking. The on-disk `running` mark (task) and `commitBusy` (commit)
+  are the reservations that stop the next pass from re-picking.
+- **`commitBusy` reservation.** It spans from before `StartConfigured` to the
+  end of `afterCommitSession`, which is wider than the session's tracked
+  lifetime, exactly like `beginPlanning` / `beginCleanup`. Without it, a pass
+  running while a commit agent's sandbox is still provisioning would see no
+  `#commit` session and launch a second integration.
+- **Launch failures** keep today's handling, per task:
+  `releaseRunningTask(…, "launch_failed")`, then release the token, then
+  `transitionProjectBlocked`. A failed commit launch releases `commitBusy`
+  and blocks, as today.
+- **Stuck-graph block.** Today this lives only in `afterCommitSession` ("no
+  ready tasks remain but project is not fully committed"). It moves into
+  `schedule` with a stricter guard: nothing is in flight, no commit is
+  reserved, and no planner is running (`deferToPlanner`). Otherwise a task
+  still running would make "nothing ready right now" look like a dead end.
+  `dispatchNextTask`'s `no_ready_tasks` audit line stays for passes that find
+  nothing to start but still have work in flight. That pass is
+  `scheduler_idle`, with counts of in-flight, queued and deferred tasks.
+- **Blocked projects.** `transitionProjectBlocked` does **not** kill sibling
+  task agents. Each runs to the end of its session, and its `afterTaskSession`
+  records the outcome:
+  - `success` stays queued;
+  - `failed` is retried if it has budget left (the relaunch goes through
+    `schedule`, which declines while the project is `blocked`, so the task
+    waits at `ready` for the unblock).
+
+  No commit agent starts while the project is blocked. Work the siblings
+  finished is not thrown away, and the wolf's fix integrates on top of a
+  queue that is intact. Interactions with the wolf, stop, and restart are
+  covered in [Interactions](#interactions).
+
+### S5. The commit queue
+
+**Membership is derived, not stored.** A task is queued when its file says
+either:
+
+- `status: success` and not a push task. Its task agent finished, and its
+  work is on `wm/<pb>/<task>`.
+- A push task at `ready` with all `depends_on` committed. A push task has no
+  task-agent phase (`dispatchReadyTask`). It joins the queue directly, and its
+  in-flight count starts at dispatch.
+
+Because membership comes from disk, a daemon restart rebuilds the queue for
+free. Today's `firstUncommittedSuccess` "commit recovery" becomes the queue's
+normal path, not a special case.
+
+**Ordering: FIFO by success time.** `commitQueueHead` picks the queued task
+with the earliest `succeeded_at`, with name as the tiebreak. `succeeded_at` is
+a new daemon-stamped task field, written in `afterTaskSession` when it first
+observes `success`, the same way `completed_at` is stamped after commit
+(field spec in [Schema/state changes](#schemastate-changes)). A push task
+uses the time it became eligible. A task with no `succeeded_at` (legacy
+files, or a human set `success` by hand) sorts first, by name, so it keeps
+today's `firstUncommittedSuccess` behavior.
+
+Alternatives considered:
+
+- **Plan order (name, or topological):** this makes early finishers wait for
+  slower siblings that happen to sort earlier. Their rebase base gets older
+  for nothing.
+- **"Most dependents first"**: integrating the task that unblocks the most
+  `ready` tasks raises parallelism. It is a reasonable later refinement. It
+  is listed in [Risks & open questions](#risks--open-questions) rather than
+  in v1, because FIFO is easy to predict and test, and tasks with dependents
+  already get scheduling priority (H3).
+
+**Head-of-line behavior.** Each outcome from I4 maps to a queue move:
+
+| Integration outcome (I4) | Queue effect |
+|---|---|
+| Integrated | Head is removed (task → `committed`). `afterCommitSession` verifies (I3), cleans up the worktree (W6), stamps `completed_at`, releases `commitBusy`, then calls `schedule`. That one pass both starts the next integration and fills the task slots the newly committed task freed. Its dependents are now `Ready()`. |
+| Conflict → re-run | Head leaves the queue (task → `ready`, `attempts++`). The next queued task integrates right away. The re-run competes for a task slot like any ready task, with the conflicting files added to its hints (H3). |
+| Transient | Head stays at the head. The commit agent is relaunched for the **same** task (`integration.attempts`, max 2), and nothing overtakes it. Integrating a later task first would move the tip under the retry, and the retry would then fail for a different reason. |
+| Block (invariant, partial, exhausted) | Queue is frozen with the project `blocked` (S4). Entries keep their `succeeded_at` order, and the queue resumes from the same head after the wolf unblocks. |
+
+**What dependents do while a dependency waits for integration: nothing.**
+A task whose dependency is at `success` is not `Ready()`, does not take a
+slot, and is not dispatched. Speculatively starting it on top of the
+dependency's task branch (a stacked branch) was considered and rejected:
+
+- Its base is a commit that integration is about to **rebase**. Integrating
+  the dependent then means rebasing a stack. A conflict in the dependency's
+  rebase invalidates the dependent's work too, and the cascade
+  (re-run A, and so B, and so B's dependents) grows with the depth of the
+  graph.
+- It breaks W4's simple rule (every worktree is cut from the shared tip), and
+  `committed` would no longer be the only thing a base can contain.
+- What it buys is small. The gap between "dependency succeeded" and
+  "dependency integrated" is one commit-agent run, usually a fast-forward
+  (I2). Other independent tasks fill the slots meanwhile.
+
+The waiting is visible: `schedule` logs `task_waiting_integration`
+(`task`, `waiting_on`) once per task per dependency, and the snapshot/TUI can
+show "waiting on integration of X" ([Schema/state changes](#schemastate-changes)).
+
+### S6. Power gate, watcher, startup
+
+- **Power gate (`power_gate.go`).** `deferForPower` is checked today only at
+  the top of `dispatchProject`. The session-end chains bypass it:
+  `afterTaskSession` → `launchCommitAgent` and `afterCommitSession` →
+  `dispatchReadyTask` start new agents on battery. With every launch moving
+  into `schedule`, the check moves there too. On battery, a pass starts no
+  task agent and no commit agent. Sessions already running are left alone, as
+  the gate's doc comment already promises. `checkPower`'s resume path
+  (`revisitProject` for each deferred project) refills every slot at once,
+  bounded by the limits. This tightens the gate to what its comment says,
+  which is a small, intended behavior change worth a test.
+- **Watcher (`watcher.go`).**
+  - `handlerFor` and `handleTask` stay observation-only. Task-file events
+    still don't drive the lifecycle, for the same race reason as today, and
+    that reason matters more with N agents writing `success` at about the
+    same time.
+  - Per-task worktrees live under the shared workspace
+    (`~/dev/workspaces/…`). That is outside every `--root`, so they add no
+    fsnotify watches or events. `maybeWatchNewDir` would add watches if a
+    user configured a root above the workspaces dir. The daemon should skip
+    `.worktrees` in `addTree` and `maybeWatchNewDir` as a guard.
+- **Startup (`startupScan`).** The order is unchanged: `reconcileSessions`
+  adopts sessions, then per project `releaseOrphanedTasks`, then
+  `revisitProject` → `schedule`.
+  - `reconcileSessions` adopts a task session under `#task:<name>` (the name
+    comes from `rec.TaskPath`), a commit session under `#commit` (re-taking
+    `commitBusy`), and re-takes one global token per adopted task session.
+  - `releaseOrphanedTasks` uses the per-task `taskSessionLive`.
+  - `startupScanConcurrency = 8` still bounds projects, not tasks. With
+    `max_parallel_tasks > 1` a restart can try to start up to `8 × limit`
+    task agents (each with a `git worktree add` and a sandbox create).
+    `--max-parallel-tasks` is the bound for that burst.
+  - The worktree sweep (W7) runs after `releaseOrphanedTasks` and before
+    `schedule`, so a re-dispatch never trips over a stale worktree.
+
+### S7. State diagram
+
+The task status enum does not change (`internal/task/task.go`). What changes
+is when edges fire, and that `success` now means "queued for integration".
+The diagram below is the task machine from `state-machine.md` §2. It keeps
+every existing edge and adds the guard on `ready → running` and the two new
+`success` edges.
+
+```mermaid
+stateDiagram-v2
+    [*] --> ready: planning agent creates task
+
+    ready --> running: schedule() dispatches task agent\n(deps all committed ∧ project slot free\n∧ global token ∧ no hint overlap\nwith in-flight tasks)\n— worktree cut from shared tip
+    ready --> running: push task: deps committed ∧ queue head\n→ commit agent (push mode)
+
+    running --> success: task agent reports success\n(daemon stamps succeeded_at;\njoins commit queue)
+    running --> failed: task agent reports failure,\ncrashes, or is reaped
+    running --> blocked: task agent reports blocked
+    running --> ready: launch failed, project stopped,\nor agent lost across a daemon restart
+    running --> committed: push task's commit agent\npublishes the shared branch
+
+    failed --> ready: attempts < 3, retried\n(fresh worktree from current tip)
+    failed --> [*]: attempts >= 3,\nproject → blocked (wolf)
+
+    state success {
+        [*] --> queued
+        queued --> integrating: head of commit queue\n∧ #commit slot free
+        integrating --> integrating: transient failure,\nintegration.attempts < 2
+    }
+    success --> committed: commit agent integrates\n(rebase + ff-only), daemon verifies
+    success --> ready: integration conflict,\nattempts < 3 → re-run on new tip
+    success --> [*]: conflict with attempts >= 3,\npartial publish, or invariant broken\n→ project blocked (wolf)
+
+    committed --> [*]: worktree removed;\nschedule() admits dependents / next task,\nor project completes
+
+    blocked --> [*]: project → blocked (wolf),\nno automatic retry
+
+    note right of success
+      queued / integrating are not new
+      status values: queued = status success,
+      integrating = the #commit slot is
+      held for this task. Both count
+      against max_parallel_tasks.
+    end note
+```
+
+Two notes on how this lines up with `state-machine.md`:
+
+- **Project status is unchanged.** `working` still covers "tasks are being
+  dispatched". The `working → working` "task dispatch loop" edge now stands
+  for N task slots plus one commit slot, not a single chain. `working → idle`
+  still fires only when `AllCommitted()`, which implies nothing is in flight.
+- **`running → ready` keeps its three causes** (launch failed, stop,
+  orphaned after restart), and none of them costs an attempt. The new
+  `success → ready` edge **does** cost an attempt (I5), so it is a separate
+  edge.
+
+An example with `max_parallel_tasks: 2`, where A and B are independent, C
+depends on A, and D overlaps B:
+
+```
+t0  schedule: A running, B running            (D skipped: overlaps B; C: dep A not committed)
+t1  B success → queue [B]; #commit ← B         (in-flight 2: A running, B integrating)
+t2  B committed; schedule: D running           (D no longer overlaps an in-flight task)
+t3  A success → queue [A]; #commit ← A
+t4  A committed (rebased onto B); schedule: C running
+t5  D success → queue [D] … C success → queue [D, C] → D, then C
+```
+
+### S8. Files touched
+
+| Package / file | Change |
+|---|---|
+| `internal/taskgraph/graph.go` | `InFlight()`, `CommitQueue()` / `QueueHead()` (FIFO by `succeeded_at`), `Runnable(inflight)` (Ready ∩ no-overlap, priority order; H3), overlap helpers. `Ready()` and `depsCommitted` unchanged. |
+| `internal/daemon/dispatch.go` | `dispatchReadyOrPending` → `schedule`. Per-task `launchTaskAgent` key. `projectBusy`. `launchPlanningAgent` / `launchProjectRootAgent` slot checks. `schedMu`. Stuck-graph block moved here. |
+| `internal/daemon/dispatch_lifecycle.go` | `afterTaskSession` stamps `succeeded_at`, releases the token, then calls `schedule` instead of `launchCommitAgent`. `afterCommitSession` releases `commitBusy` and calls `schedule` instead of picking `ready[0]` itself. `launchCommitAgent` on `#commit` with `beginCommit`/`endCommit`. `taskSessionLive` re-keyed. `releaseOrphanedTasks` per-task. `firstUncommittedSuccess` removed (subsumed by the queue). |
+| `internal/daemon/power_gate.go` | `deferForPower` consulted in `schedule`. Resume unchanged. |
+| `internal/daemon/watcher.go` | `startupScan` order (sweep before revisit); skip `.worktrees` in `addTree` / `maybeWatchNewDir`. |
+| `internal/daemon/daemon.go` | `taskTokens`, `capDeferred`, `commitBusy`, `schedMu`; `WithMaxParallelTasks`. |
+| `internal/daemon/reconcile.go`, `reaper.go`, `stop.go`, `review.go` | Re-keyed adoption, per-key `stageComplete` (unchanged logic), `projectBusy` in review. `killProjectSessions` already matches `path#*`. |
+| `cmd/orch/main.go` | `--max-parallel-tasks`. |
+| `internal/project/project.go` | `max_parallel_tasks` (see [Schema/state changes](#schemastate-changes)). |
+| `internal/scheduler` | none |
+
+Tests to add, beside `concurrency_test.go`:
+
+- two independent ready tasks with `limit: 2` both start; with `limit: 1`
+  only one starts, and the second starts only after the first is `committed`;
+- a dependent does not start while its dependency is at `success`;
+- simultaneous session ends never exceed the limit (run under `-race`);
+- the global cap defers and resumes across two projects;
+- on battery, a session end starts nothing;
+- a restart with two adopted task sessions and one queued `success` rebuilds
+  the slots, the queue and the tokens.
 
 ## Planning independence hints
 
-_To be written (task `design-scheduler-dispatch`)._
+`depends_on` is the only ordering signal today (§2 of current behavior). It
+says "B needs A's result". It cannot say "A and B are unrelated, so run them
+together", or "A and B both edit `go.mod`, so don't". This section adds that
+second signal. The planner declares it, `taskgraph` checks it, and `schedule`
+uses it.
+
+### H1. Two hints, both optional
+
+```yaml
+name: add-healthz-handler
+depends_on: []
+touches:            # files/dirs this task expects to change, per repo
+  - workingman/internal/api/healthz*.go
+  - workingman/internal/api/router.go
+  - workingman/docs/api.md
+areas:              # coarse, named shared resources
+  - go-deps
+```
+
+- **`touches:`** is a list of globs. The first path segment is the repo's
+  workspace directory name (`workspace.Repo.DirName`, the same convention as
+  `commits[].repo`), and the rest is repo-relative. `**` matches any number of
+  segments, and `*`, `?` and `[…]` match within one segment
+  (doublestar/`path.Match` syntax). The repo segment may be `*` to mean every
+  repo. Globs describe the files the task will **create, edit or delete**,
+  not the files it reads.
+- **`areas:`** is a list of free-form kebab-case tags for shared hotspots
+  that globs describe badly or that cut across repos. Examples: `go-deps`
+  (`go.mod`/`go.sum`), `npm-deps`, `db-schema`, `ci`, `generated-docs`
+  (`docs/packages.md`), `changelog`, `release-version`. Two tasks with a tag
+  in common conflict, whatever their globs say. Tags are compared as exact
+  strings. There is no registry, and the planning prompt suggests a short
+  standard list (H4) so that independent planning runs (intake, re-plan)
+  reuse the same words.
+- **No hints means exclusive.** A task with neither field overlaps **every**
+  task. Existing task files, hand-written tasks and planner output written
+  before this change therefore never run beside anything, even with
+  `max_parallel_tasks > 1`. Parallelism has to be opted into one task at a
+  time by declaring what it touches. An explicit empty list (`touches: []`
+  with no areas) means "touches nothing", for a task that only produces
+  `created_files` or calls external APIs. That is distinct from omitting the
+  field.
+- **Validation in `taskgraph.Load`.** An invalid glob or tag is repaired, in
+  the same spirit as invalid names: the task is treated as exclusive and a
+  `Warnings()` entry is logged (`taskgraph_repair`). It is never fatal,
+  because one bad hint must not abort the graph.
+- Field definitions and YAML compatibility (`omitempty`, and why a nil and an
+  empty slice must stay distinct) are owned by
+  [Schema/state changes](#schemastate-changes).
+
+### H2. Overlap
+
+Two tasks **overlap** if any of the following holds:
+
+1. either is exclusive (no hints);
+2. they share an `areas` tag;
+3. some glob in one's `touches` and some glob in the other's could match a
+   common path.
+
+Check 3 is computed **conservatively**. False positives (serializing two
+tasks that would not really have conflicted) cost throughput. False negatives
+cost a conflict and a re-run (I4). The asymmetry favors over-reporting.
+
+- Split each glob into path segments and compare pairwise from the left.
+  The repo segments must be equal, or one of them `*`.
+- Two literal segments must be equal.
+- A segment containing `*`, `?` or `[` matches a literal segment if
+  `path.Match` accepts it. Two wildcard segments are assumed to match.
+- `**` on either side matches the rest. Running out of segments on one side
+  counts as overlap when that glob names a directory prefix (a glob with no
+  wildcard in its last segment and no file extension is treated as
+  `dir/**`).
+
+This is a few dozen lines in `internal/taskgraph/overlap.go` with
+table-driven tests. It needs no filesystem access, because hints are compared
+with each other, not with the tree.
+
+Overlap is only checked between tasks that could run at the same time. Tasks
+linked by `depends_on`, directly or transitively, never do (S1.1), so their
+hints are irrelevant to each other.
+
+### H3. How the scheduler uses it
+
+`Graph.Runnable(inflight)` returns the tasks `schedule` may start in this
+pass, in priority order.
+
+**Priority.** The candidates are `Ready()`, ordered by:
+
+1. **Re-runs first.** A task with `attempts > 0` already lost work once, and
+   making it wait again raises the chance it conflicts again.
+2. **Most transitive dependents first.** Ready tasks on the critical path
+   unblock the most work once integrated.
+3. **Name.**
+
+`Ready()` itself stays name-sorted. The ordering lives in `Runnable`, so
+existing callers and tests are unaffected.
+
+**Greedy admission with barriers.** Walk the candidates in order:
+
+- start a candidate if it overlaps **no** task in `inflight` (running *or*
+  queued: a queued task's changes have not landed yet, so overlapping it
+  would conflict at its rebase) and no candidate already admitted in this
+  pass;
+- otherwise skip it (`task_deferred_overlap`, with `task` and
+  `overlaps: [names]`), and **add it to the barrier set**: later candidates
+  that overlap a skipped one are skipped too.
+
+The barrier prevents starvation. Without it, a task that overlaps a running
+one could be overtaken forever by a stream of later-sorted tasks touching the
+same files. Each of those would land first and make its rebase steadily
+worse. With it, an exclusive task acts as a full barrier: once it reaches
+the front of the queue, nothing new is admitted until in-flight work drains
+and it can start alone. That gives exactly the "serial unless declared
+independent" behavior H1 promises.
+
+**Conflict feedback.** When a task re-runs after an integration conflict
+(I4), its effective `touches` for overlap purposes becomes its declared
+globs **plus** the conflicting `integration.files`, recorded literally. The
+re-run therefore cannot be co-scheduled with another task declaring those
+files, even if the planner's hints missed them. The task file is not
+rewritten; the union is computed in `Runnable`.
+
+**Hint accuracy is audited, not enforced.**
+
+- After a successful integration, `afterCommitSession` compares
+  `git diff --name-only <base>..<tip>` per repo against the task's `touches`
+  and `areas` (the area tags map to known files only for the standard list).
+  Changed paths outside the declared hints are logged as `touches_exceeded`
+  (`task`, `paths`), and the task file gains an informational
+  `touches_actual:` list.
+- Nothing blocks on it. The task agent may legitimately need a file the
+  planner did not foresee. These events, together with `integration_conflict`
+  counts, show whether hints are good enough to raise `max_parallel_tasks`.
+- A later phase could auto-serialize a project whose hints keep missing
+  ([Risks & open questions](#risks--open-questions)).
+
+**What hints do not do.** They never order tasks the way `depends_on` does,
+never make a task `Ready()` that otherwise wouldn't be, and have no effect at
+`max_parallel_tasks: 1`. At that limit there is never a second in-flight task
+to overlap with, so a project that ignores hints behaves exactly as it does
+today.
+
+### H4. Planning prompt changes (`internal/prompts/templates`)
+
+**`planning.tmpl`** gains one block, placed after the `name` rules and
+before `static_mcps`. In substance:
+
+> **Parallelism hints.** The daemon may run several of this project's tasks
+> at the same time (up to `{{.MaxParallelTasks}}` for this project). Each task
+> works in its own git worktree, and the work is integrated onto the shared
+> branch one task at a time. Two tasks run together only when the daemon can
+> tell they don't touch the same code, so for each task declare:
+>
+> - `depends_on`: a task whose code or output this task needs. This is the
+>   ordering edge, as before. If B builds on A's changes, B depends on A. Do
+>   not use hints for that.
+> - `touches`: globs for every file the task will create, edit or delete.
+>   Each starts with the repo directory name (`{{range .Repos}}{{.DirName}}
+>   {{end}}`). Be complete rather than tight: a missed file risks an
+>   integration conflict and a re-run, and an extra file only costs some
+>   parallelism. Use a directory (`repo/internal/api/`) when you can't name
+>   the files.
+> - `areas`: tags for shared hotspots the task changes. Use these names when
+>   they fit: `go-deps`, `npm-deps`, `db-schema`, `ci`, `generated-docs`,
+>   `changelog`, `release-version`. Any task that adds a dependency,
+>   regenerates a generated file, or bumps a version must list the matching
+>   area.
+> - If you can't predict what a task will touch (exploratory work, broad
+>   refactors, "fix whatever is failing"), **leave both fields out**. The task
+>   then runs alone, which is always safe.
+> - `touches: []` means the task changes no files in any repo (for example it
+>   only calls an external API).
+>
+> Do not split or merge tasks just to make them parallel. Plan the work the
+> way it should be done, then describe it accurately. Where two tasks would
+> edit the same file, prefer `depends_on` between them, so the second builds
+> on the first instead of conflicting with it. Do not change
+> `max_parallel_tasks` in `project.yaml`. If the plan has a lot of
+> independent work, say so in your final message.
+
+Other planning-template changes:
+
+- **Incremental intake and re-plan branches.** One extra sentence: tasks
+  added while others are `running` are scheduled against them by the same
+  hints, so declare hints on new tasks with the running tasks' hints in mind.
+  When re-planning a cron cycle and resetting a task to run again, keep or
+  refresh its hints, and delete `touches_actual:` along with the other
+  result fields.
+- **`prompts.Data`** gains `MaxParallelTasks int` (the effective per-project
+  limit) and exposes `Repos` (already on the plan) with `DirName` to the
+  template. `setup.Context` writes `max_parallel_tasks` into
+  `.orch/context.yaml` for the planner.
+- **The block is rendered only when `MaxParallelTasks > 1`.** At the default
+  limit, hints have no effect (H3), so the planning prompt stays as it is
+  today, and existing tests on the template output (`internal/prompts`) keep
+  passing for the default case. A planner that writes hints anyway is
+  harmless.
+
+**`task.tmpl`** (worktree wording, owned by
+[Worktrees](#worktrees) / [Integration & conflicts](#integration--conflicts))
+gains one hint-related line: "Your task declares `touches:`/`areas:` (listed
+below). Stay within them where you reasonably can. If you must change other
+files, do so, and say which ones in `failure_reason`/your summary. Other
+tasks may be running beside you on the assumption that you won't." The
+rendered task data (`.orch/context.yaml`) carries the task's hints.
+
+**`wolf.tmpl`** gains a sentence in the integration-conflict paragraph
+(I6): when resetting a conflicted task, the wolf may also tighten its
+`touches`/`areas`, or add a `depends_on` on the task it collided with, so
+the two never run together again.
+
+**`review.tmpl`** needs no change. Review-fix tasks and push tasks are
+inserted by the review agent and carry no hints, so they are exclusive. A
+batch of review fixes therefore runs serially. That is the right default for
+small edits concentrated on the same PR, and it can be revisited if review
+batches get large.
 
 ## Schema/state changes
 
