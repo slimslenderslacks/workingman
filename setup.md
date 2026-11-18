@@ -14,7 +14,7 @@ Three scripts drive the local setup:
 | AGENT_DIR | ssh agent.sock location |
 | AGENT_PID | ssh agent pid |
 | ORCH_PID | orch daemon pid |
-| ORCH_SSH_KEY_REF | op:// reference to the openssh-format signing key; default `op://workingman/SSH github/private key?ssh-format=openssh` (must be in a vault the service account can read — never Personal) |
+| ORCH_SSH_KEY_REF | op:// reference to the openssh-format signing key; default `op://workingman-okta/SSH github/private key?ssh-format=openssh` (must be in a vault the service account can read — never Personal) |
 | ORCH_OP_READ | op-read binary that resolves ORCH_SSH_KEY_REF; default `$HERE/op-read` |
 | OP_SERVICE_ACCOUNT_TOKEN | 1Password service account token; when unset, read from the macOS keychain |
 | OP_SA_KEYCHAIN_SERVICE / OP_SA_KEYCHAIN_ACCOUNT / OP_SA_KEYCHAIN | keychain item holding the token; default service `workingman:service_account`, account `jim.clark`, default keychain search list |

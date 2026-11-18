@@ -69,10 +69,10 @@ reference, never the token or the key.
   there with Keychain Access and set `OP_SA_KEYCHAIN=<name>.keychain-db`.
   standalone-codemode's gateway reads the same item.
 - **Reference.** `ORCH_SSH_KEY_REF`, default
-  `op://workingman/SSH github/private key?ssh-format=openssh`. A service account
+  `op://workingman-okta/SSH github/private key?ssh-format=openssh`. A service account
   only sees vaults it has been granted and **never a Personal vault**, so the
   SSH key item has to be moved or copied into a shared vault (here
-  `workingman`) that the service account can read.
+  `workingman-okta`) that the service account can read.
 - **Format.** The SDK's `Secrets().Resolve` honours `?ssh-format=openssh` on an
   SSH key's private key field. As a belt-and-braces fallback, if a reference
   asks for that format but the value comes back as a PKCS#1/PKCS#8/SEC 1 PEM

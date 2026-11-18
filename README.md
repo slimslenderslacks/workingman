@@ -110,7 +110,7 @@ unattended runs would hang.
   the **1Password Go SDK** authenticated as a **1Password service account** —
   no `op` CLI, no `op signin`, no biometric prompt — and pipes the
   openssh-format key straight into `ssh-add -`. The default reference is
-  `op://workingman/SSH github/private key?ssh-format=openssh`: the item
+  `op://workingman-okta/SSH github/private key?ssh-format=openssh`: the item
   **"SSH github"** in vault **"workingman"**.
 - **The key must live in a vault the service account can read.** A service
   account can never see a *Personal* (Private) vault, so move or copy the SSH

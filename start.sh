@@ -43,7 +43,7 @@ fi
 #
 # ORCH_SSH_KEY_REF is the op:// secret reference to the openssh-format private
 # key. A service account cannot see a Personal vault, so the item must live in
-# a shared vault granted to the service account (default: vault "workingman").
+# a shared vault granted to the service account (default: vault "workingman-okta").
 # ORCH_OP_READ overrides the op-read binary (tests point it at a stub).
 #
 # This op-read is the ONLY 1Password call in workingman, and it runs exactly once
@@ -53,7 +53,7 @@ fi
 # to this same in-memory agent. orch also pins its host-side git/ssh to this
 # agent (GIT_SSH_COMMAND IdentityAgent, gpg.ssh.program=ssh-keygen) so a
 # 1Password IdentityAgent/op-ssh-sign in the user's ssh/git config never fires.
-ORCH_SSH_KEY_REF="${ORCH_SSH_KEY_REF:-op://workingman/SSH github/private key?ssh-format=openssh}"
+ORCH_SSH_KEY_REF="${ORCH_SSH_KEY_REF:-op://workingman-okta/SSH github/private key?ssh-format=openssh}"
 ORCH_OP_READ="${ORCH_OP_READ:-$HERE/op-read}"
 
 AGENT_DIR=""
