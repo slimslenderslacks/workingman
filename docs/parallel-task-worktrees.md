@@ -807,7 +807,7 @@ gets:
 
 The TUI shows the same block reason it shows today, with no new UI
 required. A conflict re-run that eventually succeeds never reaches the wolf.
-It is visible only in the audit log (`integration_conflict`,
+It is visible only in the audit log (`integration_conflicted`,
 `task_retry` with `cause: conflict`) and in the task's `attempts`.
 
 ## Scheduler & dispatch
@@ -1352,7 +1352,7 @@ rewritten; the union is computed in `Runnable`.
   (`task`, `paths`), and the task file gains an informational
   `touches_actual:` list.
 - Nothing blocks on it. The task agent may legitimately need a file the
-  planner did not foresee. These events, together with `integration_conflict`
+  planner did not foresee. These events, together with `integration_conflicted`
   counts, show whether hints are good enough to raise `max_parallel_tasks`.
 - A later phase could auto-serialize a project whose hints keep missing
   ([Risks & open questions](#risks--open-questions)).
@@ -1440,11 +1440,781 @@ batches get large.
 
 ## Schema/state changes
 
-_To be written (task `design-state-interactions`)._
+This section turns the fields, events and views named in the earlier sections
+into a concrete spec. It covers the task file, `project.yaml`, the audit log,
+the state snapshot, the TUI, and the daemon's own `session.json` records. Two
+rules apply throughout:
+
+- **Additive and optional.** Every new field has `omitempty` (or is a
+  pointer), and a file without it behaves exactly as it does today.
+  `internal/task` and `internal/project` decode with plain `yaml.Unmarshal`,
+  not `KnownFields(true)`, so a file that carries new fields also still loads
+  under an older daemon. That older daemon ignores the fields, and the next
+  `task.Save` it does drops them. That loss is harmless for the hints, but it
+  loses the worktree bookkeeping, which the sweep (W7) rebuilds from git. See
+  D7.
+- **No new status values.** `task.Status` and `project.Status` keep their
+  enums. A new status value would make every older reader (`Status.Valid`,
+  `UnmarshalYAML`) reject the file outright, which is the one change here that
+  could not be rolled back. "Queued" and "integrating" are therefore
+  *derived* views of `success`, not values on disk (S7).
+
+### D1. Task YAML (`internal/task/task.go`)
+
+New fields on `task.Task`, grouped by who writes them. "Daemon" fields are
+stamped from the session-end callbacks after the agent has exited, through
+`task.Update`, the same way `completed_at` is stamped today. An agent
+rewriting the task file therefore cannot clobber them for long.
+
+| Field | Type | Writer | Meaning | Section |
+|---|---|---|---|---|
+| `touches` | `*[]string` (see below) | planner, wolf | Globs the task expects to change, each starting with the repo dir name. | H1 |
+| `areas` | `[]string` | planner, wolf | Shared-hotspot tags. | H1 |
+| `worktree` | `string` | daemon | Absolute path of the task worktree root (`<shared>/.worktrees/<task>`). Set when the worktree is cut, cleared after cleanup. A non-empty value on a `failed`/`blocked` task points the wolf at the retained checkout. | W4, W6 |
+| `task_branch` | `string` | daemon | `wm/<project-branch>/<task>`. Stored, not recomputed, so a later rename of `project.branch` cannot orphan it silently. | W3 |
+| `base` | `[]Commit` | daemon | Per-repo shared tip the worktree was cut from. Same `{repo, hash}` shape as `commits:`. | W4 |
+| `succeeded_at` | `*time.Time` | daemon | First time `afterTaskSession` observed `success`. Orders the commit queue. Cleared when the task goes back to `ready`. | S5 |
+| `integration` | `*Integration` | commit agent (`result`, `repo`, `files`, `onto`, `published`), daemon (`attempts`, `landed`) | Outcome of the latest integration attempt. Cleared on `committed`. | I4, I5 |
+| `attempt_refs` | `[]string` | daemon | `refs/wm/<pb>/<task>/attempt-<n>` refs saved from earlier attempts, newest last. Lets the wolf and the re-run prompt list them without running `git for-each-ref`. | W3, W6 |
+| `touches_actual` | `[]string` | daemon | Changed paths outside the declared hints, recorded after a successful integration. Informational only. | H3 |
+
+```go
+// Integration is the commit agent's report of its latest attempt to land
+// this task on the shared branch (see docs/parallel-task-worktrees.md I4).
+type Integration struct {
+	Result    string   `yaml:"result"`              // conflict | error | partial
+	Repo      string   `yaml:"repo,omitempty"`      // repo that failed
+	Files     []string `yaml:"files,omitempty"`     // conflicting paths, repo-relative
+	Onto      []Commit `yaml:"onto,omitempty"`      // shared tips it tried to rebase onto
+	Published []string `yaml:"published,omitempty"` // repos already fast-forwarded (partial only)
+	Landed    []string `yaml:"landed,omitempty"`    // tasks integrated between base and onto (daemon)
+	Attempts  int      `yaml:"attempts,omitempty"`  // commit-agent retries for this task run (daemon)
+}
+```
+
+Notes on individual fields:
+
+- **`touches` must tell absent from empty.** H1 gives `touches: []` a
+  meaning ("touches nothing") that is different from leaving the field out
+  ("exclusive"). yaml.v3 decodes the two differently (nil vs. empty slice),
+  but with `[]string` and `omitempty` an empty list is dropped on marshal, so
+  the first daemon `task.Save` would turn "touches nothing" into
+  "exclusive". The field is therefore a pointer (`*[]string`,
+  `yaml:"touches,omitempty"`). Nil means absent, and a non-nil empty slice
+  round-trips as `touches: []`. (I checked this against yaml.v3.) `areas`
+  doesn't need that distinction: a task is exclusive only when **both** are
+  absent, and an `areas` list with no `touches` is "touches only these
+  hotspots". A helper `t.Exclusive()` holds the rule so `taskgraph` and the
+  TUI agree on it.
+- **`status` is unchanged.** `committed` is redefined (I5) but not renamed.
+  `Status.Valid` and every switch on it stay as they are.
+- **`attempts`** keeps its type and meaning (I5). `maxTaskAttempts = 3`
+  counts task runs, and integration retries live in `integration.attempts`.
+- **`commits:`** keeps its shape. For a worktree task, each `hash` is the
+  **post-integration** shared tip for that repo (I3 step 4). That matches what
+  the review agent and push tasks already read, so `review.tmpl` Step 4's
+  "Addressed in `<sha>`" stays correct.
+- **`save_sandbox`** keeps its meaning (sandbox retention). Worktree
+  retention is keyed off the task status plus `worktree:`, not off this flag,
+  because a task can be retained for its worktree after its sandbox is gone.
+  `retainSandbox` sets both.
+- **Planner-owned result fields.** The planning template's replan branch
+  already lists the result fields to clear when it resets a task: `summary`,
+  `commits`, `created_files`, `completed_at`. `succeeded_at`, `integration`,
+  `touches_actual`, `base`, `worktree`, `task_branch` and `attempt_refs` join
+  that list (H4). The daemon also clears the worktree fields itself when it
+  re-cuts a worktree (W6), so a planner that forgets is harmless.
+- **`Load` backfill.** Nothing new to backfill. A missing `worktree` simply
+  means "no worktree yet", which is the same state as a task that has never
+  been dispatched.
+
+`internal/taskgraph` gains the derived views that S5 and H3 use. None of
+them are persisted:
+
+- `Queued()`: `success` tasks, plus push tasks at `ready` with deps
+  committed, ordered by `succeeded_at` and then name;
+- `InFlight()`: `running` ∪ `success`;
+- `WaitingOnIntegration(t)`: the deps of `t` that are at `success`.
+
+### D2. `project.yaml` (`internal/project/project.go`)
+
+| Field | Type | Writer | Meaning | Section |
+|---|---|---|---|---|
+| `max_parallel_tasks` | `int`, `omitempty` | human / TUI / workingman agent | Per-project concurrency limit. `0`/absent/`1` → 1. Never written by the daemon or the planner. | S3 |
+| `conflict_resolution` | `string`, `omitempty` | human | Reserved. Empty or `rerun` is the v1 behavior. `agent` is the opt-in later mode from I4. An unknown value loads with a warning and falls back to `rerun`. | I4 |
+
+What is deliberately **not** added to `project.yaml`:
+
+- **Commit-queue state.** The queue's membership and order come from the
+  task files (S5), and `commitBusy` is in memory and rebuilt by
+  `reconcileSessions` (S6). Persisting a queue would add a second source of
+  truth that a crash could leave out of step with the task files. It would
+  also add another daemon-written `project.yaml` field. Today every one of
+  those is a potential write→fsnotify→`handleProject` loop, held off only by
+  `updated_by: daemon`.
+- **An `integrating:` pointer.** The task holding `#commit` is visible in the
+  live snapshot (D4). Recovery derives it from the adopted commit session's
+  `TaskPath` (X7).
+
+`project.Project` gets a method `p.MaxParallel() int` that returns the
+effective limit (the clamp in S3). The snapshot, the TUI, `prompts.Data` and
+`schedule` all call it, so the "0 means 1" rule lives in one place.
+
+The other project-control files are unchanged in shape:
+
+- **`blocked-session.yaml`** (`project/blocked_session.go`) needs no change.
+  The wolf already writes free text (`summary`, `attempted`), and integration
+  details go on the task file (`integration:`), where the wolf can already
+  read them.
+- **`last-planned.yaml`** (`project/planned_snapshot.go`) gains
+  `max_parallel_tasks`, so a change to the limit between planning cycles shows
+  up in the `ProjectChanges` diff that `Describe` hands the planner. The
+  planner's hint block (H4) depends on the limit.
+
+### D3. Audit events (`internal/audit`)
+
+`audit.Logger.Log` takes a free-form event name, so no change is needed in
+`internal/audit` itself. The events below are a naming contract, written down
+here and in `docs/state-snapshot.md`. All of them carry `path` (the
+`project.yaml`) and `task` (the task name), matching how `task_running` and
+`task_retry` identify a task today.
+
+**Worktree lifecycle** (`internal/daemon`, a new `worktree.go`):
+
+| Event | Extra fields | When |
+|---|---|---|
+| `worktree_created` | `worktree`, `branch`, `base` (`repo=sha,…`) | After `git worktree add` succeeds for every repo, before the session starts. |
+| `worktree_reused` | `worktree` | W4 idempotency hit (restart, re-dispatch onto a valid worktree). |
+| `worktree_create_error` | `repo`, `err` | Any `worktree add` failure. Followed by `task_released why=worktree_failed` and `project_blocked`. |
+| `worktree_removed` | `worktree`, `reason` (`integrated`/`retry`/`rerun`/`archive`) | W6 cleanup. |
+| `task_worktree_remove_error` | `repo`, `err` | Best-effort cleanup failed and was left for the sweep (W6). |
+| `task_worktree_gc` | `worktree`, `reason` | Reaper sweep removal (W7). |
+| `attempt_ref_saved` | `ref`, `sha` | Before a retry or re-run discards a worktree that held commits or edits. |
+
+**Integration** (`afterCommitSession`, `schedule`):
+
+| Event | Extra fields | When |
+|---|---|---|
+| `integration_started` | `queue_depth`, `base`, `onto` | `schedule` launches the commit agent for the queue head. |
+| `integration_succeeded` | `commits` (`repo=sha,…`), `fast_forward` (`true` when no rebase was needed) | Verification (I3) passed. Logged just before the existing `task_completed_stamped`. |
+| `integration_conflicted` | `repo`, `files`, `landed`, `attempts` | Commit agent reported `result: conflict`. Followed by `task_retry cause=conflict` or `project_blocked`. |
+| `integration_retry` | `integration_attempts`, `err` | Transient failure (I4); the same head relaunches. |
+| `integration_verify_failed` | `repo`, `hash`, `why` | The daemon's ancestor check failed. Always followed by `project_blocked`. |
+| `integration_partial` | `published`, `repo` | Partial publish. Always followed by `project_blocked`. |
+| `touches_exceeded` | `paths` | Hint audit (H3). |
+
+**Scheduling** (`schedule`):
+
+| Event | Extra fields | When |
+|---|---|---|
+| `task_deferred_overlap` | `overlaps` | A ready task was skipped for overlap. Logged once per task per blocking set, not on every pass. |
+| `task_deferred_cap` | `tokens_in_use` | Global cap reached. |
+| `task_waiting_integration` | `waiting_on` | A task's dep is at `success`, once per (task, dep). |
+| `scheduler_idle` | `in_flight`, `queued`, `deferred` | A pass started nothing but work is in flight. Replaces repeated `no_ready_tasks` lines when a pass is not a dead end. |
+
+**Changed existing events:**
+
+- `task_retry` gains `cause` (`failure` | `conflict`). An absent `cause` keeps
+  meaning "failure", so log readers that ignore it are unaffected.
+- `session_started` / `session_ended` / `session_skip_duplicate` already log
+  the session `key`. That key now carries the new `#task:<name>` / `#commit`
+  markers (S2), and no other change is needed.
+- `task_released` gains `why=worktree_failed` alongside `launch_failed`,
+  `stopped`, `orphaned` and `adopted_session_ended`.
+
+The **channel notifier** (`channels_notify.go`) watches no audit events.
+It is driven by `transitionProjectBlocked`/wolf calls, so it needs no change.
+An integration block reaches it through the ordinary block path, with the
+`blocked_reason` from I6.
+
+### D4. State snapshot (`internal/daemon/snapshot*.go`, `docs/state-snapshot.md`)
+
+Everything here is additive, so per the schema's own rule (`version` bumps
+only for breaking changes) **`version` stays `1`**. One existing value changes
+shape: `sessions[].key` gains new markers. That is covered below.
+
+**`projects[]`** gains:
+
+| field | notes |
+|---|---|
+| `max_parallel_tasks` | effective limit (`p.MaxParallel()`), always present (1 for legacy projects) |
+| `commit_queue` | task names in integration order (S5), head first, derived from disk via `taskgraph.Queued`. Present in offline snapshots too. |
+
+**`projects[].tasks[]`** gains:
+
+| field | notes |
+|---|---|
+| `touches`, `areas` | as on disk. `touches` is omitted when absent and `[]` when empty, keeping the H1 distinction. |
+| `exclusive` | `t.Exclusive()`; lets a reader see why tasks didn't run together |
+| `worktree`, `task_branch` | when set |
+| `base` | `[{repo, hash}]` when set |
+| `succeeded_at`, `completed_at` | RFC3339. `completed_at` is already on disk but missing from the snapshot today. |
+| `queue_position` | 1-based position in `commit_queue`; omitted when not queued |
+| `waiting_on` | deps at `success` (S5). Omitted when empty. |
+| `integration` | `{result, repo, files, attempts, landed}` when set |
+
+**`projects[].live`** gains:
+
+| field | notes |
+|---|---|
+| `running_tasks` | names of tasks holding a `#task:<name>` slot, sorted |
+| `integrating` | name of the task holding `#commit`, or absent |
+| `commit_reserved` | `commitBusy[path]`: true from commit launch until `afterCommitSession` finishes, wider than the session (S4) |
+| `deferred` | `{overlap: [names], cap: bool, power: bool}`: why ready tasks were not started on the last pass. Kept in memory by `schedule`. |
+
+`live.sessions` stays a list of kind strings, so it now repeats a kind:
+`["task","task","commit"]` for two running tasks and an integration. That is
+a value change, not a type change. The doc should say that readers who want
+to know *which* tasks are running should use `running_tasks`.
+
+**`sessions[]`**:
+
+- `key` is now `<path>#task:<name>` or `<path>#commit` for task and commit
+  agents (S2). Today's doc already says keys are "the `project.yaml` path,
+  plus `#wolf` / `#archive`". The table is updated to list every marker:
+  `#planning` (already missing from the doc, §7 of current behavior),
+  `#task:<name>`, `#commit`, `#wolf`, `#archive`. A reader that matched the
+  bare path exactly to find "the" task session must now match the prefix. This
+  is the only reader-visible break, and it is why the doc must change in the
+  same release as S2.
+- `splitSessionKey` (`snapshot_live.go`) splits on the **last** `#`, which
+  still works because task names cannot contain `#` (`task.ValidName`). It
+  returns the marker `task:<name>`. `projectLive` should switch on the kind
+  from the session entry, not on the marker, as it already does.
+- New optional `worktree` (task sessions) holding the agent's cwd, so a reader
+  can open the right checkout.
+
+**`task_counts`** stays a count per status. `running` can now exceed 1, and
+`success` counts the queue.
+
+**`snapshot_text.go`** (`orch status`): the per-project block prints
+`tasks: 2 running (a, b), 1 integrating (c), 1 queued` instead of only status
+counts, plus a `queue:` line when the queue is non-empty, and the
+`integration.result` of any blocked task.
+
+### D5. TUI views (`internal/tui`)
+
+The TUI reads task files and the daemon's `SessionInfo` list, not the
+snapshot (`ProjectView`/`TaskView` in `projects.go`). It needs these changes:
+
+- **`TaskView`** gains `SucceededAt`, `Worktree`, `QueuePos`, `WaitingOn`,
+  `Integration` (result + files) and `Exclusive`, filled in the same scan pass
+  that computes `TaskCounts`.
+- **Status glyph and colour** (`taskStatusGlyph`, `taskStatusStyle`):
+  - `success` stops sharing `✓` with `committed`. It becomes `⧗` (queued) or
+    `⇡` (integrating, when the project's `#commit` session's `TaskName`
+    matches), in the "running" colour, because it isn't done yet.
+  - `committed` keeps `✓`.
+  - A `ready` task with a non-empty `integration` (a conflict re-run waiting
+    for a slot) shows `↻`.
+- **Task breakdown** (`renderTaskBreakdown`, `R:… W:… B:… D:… F:…`): `D`
+  stops counting `success`, and a `Q:` (queued) count is added. Today's
+  comment ("Done counts both committed and success …") was right for a
+  pipeline where `success` lasted a few seconds. With a queue, `success` can
+  last minutes, and calling it done hides the backlog.
+- **Tasks pane rows** get a trailing dim hint: `queue #2`,
+  `waiting on X (integrating)`, `deferred: overlaps Y`, or
+  `conflict in <files> (attempt 2/3)`. `pendingDeps` already counts
+  non-committed deps; it stays, and `waiting_on` is shown separately to make
+  the difference visible.
+- **Project detail pane** (`project_detail.go`) gets a `parallel: 2 (running
+  a, b · integrating c · queued d)` line when `MaxParallel() > 1` or anything
+  is queued, and lists `worktree:` for a selected failed or blocked task.
+- **Sessions pane**: no structural change. Each task session is already its
+  own row, keyed by `SessionInfo.ID`, which is the session-map key and so
+  becomes `…#task:<name>`, unique per task. `AgentName` stays `task`/`commit`,
+  and `TaskName` is already shown (`tui.go` session box). The row label
+  `filepath.Base(filepath.Dir(key))` is unchanged by a suffix on the
+  filename. Two tasks of the same project now appear as two rows. That is the
+  visible sign parallelism is on, and no grouping is needed in v1.
+- **ACP tabs**: titled by session id (`acpTabTitle`), which already includes
+  the task name, so several task tabs are distinguishable. No change.
+- **`:workspace`** (`OpenWorkspaceDirTab`) keeps opening the shared
+  workspace. When the selected task has a `worktree:`, the Tasks-pane action
+  opens that directory instead. That is a small addition to the existing task
+  focus actions.
+
+### D6. Daemon-internal records
+
+- **`session.json`** (`internal/session`) gains nothing. `Kind` and
+  `TaskPath` are already recorded, and they are enough to rebuild the
+  `#task:<name>` / `#commit` key on adoption (X7). `Workspaces` already lists
+  the mounts, so the task worktree is recorded as the first entry for free.
+- **In-memory maps** (`daemon.go`): `commitBusy`, `schedMu`, `taskTokens`
+  and `capDeferred` (S3, S4). None are persisted. Each is rebuilt on restart
+  from adopted sessions plus disk (X7).
+
+### D7. Backward and forward compatibility
+
+| Situation | Behavior |
+|---|---|
+| Existing task files (no hints, no worktree fields) | Load unchanged. Exclusive by H1. Dispatch creates a worktree on their next run. A task already at `committed` is never touched. |
+| Existing `project.yaml` (no `max_parallel_tasks`) | Limit 1, so the pipeline behaves as today (S1). Worktree isolation still applies. |
+| A project **mid-run** when the new daemon first starts | A task at `running` with no `worktree:` was started by the old daemon in the shared tree. Reconcile adopts its session as today (`#task:<name>`, X7), and it finishes in the shared tree. Its commit then goes through the **legacy commit path**: `commit.tmpl` without the worktree branch, committing the shared tree directly, which is exactly today's behavior. `afterCommitSession` skips the worktree cleanup and ancestor check for a task with no `task_branch`. A task at `success` with no `task_branch` integrates the same way. One code path, keyed on "does this task have a `task_branch`?", keeps every in-flight project on the old daemon finishing correctly. |
+| Shared tree dirty when the first worktree task is dispatched (left over from a legacy task) | `schedule` refuses to cut a worktree while any legacy task (no `task_branch`) is `running` or `success`. Those must drain first, which is automatic at `limit: 1`. Otherwise the integration's clean-tree check (I3) would block on files that belong to the legacy task. |
+| Downgrade: old daemon reads new files | Every new field is ignored. The old daemon commits the shared tree, which no longer holds the task's work, because that is in the worktree. **A downgrade with tasks at `running`/`success` loses track of their work.** The commits are still on `wm/…` branches and nothing is deleted, but the old daemon won't integrate them. The rollout ([Phased rollout](#phased-rollout)) should ship the reader side (fields parsed, legacy path kept) before the writer side, and document "drain to idle before downgrading". |
+| Snapshot readers | `version: 1`, additive fields. The only value change is `sessions[].key` markers, which is documented. |
+| Audit readers (`audit.ParseLine`, snapshot `audit_events`) | New event names and fields. The parser is generic. |
 
 ## Interactions
 
-_To be written (task `design-state-interactions`)._
+This section goes through each subsystem that is not task dispatch itself
+and says what changes for it under per-task worktrees, the serialized commit
+queue and parallel task slots. The recurring theme is that every one of
+these subsystems was written against the single main slot. Each needs one of
+two fixes:
+
+- its busy check widened to "anything in flight" (`projectBusy` plus
+  `commitBusy`); or
+- its session-end handling made correct when several sessions end in an
+  arbitrary order.
+
+### X1. Review agent and PRs (`review.go`, `review_gateway.go`, `review_mcp.go`)
+
+**When the review agent runs.**
+
+- `transitionProjectComplete` is reached only when `g.AllCommitted()`. Under
+  this design that means the queue is empty and no task is `running`. It is
+  now called from `schedule` under `schedMu`, so two near-simultaneous last
+  integrations can't both run it. `ensureReviewPoll` is already idempotent.
+- `onReviewPoll` and `dispatchReviewAgent` check `hasSession(bare) ||
+  planningInFlight` today. Task and commit agents move off the bare key
+  (S2), so that check would stop seeing them. Both switch to `projectBusy(path)
+  || commitBusy[path] || planningInFlight(path)`.
+- In the steady state the review poll only runs on an `idle` project, where
+  nothing is in flight anyway. The widened check matters in the windows
+  between `working → idle` and a review-created task landing. It also covers
+  a `:review` kick (`forceReviewNow`) arriving while a review-fix batch is
+  still integrating. The review agent itself stays on the bare slot.
+
+**Review-created tasks.**
+
+- **Fix tasks** (`source.kind: pr-comment|pr-check`) are ordinary tasks. The
+  review agent writes no `touches`/`areas`, so each is exclusive (H4) and a
+  fix batch runs one at a time. Each fix gets its own worktree, is integrated
+  through the queue, and reaches `committed` with `commits:` holding the
+  **post-integration** shared-branch hash (D1). That hash is what Step 4 of
+  `review.tmpl` quotes ("Addressed in `<sha>`"), and it is a commit that will
+  exist on the PR once pushed. A pre-rebase task-branch hash would not be, so
+  the D1 rule on `commits:` is load-bearing for thread replies.
+- **Push tasks** (`source.kind: pr-push`) have no worktree (W4). They join the
+  commit queue directly (S5) and run on `#commit` in the shared workspace,
+  pushing `refs/heads/<pb>` for `source.repo` only, as today. A push task
+  `depends_on` the fixes it publishes, so `Ready()` only offers it once every
+  one of them is integrated. The commits it pushes are therefore exactly the
+  integrated ones.
+  - Today's rule "never push one repo's in-progress work" (`review.tmpl`) is
+    now enforced by structure: in-progress work lives on `wm/…` branches in
+    task worktrees, and the shared branch holds only integrated commits.
+  - Because the push shares the queue with integrations, it can never push a
+    shared tip that is halfway through a multi-repo publish (I3 step 3).
+- **Fix-cycle and error counters** (`reviewFixCycles`, `reviewErrors`) are
+  unchanged. They count review-agent runs, not tasks.
+
+**PR shape and merge detection.**
+
+- Task branches are never pushed (W3), so the PR shows one branch, `<pb>`,
+  with linear history (I2). Squash-merge and rebase-merge PRs behave as
+  today, and no `wm/*` branch ever appears on the remote.
+- `maybeTransitionMerged` counts `git rev-list base..HEAD` in
+  `Workspaces.Path(p.Branch)`. That is the shared repo's main working tree,
+  whose `HEAD` is `<pb>`. Integration fast-forwards that ref, so the count is
+  still exactly the integrated commits. Commits still sitting on task
+  branches are correctly ignored.
+- `review_mcp.go` (`fingerprintPR`) and `review_gateway.go` are read-only
+  GitHub probes. They are unaffected.
+
+**Files:** `review.go` (busy checks), `review.tmpl` (none; see H4).
+
+### X2. Cron (`dispatch.go` cron paths, `cron_missed.go`, `sleepy_head.go`)
+
+- **Firing on a `working` project.** `requestCronReplan` already refuses to
+  re-plan mid-flight, and the firing degrades to `revisitProject`. That now
+  lands in `schedule`, so a cron tick doubles as a recovery poll that also
+  refills free task slots and restarts a stalled queue. No change is needed.
+- **Re-plan gate.** `launchPlanningAgent` with `p.Replan` waits today while
+  `sessionKind(bare)` is live. It must wait for `!projectBusy(path) &&
+  !commitBusy[path]`. A re-plan resets and deletes task files, so it must not
+  overlap any task or commit session, or an integration that is still holding
+  `#commit`. Re-plans only start from `idle`/`ready`, so in practice this is
+  only reached when a cycle's last integration and the next tick race.
+- **New cycle on reset tasks.** The re-plan planner resets tasks to `ready`
+  and clears their result fields. The D1 list adds the worktree fields. Those
+  tasks' worktrees were already removed when they reached `committed` (W6), so
+  the next dispatch cuts fresh worktrees from the shared tip that now holds
+  the previous cycle's work. Attempt refs from the previous cycle were deleted
+  at `committed` (W7 step 4). A task the planner **deletes** has its leftovers
+  removed by the sweep ("task file missing", W7).
+- **Missed runs** (`cron_missed.go`: `detectMissedAtStartup`, `sleepWatchLoop`,
+  `evaluateMissed`) and sleepy-head catch-up (`catchUpProject` →
+  `runCron`) are unaffected. They decide *whether* to start a cycle, and a
+  cycle starts with planning, before any task exists. `CronRuns` counting is
+  per cycle, not per task, so parallel tasks don't change it.
+- **Battery.** `onCronFired` already records a missed tick on battery. With
+  the power check also inside `schedule` (S6), a cron poke on battery starts
+  no task or commit agents either.
+- **Scheduler keys.** Cron uses the bare path, and the PR poll uses
+  `path#review`, as scheduler keys. Scheduler keys and session keys are
+  separate namespaces, so the new `#task:`/`#commit` session keys don't
+  collide with them.
+
+**Files:** `dispatch.go` (`launchPlanningAgent` re-plan gate),
+`planning.tmpl` (result-field list).
+
+### X3. Wolf and blocked sessions (`dispatch_lifecycle.go`, `project/blocked_session.go`, `wolf.tmpl`)
+
+**Blocking with siblings in flight.** `transitionProjectBlocked` does not
+kill running siblings (S4), so the wolf can start while other task agents are
+still working and their outcomes are still arriving. Five consequences
+follow:
+
+1. **The wolf is told what is in flight.** `launchWolfAgent` already fills
+   `FailedTasks` (failed/blocked). It also fills `InFlightTasks`: tasks at
+   `running`, plus `success` tasks with their queue position. `wolf.tmpl`
+   says: don't edit those, they will finish on their own; the queue is frozen
+   while the project is blocked; and unblocking resumes it from the same
+   head. `prompts.Data`/`setup.Context` carry the list into
+   `.orch/context.yaml`.
+2. **Second block while blocked.** A sibling can exhaust its retries, or hit
+   an invariant, while the project is already `blocked` and the wolf is
+   running. Today `transitionProjectBlocked` would overwrite `blocked_reason`,
+   and `launchWolfAgent` would dedupe on `#wolf`, so the running wolf never
+   hears about it. Instead, on an already-blocked project the daemon
+   **appends** the new reason (`…; also: task "b" failed after 3 attempts`)
+   and logs `project_block_additional`, so the wolf and the TUI both see it.
+   It does not relaunch the wolf. `wolf.tmpl` says to re-read
+   `project.yaml` and `tasks/` before handing back, because both may have
+   changed while it worked. The wolf's own record
+   (`blocked-session.yaml`: `blocked_reason`, `summary`, `attempted`) needs no
+   schema change.
+3. **The unblock resumes everything at once.** The wolf sets `working` (or
+   `ready`/`idle`), its `onEnd` calls `revisitProject` → `schedule`, and that
+   one pass starts the queue head and fills free slots, bounded by the
+   limits. If another task is still `failed` with no budget, the graph is
+   stuck, and `schedule`'s stuck-graph block re-blocks with a reason that
+   names it. That reason is no worse than today's.
+4. **What the wolf can touch.** The wolf's mounts are the control dir and
+   the shared workspace (W5). That already includes `.worktrees/<task>/` for
+   every retained task, and the absolute `gitdir:` pointers resolve because
+   sbx mounts at host paths. I6 gives the three ways out of an integration
+   block.
+   - A wolf that commits directly on the shared branch moves the tip outside
+     the queue. If an integration is running, its `--ff-only` fails cleanly
+     and it retries (I3 step 3, transient). It never corrupts anything.
+   - A wolf that leaves the **shared tree dirty** makes the next integration
+     block (I3). `wolf.tmpl` therefore says: never leave uncommitted changes
+     in the shared workspace; work in the task's worktree, or commit.
+5. **Retention.** `retainSandbox` call sites also keep the worktree and
+   branch, and `worktree:` stays set (W6). When the wolf resets a task to
+   `ready`, the next dispatch saves an attempt ref and re-cuts (X4 explains
+   why a dispatch from `ready` always re-cuts).
+
+**Tandem.** `wolf_tandem_test.go` asserts that the wolf runs alongside the main
+slot. With slots split, the same test runs with two `#task:*` sessions plus
+`#commit` live. `schedule` declining while the project is blocked means no
+*new* task or commit sessions start alongside the wolf.
+
+**`:session` / `:workspace`** (`interactive.go`): `OpenInteractiveSession`
+mounts the shared workspace, so a human editing there has the same dirty-tree
+effect as the wolf. The session's banner (its `instructions.md`) gains the
+same warning. When it is opened with a selected task that has a `worktree:`,
+it mounts that worktree as cwd instead (D5), which is the useful place to
+poke at a failed task.
+
+**Files:** `dispatch_lifecycle.go` (`transitionProjectBlocked` append,
+`launchWolfAgent` `InFlightTasks`), `prompts` (`Data.InFlightTasks`),
+`wolf.tmpl`, `interactive.go`, `wolf_tandem_test.go`.
+
+### X4. Stop / start (`stop.go`, `tui/stop.go`)
+
+- **Kill.** `killProjectSessions` already matches `path` and every
+  `path#…` key, so it kills all `#task:*` sessions and `#commit` with no
+  change. Each session's `onEnd` still fires.
+- **Session ends on a stopped project.** `afterTaskSession` already checks
+  `isStopped` and only calls `releaseRunningTask`. It now also releases its
+  global token. `afterCommitSession` already returns early when stopped. It
+  now also releases `commitBusy`; otherwise the reservation would outlive
+  the stop and `:start` could never integrate. `capDeferred` drops the
+  project. All three releases sit in `defer`s at the top of the callbacks so
+  that no early return can skip them.
+- **Task worktrees on stop.** They are kept (W6). On `:start`, a task
+  released to `ready` is dispatched through the normal `ready → running`
+  path, and **a dispatch from `ready` always re-cuts the worktree.** The old
+  one is saved first as an attempt ref (committed plus dirty edits, W6) if it
+  holds anything, and then removed. The W4 "reuse if valid" rule applies
+  **only** to a task that is still `running` with a live, adopted session
+  (X7). That resolves an ambiguity between W4 and W6: a stopped task always
+  starts again from the *current* shared tip. Stops cost no attempt. The
+  re-run prompt names the saved ref, like a conflict re-run does, so the
+  agent can pick up where it was interrupted.
+- **`success` tasks on stop** keep their worktree and branch. They are the
+  queue. `:start` (`StoppedFrom` → `working`) → `schedule` resumes the queue
+  from the earliest `succeeded_at`. That replaces today's
+  `firstUncommittedSuccess` "commit recovery" (S5).
+- **A commit agent killed mid-integration** leaves the same states a crash
+  leaves: a rebase in progress in the task worktree, or some repos
+  fast-forwarded and others not. `:start` goes through the same
+  integration-recovery path as a restart (X7). That path is idempotent, so a
+  stop in the middle of an integration is safe.
+- **Stopping during a block** (`StoppedFrom: blocked`) behaves as today:
+  `:start` restores `blocked`, and the queue stays frozen.
+
+**Files:** `dispatch_lifecycle.go` (deferred releases), `stop_test.go`
+(two task sessions plus `#commit` killed; start resumes the queue and
+re-cuts worktrees).
+
+### X5. Intake and re-planning (`intake.go`, `repo_sync.go`, `project/planned_snapshot.go`)
+
+- **Planning while working** keeps its rule: a planner may run alongside
+  task and commit agents (`runsAlongsidePlanning`, generalized to the
+  `#task:`/`#commit` prefixes, S2), but not alongside the project or review
+  agent on the bare slot. `handleIntakeFile` and `intake_queued` are
+  unchanged.
+- **The planner sees integrated work only.** Its second mount is the shared
+  workspace, which no longer contains half-finished task edits (§7 caveat,
+  W5). It plans new tasks against code that has actually landed.
+- **New tasks run beside in-flight tasks.** A task the planner writes while
+  others are running is admitted on the next `schedule` pass if its hints
+  don't overlap them (H3). `planning.tmpl` already says to "never touch a task
+  that is `running` or `success`". It gains: and don't edit the
+  `touches`/`areas` of in-flight tasks. Those hints were the basis of an
+  admission decision that has already been made, and changing them afterwards
+  would hide a real overlap.
+- **`deferToPlanner`** keeps guarding graph-wide decisions (complete,
+  stuck-graph block, `taskgraph_error`). These now live in `schedule`, so
+  the guard moves with them (S4).
+- **Atomic task writes.** The planner already writes each task file
+  complete, in one go. With `schedule` passes running on several goroutines,
+  a half-written file is still only a `taskgraph.Load` parse error. That
+  error is deferred to the planner while one is in flight, as today.
+- **Repos added mid-run** (`syncPlannedRepos` → `Workspaces.AddRepos`)
+  land in the shared workspace. Task worktrees cut after that include them
+  (W2). Worktrees already in flight don't, and integration skips repos a
+  task worktree lacks. A task that needs the new repo was planned by the run
+  that added it, so it is new and gets a new worktree.
+- **`last-planned.yaml`** gains `max_parallel_tasks` (D2), so a limit change
+  appears in the `ProjectChanges` diff and the planner can refresh its hints
+  (H4 only renders the hint block when the limit is over 1).
+- **Re-plan** (cron or human `replan: true`): see X2. The gate widens to all
+  task and commit slots.
+
+**Files:** `dispatch.go` (`runsAlongsidePlanning` prefix form, re-plan gate),
+`planning.tmpl`, `project/planned_snapshot.go`, `repo_sync.go` (none).
+
+### X6. Archive (`launchArchiveAgent`, `tui/archive.go`, `tui/cleanup.go`)
+
+Today `cleanup: true` outranks status routing. `dispatchProject` returns
+before dispatching any task, but a task or commit agent already running is
+not stopped. With parallel tasks there can be several of them, plus a queue.
+The rule becomes **drain, then archive**:
+
+1. **No new task agents.** `schedule` returns without admitting tasks while
+   `p.Cleanup` is set. That includes retries and conflict re-runs, which go
+   through `schedule` (S4).
+2. **The queue keeps integrating.** `schedule` still starts the commit agent
+   for the queue head, so finished work (`success`) lands on the shared
+   branch before the archive agent pushes it. Throwing it away would be
+   worse.
+3. **The archive agent waits.** `launchArchiveAgent` (after `beginCleanup`)
+   defers while `projectBusy(path) || commitBusy[path]`, logging
+   `archive_waiting_in_flight` with the counts. Every `afterTaskSession` /
+   `afterCommitSession` calls `schedule`, and that ends with a revisit when
+   the project is draining for cleanup. The last one to finish therefore
+   triggers the archive agent. This wait is new: today the archive agent can
+   run concurrently with a task agent in the same shared tree.
+4. **Before launch** (W6): remove the worktrees of `committed` tasks, run
+   `git worktree prune`, and put every task still holding **unintegrated**
+   work (`failed`/`blocked`/a stuck `success`) into the archive agent's
+   context, with its `task_branch` and `attempt_refs`. `archive.tmpl` gains
+   a line: report those as work not carried into the branch. Its existing
+   "final commit if needed" step should now find the shared tree clean. A
+   dirty shared tree means a rule was broken, and the report should say so.
+5. **`:archive`** (`tui/archive.go:archiveProject`), after `archive: true`:
+   - The TUI runs the same worktree removal, then deletes the project's
+     **refs**: `refs/heads/wm/<pb>/*` and `refs/wm/<pb>/*` in each repo. Only
+     then do `removeWorkspaceOrch` and `wsp rm --force` run.
+   - Deleting the refs explicitly matters if a repo directory is ever a
+     worktree of a shared wsp mirror rather than a full clone. The refs would
+     then live in the mirror and survive `wsp rm`. W2 notes this case for
+     mounts too.
+   - The removal is a shared helper in a new `internal/worktree` package,
+     used by the daemon (W6/W7) and the TUI, so the two never disagree about
+     paths or ref names.
+
+`:cleanup` (`tui/cleanup.go:requestCleanup`) is unchanged. The reaper's
+`stageComplete` for `#archive` is unchanged.
+
+**Files:** `dispatch.go` (`schedule` cleanup gate), `dispatch_lifecycle.go`
+(`launchArchiveAgent` drain wait, pre-launch cleanup, context),
+`archive.tmpl`, `tui/archive.go`, `archive_dispatch_test.go`,
+`tui/archive_test.go`.
+
+### X7. Daemon restart recovery (`reconcile.go`, `watcher.go:startupScan`, `restart_*_test.go`)
+
+ACP task and commit sessions are **detached, not killed**, on daemon
+shutdown (`TestRestartDoesNotCloseDetachableSession`). Their sandboxes keep
+working while the daemon is down, so recovery has to handle two kinds of
+state: sessions still alive, and the half-finished results of sessions that
+ended while nobody was watching. The startup order (S6) is:
+
+```
+detectMissedAtStartup → addTree → reconcileSessions → … → startupScan:
+    per project: releaseOrphanedTasks → resumeOrphanedOutcomes → worktree sweep (W7) → schedule
+```
+
+**1. Re-keying adopted sessions** (`reconcileSessions`). The key is derived
+from `rec.Kind` plus `rec.TaskPath`. Both are already in `session.json`
+(D6).
+
+| Kind | Key | Also re-takes |
+|---|---|---|
+| task | `<path>#task:<taskNameFor(rec.TaskPath)>` | one global token |
+| commit | `<path>#commit` | `commitBusy[path]` |
+| project, review | `<path>` (bare) | — |
+| planning / wolf / archive | unchanged | unchanged |
+
+Today two adopted task sessions for one project both map to the bare key, and
+the second is dropped. Re-keying fixes that. A second adopted **commit**
+session for the same project would point at an earlier crash bug. It is
+logged as `session_reconcile_error` and not adopted, and its task is handled
+by integration recovery (part 4).
+
+**2. What an adopted session's end does.** Today an adopted task or commit
+session ends with `releaseRunningTask` + `revisitProject`, skipping
+`afterTaskSession` / `afterCommitSession`. Under the new design that would:
+
+- skip `succeeded_at`, so a task that finished while adopted sorts first in
+  the queue;
+- skip retry routing for a `failed` task, which then sits until the
+  stuck-graph block;
+- skip the verify/cleanup after `committed`;
+- leak the token and `commitBusy`.
+
+Adopted sessions therefore get the **same** callbacks as live ones. Both
+already route purely on what the task file says, so nothing is lost by
+having run under a previous daemon. They keep `releaseRunningTask` as the
+first step, which covers the case where the agent died without writing
+anything.
+
+**3. Outcomes that landed while the daemon was down** (new
+`resumeOrphanedOutcomes`, in `startupScan`, per task with no live session):
+
+| Found on disk | Action (what the missed callback would have done) |
+|---|---|
+| `running`, no session | `releaseOrphanedTasks` → `ready` (unchanged). The sweep saves an attempt ref and removes the worktree. Re-dispatch re-cuts (X4). No attempt is spent, as today. |
+| `success`, no `succeeded_at` (and a `task_branch`) | Stamp `succeeded_at` from the task file's mtime, so the queue order roughly matches finish order. Legacy tasks (no `task_branch`) keep the "sorts first" rule (S5). |
+| `failed` with `integration.result: conflict` | Apply the conflict re-run path (I4): save an attempt ref, `attempts++`, `ready`, or block if exhausted. |
+| `failed` / `blocked`, otherwise | Apply `handleTaskFailure` / block, the routing `afterTaskSession` would have done. **Behavior change:** today such a task just sits until the graph looks stuck. |
+| `committed` with `task_branch` still set (cleanup never ran) | Run the `afterCommitSession` verification (I3) and W6 cleanup, and stamp `completed_at` if missing. A verification failure blocks the project, as it would have live. |
+
+**4. A half-done integration.** A task is at `success` with no live commit
+session, and its last integration may have stopped anywhere in I3. Recovery
+does **not** try to work out which step was reached. It relies on the
+procedure being **resumable**: running the commit agent again from the top
+converges. This needs two small amendments to I3:
+
+- **Step 0's skip rule** becomes "skip repos where the task branch equals
+  `base`", rather than "where `<pb>..task` is empty". A repo published by
+  the interrupted attempt has `<pb>..task` empty but still belongs in
+  `commits:`.
+- **Step 4 records** the shared tip of every repo whose task branch is an
+  ancestor of the shared branch and differs from `base`. That includes repos
+  published by a previous attempt.
+
+Before launching the commit agent for the queue head, `schedule` runs a cheap
+host-side `prepareIntegration(t)`. It runs on every launch, not only after a
+restart, so it is exercised constantly:
+
+1. **Interrupted rebase** in a task worktree (`git -C <wt>/<repo> rev-parse
+   --git-path rebase-merge` exists): `git rebase --abort`. The pre-rebase tip
+   is restored, and rebasing creates no signed objects worth keeping.
+2. **Stale `index.lock`** in the shared repo or the task worktree, with no
+   live session holding it (`#commit` is free here by construction): remove
+   it and log `integration_lock_cleared`.
+3. **Dirty shared tree**: block with `shared workspace <repo> has
+   uncommitted changes (interrupted integration?)`. A fast-forward killed
+   mid-checkout can cause this. Auto-resetting it would risk discarding a
+   human's edits, so the wolf decides (I3, I4).
+
+Then the commit agent runs again, and its pass is mostly no-ops:
+
+| Repo state | What the pass does |
+|---|---|
+| Already fast-forwarded | Step 2 is a no-op (the task branch is already on the tip), and step 3 is a no-op too. |
+| Rebased but not published | Fast-forwarded. |
+| Untouched | Rebased and published normally. |
+
+The commit queue is serialized, so nothing else moved the tip in between. A
+mid-integration crash is therefore **not** the I4 "partial publish" block.
+That block stays reserved for a tip moved *outside* the queue.
+
+A recovery relaunch **does** count against `integration.attempts`. A commit
+agent that keeps dying (or keeps taking the host down) therefore ends with the
+wolf after `maxIntegrationAttempts`, instead of looping across restarts.
+
+**5. Worktrees after a restart.** The W7 sweep decides keep or remove per
+task status and live session, after `releaseOrphanedTasks` and before
+`schedule`. An adopted `running` task keeps its worktree untouched. W4's
+"reuse a valid worktree" applies **only** here, for a session that is still
+live. Anything half-created by a crash during `git worktree add` (some repos
+added, task released to `ready`) is removed and re-cut on dispatch.
+
+**6. In-memory state.** None of it is persisted; all of it is rebuilt:
+
+- `commitBusy`: from the adopted `#commit` session;
+- tokens: from adopted `#task:*` sessions;
+- `capDeferred`: empty, refilled by the first `schedule` pass;
+- `schedMu`: fresh.
+
+The queue and the slots come from disk (S1.5). A restart with
+`max_parallel_tasks > 1` re-admits up to `limit` tasks per project. The
+global cap bounds the burst (S6).
+
+**7. Tests.** These go next to `restart_test.go`, using its
+session.json-seeding helpers:
+
+- `TestReconcileAdoptsTwoTaskSessionsUnderTaskKeys`: both adopted, two
+  tokens taken, `startupScan` launches no duplicate.
+- `TestReconcileAdoptsCommitSessionRetakesCommitBusy`: no second integration
+  starts while the adopted one runs.
+- `TestAdoptedTaskSessionEndRoutesThroughAfterTaskSession`: a `success`
+  written while adopted is stamped and queued, and a `failed` one is retried.
+- `TestRestartResumesHalfPublishedIntegration`: repo A fast-forwarded,
+  repo B not. After restart B lands and `commits:` lists both.
+- `TestRestartAbortsInterruptedRebase`.
+- `TestRestartBlocksOnDirtySharedTree`.
+- `TestRestartFinalizesCommittedTaskWithLeftoverWorktree`.
+- `TestRestartReplaysConflictOutcome`: `failed` + `integration.result:
+  conflict` becomes a re-run with `attempts++`.
+- `TestRestartOrphanedRunningTaskRecutsWorktree`: an attempt ref is saved
+  and the new base is the current tip.
+- `TestRestartLegacyInFlightTaskUsesSharedTree`: a task `running` without
+  `task_branch` finishes and commits via the legacy path (D7).
+
+`restart_catchup_test.go` (missed cron → sleepy-head) needs no change. Its
+projects are idle, with nothing in flight.
+
+**Files:** `reconcile.go` (key derivation, reservations, callbacks),
+`watcher.go` (`startupScan` order), `dispatch_lifecycle.go`
+(`resumeOrphanedOutcomes`, `prepareIntegration`), `commit.tmpl` (resumable
+step 0/4 rules), `restart_test.go`.
+
+### X8. Smaller touch points
+
+- **Reaper** (`reaper.go`). `stageComplete` already works per key, and
+  `filepath.Dir(key)` handles suffixed keys (S2). With N task sessions the
+  idle timeout (`defaultSessionIdleTimeout`) and done-grace apply per
+  session, which is correct. The reaper also runs the worktree sweep (W7).
+- **Power gate** (`power_gate.go`). `schedule` checks it (S6). On resume,
+  every slot fills at once, bounded by the limits.
+- **Workingman agent and the snapshot.** The workingman agent reads the
+  snapshot, so D4's `running_tasks`, `commit_queue` and per-task
+  `integration` are what let it answer "why isn't X running?". Its prompt
+  gains a line pointing at those fields.
+- **Channels / notifications.** Unchanged. Blocks still go through
+  `transitionProjectBlocked`. The appended-reason rule (X3) means a second
+  block on an already-blocked project does **not** send a second
+  notification. The daemon rate-limits wolf messages per work stream anyway.
 
 ## Risks & open questions
 
