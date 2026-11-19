@@ -427,7 +427,10 @@ Why this layout:
   are advisory). A `git worktree add` costs only a checkout, and integration
   skips repos with no new commits (I3). Repos added later through
   `AddRepos` / `syncPlannedRepos` show up in the next task worktree created
-  after them. An existing task worktree is never extended mid-flight.
+  after them. An existing task worktree is never extended while a session
+  runs in it. When it is reused for a later attempt (W4), the daemon adds a
+  worktree for any repo the root lacks, cut from that repo's current shared
+  tip, and records that repo's `base`.
 - Today's repo is a full clone (`.git/` is a directory). If wsp ever makes
   the per-repo directory itself a worktree, `git worktree add` still works,
   because git resolves the common dir. The mount rule in W5 uses
@@ -465,19 +468,18 @@ wm/<project-branch>/<task-name>
 - Task branches are **never pushed**. Push tasks and the archive agent push
   only the shared branch (`commit.tmpl`: "push ONLY that repo … do NOT push a
   different branch"). That property is what makes rebasing them safe (I2).
-- A retry or re-run reuses the same branch name (see W6). The branch is
-  recreated, not appended to, so the name always means "the current attempt".
-  The previous attempt's tip is kept under
-  `refs/wm/<project-branch>/<task-name>/attempt-<n>` when it carried commits.
-  That is a non-branch ref, so it never shows in `git branch` or gets pushed.
-  The re-run agent and the wolf can still diff against it.
+- A retry or re-run keeps **the same branch and the same worktree** (W6). The
+  branch is not recreated between attempts, so it always holds whatever the
+  latest attempt left: its commits, plus any uncommitted edits in the
+  worktree. No separate per-attempt refs are kept. The worktree itself is the
+  record of the previous attempt, and the next attempt decides what to keep.
 
 ### W4. Base commit
 
-A task worktree is created **when the task is dispatched**, by the daemon, on
-the host, right before `launchTaskAgent` starts the session. This is the point
-where `markTaskRunning` flips `ready → running` today. It is cut, per repo,
-from the **shared tip at that moment**:
+A task worktree is created **when the task is first dispatched**, by the
+daemon, on the host, right before `launchTaskAgent` starts the session. This
+is the point where `markTaskRunning` flips `ready → running` today. It is cut,
+per repo, from the **shared tip at that moment**:
 
 ```
 git -C <shared>/<repo> worktree add -b wm/<pb>/<task> \
@@ -496,27 +498,47 @@ git -C <shared>/<repo> worktree add -b wm/<pb>/<task> \
   file (`base: [{repo, hash}]`, the same shape as `commits:`; the schema work
   belongs to [Schema/state changes](#schemastate-changes)). Integration (I3)
   uses it to tell a fast-forward from a rebase. The wolf uses it to see how
-  stale a blocked task was.
+  stale a blocked task was. Because a retry keeps its worktree, and a
+  conflict re-run may rebase it (I4), the base can move between attempts. The
+  daemon therefore re-stamps `base` each time `afterTaskSession` observes
+  `success`, as `git merge-base wm/<pb>/<task> refs/heads/<pb>` per repo.
+  Integration retries never re-stamp it (X7 relies on that).
 - **Push tasks get no worktree.** A push task (`t.IsPushTask()`) has no code
   work of its own (`dispatchReadyTask` sends it straight to
   `launchCommitAgent`). It publishes the shared branch, so it runs in the
   shared workspace, through the commit queue (I1), exactly as it does today.
-- **Failure creating the worktree** (a git error, disk full, the branch
-  already exists and could not be cleared) is handled like a failed launch:
+- **Failure creating the worktree** (a git error, disk full, a ref-lock
+  collision, W3) is handled like a failed launch:
   `releaseRunningTask` and then `transitionProjectBlocked`. The wsp workspace
   provisioning failures that `startSessionTracked` reports today are handled
   the same way.
 
-Creation is idempotent, which matters for restart recovery. Reuse is
-allowed in **one** case only: the task is still `running` with a live,
-adopted session (X7), and `.worktrees/<task>/<repo>` exists **and** is
-registered in `git worktree list --porcelain` on `wm/<pb>/<task>`. A dispatch
-from `ready` always re-cuts from the current tip, after saving an attempt ref
-if the old worktree holds commits or edits (X4). Anything else (a stray
-directory, a branch on the wrong commit, a worktree whose directory vanished)
-is removed and recreated (W6). `git worktree add`
-refuses to check out a branch that is checked out elsewhere, which gives a
-second guard against two sessions sharing one task worktree.
+**Reuse is the rule; cutting is for the first dispatch.** Every dispatch of
+a task (first run, automatic retry, conflict re-run, `:start` after a stop,
+re-dispatch after an orphaned restart, a wolf reset to `ready`) goes through
+the same idempotent step, per repo:
+
+- `.worktrees/<task>/<repo>` exists **and** is registered in
+  `git worktree list --porcelain` on `wm/<pb>/<task>`: **reuse it as it is**,
+  dirty or not (`worktree_reused`). Its base stays the one recorded in the
+  task file.
+- No worktree, but `wm/<pb>/<task>` exists (a directory removed by hand, or a
+  crash during `git worktree add`): re-attach the existing branch with
+  `git worktree add <path> wm/<pb>/<task>` (no `-b`), so committed work is
+  never thrown away.
+- Neither exists: cut a new one from the current shared tip, as above.
+- Anything else (a stray directory that is not a registered worktree, a
+  worktree on the wrong branch) is moved aside to
+  `.worktrees/.stale/<task>-<unix-ts>/` and logged, then handled as "no
+  worktree". It is never deleted unseen.
+
+The daemon never resets a reused worktree. Whether to keep, fix or discard
+an earlier attempt's changes is the task agent's decision, and the task
+prompt says so (W6). Only a task's first dispatch, or a dispatch after the
+worktree was removed at `committed` (a cron re-plan resetting the task, X2),
+starts from a fresh tip. `git worktree add` refuses to check out a branch
+that is checked out elsewhere, which gives a second guard against two
+sessions sharing one task worktree.
 
 ### W5. Mounts into the sandbox
 
@@ -589,49 +611,55 @@ fatal to the pipeline.
 
 | When | What happens | Hook |
 |---|---|---|
-| **Successful integration** (task reaches `committed`) | First verify, for each repo with commits, `git merge-base --is-ancestor wm/<pb>/<task> refs/heads/<pb>`. Then remove the worktree, delete the branch and drop any `refs/wm/…/attempt-*`. The shared branch and the task file's `commits:` are the permanent record. If the ancestor check fails, nothing is removed; the integration did not really land, so this is treated like I4's "commit agent lied" case (block). | `afterCommitSession`, before the graph reload that dispatches the next task |
-| **Failure with automatic retry** (`handleTaskFailure`, `attempts < maxTaskAttempts`) | If the failed attempt's branch has commits, save its tip as `refs/wm/<pb>/<task>/attempt-<n>`, keep the working tree diff as a commit on that ref (`git stash create`-style) when it is dirty, then remove the worktree and branch. The retry cuts a **fresh** worktree from the **current** shared tip at its dispatch. That differs from today, where a retry inherits the failed attempt's uncommitted edits in the shared tree, mixed with whatever else is there. A clean start is the more predictable behavior. The previous attempt stays diff-able through the saved ref. | `handleTaskFailure`, before `launchTaskAgent` |
-| **Re-run after an integration conflict** (I4) | Same as a retry: save the attempt ref, remove, and re-cut from the new tip. | conflict path in `afterCommitSession` |
-| **Terminal failure / blocked** (retries exhausted, agent wrote `blocked`, integration blocked) | **Keep** the worktree and branch, mirroring `retainSandbox`, so the wolf (and a human) can inspect them. The task file records `worktree: <path>`. When the wolf (or `:start` after a manual fix) resets the task to `ready`, the next dispatch saves its ref and re-cuts a fresh worktree from the current tip (W4, X4). | `retainSandbox` call sites |
-| **Stop** (`enforceStopped`) | Keep everything. A stopped task is released back to `ready` (`releaseRunningTask`), and `:start` re-dispatches it into a fresh worktree. A task stopped at `success` keeps its worktree, because that branch is exactly what the commit queue will integrate on `:start`. | — |
+| **Successful integration** (task reaches `committed`) | First verify, for each repo with commits, `git merge-base --is-ancestor wm/<pb>/<task> refs/heads/<pb>`. Then remove the worktree and delete the branch. This is the only point in a task's life where its worktree is removed. The shared branch and the task file's `commits:` are the permanent record. If the ancestor check fails, nothing is removed; the integration did not really land, so this is treated like I4's "commit agent lied" case (block). | `afterCommitSession`, before the graph reload that dispatches the next task |
+| **Failure with automatic retry** (`handleTaskFailure`, `attempts < maxTaskAttempts`) | **Keep** the worktree and branch exactly as the failed attempt left them, committed and uncommitted changes alike. The retry runs in the **same** worktree (W4 reuse). Its task prompt says this is attempt `n`, that the worktree may be dirty with the previous attempt's changes, and how to inspect them (`git status`, `git log <base>..HEAD`, `git diff <base>`). The agent decides whether to build on them, fix them, or undo them (`git reset --hard <base>`, `git clean -fd`) and start over. This matches today, where a retry inherits the failed attempt's edits in the shared tree, but without the mix of other tasks' edits. It is also cheaper: a mostly-right attempt is not thrown away. | `handleTaskFailure`, before `launchTaskAgent` |
+| **Re-run after an integration conflict** (I4) | Same as a retry: keep the worktree and branch. The commit agent's `rebase --abort` left the branch at its pre-rebase tip, with every change committed (I3 step 0). The re-run's prompt tells the agent to rebase its branch onto the current shared tip itself and resolve the conflicts it names (I4). | conflict path in `afterCommitSession` |
+| **Terminal failure / blocked** (retries exhausted, agent wrote `blocked`, integration blocked) | **Keep** the worktree and branch, mirroring `retainSandbox`, so the wolf (and a human) can inspect them. The task file records `worktree: <path>`. When the wolf (or `:start` after a manual fix) resets the task to `ready`, the next dispatch reuses the same worktree, with whatever the wolf did to it (W4, X4). A wolf that wants a clean start resets the worktree before handing back. | `retainSandbox` call sites |
+| **Stop** (`enforceStopped`) | Keep everything. A stopped task is released back to `ready` (`releaseRunningTask`), and `:start` re-dispatches it into the same worktree, so it picks up where it was interrupted. A task stopped at `success` keeps its worktree, because that branch is exactly what the commit queue will integrate on `:start`. | — |
 | **Archive** (`cleanup: true` → archive agent → `archive: true` → TUI `:archive`) | Before the archive agent launches, the daemon removes worktrees whose tasks are `committed` and runs `git worktree prune`. Any task worktree still holding **unintegrated** commits (a task at `success`/`failed`/`blocked`) is listed in the archive agent's context, so its report names the work that would be lost. `wsp rm --force` then deletes whatever is left with the workspace. | `launchArchiveAgent`; `internal/tui/archive.go` deletes the project's `wm/` refs before `wsp rm` (X6) |
 | **Project file deleted / project gone** | Nothing new. The workspace was never removed by the daemon, and it still is not. | — |
+
+Because a worktree lives from a task's first dispatch until it is
+`committed`, there is no per-attempt state to save. No `refs/wm/…/attempt-*`
+refs exist, and the daemon never discards an attempt's changes. The cost is
+that a later attempt may start from a stale base or a messy tree. Both are
+visible to the agent, and integration rebases onto the current tip anyway
+(I3), so a stale base costs at most a conflict the next attempt resolves.
 
 ### W7. Orphan GC in the reaper
 
 `reapLoop` gains a slower second duty: a worktree sweep, run every few
 minutes rather than every 30s `reapInterval`, and also once from
 `startupScan`, after `releaseOrphanedTasks`. For each project with a resolvable
-shared workspace, the sweep works through four steps:
+shared workspace, the sweep works through three steps:
 
 1. Run `git worktree prune` in each repo. This drops git admin entries whose
    directory is gone (for example, a user deleted `.worktrees/`).
 2. For each `.worktrees/<task>/`, decide its fate from the task file and the
    session map:
-   - **Task file missing:** the planner deleted or renamed the task. Save the
-     attempt ref if the branch has commits, then remove.
+   - **Task file missing:** the planner deleted or renamed the task. Remove
+     it only if it holds nothing beyond its base (clean tree, branch equal to
+     `base`). Otherwise keep it, log `task_worktree_orphaned`, and leave it
+     for `:archive`, whose context lists it as unintegrated work (X6).
    - **`committed`:** cleanup after a successful integration was interrupted
      (crash or restart). Remove.
-   - **`ready` with no live session:** an orphaned dispatch that
-     `releaseOrphanedTasks` reset, or a task released by a stop. Save an
-     attempt ref if the worktree holds commits or edits, then remove. The
-     next dispatch re-cuts anyway (X4), and removing early frees disk and
-     avoids a stale base.
-   - **`running` with a live session** (`taskSessionLive`, re-keyed per task
-     by [Scheduler & dispatch](#scheduler--dispatch)) and **`success`**
-     (waiting in the commit queue): keep.
-   - **`failed` / `blocked`, or `save_sandbox: true`:** keep (retained for
-     the wolf).
+   - **`ready`, `running`, `success`, `failed` or `blocked`:** keep. Every
+     one of these either is in use (a live session, or waiting in the commit
+     queue) or will be reused by the task's next dispatch (W4, W6), possibly
+     after the wolf has looked at it.
+
+   `.worktrees/.stale/` (W4) is never swept automatically. It holds
+   directories the daemon did not recognize, and only `:archive` or a human
+   removes it.
 3. For each `refs/heads/wm/<pb>/*` branch with no worktree, apply the same
-   decision on the task's status. That covers a crash between `worktree
-   remove` and `branch -D`.
-4. Delete `refs/wm/<pb>/<task>/attempt-*` refs once their task is
-   `committed`.
+   decision on the task's status. A `committed` task's branch is deleted
+   (a crash between `worktree remove` and `branch -D`). Any other branch is
+   kept; W4 re-attaches it on the next dispatch.
 
 The sweep never touches a worktree whose task has a live session, and it
-never deletes the only copy of uncommitted work without first saving an
-attempt ref, unless the task is `committed`, whose leftovers are by
-definition `created_files`. Each removal is audited
+never deletes uncommitted or unintegrated work, unless the task is
+`committed`, whose leftovers are by definition `created_files`. Each removal
+is audited
 (`task_worktree_gc`, with `task`, `reason`).
 
 ## Integration & conflicts
@@ -664,10 +692,12 @@ already makes one commit per repo per task, so rebase over a one-commit
 branch is a squash in effect. Rebase also keeps working if task agents start
 making several commits.
 
-### I2. Recommendation: rebase onto the shared tip, then fast-forward only
+### I2. Decision: rebase onto the shared tip, then fast-forward only
 
-Rebase the task branch in its own worktree, then `merge --ff-only` the shared
-branch to it.
+**Decided.** Integration always rebases the task branch in its own worktree,
+then runs `merge --ff-only` to move the shared branch to it. Merge and
+cherry-pick are not supported, and there is no per-project setting to choose
+between them. The reasons:
 
 - **Conflicts never touch the shared tree.** That property alone decides it.
   Merge and cherry-pick both resolve on the shared branch's working tree,
@@ -718,6 +748,11 @@ steps run in order:
    this step. Reset each one to the pre-rebase tip recorded at the start of
    step 2 (`git reset --hard <saved-tip>`). Then report the conflict (I4)
    and stop.
+   - **Build check.** If at least one repo was rebased in this step, and the
+     project sets `verify:`, and the task is not docs-only (R1), run the
+     `verify:` command in the task worktree. On failure, reset every rebased
+     repo to its saved tip, as for a conflict, and report
+     `result: verify_failed` (I4). The fast path (nothing rebased) skips it.
 3. **Publish.** In each shared repo, run
    `git -C <shared>/<repo> merge --ff-only wm/<pb>/<task>`. Because of the
    queue, the tip cannot have moved since step 1 unless something outside the
@@ -755,23 +790,32 @@ whose commits appear in `base..onto`, derived by the daemon from the
 | Outcome | Commit agent writes | Daemon action | Counts against |
 |---|---|---|---|
 | **Integrated** | `status: committed`, `commits:` | Verify (I3). Clean up (W6). Stamp `completed_at`. Dispatch dependents. | — |
-| **Textual conflict** during rebase | `status: failed`, `integration: {result: conflict, repo, files, onto}`, `failure_reason: "integration conflict in <repo>: <files>"` | **Re-run the task on the updated branch.** Save `attempt-<n>`. Remove the worktree (W6). Set `attempts++` and `status: ready`. Keep `integration:` for the next run. The scheduler re-cuts a worktree from the **current** tip. The re-run's task prompt tells the agent that a previous attempt exists at `refs/wm/<pb>/<task>/attempt-<n>`, which files conflicted, and which tasks landed in between. The usual cheap fix is `git cherry-pick` of its own attempt, resolving against code it can now read. | `attempts` (shared `maxTaskAttempts = 3` budget) |
+| **Textual conflict** during rebase | `status: failed`, `integration: {result: conflict, repo, files, onto}`, `failure_reason: "integration conflict in <repo>: <files>"` | **Re-run the task on the updated branch.** Keep the worktree and branch (W6). The commit agent's abort left the branch at its pre-rebase tip, fully committed. Set `attempts++` and `status: ready`. Keep `integration:` for the next run. The scheduler re-dispatches into the **same** worktree. The re-run does **not** get a re-cut worktree. Its task prompt tells the agent to rebase its own branch onto the current shared tip (`git rebase refs/heads/<pb>`), resolve the conflicts in the named files using the code that has since landed, check that the result still does what the task asks, and write `success`. The daemon then re-stamps `base` to the new tip (W4), so the next integration is normally a fast path. | `attempts` (shared `maxTaskAttempts = 3` budget) |
+| **Build check failed** after a clean rebase (R1) | `status: failed`, `integration: {result: verify_failed, repo, onto, output}`, `failure_reason: "build check failed after rebase onto <onto>"` | Same as a textual conflict: keep the worktree, `attempts++`, `ready`, re-run on the same worktree with a prompt naming the failing check and its output tail. Logged as `integration_verify_check_failed` (D3), which is the counter R1 tracks. | `attempts` |
 | **Transient** failure: shared tip moved outside the queue, git `index.lock`, sandbox or wrapper start failure (`runner.StartFailure`), or the session ended with the task still `success` | nothing, or `integration: {result: error, …}` | **Auto-retry the commit agent only.** The task's work is fine, so it is not re-run. Relaunch `launchCommitAgent` for the same task, up to `maxIntegrationAttempts = 2`, tracked in `integration.attempts`. After that, block. | `integration.attempts` (not `attempts`) |
 | **Dirty shared tree**, daemon verification failed (`commits:` not ancestors of the tip), or the agent wrote `committed` with nothing on the shared branch | anything | **Block** immediately. These mean an invariant broke. Re-running would just repeat it, and continuing would integrate on top of something unknown. | — |
 | **Partial publish** (repo A fast-forwarded, then repo B conflicted on a re-snapshot) | `status: failed`, `integration: {result: partial, published: [A], repo: B, …}` | **Block.** A has landed, so re-running the whole task would double-apply A. The wolf finishes B by hand, from B's worktree, which is kept. This is only reachable when something outside the queue moved the tip mid-integration. | — |
-| **Re-runs exhausted** (`attempts == maxTaskAttempts` when a conflict arrives) | as for conflict | **Block** with `task "<t>" conflicted with <landed tasks> in <files> after <n> attempts`. Keep the worktree and attempt refs (`retainSandbox`-style). | — |
+| **Re-runs exhausted** (`attempts == maxTaskAttempts` when a conflict or build-check failure arrives) | as for conflict | **Block** with `task "<t>" conflicted with <landed tasks> in <files> after <n> attempts`. Keep the worktree and branch (`retainSandbox`-style). | — |
 | **Push task** rejected | `status: blocked` (unchanged) | **Block** (unchanged). | — |
 
 Why re-run is the default for conflicts, and not commit-agent resolution:
 
 - **The commit agent has the wrong context.** It sees two diffs, not the
   intent behind either. The task agent re-running on the new tip has the task
-  description, the code as it now is, and its own previous attempt to crib
-  from. That is the same position a human rebasing a stale PR is in.
+  description, the code as it now is, and its own previous attempt, already
+  checked out in front of it. That is the same position a human rebasing a
+  stale PR is in.
+- **Rebase in place, not re-cut.** A conflict re-run keeps its worktree, like
+  every retry (W6), and rebases it onto the new tip. A re-cut would throw the
+  previous attempt away and make the agent redo work that was mostly right.
+  The rebase keeps it, and confines the new work to the conflicting files.
+  The agent may still discard its branch and start over
+  (`git reset --hard refs/heads/<pb>`) if it judges the old approach no
+  longer fits.
 - **A re-run is retry-shaped,** so it reuses the existing `handleTaskFailure`
   machinery (`attempts`, the `maxTaskAttempts` cap, `retainSandbox` on
-  exhaustion, `task_retry` audit). The only difference is that the worktree is
-  re-cut from a newer base. No new state-machine edge is needed.
+  exhaustion, `task_retry` audit). The only differences are the prompt's
+  conflict context and the rebase. No new state-machine edge is needed.
 - **Conflicts should be rare** if the planner's independence hints are any
   good. A conflict is evidence the hints were wrong. The scheduler can react
   by not co-scheduling the re-run with the tasks it conflicted with (the
@@ -784,10 +828,11 @@ falling back to re-run. It is an open question
 ([R9](#r9-smaller-open-questions)), not part of v1.
 
 **Semantic conflicts** (a rebase that applies cleanly but breaks the build)
-are **not** detected by integration, just as a sequential pipeline would not
-detect them either. They surface in later tasks, in the review agent's CI
-checks, or in an optional per-project `verify:` command run in the task
-worktree after step 2 and before step 3. That command is deferred to
+are caught by the pre-integration build check: an optional per-project
+`verify:` command, run by the commit agent in the task worktree after step 2
+and before step 3, but only when step 2 actually rebased something. A
+failure is handled like a textual conflict (re-run on the new tip). The rules
+for when it runs, and the phase that ships it, are in
 [R1](#r1-semantic-conflicts-that-merge-cleanly).
 
 ### I5. `attempts` and `failure_reason` semantics
@@ -822,20 +867,37 @@ gets:
   (`result`, `repo`, `files`, `onto`, `landed`, `published` for partials),
   `base:`, and `worktree:`.
 - **The retained task worktree,** visible inside its existing `<shared>`
-  mount at `.worktrees/<task>/`, plus the `refs/wm/<pb>/<task>/attempt-*`
-  refs. It can run `git -C .worktrees/<task>/<repo> diff <base>..attempt-<n>`
-  to see what the task wanted, and `git log <base>..<pb>` to see what landed
-  in between.
+  mount at `.worktrees/<task>/`. It holds the latest attempt, built on every
+  earlier one (W6). The wolf can run `git -C .worktrees/<task>/<repo> log
+  <base>..HEAD` and `git diff <base>` to see what the task did, and
+  `git log <base>..<pb>` to see what landed in between.
 - **`wolf.tmpl`** gains a short "integration conflicts" paragraph with three
   ways out:
-  1. Reset the task to `ready` (with `attempts: 0`) to re-run it on the
-     current tip, optionally editing its description or `depends_on` so it
-     waits for the task it conflicted with.
+  1. Reset the task to `ready` (with `attempts: 0`) to re-run it. The re-run
+     reuses the worktree as it is (W4), so the wolf either leaves it for the
+     agent to rebase or resets it first (`git reset --hard refs/heads/<pb>`)
+     for a clean start. It may also edit the task's description or
+     `depends_on` so it waits for the task it conflicted with.
   2. Resolve by hand in the retained worktree (rebase onto `<pb>`, resolve,
      `git rebase --continue`), then set the task to `success`. The commit
      queue then integrates it, normally by the fast path.
   3. For a partial publish, finish the remaining repos and set `committed`
      with the right `commits:`. The daemon's ancestor check validates it.
+- **A warning about the shared branch.** `wolf.tmpl` says, prominently: do
+  not commit, rebase, reset or otherwise move `refs/heads/<pb>` in the
+  shared workspace while an integration is in flight. An integration is in
+  flight when the project's `live.integrating` or `live.commit_reserved`
+  snapshot field is set (D4). Blocking freezes the queue, but a commit agent
+  that started before the block still runs to its end (S4), so "the project
+  is blocked" is not enough on its own. The wolf's `.orch/context.yaml`
+  names the integrating task, if any, at launch (`InFlightTasks`, X3), and
+  the wolf re-reads the snapshot immediately before any commit on the shared
+  branch, because the state can change while it works. If it cannot read the
+  snapshot and any task is at `success`, it treats an integration as in
+  flight. Instead of committing on the shared branch, it works in a task's
+  worktree and sets that task to `success`, so the change goes through the
+  queue. This is the R4 residual risk, turned into a rule the wolf can follow
+  from state it can read.
 
 The TUI shows the same block reason it shows today, with no new UI
 required. A conflict re-run that eventually succeeds never reaches the wolf.
@@ -848,7 +910,8 @@ This section changes the daemon so that a project can run several ready tasks
 at once. Two limits apply: a per-project concurrency limit and an optional
 global cap. Integration is still serialized through **one commit queue per
 project**. It builds on [Worktrees](#worktrees) (each task gets an isolated
-checkout cut from the shared tip when it is dispatched) and on
+checkout cut from the shared tip at its first dispatch, and reused by its
+retries) and on
 [Integration & conflicts](#integration--conflicts) (one integration per
 project at a time; `committed` means "integrated and verified").
 
@@ -1177,7 +1240,7 @@ stateDiagram-v2
     running --> ready: launch failed, project stopped,\nor agent lost across a daemon restart
     running --> committed: push task's commit agent\npublishes the shared branch
 
-    failed --> ready: attempts < 3, retried\n(fresh worktree from current tip)
+    failed --> ready: attempts < 3, retried\n(same worktree, possibly dirty)
     failed --> [*]: attempts >= 3,\nproject → blocked (wolf)
 
     state success {
@@ -1186,7 +1249,7 @@ stateDiagram-v2
         integrating --> integrating: transient failure,\nintegration.attempts < 2
     }
     success --> committed: commit agent integrates\n(rebase + ff-only), daemon verifies
-    success --> ready: integration conflict,\nattempts < 3 → re-run on new tip
+    success --> ready: integration conflict or\nbuild check failed, attempts < 3\n→ re-run, rebasing its worktree\nonto the new tip
     success --> [*]: conflict with attempts >= 3,\npartial publish, or invariant broken\n→ project blocked (wolf)
 
     committed --> [*]: worktree removed;\nschedule() admits dependents / next task,\nor project completes
@@ -1341,8 +1404,9 @@ pass, in priority order.
 
 **Priority.** The candidates are `Ready()`, ordered by:
 
-1. **Re-runs first.** A task with `attempts > 0` already lost work once, and
-   making it wait again raises the chance it conflicts again.
+1. **Re-runs first.** A task with `attempts > 0` already spent a run, and
+   its worktree's base only gets staler while it waits, which raises the
+   chance it conflicts again.
 2. **Most transitive dependents first.** Ready tasks on the critical path
    unblock the most work once integrated.
 3. **Name.**
@@ -1502,22 +1566,22 @@ rewriting the task file therefore cannot clobber them for long.
 |---|---|---|---|---|
 | `touches` | `*[]string` (see below) | planner, wolf | Globs the task expects to change, each starting with the repo dir name. | H1 |
 | `areas` | `[]string` | planner, wolf | Shared-hotspot tags. | H1 |
-| `worktree` | `string` | daemon | Absolute path of the task worktree root (`<shared>/.worktrees/<task>`). Set when the worktree is cut, cleared after cleanup. A non-empty value on a `failed`/`blocked` task points the wolf at the retained checkout. | W4, W6 |
+| `worktree` | `string` | daemon | Absolute path of the task worktree root (`<shared>/.worktrees/<task>`). Set when the worktree is first cut, kept across retries and re-runs, cleared after cleanup at `committed`. A non-empty value on a `failed`/`blocked` task points the wolf at the retained checkout. | W4, W6 |
 | `task_branch` | `string` | daemon | `wm/<project-branch>/<task>`. Stored, not recomputed, so a later rename of `project.branch` cannot orphan it silently. | W3 |
-| `base` | `[]Commit` | daemon | Per-repo shared tip the worktree was cut from. Same `{repo, hash}` shape as `commits:`. | W4 |
+| `base` | `[]Commit` | daemon | Per-repo shared tip the worktree was cut from, re-stamped as the merge base with the shared branch each time the task reaches `success` (a re-run may have rebased it). Same `{repo, hash}` shape as `commits:`. | W4 |
 | `succeeded_at` | `*time.Time` | daemon | First time `afterTaskSession` observed `success`. Orders the commit queue. Cleared when the task goes back to `ready`. | S5 |
 | `integration` | `*Integration` | commit agent (`result`, `repo`, `files`, `onto`, `published`), daemon (`attempts`, `landed`) | Outcome of the latest integration attempt. Cleared on `committed`. | I4, I5 |
-| `attempt_refs` | `[]string` | daemon | `refs/wm/<pb>/<task>/attempt-<n>` refs saved from earlier attempts, newest last. Lets the wolf and the re-run prompt list them without running `git for-each-ref`. | W3, W6 |
 | `touches_actual` | `[]string` | daemon | Changed paths outside the declared hints, recorded after a successful integration. Informational only. | H3 |
 
 ```go
 // Integration is the commit agent's report of its latest attempt to land
 // this task on the shared branch (see docs/parallel-task-worktrees.md I4).
 type Integration struct {
-	Result    string   `yaml:"result"`              // conflict | error | partial
+	Result    string   `yaml:"result"`              // conflict | verify_failed | error | partial
 	Repo      string   `yaml:"repo,omitempty"`      // repo that failed
 	Files     []string `yaml:"files,omitempty"`     // conflicting paths, repo-relative
 	Onto      []Commit `yaml:"onto,omitempty"`      // shared tips it tried to rebase onto
+	Output    string   `yaml:"output,omitempty"`    // verify_failed only: tail of the build check's output
 	Published []string `yaml:"published,omitempty"` // repos already fast-forwarded (partial only)
 	Landed    []string `yaml:"landed,omitempty"`    // tasks integrated between base and onto (daemon)
 	Attempts  int      `yaml:"attempts,omitempty"`  // commit-agent retries for this task run (daemon)
@@ -1553,9 +1617,15 @@ Notes on individual fields:
 - **Planner-owned result fields.** The planning template's replan branch
   already lists the result fields to clear when it resets a task: `summary`,
   `commits`, `created_files`, `completed_at`. `succeeded_at`, `integration`,
-  `touches_actual`, `base`, `worktree`, `task_branch` and `attempt_refs` join
-  that list (H4). The daemon also clears the worktree fields itself when it
-  re-cuts a worktree (W6), so a planner that forgets is harmless.
+  `touches_actual`, `base`, `worktree` and `task_branch` join
+  that list (H4). The daemon already clears the worktree fields when it
+  removes the worktree at `committed` (W6), and a re-plan only resets
+  committed tasks, so a planner that forgets is harmless.
+- **No `attempt_refs`.** An earlier draft saved each failed attempt under
+  `refs/wm/<pb>/<task>/attempt-<n>` and listed those refs here. Retries now
+  reuse the worktree (W6), so there is nothing to save and the field is
+  dropped. The worktree and `git log <base>..wm/<pb>/<task>` are the history
+  of the task's attempts.
 - **`Load` backfill.** Nothing new to backfill. A missing `worktree` simply
   means "no worktree yet", which is the same state as a task that has never
   been dispatched.
@@ -1573,6 +1643,7 @@ them are persisted:
 | Field | Type | Writer | Meaning | Section |
 |---|---|---|---|---|
 | `max_parallel_tasks` | `int`, `omitempty` | human / TUI / workingman agent | Per-project concurrency limit. `0`/absent/`1` → 1. Never written by the daemon or the planner. | S3 |
+| `verify` | `string`, `omitempty` | human | Pre-integration build check command (for example `go build ./... && go test ./internal/...`), run by the commit agent in the task worktree after a rebase. Empty means no check. Shipped in phase 2 (R1). | I3, R1 |
 | `conflict_resolution` | `string`, `omitempty` | human | Reserved. Empty or `rerun` is the v1 behavior. `agent` is the opt-in later mode from I4. An unknown value loads with a warning and falls back to `rerun`. | I4 |
 
 What is deliberately **not** added to `project.yaml`:
@@ -1616,12 +1687,13 @@ here and in `docs/state-snapshot.md`. All of them carry `path` (the
 | Event | Extra fields | When |
 |---|---|---|
 | `worktree_created` | `worktree`, `branch`, `base` (`repo=sha,…`) | After `git worktree add` succeeds for every repo, before the session starts. |
-| `worktree_reused` | `worktree` | W4 idempotency hit (restart, re-dispatch onto a valid worktree). |
+| `worktree_reused` | `worktree`, `attempt`, `dirty` (`true` when the tree has uncommitted changes) | W4 reuse: a retry, conflict re-run, stop/start or restart re-dispatching into the task's existing worktree. |
+| `worktree_stale_moved` | `from`, `to` | W4 moved an unrecognized directory aside to `.worktrees/.stale/`. |
 | `worktree_create_error` | `repo`, `err` | Any `worktree add` failure. Followed by `task_released why=worktree_failed` and `project_blocked`. |
-| `worktree_removed` | `worktree`, `reason` (`integrated`/`retry`/`rerun`/`archive`) | W6 cleanup. |
+| `worktree_removed` | `worktree`, `reason` (`integrated`/`archive`) | W6 cleanup. |
 | `task_worktree_remove_error` | `repo`, `err` | Best-effort cleanup failed and was left for the sweep (W6). |
 | `task_worktree_gc` | `worktree`, `reason` | Reaper sweep removal (W7). |
-| `attempt_ref_saved` | `ref`, `sha` | Before a retry or re-run discards a worktree that held commits or edits. |
+| `task_worktree_orphaned` | `worktree`, `branch` | The sweep found unintegrated work for a task whose file is gone, and kept it (W7). |
 
 **Integration** (`afterCommitSession`, `schedule`):
 
@@ -1630,6 +1702,9 @@ here and in `docs/state-snapshot.md`. All of them carry `path` (the
 | `integration_started` | `queue_depth`, `base`, `onto` | `schedule` launches the commit agent for the queue head. |
 | `integration_succeeded` | `commits` (`repo=sha,…`), `fast_forward` (`true` when no rebase was needed) | Verification (I3) passed. Logged just before the existing `task_completed_stamped`. |
 | `integration_conflicted` | `repo`, `files`, `landed`, `attempts` | Commit agent reported `result: conflict`. Followed by `task_retry cause=conflict` or `project_blocked`. |
+| `integration_verify_check_passed` | `repo`, `onto` | Pre-integration build check passed (R1). |
+| `integration_verify_check_failed` | `repo`, `onto`, `attempts` | Pre-integration build check failed after a clean rebase (R1). Followed by `task_retry cause=verify` or `project_blocked`. This is the event R1's follow-up counts. |
+| `integration_verify_check_skipped` | `why` (`fast_path`/`docs_only`/`not_configured`) | The build check did not run (R1). Lets the failure rate be read as a fraction of the runs that could have failed. |
 | `integration_retry` | `integration_attempts`, `err` | Transient failure (I4); the same head relaunches. |
 | `integration_verify_failed` | `repo`, `hash`, `why` | The daemon's ancestor check failed. Always followed by `project_blocked`. |
 | `integration_partial` | `published`, `repo` | Partial publish. Always followed by `project_blocked`. |
@@ -1646,7 +1721,7 @@ here and in `docs/state-snapshot.md`. All of them carry `path` (the
 
 **Changed existing events:**
 
-- `task_retry` gains `cause` (`failure` | `conflict`). An absent `cause` keeps
+- `task_retry` gains `cause` (`failure` | `conflict` | `verify`). An absent `cause` keeps
   meaning "failure", so log readers that ignore it are unaffected.
 - `session_started` / `session_ended` / `session_skip_duplicate` already log
   the session `key`. That key now carries the new `#task:<name>` / `#commit`
@@ -1671,6 +1746,7 @@ shape: `sessions[].key` gains new markers. That is covered below.
 |---|---|
 | `max_parallel_tasks` | effective limit (`p.MaxParallel()`), always present (1 for legacy projects) |
 | `commit_queue` | task names in integration order (S5), head first, derived from disk via `taskgraph.Queued`. Present in offline snapshots too. |
+| `verify_checks` | `{run, failed, skipped}` counts of the pre-integration build check (R1) since the daemon started, from the `integration_verify_check_*` events. Omitted when the project sets no `verify:`. The number to watch for R1's planner follow-up. |
 
 **`projects[].tasks[]`** gains:
 
@@ -1874,9 +1950,10 @@ two fixes:
   and clears their result fields. The D1 list adds the worktree fields. Those
   tasks' worktrees were already removed when they reached `committed` (W6), so
   the next dispatch cuts fresh worktrees from the shared tip that now holds
-  the previous cycle's work. Attempt refs from the previous cycle were deleted
-  at `committed` (W7 step 4). A task the planner **deletes** has its leftovers
-  removed by the sweep ("task file missing", W7).
+  the previous cycle's work. This is the one case where a task that ran
+  before gets a fresh worktree: its previous worktree ended with a successful
+  integration, not a failure. A task the planner **deletes** has its
+  leftovers handled by the sweep ("task file missing", W7).
 - **Missed runs** (`cron_missed.go`: `detectMissedAtStartup`, `sleepWatchLoop`,
   `evaluateMissed`) and sleepy-head catch-up (`catchUpProject` →
   `runCron`) are unaffected. They decide *whether* to start a cycle, and a
@@ -1902,11 +1979,20 @@ follow:
 
 1. **The wolf is told what is in flight.** `launchWolfAgent` already fills
    `FailedTasks` (failed/blocked). It also fills `InFlightTasks`: tasks at
-   `running`, plus `success` tasks with their queue position. `wolf.tmpl`
-   says: don't edit those, they will finish on their own; the queue is frozen
-   while the project is blocked; and unblocking resumes it from the same
-   head. `prompts.Data`/`setup.Context` carry the list into
-   `.orch/context.yaml`.
+   `running`, plus `success` tasks with their queue position, with the task
+   holding `#commit` (if any) marked `integrating`. `wolf.tmpl` says: don't
+   edit those, they will finish on their own; the queue is frozen while the
+   project is blocked, except for an integration that was already running;
+   and unblocking resumes it from the same head. `prompts.Data`/`setup.Context`
+   carry the list into `.orch/context.yaml`. The context file is only a
+   launch-time copy, so the wolf also needs a live answer. Today it does not
+   read the state snapshot. From phase 3 (when D4 ships `live.integrating`
+   and `live.commit_reserved`), the wolf sandbox gets the state directory
+   (`~/.workingman/state`) as a read-only mount, as `docs/state-snapshot.md`
+   already describes for the workingman agent, and `wolf.tmpl` points it at
+   those two fields. Until then, the live answer comes from the task files:
+   a task at `success` on a project whose queue is moving, or the
+   `integrating` mark in the context.
 2. **Second block while blocked.** A sibling can exhaust its retries, or hit
    an invariant, while the project is already `blocked` and the wolf is
    running. Today `transitionProjectBlocked` would overwrite `blocked_reason`,
@@ -1930,16 +2016,28 @@ follow:
    every retained task, and the absolute `gitdir:` pointers resolve because
    sbx mounts at host paths. I6 gives the three ways out of an integration
    block.
-   - A wolf that commits directly on the shared branch moves the tip outside
-     the queue. If an integration is running, its `--ff-only` fails cleanly
-     and it retries (I3 step 3, transient). It never corrupts anything.
+   - **A wolf that commits directly on the shared branch while an
+     integration runs** moves the tip outside the queue. This is the R4
+     residual risk, and the wolf is the actor most likely to cause it, so
+     `wolf.tmpl` addresses it directly (I6): check `live.integrating` /
+     `live.commit_reserved` right before any commit on the shared branch,
+     and while either is set, do not commit there. Route the change through
+     a task worktree and the queue instead, or wait for the integration to
+     end. If the rule is broken anyway, the damage is still bounded: the
+     integration's `--ff-only` fails cleanly and it retries (I3 step 3,
+     transient), or it blocks as a partial publish (I4). It never corrupts
+     history.
    - A wolf that leaves the **shared tree dirty** makes the next integration
      block (I3). `wolf.tmpl` therefore says: never leave uncommitted changes
-     in the shared workspace; work in the task's worktree, or commit.
+     in the shared workspace; work in the task's worktree, or commit, but
+     only when no integration is in flight (above).
 5. **Retention.** `retainSandbox` call sites also keep the worktree and
    branch, and `worktree:` stays set (W6). When the wolf resets a task to
-   `ready`, the next dispatch saves an attempt ref and re-cuts (X4 explains
-   why a dispatch from `ready` always re-cuts).
+   `ready`, the next dispatch reuses that worktree as the wolf left it (W4).
+   `wolf.tmpl` says so: to give the task a clean start, reset the worktree
+   to the shared tip before handing back; to keep the partial work, leave
+   it, and add a note to the task description if the next attempt needs
+   guidance.
 
 **Tandem.** `wolf_tandem_test.go` asserts that the wolf runs alongside the main
 slot. With slots split, the same test runs with two `#task:*` sessions plus
@@ -1971,14 +2069,14 @@ poke at a failed task.
   that no early return can skip them.
 - **Task worktrees on stop.** They are kept (W6). On `:start`, a task
   released to `ready` is dispatched through the normal `ready → running`
-  path, and **a dispatch from `ready` always re-cuts the worktree.** The old
-  one is saved first as an attempt ref (committed plus dirty edits, W6) if it
-  holds anything, and then removed. The W4 "reuse if valid" rule applies
-  **only** to a task that is still `running` with a live, adopted session
-  (X7). That resolves an ambiguity between W4 and W6: a stopped task always
-  starts again from the *current* shared tip. Stops cost no attempt. The
-  re-run prompt names the saved ref, like a conflict re-run does, so the
-  agent can pick up where it was interrupted.
+  path, and that dispatch **reuses its worktree** (W4), dirty or not, the
+  same as any retry. Stops cost no attempt. The task prompt tells the agent
+  that an earlier, interrupted run left changes in the worktree, so it can
+  pick up where it stopped. If the stop interrupted an agent mid-rebase (a
+  conflict re-run, I4), the rebase is left in progress, and the prompt says
+  so (`git status` shows it). The agent continues or aborts it. A stopped
+  task keeps its old base; integration rebases it onto the current tip
+  anyway (I3).
 - **`success` tasks on stop** keep their worktree and branch. They are the
   queue. `:start` (`StoppedFrom` → `working`) → `schedule` resumes the queue
   from the earliest `succeeded_at`. That replaces today's
@@ -1993,7 +2091,7 @@ poke at a failed task.
 
 **Files:** `dispatch_lifecycle.go` (deferred releases), `stop_test.go`
 (two task sessions plus `#commit` killed; start resumes the queue and
-re-cuts worktrees).
+re-dispatches the released tasks into their existing, dirty worktrees).
 
 ### X5. Intake and re-planning (`intake.go`, `repo_sync.go`, `project/planned_snapshot.go`)
 
@@ -2022,7 +2120,8 @@ re-cuts worktrees).
 - **Repos added mid-run** (`syncPlannedRepos` → `Workspaces.AddRepos`)
   land in the shared workspace. Task worktrees cut after that include them
   (W2). Worktrees already in flight don't, and integration skips repos a
-  task worktree lacks. A task that needs the new repo was planned by the run
+  task worktree lacks. A worktree that is reused for a retry gains the new
+  repos at that dispatch (W2). A task that needs the new repo was planned by the run
   that added it, so it is new and gets a new worktree.
 - **`last-planned.yaml`** gains `max_parallel_tasks` (D2), so a limit change
   appears in the `ProjectChanges` diff and the planner can refresh its hints
@@ -2056,8 +2155,8 @@ The rule becomes **drain, then archive**:
    run concurrently with a task agent in the same shared tree.
 4. **Before launch** (W6): remove the worktrees of `committed` tasks, run
    `git worktree prune`, and put every task still holding **unintegrated**
-   work (`failed`/`blocked`/a stuck `success`) into the archive agent's
-   context, with its `task_branch` and `attempt_refs`. `archive.tmpl` gains
+   work (`failed`/`blocked`/a stuck `success`, plus worktrees the sweep kept
+   as orphaned, W7) into the archive agent's context, with its `task_branch` and `worktree`. `archive.tmpl` gains
    a line: report those as work not carried into the branch. Its existing
    "final commit if needed" step should now find the shared tree clean. A
    dirty shared tree means a rule was broken, and the report should say so.
@@ -2133,9 +2232,9 @@ anything.
 
 | Found on disk | Action (what the missed callback would have done) |
 |---|---|
-| `running`, no session | `releaseOrphanedTasks` → `ready` (unchanged). The sweep saves an attempt ref and removes the worktree. Re-dispatch re-cuts (X4). No attempt is spent, as today. |
+| `running`, no session | `releaseOrphanedTasks` → `ready` (unchanged). The sweep keeps the worktree, and re-dispatch reuses it as the lost session left it (W4, X4). No attempt is spent, as today. |
 | `success`, no `succeeded_at` (and a `task_branch`) | Stamp `succeeded_at` from the task file's mtime, so the queue order roughly matches finish order. Legacy tasks (no `task_branch`) keep the "sorts first" rule (S5). |
-| `failed` with `integration.result: conflict` | Apply the conflict re-run path (I4): save an attempt ref, `attempts++`, `ready`, or block if exhausted. |
+| `failed` with `integration.result: conflict` or `verify_failed` | Apply the conflict re-run path (I4): keep the worktree, `attempts++`, `ready`, or block if exhausted. |
 | `failed` / `blocked`, otherwise | Apply `handleTaskFailure` / block, the routing `afterTaskSession` would have done. **Behavior change:** today such a task just sits until the graph looks stuck. |
 | `committed` with `task_branch` still set (cleanup never ran) | Run the `afterCommitSession` verification (I3) and W6 cleanup, and stamp `completed_at` if missing. A verification failure blocks the project, as it would have live. |
 
@@ -2186,10 +2285,13 @@ wolf after `maxIntegrationAttempts`, instead of looping across restarts.
 
 **5. Worktrees after a restart.** The W7 sweep decides keep or remove per
 task status and live session, after `releaseOrphanedTasks` and before
-`schedule`. An adopted `running` task keeps its worktree untouched. W4's
-"reuse a valid worktree" applies **only** here, for a session that is still
-live. Anything half-created by a crash during `git worktree add` (some repos
-added, task released to `ready`) is removed and re-cut on dispatch.
+`schedule`. Only `committed` tasks' leftovers are removed. An adopted
+`running` task keeps its worktree untouched, and a task released to `ready`
+keeps its worktree for its next dispatch (W4 reuse). Anything half-created
+by a crash during `git worktree add` (some repos added, task released to
+`ready`) is completed on dispatch: W4 adds the missing repos' worktrees and
+re-attaches any branch whose directory is missing. Nothing already there is
+discarded.
 
 **6. In-memory state.** None of it is persisted; all of it is rebuilt:
 
@@ -2218,8 +2320,9 @@ session.json-seeding helpers:
 - `TestRestartFinalizesCommittedTaskWithLeftoverWorktree`.
 - `TestRestartReplaysConflictOutcome`: `failed` + `integration.result:
   conflict` becomes a re-run with `attempts++`.
-- `TestRestartOrphanedRunningTaskRecutsWorktree`: an attempt ref is saved
-  and the new base is the current tip.
+- `TestRestartOrphanedRunningTaskReusesWorktree`: the released task is
+  re-dispatched into its existing worktree, uncommitted edits intact, with
+  `worktree_reused dirty=true`.
 - `TestRestartLegacyInFlightTaskUsesSharedTree`: a task `running` without
   `task_branch` finishes and commits via the legacy path (D7).
 
@@ -2259,28 +2362,53 @@ the pipeline is today's, plus isolation.
 
 Two tasks with disjoint `touches` can still break each other. Task A renames a
 function, and task B, cut from a tip before the rename, adds a new caller of
-the old name. Both rebase cleanly, and the shared branch no longer builds. I4
-already notes that integration cannot see this. Today's sequential pipeline
+the old name. Both rebase cleanly, and the shared branch no longer builds.
+A rebase alone cannot see this. Today's sequential pipeline
 avoids most of these cases by accident, because each task starts from a tip
 that already holds every earlier task.
 
-- **Mitigation in v1:** none at integration time. The breakage surfaces in the
-  next task to build, in the review agent's CI checks, or in a human's PR
-  review. Hints reduce the odds (a rename is a broad `touches`), and so does
-  the conservative overlap rule (H2).
-- **Open: a `verify:` command.** An optional per-project `verify:` (for
-  example `go build ./... && go test ./internal/...`) would run in the task
-  worktree after the rebase (I3 step 2) and before publishing (step 3). A
-  failure is handled like a conflict: re-run on the new tip. Questions:
-  - Should it run in the commit agent's sandbox, which is unattended and
-    costs a slow build per integration, or on the host?
-  - Does it run on the fast path too, where nothing was rebased? Skipping it
-    there keeps `limit: 1` as cheap as today.
-  - Which tasks may skip it (docs-only `touches`)?
-- **Open: post-integration build check.** A cheaper alternative is to build
-  the shared branch after each integration and block on the first red build.
-  That attributes the break to one task without delaying integration, but it
-  leaves the branch red until the wolf acts.
+- **Mitigations:** hints reduce the odds (a rename is a broad `touches`),
+  and so does the conservative overlap rule (H2). The build check below
+  catches what gets through, for projects that configure it. Without a
+  `verify:` command, breakage surfaces in the next task to build, in the
+  review agent's CI checks, or in a human's PR review, as it would today.
+- **Decided: a pre-integration build check (`verify:`).** An optional
+  per-project `verify:` command (D2; for example `go build ./... && go test
+  ./internal/...`) runs in the task worktree after the rebase (I3 step 2)
+  and before publishing (step 3). A failure is handled like a conflict: the
+  rebased repos are reset, and the task re-runs on its own worktree (I4,
+  `result: verify_failed`). It ships in **phase 2**, with the rest of the
+  rebase procedure. The rules:
+  - **Where it runs: in the commit agent's sandbox.** It is unattended and
+    costs a build per rebased integration, but it needs no new host-side
+    execution path, and it runs with the same toolchain and mounts the
+    commit agent already has. Running it on the host is not planned.
+  - **Not on the fast path.** When step 2 rebased nothing (the shared tip
+    still equals `base`), the task's own build is what is being published,
+    and nothing new can break. The check is skipped, which keeps `limit: 1`
+    exactly as cheap as today.
+  - **Docs-only tasks skip it.** A task whose declared `touches` all match
+    documentation (`**/*.md`, `**/docs/**`) and whose actual diff
+    (`git diff --name-only <base>..HEAD`) confirms it skips the check. The
+    actual diff is what decides, so a task with no hints, or one that
+    strayed outside its hints, still runs it.
+  - **Tracked, with a planner follow-up.** Every run, pass, failure and skip
+    is an audit event (`integration_verify_check_*`, D3), and the snapshot
+    keeps per-project counts (`verify_checks`, D4). A build-check failure is
+    a semantic conflict the planner's hints did not prevent. **Follow-up:**
+    if failures are frequent (for example, more than one in ten checked
+    integrations over a cycle), the planner has to work harder to avoid
+    them: declare broader `touches`, use `depends_on` between tasks that
+    share an API, and split fewer tasks across one interface. That is a
+    planning-prompt change (H4) driven by these counts, recorded in
+    [After phase 6](#after-phase-6).
+- **Future alternative: post-integration build check.** A cheaper option is
+  to build the shared branch after each integration and block on the first
+  red build. That attributes the break to one task without delaying
+  integration, but it leaves the branch red until the wolf acts. It is not
+  part of the plan. It is recorded as something to try later, for example if
+  the pre-integration check turns out too slow, and is listed in
+  [After phase 6](#after-phase-6).
 
 ### R2. Shared build caches, ports and other host resources
 
@@ -2294,8 +2422,9 @@ Sandboxes isolate processes, not everything a task agent touches:
 - **Build caches.** `GOCACHE` and `node_modules`/`.venv` live inside each
   sandbox or each worktree, so parallel tasks do not share them. That is safe
   but cold: every worktree pays a full first build and, for npm or Python
-  repos, a full dependency install. That is a cost risk (R3) rather than a
-  correctness one.
+  repos, a full dependency install. In v1 that is a cost risk (R3) rather
+  than a correctness one. Sharing them is the goal; see the highlighted item
+  below.
 - **Ports.** Each sandbox has its own network namespace, so two task agents
   each running a dev server on `:8080` don't collide. Collisions are possible
   only through `host.docker.internal` (a shared service on the host) or
@@ -2312,6 +2441,33 @@ Sandboxes isolate processes, not everything a task agent touches:
   time. Each writes only its own file, and the daemon writes back with
   `task.Update`. The fsnotify chain sees more events, but task events are
   observation-only. No change.
+
+> **Highlighted open item: shared build state across sandboxes.**
+> Supporting shared state across parallel sandboxes is a goal of this work,
+> not just an optimization. Every parallel task now pays a cold build, so
+> the payoff grows with `max_parallel_tasks`. Whether sharing is safe depends
+> on the cache:
+>
+> | State | Shared concurrently? | Why |
+> |---|---|---|
+> | Go module cache (`GOMODCACHE`) | **Safe**, already shared in v1 | Content-addressed and immutable once written. `go` locks and writes atomically, and verifies against `go.sum`. |
+> | Go build cache (`GOCACHE`) | **Safe** | Content-addressed by action ID. `go` writes entries atomically (temp file + rename) and is designed for concurrent builds on one machine. A corrupt or partial entry is a miss, not a wrong build. Needs a size bound (`go clean -cache` or a trim job), since nothing evicts it across sandboxes. |
+> | npm/pnpm/yarn download caches (`~/.npm`, pnpm store) | **Mostly safe** | Content-addressed tarball stores. npm's cache uses `cacache`, built for concurrent access. The pnpm store is designed to be shared between projects. |
+> | `node_modules` | **Not safe** | A per-checkout tree that `npm install` deletes and rewrites in place. Two tasks with different lockfiles would fight over it. It stays per worktree, and the shared download cache makes the per-worktree install cheap. |
+> | Python `.venv` | **Not safe** | Mutable, per-checkout, with absolute paths baked in. It stays per worktree. A shared pip or `uv` download cache (`~/.cache/pip`, `~/.cache/uv`) is safe to share, and `uv` hard-links from its cache, which makes per-worktree venvs cheap. |
+> | Generic tool caches (linters, `golangci-lint`, test result caches) | **Case by case** | Only if the tool documents concurrent use. Default per sandbox. |
+>
+> The rule that falls out: **share content-addressed download and build
+> caches, never shared trees of installed dependencies.** The mechanism is
+> the one `.gomodcache` already uses (W5): a host directory staged once and
+> mounted rw into every task sandbox, with the matching environment variable
+> (`GOCACHE`, `npm_config_cache`, `UV_CACHE_DIR`, `PIP_CACHE_DIR`) pointed at
+> it. A per-project `shared_caches:` list, or a fixed set the acp-wrapper
+> knows how to mount, would make it configurable. It is listed in
+> [After phase 6](#after-phase-6). Its design questions (per-project or
+> per-host scope, size limits and eviction, whether sandbox templates already
+> set these variables, and how a cache poisoned by one task is detected and
+> cleared) are still open.
 
 ### R3. Resource and cost limits
 
@@ -2344,18 +2500,26 @@ I3 publishes repo by repo. The prepare/publish split means a conflict never
 leaves some repos published, unless something outside the queue moves a
 shared tip between steps 1 and 3. That case blocks with `result: partial`.
 
-- **Residual risk:** a human or the wolf committing on the shared branch
-  while an integration runs. The ff-only retry covers a moved tip, and the
-  partial block covers a moved tip that also conflicts. Both are rare.
+- **Residual risk, flagged to the wolf:** a human or the wolf committing on
+  the shared branch while an integration runs. The ff-only retry covers a
+  moved tip, and the partial block covers a moved tip that also conflicts.
+  Both are rare, and the wolf, the likeliest cause, is told to avoid it.
+  Whether an integration is running is visible in state the wolf can read:
+  `live.integrating` and `live.commit_reserved` in the snapshot (D4), the
+  `integrating` mark on `InFlightTasks` in its context (X3), and tasks at
+  `success`. `wolf.tmpl` (phase 2, extended in phase 4) tells it to check
+  that state right before any commit on the shared branch, and not to commit
+  there while an integration is in flight (I6, X3). Humans get the same
+  warning in the `:session` banner (X3, phase 6) and the docs.
 - **Not atomic across repos.** A reader (the planner's mount, a push task
   that is not queued, or a human) can observe repo A integrated and repo B
   not, for the seconds between the two fast-forwards. Push tasks are queued,
   so they never see it. The planner may, and it is harmless there.
 - **Repos added mid-run** (X5): a worktree that lacks a repo cannot change
   it. A task planned before the repo was added that turns out to need it
-  fails and re-runs into a fresh worktree that has it. That costs an attempt.
-  **Open:** whether to re-cut a worktree when `workspaceReposFor(p)` changes
-  between dispatch and the first agent turn.
+  fails, and its retry reuses the worktree with the missing repo added (W2).
+  That costs an attempt. **Open:** whether to extend a worktree when
+  `workspaceReposFor(p)` changes between dispatch and the first agent turn.
 
 ### R5. Signing throughput and the shared ssh-agent
 
@@ -2483,11 +2647,11 @@ rolled back to a daemon that at least parses its files.
 
 - **Changes:**
   - `internal/task/task.go`: `Touches *[]string`, `Areas`, `Worktree`,
-    `TaskBranch`, `Base`, `SucceededAt`, `Integration`, `AttemptRefs`,
+    `TaskBranch`, `Base`, `SucceededAt`, `Integration` (with `Output`),
     `TouchesActual`, and `t.Exclusive()`. All `omitempty`. No status values
     change (D1).
-  - `internal/project/project.go`: `MaxParallelTasks`, `ConflictResolution`,
-    and `p.MaxParallel()` (D2).
+  - `internal/project/project.go`: `MaxParallelTasks`, `Verify`,
+    `ConflictResolution`, and `p.MaxParallel()` (D2).
   - `internal/project/planned_snapshot.go`: `max_parallel_tasks`.
   - `internal/daemon/dispatch_lifecycle.go`: the "does this task have a
     `task_branch`?" switch, wired with only the legacy branch for now.
@@ -2505,8 +2669,8 @@ dispatch and integration, so every integration takes the I2 fast path.
 
 - **Changes:**
   - New `internal/worktree` package: path layout (W2), branch and ref names
-    (W3), `Create` (W4, including the reuse rule), `Remove`, `SaveAttempt`
-    (W6), `GitCommonDir`. It wraps `git` through an injectable runner, like
+    (W3), `Ensure` (W4: reuse an existing worktree, re-attach an existing
+    branch, add missing repos, or cut a new one), `Remove`, `GitCommonDir`. It wraps `git` through an injectable runner, like
     `internal/workspace`. It is shared by the daemon and the TUI (X6).
   - `internal/runner/runner.go`: `Plan.TaskWorktree`; `resolveWorkingDir`
     and `sandboxWorkspaces` for task agents (W5). The commit agent gets its
@@ -2515,14 +2679,21 @@ dispatch and integration, so every integration takes the I2 fast path.
     because the task sandbox no longer mounts the shared tree.
   - `internal/acpwrapper/acpwrapper.go`: `goModCacheDir` accepts a mount
     named `.gomodcache` (W5).
-  - `internal/daemon/dispatch.go` (`launchTaskAgent`): cut the worktree after
-    `markTaskRunning` and stamp `worktree`/`task_branch`/`base`; a failure
-    gives `worktree_create_error` → release → block.
-  - `internal/daemon/dispatch_lifecycle.go`: `handleTaskFailure` saves an
-    attempt ref and removes the worktree before a retry; the `retainSandbox`
-    sites keep it; `afterCommitSession` cleans up after `committed`.
+  - `internal/daemon/dispatch.go` (`launchTaskAgent`): ensure the worktree
+    after `markTaskRunning` and stamp `worktree`/`task_branch`/`base` (`base`
+    only when it is first cut); a failure gives `worktree_create_error` →
+    release → block.
+  - `internal/daemon/dispatch_lifecycle.go`: `handleTaskFailure` leaves the
+    worktree in place for the retry; the `retainSandbox` sites keep it;
+    `afterTaskSession` re-stamps `base` on `success`; `afterCommitSession`
+    cleans up after `committed`, the only removal.
   - `internal/prompts/templates/task.tmpl`: worktree wording ("your
-    worktree is on branch `wm/…`; do not touch other refs").
+    worktree is on branch `wm/…`; do not touch other refs"), and a
+    retry block rendered when `attempts > 0`: this is attempt `n`; the
+    worktree may hold the previous attempt's committed and uncommitted
+    changes; inspect them with `git status` / `git diff <base>`; keep, fix,
+    or undo them (`git reset --hard <base>`, `git clean -fd`) as needed.
+    `prompts.Data` gains `Attempt` and `Base`.
   - `internal/prompts/templates/commit.tmpl`: worktree branch, with I3 step 0
     (commit leftovers) and step 3 (ff-only publish), but no rebase yet. If
     the ff-only fails (the tip was moved outside the queue, by a human or
@@ -2535,10 +2706,13 @@ dispatch and integration, so every integration takes the I2 fast path.
     (`git init`) when a test asks for them, so the worktree code runs in
     daemon tests.
 - **Tests:** `internal/worktree` unit tests against temp repos (create,
-  reuse, re-cut, save attempt, remove, nested-branch collision); daemon tests
-  showing a task's edits land in `.worktrees/<task>/` and never in the
-  shared tree; a retry starting from a fresh worktree with an attempt ref; a
-  legacy in-flight task finishing through the shared tree (D7);
+  reuse a dirty worktree untouched, re-attach a branch whose directory is
+  gone, add a missing repo, move a stray directory aside, remove,
+  nested-branch collision); daemon tests showing a task's edits land in
+  `.worktrees/<task>/` and never in the shared tree; a retry running in the
+  previous attempt's worktree, with its uncommitted edits still present and
+  the retry block in the rendered prompt; a stop/start resuming in the same
+  worktree; a legacy in-flight task finishing through the shared tree (D7);
   `goModCacheDir` with the new mount.
 - **Rollback:** revert. A task in flight at the time of the revert has its
   work on `wm/…` (D7 downgrade row). Release notes say to drain first; the
@@ -2554,17 +2728,40 @@ every test.
 
 - **Changes:**
   - `commit.tmpl`: full I3 procedure (rebase, abort on conflict across
-    repos, ff-only retry, `integration:` reporting, the resumable step 0/4
-    rules from X7).
+    repos, the pre-integration build check after a non-trivial rebase,
+    ff-only retry, `integration:` reporting, the resumable step 0/4 rules
+    from X7).
+  - The build check (R1): the commit agent runs the project's `verify:`
+    command only when step 2 rebased something and the task is not
+    docs-only. `launchCommitAgent` passes `verify` and the docs-only verdict
+    (computed by the daemon from `touches` and the actual diff) through
+    `prompts.Data`. The `integration_verify_check_*` events (D3) ship here,
+    ahead of phase 3, so the failure rate is tracked from the first
+    integration that runs the check.
   - `internal/daemon/dispatch_lifecycle.go`: `afterCommitSession` routes on
-    I4 (verify with `merge-base --is-ancestor`, conflict → re-run with
-    `attempts++`, transient → relaunch up to `maxIntegrationAttempts`,
-    partial/verify failure → block); `prepareIntegration` (abort a stale
-    rebase, clear stale `index.lock`, block on a dirty shared tree).
-  - `wolf.tmpl`: the integration-conflict paragraph (I6).
+    I4 (verify with `merge-base --is-ancestor`, conflict or `verify_failed`
+    → re-run in the same worktree with `attempts++`, transient → relaunch up
+    to `maxIntegrationAttempts`, partial/ancestor failure → block);
+    `prepareIntegration` (abort a stale rebase, clear stale `index.lock`,
+    block on a dirty shared tree).
+  - `task.tmpl`: the conflict re-run block, rendered when `integration` is
+    set: rebase your branch onto `refs/heads/<pb>`, resolve the named files
+    (or fix the named build failure), then write `success`.
+  - `wolf.tmpl`: the integration-conflict paragraph (I6), including the
+    worktree-reuse note for resets, and the **shared-branch warning**: do
+    not commit on the shared branch while an integration is in flight
+    (from the task files and the context in this phase; the snapshot fields
+    are added in phase 3); route changes through a task worktree and the
+    queue. At this phase only one task runs at a time, but the commit
+    agent can still run while the wolf works on a blocked project, so the
+    warning is needed from here on.
 - **Tests:** a conflict re-run (two tasks forced to conflict by a manual
-  commit on the shared branch between dispatch and integration), conflict
-  exhaustion blocking with the I6 reason, a transient ff-only failure
+  commit on the shared branch between dispatch and integration) that
+  re-dispatches into the same worktree and rebases it, conflict
+  exhaustion blocking with the I6 reason, the build check running after a
+  rebase, skipped on the fast path and for a docs-only diff, and a failing
+  check routing as `verify_failed`, the shared-branch warning in the
+  rendered `wolf.tmpl`, a transient ff-only failure
   retrying the commit agent only, a multi-repo conflict in repo B leaving
   repo A unpublished, verify failure blocking, the resumable procedure after
   a commit agent killed between the two repos' fast-forwards.
@@ -2578,11 +2775,16 @@ Make the new state visible before raising concurrency, so that the first
 parallel runs can be watched.
 
 - **Changes:**
-  - `internal/daemon` (`worktree.go`, `dispatch_lifecycle.go`): the D3
-    events, plus `task_retry cause` and `task_released why=worktree_failed`.
+  - `internal/daemon` (`worktree.go`, `dispatch_lifecycle.go`): the rest of
+    the D3 events (the build-check events shipped in phase 2), plus
+    `task_retry cause` and `task_released why=worktree_failed`.
   - `internal/daemon/snapshot.go`, `snapshot_live.go`, `snapshot_text.go`:
-    the D4 fields (`max_parallel_tasks`, `commit_queue`, per-task worktree,
-    queue and integration fields, `completed_at`).
+    the D4 fields (`max_parallel_tasks`, `commit_queue`, `verify_checks`,
+    per-task worktree, queue and integration fields, `completed_at`, and
+    `live.integrating` / `live.commit_reserved`, which the wolf's
+    shared-branch check reads). `internal/runner/runner.go`: mount the state
+    directory read-only into the wolf sandbox, and `wolf.tmpl`: switch the
+    shared-branch check to those snapshot fields (X3).
   - `docs/state-snapshot.md`: new fields and every session-key marker,
     including the missing `#planning` (§7).
   - `internal/tui` (`projects.go`, `project_detail.go`, `tui.go`): `TaskView`
@@ -2627,7 +2829,10 @@ on its tasks by hand. That makes it a controlled trial.
     busy checks and re-keyed adoption (X1, X7). The adopted-session callbacks
     become `afterTaskSession`/`afterCommitSession`, and
     `resumeOrphanedOutcomes` is added.
-  - `internal/prompts` (`Data.InFlightTasks`) and `wolf.tmpl`.
+  - `internal/prompts` (`Data.InFlightTasks`, with the `integrating` mark)
+    and `wolf.tmpl`: the in-flight list, and the shared-branch warning from
+    phase 2 extended to name the integrating task from `InFlightTasks` and
+    to say that a block does not stop an integration already running (X3).
 - **Tests:** the S8 list (limit 2 vs 1, dependents waiting on integration,
   simultaneous session ends under `-race`, global cap across projects,
   battery), the X7 restart list, the `stop_test.go` and
@@ -2674,7 +2879,7 @@ Clean up what crashes, deleted tasks and long-lived projects leave behind.
 
 - **Changes:**
   - `internal/daemon/reaper.go`: the W7 sweep (prune, per-worktree verdict,
-    branchless refs, attempt-ref deletion), on its own slower interval.
+    branchless refs of committed tasks), on its own slower interval.
   - `internal/daemon/watcher.go`: `startupScan` runs the sweep after
     `releaseOrphanedTasks` and before `schedule` (S6, X7).
   - `internal/daemon/dispatch_lifecycle.go` (`launchArchiveAgent`) and
@@ -2685,8 +2890,8 @@ Clean up what crashes, deleted tasks and long-lived projects leave behind.
     opening a task's worktree as cwd (X3).
   - Startup git-version preflight (R8).
 - **Tests:** the sweep's decision table (one test per W7 case, including
-  "task file deleted" saving an attempt ref first); a restart with a
-  half-created worktree; `tui/archive_test.go` checking refs are gone after
+  "task file deleted" keeping a worktree that holds unintegrated work); a
+  restart with a half-created worktree completed on dispatch; `tui/archive_test.go` checking refs are gone after
   `:archive`.
 - **Rollback:** revert. Without the sweep, worktrees of committed tasks
   are still removed by phase 1's inline cleanup. Only crash leftovers
@@ -2694,7 +2899,19 @@ Clean up what crashes, deleted tasks and long-lived projects leave behind.
 
 ### After phase 6
 
-Candidates, each gated on data from phases 3–6 (R1, R6, R9): the `verify:`
-command, auto-serializing a project with bad hints, a default global cap in
-`orch service install`, queue ordering by dependents, `conflict_resolution:
-agent`, and a protected-ref hook for the shared branch.
+Candidates, each gated on data from phases 3–6 (R1, R2, R6, R9):
+
+- **Shared build state across sandboxes** (highlighted in R2): mount
+  content-addressed caches (`GOCACHE`, npm/pnpm and pip/uv download caches)
+  into every task sandbox, as `.gomodcache` already is. This is a goal, not
+  an optional nicety: it is the main lever on the cold-build cost of
+  parallelism.
+- **Planner follow-up on build-check failures** (R1): if
+  `integration_verify_check_failed` is frequent, make the planner work
+  harder to avoid it (broader `touches`, more `depends_on` between tasks
+  that share an interface).
+- **Post-integration build check** (R1): a future alternative to the
+  pre-integration check.
+- Auto-serializing a project with bad hints, a default global cap in
+  `orch service install`, queue ordering by dependents, `conflict_resolution:
+  agent`, and a protected-ref hook for the shared branch.
