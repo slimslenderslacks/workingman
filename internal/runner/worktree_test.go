@@ -116,3 +116,18 @@ func TestTaskWithoutWorktreeKeepsSharedWorkspace(t *testing.T) {
 		t.Errorf("sandboxWorkspaces = %v, want %v", got, want)
 	}
 }
+
+// The wolf gets the daemon's state dir as a read-only mount, after its control
+// dir and source worktree, so it can read the live snapshot (X3). A read-only
+// path nested in a writable mount is dropped. Other kinds ignore the field.
+func TestWolfMountsStateDirReadOnly(t *testing.T) {
+	p := Plan{Kind: agent.WolfAgent, ReadOnlyMounts: []string{"/home/.workingman/state", "/orch/p/sub", ""}}
+	want := []string{"/orch/p", "/ws", "/home/.workingman/state" + ReadOnlySuffix}
+	if got := sandboxWorkspaces(p, "/orch/p", "/ws"); !reflect.DeepEqual(got, want) {
+		t.Errorf("wolf sandboxWorkspaces = %v, want %v", got, want)
+	}
+	p.Kind = agent.PlanningAgent
+	if got := sandboxWorkspaces(p, "/orch/p", "/ws"); !reflect.DeepEqual(got, []string{"/orch/p", "/ws"}) {
+		t.Errorf("planning sandboxWorkspaces = %v", got)
+	}
+}

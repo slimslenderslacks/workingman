@@ -29,7 +29,7 @@ var projectCommands = []projectCommand{
 	{"session", "session", "open/resume an interactive claude session"},
 	{"wolf", "wolf", "summon the wolf to investigate"},
 	{"orch", "orch", "open a terminal in this work stream's orch directory"},
-	{"workspace", "workspace", "open a terminal at this work stream's wsp workspace root"},
+	{"workspace", "workspace", "open a terminal at this work stream's wsp workspace root (from Tasks: the task's worktree)"},
 	{"review", "review", "watch this work stream's PR (or poll it now)"},
 	{"cleanup", "cleanup", "prepare this work stream for archiving"},
 	{"archive", "archive", "archive this work stream"},

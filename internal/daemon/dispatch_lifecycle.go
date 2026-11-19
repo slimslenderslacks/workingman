@@ -23,7 +23,7 @@ import (
 // restarted — instead the project transitions to blocked and the wolf agent
 // is launched. The bound is intentionally a const: tests seed task files
 // with a near-limit Attempts value to exercise the boundary.
-const maxTaskAttempts = 3
+const maxTaskAttempts = task.MaxAttempts
 
 // afterTaskSession runs after a task agent's session has ended. It re-reads
 // the task file and decides the next action.
@@ -97,8 +97,10 @@ func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Proje
 func (d *Daemon) handleTaskFailure(projectPath, taskPath string, p *project.Project, t *task.Task) {
 	if t.Attempts >= maxTaskAttempts {
 		d.audit.Log("task_retry_exhausted",
+			"path", projectPath,
 			"task", t.Name,
 			"attempts", fmt.Sprintf("%d", t.Attempts),
+			"cause", "failure",
 		)
 		// Retries are done and the project is about to block for the wolf.
 		// Keep this task's sandbox so it can be inspected — the failed run's
@@ -122,8 +124,10 @@ func (d *Daemon) handleTaskFailure(projectPath, taskPath string, p *project.Proj
 		return
 	}
 	d.audit.Log("task_retry",
+		"path", projectPath,
 		"task", updated.Name,
 		"attempts", fmt.Sprintf("%d", updated.Attempts),
+		"cause", "failure",
 	)
 	d.launchTaskAgent(projectPath, p, &updated)
 }
@@ -324,13 +328,13 @@ func (d *Daemon) markTaskRunning(t *task.Task) bool {
 // they always did — without spending a retry attempt. A task at any other
 // status is left alone. Best-effort: errors are logged.
 func (d *Daemon) releaseRunningTask(taskPath, why string) {
-	released := false
+	released, name := false, ""
 	err := task.Update(taskPath, func(t *task.Task) bool {
 		if t.Status != task.StatusRunning {
 			return false
 		}
 		t.Status = task.StatusReady
-		released = true
+		released, name = true, t.Name
 		return true
 	})
 	if err != nil {
@@ -340,7 +344,10 @@ func (d *Daemon) releaseRunningTask(taskPath, why string) {
 		return
 	}
 	if released {
-		d.audit.Log("task_released", "task", taskPath, "why", why)
+		// path and task identify the task as every task event does (D3);
+		// task_path is the file, which is what this event used to carry.
+		projectPath := filepath.Join(filepath.Dir(filepath.Dir(taskPath)), project.FileName)
+		d.audit.Log("task_released", "path", projectPath, "task", name, "task_path", taskPath, "why", why)
 	}
 }
 
@@ -440,13 +447,24 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 	// A push task goes straight from ready to this agent, so the commit agent
 	// is what's running it; any other task is already at success.
 	marked := t.IsPushTask() && d.markTaskRunning(t)
+	if il != nil {
+		d.audit.Log("integration_started", "path", projectPath, "task", t.Name,
+			"queue_depth", strconv.Itoa(d.queueDepth(projectPath)), "base", formatCommits(t.Base), "onto", formatOnto(il.onto))
+	}
+	// The reservation outlives the session: it is released only once
+	// afterCommitSession has routed the outcome (live.commit_reserved, X3).
+	d.beginCommit(projectPath)
 	tracked, err := d.startSessionTracked(projectPath, plan, func(waitErr error) {
+		defer d.endCommit(projectPath)
 		startFailure := ""
 		if waitErr != nil {
 			startFailure = d.runner.StartFailure(plan)
 		}
 		d.afterCommitSession(projectPath, plan.TaskPath, p, startFailure, il)
 	})
+	if err != nil || !tracked {
+		d.endCommit(projectPath) // no session, so no afterCommitSession either
+	}
 	if marked && (err != nil || (!tracked && !d.taskSessionLive(projectPath, t.Name))) {
 		d.releaseRunningTask(plan.TaskPath, "launch_failed")
 	}
@@ -593,6 +611,13 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 		// Ignored on the host terminal-tab path, where the claude process is already
 		// long-lived.
 		Persistent: true,
+	}
+	if d.snapshot.path != "" {
+		// The live answer to "is an integration in flight?" is the snapshot's
+		// live.integrating / live.commit_reserved (X3). The snapshot is
+		// replaced by rename, so its whole directory is mounted, read-only.
+		plan.Observe.SnapshotFile = d.snapshot.path
+		plan.ReadOnlyMounts = []string{filepath.Dir(d.snapshot.path)}
 	}
 	d.audit.Log("wolf_dispatch", "path", projectPath, "reason", reason)
 	// Ignore start error here: the project is already blocked, recursing

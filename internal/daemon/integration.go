@@ -185,6 +185,7 @@ func (d *Daemon) routeIntegrationFailure(projectPath string, p *project.Project,
 			fmt.Sprintf("commit agent blocked task %q: %s", t.Name, t.BlockedReason))
 	case t.Status == task.StatusFailed && (result == integrationConflict || result == integrationVerifyFailed):
 		if result == integrationVerifyFailed {
+			d.countVerifyCheck(projectPath, verifyCheckFailed)
 			d.audit.Log("integration_verify_check_failed", "path", projectPath, "task", t.Name,
 				"repo", t.Integration.Repo, "onto", formatCommits(t.Integration.Onto), "attempts", strconv.Itoa(t.Attempts))
 		}
@@ -283,7 +284,7 @@ func (d *Daemon) conflictReRun(projectPath string, p *project.Project, t *task.T
 		}); err != nil {
 			d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
 		}
-		d.audit.Log("task_retry_exhausted", "task", t.Name, "attempts", strconv.Itoa(t.Attempts), "cause", cause)
+		d.audit.Log("task_retry_exhausted", "path", projectPath, "task", t.Name, "attempts", strconv.Itoa(t.Attempts), "cause", cause)
 		d.retainSandbox(t.Path, t)
 		d.transitionProjectBlocked(projectPath, p, conflictBlockReason(p, t, landed))
 		return
@@ -307,7 +308,7 @@ func (d *Daemon) conflictReRun(projectPath string, p *project.Project, t *task.T
 		d.transitionProjectBlocked(projectPath, p, "task save error: "+err.Error())
 		return
 	}
-	d.audit.Log("task_retry", "task", updated.Name, "attempts", strconv.Itoa(updated.Attempts), "cause", cause)
+	d.audit.Log("task_retry", "path", projectPath, "task", updated.Name, "attempts", strconv.Itoa(updated.Attempts), "cause", cause)
 	d.launchTaskAgent(projectPath, p, updated)
 }
 
@@ -395,10 +396,13 @@ func (d *Daemon) auditVerifyCheck(projectPath string, t *task.Task, il *integrat
 	case il.verify == "":
 		d.audit.Log("integration_verify_check_skipped", "path", projectPath, "task", t.Name, "why", "not_configured")
 	case il.fastPath(t):
+		d.countVerifyCheck(projectPath, verifyCheckSkipped)
 		d.audit.Log("integration_verify_check_skipped", "path", projectPath, "task", t.Name, "why", "fast_path")
 	case il.docsOnly:
+		d.countVerifyCheck(projectPath, verifyCheckSkipped)
 		d.audit.Log("integration_verify_check_skipped", "path", projectPath, "task", t.Name, "why", "docs_only")
 	default:
+		d.countVerifyCheck(projectPath, verifyCheckRun)
 		d.audit.Log("integration_verify_check_passed", "path", projectPath, "task", t.Name,
 			"onto", formatOnto(il.onto))
 	}
@@ -420,4 +424,106 @@ func worktreeRoot(shared string, t *task.Task) string {
 		return t.Worktree
 	}
 	return worktree.Root(shared, t.Name)
+}
+
+// beginCommit reserves the project's commit slot from launchCommitAgent until
+// endCommit, after afterCommitSession has routed the outcome. A transient
+// retry relaunches from inside afterCommitSession, so the count can briefly be
+// 2; the project is commit-reserved while it is above 0.
+func (d *Daemon) beginCommit(projectPath string) {
+	d.commitMu.Lock()
+	d.commitBusy[projectPath]++
+	d.commitMu.Unlock()
+	d.markSnapshotDirty()
+}
+
+func (d *Daemon) endCommit(projectPath string) {
+	d.commitMu.Lock()
+	if d.commitBusy[projectPath] <= 1 {
+		delete(d.commitBusy, projectPath)
+	} else {
+		d.commitBusy[projectPath]--
+	}
+	d.commitMu.Unlock()
+	d.markSnapshotDirty()
+}
+
+// commitReserved reports whether a commit agent of the project is between
+// launch and the end of its afterCommitSession.
+func (d *Daemon) commitReserved(projectPath string) bool {
+	d.commitMu.Lock()
+	defer d.commitMu.Unlock()
+	return d.commitBusy[projectPath] > 0
+}
+
+// Build check outcomes counted in verifyChecks (R1).
+const (
+	verifyCheckRun     = "run"
+	verifyCheckFailed  = "failed"
+	verifyCheckSkipped = "skipped"
+)
+
+// countVerifyCheck records one build check outcome for the project's
+// verify_checks snapshot field. A failed check also ran, so it counts in both.
+func (d *Daemon) countVerifyCheck(projectPath, outcome string) {
+	d.commitMu.Lock()
+	vc := d.verifyChecks[projectPath]
+	if vc == nil {
+		vc = &VerifyChecks{}
+		d.verifyChecks[projectPath] = vc
+	}
+	switch outcome {
+	case verifyCheckRun:
+		vc.Run++
+	case verifyCheckFailed:
+		vc.Run++
+		vc.Failed++
+	case verifyCheckSkipped:
+		vc.Skipped++
+	}
+	d.commitMu.Unlock()
+}
+
+// verifyCheckCounts returns a copy of the project's build check counters, or
+// nil when none has been recorded.
+func (d *Daemon) verifyCheckCounts(projectPath string) *VerifyChecks {
+	d.commitMu.Lock()
+	defer d.commitMu.Unlock()
+	if vc := d.verifyChecks[projectPath]; vc != nil {
+		c := *vc
+		return &c
+	}
+	return nil
+}
+
+// queueDepth is the length of the project's commit queue on disk (S5), for
+// the integration_started event.
+func (d *Daemon) queueDepth(projectPath string) int {
+	return len(taskgraph.Queued(loadTasksLenient(filepath.Join(filepath.Dir(projectPath), "tasks"))))
+}
+
+// loadTasksLenient loads every task file in tasksDir that parses, skipping the
+// rest, sorted by file name. An unnamed seed gets its filename stem as its
+// name. It is for reports (the snapshot, audit fields), which must not fail on
+// one bad file the way taskgraph.Load does.
+func loadTasksLenient(tasksDir string) []*task.Task {
+	entries, err := os.ReadDir(tasksDir)
+	if err != nil {
+		return nil
+	}
+	var out []*task.Task
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
+			continue
+		}
+		t, err := task.Load(filepath.Join(tasksDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		if t.Name == "" {
+			t.Name = strings.TrimSuffix(e.Name(), ".yaml")
+		}
+		out = append(out, t)
+	}
+	return out
 }

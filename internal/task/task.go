@@ -26,6 +26,12 @@ const (
 	StatusCommitted Status = "committed"
 )
 
+// MaxAttempts is the retry budget the daemon enforces against Task.Attempts:
+// a task that fails (or conflicts at integration) with Attempts already at
+// MaxAttempts is not run again, and its project blocks. The TUI shows it as
+// the denominator of "attempt n/MaxAttempts".
+const MaxAttempts = 3
+
 // ModelDefault is the *requested* model every task carries today: "let claude
 // pick its own default". The planning agent writes this verbatim; Load()
 // backfills it for tasks on disk that pre-date the field. It is never the model

@@ -215,3 +215,31 @@ func TestRenderWolfIntegrationParagraph(t *testing.T) {
 		}
 	}
 }
+
+// With a state snapshot, the wolf's shared-branch check reads its
+// live.integrating / live.commit_reserved fields instead of the task files
+// (X3); without one it falls back to "any task at success".
+func TestRenderWolfSharedBranchCheckUsesSnapshot(t *testing.T) {
+	base := Data{Workspace: "/orch/p", ProjectPath: "/orch/p/project.yaml", Branch: "feat/x", Worktree: "/ws"}
+	withSnap := base
+	withSnap.SnapshotFile = "/home/.workingman/state/snapshot.json"
+	out, err := Render(agent.WolfAgent, withSnap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"`/home/.workingman/state/snapshot.json`", "`live.integrating`", "`live.commit_reserved`", "`commit_queue`", "`generated_at`"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wolf prompt with a snapshot missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "while any\ntask is at `success`") {
+		t.Errorf("wolf prompt with a snapshot still uses the task-file check:\n%s", out)
+	}
+	plain, err := Render(agent.WolfAgent, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plain, "while any\ntask is at `success`") || strings.Contains(plain, "live.integrating") {
+		t.Errorf("wolf prompt without a snapshot should use the task files:\n%s", plain)
+	}
+}

@@ -2934,6 +2934,72 @@ parallel runs can be watched.
 - **Rollback:** revert. Readers ignore missing fields, and the snapshot
   `version` stays 1.
 
+#### Phase 3 as built
+
+Phase 3 follows the list above. The code forced or suggested these
+differences:
+
+- **Session keys are unchanged.** `#task:<name>` and `#commit` arrive with
+  the slot split in phase 4 (S2), so task, commit, project and review agents
+  still share the bare `project.yaml` path. `docs/state-snapshot.md` now lists
+  every marker that exists (`#planning`, `#wolf`, `#archive`, and the
+  daemon-owned `workingman-agent` / `sleepy-head` keys), names the two that
+  are coming, and tells readers to match the path as a prefix.
+  `live.running_tasks` and `live.integrating` come from the sessions' kind and
+  task name, so they need no key change.
+- **`live.commit_reserved`** is a per-project counter (`commitBusy`, guarded
+  by `commitMu`). `launchCommitAgent` takes it before the session starts and
+  the session's `onEnd` releases it after `afterCommitSession` returns, so it
+  covers the routing and a transient relaunch. A launch that tracks no session
+  releases it at once. It is a counter, not a bool, because a transient retry
+  relaunches from inside `afterCommitSession`.
+- **`verify_checks`** counts in memory from the same places that log the
+  `integration_verify_check_*` events. `not_configured` is not counted, since
+  the field is omitted for a project with no `verify:`. A daemon snapshot of a
+  project with `verify:` always has the field, zeros included.
+- **`live.deferred` is not shipped.** It is written by `schedule`, which
+  arrives in phase 4, and so does the TUI's `deferred: overlaps Y` row hint.
+- **`integration_started`** is logged in `launchCommitAgent` (there is no
+  `schedule` yet). `queue_depth` is the length of the queue on disk.
+- **The commit queue is `taskgraph.Queued`,** a function over a plain task
+  slice, so the daemon, the offline snapshot and the TUI's lenient loaders
+  share it. `taskgraph.WaitingOnIntegration` gives `waiting_on`. Both are
+  ready for phase 4's `schedule`.
+- **Audit field fixes.** Every task event touched here now carries `path`
+  and `task` (D3). `task_released` used to put the task file in `task`. It
+  now carries the name there and the file in `task_path`. No reader parsed
+  the old field. `task_retry` and `task_retry_exhausted` log
+  `cause=failure` explicitly for an ordinary failure.
+- **The wolf's live check.** When the daemon publishes a snapshot,
+  `launchWolfAgent` sets `Observe.SnapshotFile` and mounts the snapshot's
+  directory read-only (`Plan.ReadOnlyMounts`, now honoured for the wolf as
+  well as the workingman agent). A read-only path nested in a writable mount
+  is dropped. `wolf.tmpl` then checks `live.integrating` /
+  `live.commit_reserved`, with a staleness rule on `generated_at`. With no
+  snapshot it keeps phase 2's task-file check.
+- **`sessions[].worktree`** is filled from the task file's `worktree:` for a
+  task agent's session, not from the session record.
+- **TUI.** The `success` glyph, the `Q:` count, the row hints and the detail
+  pane's `parallel:` line follow D5. The model fills
+  `ProjectView.Integrating` from the live commit session (`withIntegrating`)
+  on every project or session update, so `projectViewEqual` ignores it. The
+  conflict hint reads `attempt n/4`: `task.MaxAttempts` (3) retries after the
+  first run. **Opening a task's worktree** is `:workspace` with the Tasks pane
+  focused and a task with a `worktree:` selected. It goes through a new
+  `InteractiveLauncher.OpenTaskWorktreeDir` →
+  `Daemon.OpenTaskWorktreeDirTab`, in a tab named
+  `worktree-<work-stream>-<task>`. From any other pane, or for a task with no
+  worktree, `:workspace` opens the shared workspace as before. `:session`
+  still mounts the shared workspace. X3's worktree-as-cwd variant is left for
+  later.
+- **Tests.** The golden file is
+  `internal/daemon/testdata/snapshot_pipeline.golden.json` (in
+  `snapshot_pipeline_test.go`; regenerate with `go test ./internal/daemon
+  -run Golden -update`). The same file holds the `orch status` text test and
+  an offline check. TUI view-model tests are in `internal/tui/pipeline_test.go`.
+  The wolf prompt and mount tests are in `internal/prompts/worktree_test.go`
+  and `internal/runner/worktree_test.go`.
+
 ### Phase 4: concurrency above 1, behind `max_parallel_tasks`
 
 The main slot is split and `schedule` replaces `dispatchReadyOrPending`.

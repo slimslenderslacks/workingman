@@ -196,8 +196,11 @@ type Plan struct {
 
 	// ReadOnlyMounts, for the workingman agent, are host paths bind-mounted into
 	// its sandbox READ-ONLY (sbx's `<path>:ro`) next to its writable mounts: the
-	// snapshot dir, the audit-log dir and the ACP sessions root. Ignored for
-	// every other Kind. See workingmanWorkspaces.
+	// snapshot dir, the audit-log dir and the ACP sessions root. See
+	// workingmanWorkspaces. For the wolf, they follow its control dir and
+	// source worktree: the daemon's state dir, so it can read the live
+	// snapshot (docs/parallel-task-worktrees.md X3). Ignored for every other
+	// Kind.
 	ReadOnlyMounts []string
 
 	// Observe describes what the workingman agent observes, for its prompt and
@@ -1750,10 +1753,14 @@ func sandboxWorkspaces(p Plan, workingDir, planningWorktree string) []string {
 		// the project's source worktree as a second workspace (see
 		// resolveWolfWorktree). The control dir already holds project.yaml,
 		// tasks/ and the blocked-session record, so it needs no extra orch mount.
-		if planningWorktree == "" || planningWorktree == workingDir {
-			return []string{workingDir}
+		out := []string{workingDir}
+		if planningWorktree != "" && planningWorktree != workingDir {
+			out = append(out, planningWorktree)
 		}
-		return []string{workingDir, planningWorktree}
+		if p.Kind == agent.WolfAgent {
+			out = appendReadOnlyMounts(out, p.ReadOnlyMounts)
+		}
+		return out
 	}
 	return []string{workingDir}
 }
@@ -1848,6 +1855,31 @@ func workingmanWorkspaces(scratch string, writable, readOnly []string) []string 
 		out = append(out, p+ReadOnlySuffix)
 	}
 	return out
+}
+
+// appendReadOnlyMounts adds each of readOnly to mounts as a read-only mount
+// (ReadOnlySuffix), skipping one that is empty, already present, or nested
+// with a mount already in the list: mixing modes on nested mounts is ambiguous,
+// and the writable one must win.
+func appendReadOnlyMounts(mounts, readOnly []string) []string {
+	for _, p := range readOnly {
+		p = absClean(p)
+		if p == "" {
+			continue
+		}
+		nested := false
+		for _, m := range mounts {
+			m = strings.TrimSuffix(m, ReadOnlySuffix)
+			if pathWithin(p, m) || pathWithin(m, p) {
+				nested = true
+				break
+			}
+		}
+		if !nested {
+			mounts = append(mounts, p+ReadOnlySuffix)
+		}
+	}
+	return mounts
 }
 
 // dropCovered removes every path that lies under another path of the list; of

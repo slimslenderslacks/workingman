@@ -248,7 +248,7 @@ func (d *Daemon) restampBase(p *project.Project, t *task.Task) {
 		}
 		mb, err := d.worktrees.MergeBase(d.ctx, dir, t.TaskBranch, p.Branch)
 		if err != nil {
-			d.audit.Log("worktree_base_error", "task", t.Name, "repo", repo, "err", err.Error())
+			d.audit.Log("worktree_base_error", "path", d.projectPathOf(t), "task", t.Name, "repo", repo, "err", err.Error())
 			return
 		}
 		base = append(base, task.Commit{Repo: repo, Hash: mb})
@@ -409,4 +409,10 @@ func (d *Daemon) commitWorktree(projectPath string, p *project.Project, t *task.
 	plan.Verify = il.verify
 	plan.DocsOnly = il.docsOnly
 	return il, nil
+}
+
+// projectPathOf is the project.yaml of the project t belongs to, derived from
+// its file's place in <control-dir>/tasks/.
+func (d *Daemon) projectPathOf(t *task.Task) string {
+	return filepath.Join(filepath.Dir(filepath.Dir(t.Path)), project.FileName)
 }

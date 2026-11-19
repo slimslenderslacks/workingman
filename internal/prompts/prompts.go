@@ -100,7 +100,9 @@ type Data struct {
 	// intake files there, on the human's request), the rest read-only — the
 	// directories of SnapshotFile and AuditLog, so their sibling files (the
 	// daemon, acp-wrapper and channel logs) are visible too. Workspace is its
-	// writable scratch directory.
+	// writable scratch directory. The WolfAgent gets SnapshotFile too, with
+	// its directory mounted read-only, for the live integration state it
+	// checks before committing on the shared branch.
 	Roots        []string // orch roots (--root)
 	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
 	AuditLog     string   // the audit log file; empty when unknown

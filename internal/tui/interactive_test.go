@@ -17,6 +17,7 @@ type fakeInteractive struct {
 	sessionCalls []string
 	orchCalls    []string
 	wsCalls      []string
+	wtCalls      []string
 	target       string
 	err          error
 }
@@ -33,6 +34,11 @@ func (f *fakeInteractive) OpenOrchDir(_ context.Context, projectPath string) (st
 
 func (f *fakeInteractive) OpenWorkspaceDir(_ context.Context, projectPath string) (string, error) {
 	f.wsCalls = append(f.wsCalls, projectPath)
+	return f.target, f.err
+}
+
+func (f *fakeInteractive) OpenTaskWorktreeDir(_ context.Context, projectPath, taskPath string) (string, error) {
+	f.wtCalls = append(f.wtCalls, projectPath+"|"+taskPath)
 	return f.target, f.err
 }
 

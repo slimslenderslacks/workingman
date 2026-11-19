@@ -12,6 +12,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/sbx"
+	"github.com/slimslenderslacks/work/internal/task"
 	"github.com/slimslenderslacks/work/internal/terminal"
 )
 
@@ -46,10 +47,32 @@ func (d *Daemon) OpenWorkspaceDirTab(ctx context.Context, projectPath string) (s
 	return d.openDirTab(ctx, "workspace", filepath.Dir(projectPath), dir)
 }
 
+// OpenTaskWorktreeDirTab opens a host shell in a new terminal tab whose working
+// directory is the task's own worktree (its `worktree:` field,
+// docs/parallel-task-worktrees.md D5). Backs `:workspace` when the TUI's Tasks
+// pane has a task with a worktree selected. It fails, without opening a tab,
+// when the task has no worktree or the directory is gone.
+func (d *Daemon) OpenTaskWorktreeDirTab(ctx context.Context, projectPath, taskPath string) (string, error) {
+	t, err := task.Load(taskPath)
+	if err != nil {
+		return "", fmt.Errorf("load task: %w", err)
+	}
+	if t.Worktree == "" {
+		return "", fmt.Errorf("task %q has no worktree", t.Name)
+	}
+	return d.openDirTabNamed(ctx, "worktree", filepath.Dir(projectPath), t.Worktree, t.Name)
+}
+
 // openDirTab verifies dir exists and opens a host bash there in a terminal tab
 // named "<kind>-<work-stream>", titled after the work stream. An already-open
 // tab is focused and reported with a *terminal.AlreadyOpenError.
 func (d *Daemon) openDirTab(ctx context.Context, kind, orchDir, dir string) (string, error) {
+	return d.openDirTabNamed(ctx, kind, orchDir, dir, "")
+}
+
+// openDirTabNamed is openDirTab with an optional suffix, so that one work
+// stream can have a tab per task: "<kind>-<work-stream>-<suffix>".
+func (d *Daemon) openDirTabNamed(ctx context.Context, kind, orchDir, dir, suffix string) (string, error) {
 	if d.runner == nil {
 		return "", fmt.Errorf("terminal tabs need a runner (none configured)")
 	}
@@ -57,11 +80,16 @@ func (d *Daemon) openDirTab(ctx context.Context, kind, orchDir, dir string) (str
 		return "", fmt.Errorf("%s directory %s does not exist", kind, dir)
 	}
 	workStream := filepath.Base(orchDir)
+	name, title := kind+"-"+workStream, workStream
+	if suffix != "" {
+		name += "-" + suffix
+		title += " " + suffix
+	}
 	target, err := d.runner.LaunchInteractive(ctx, runner.InteractiveSpec{
 		Cwd:   dir,
 		Inner: []string{"bash"},
-		Name:  kind + "-" + workStream,
-		Title: workStream,
+		Name:  name,
+		Title: title,
 	})
 	var already *terminal.AlreadyOpenError
 	if errors.As(err, &already) {

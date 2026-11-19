@@ -133,6 +133,19 @@ type Daemon struct {
 	// worktree.go). The zero value runs the real git binary.
 	worktrees worktree.Manager
 
+	// commitMu guards commitBusy and verifyChecks. commitBusy counts, per
+	// project, the commit agents between launchCommitAgent and the end of
+	// their afterCommitSession (beginCommit / endCommit): wider than the
+	// session itself, so it also covers the routing and the relaunch of a
+	// transient retry. The snapshot reports it as live.commit_reserved, which
+	// the wolf checks before committing on the shared branch
+	// (docs/parallel-task-worktrees.md X3). verifyChecks counts the
+	// pre-integration build check outcomes since the daemon started (R1),
+	// reported as the snapshot's verify_checks. Neither is persisted.
+	commitMu     sync.Mutex
+	commitBusy   map[string]int
+	verifyChecks map[string]*VerifyChecks
+
 	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
 	// unless WithStateFile configured a path.
 	snapshot snapshotState
@@ -264,6 +277,8 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		reviewFinger:       map[string]reviewBaseline{},
 		reviewBackoff:      map[string]int{},
 		dispatchChains:     map[string]chan struct{}{},
+		commitBusy:         map[string]int{},
+		verifyChecks:       map[string]*VerifyChecks{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 		clock:              time.Now,
 		sleepCheckEvery:    cronSleepCheckEvery,

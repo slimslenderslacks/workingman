@@ -183,10 +183,20 @@ THE SHARED BRANCH — do not commit, rebase, reset or otherwise move
 `{{.Branch}}` in the shared workspace while an integration is in flight, and
 never leave uncommitted changes there: either makes the integration fail or
 block. A block does not stop a commit agent that was already running, so
-"the project is blocked" is not enough. An integration is in flight while any
+"the project is blocked" is not enough. {{if .SnapshotFile}}Check the daemon's live state snapshot,
+`{{.SnapshotFile}}` (read-only, rewritten every few seconds), right before
+any commit on `{{.Branch}}`: find this project in `projects[]` (`path` is
+{{.ProjectPath}}) and do not commit while its `live.integrating` names a
+task or `live.commit_reserved` is true. If `generated_at` is more than about a
+minute old the daemon is down and the snapshot cannot tell you; fall back to
+the task files. `commit_queue` lists the tasks waiting to integrate, head
+first, and a queued task's `integration` says why its last attempt failed.
+Tasks at `success` are queued and will integrate once the project is
+unblocked, so changes you commit on `{{.Branch}}` meanwhile become what they
+rebase onto.{{else}}An integration is in flight while any
 task is at `success` (it is queued for, or in, integration); re-read the task
 files right before any commit on `{{.Branch}}`, since that can change while
-you work. Instead of committing on `{{.Branch}}`, make the change in a task's
+you work.{{end}} Instead of committing on `{{.Branch}}`, make the change in a task's
 worktree and set that task to `success`, so it goes through the commit queue.
 
 {{end}}When you have a resolution, update the relevant task and/or project files to
