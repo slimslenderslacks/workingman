@@ -19,16 +19,27 @@
 // entries are worth parsing: `*.json` files that are not hidden and not
 // temp or partial writes.
 //
+// [Scan] loads every pending request in the inbox at once, reporting
+// malformed files as per-file [*FileError]s instead of failing. [Watch]
+// follows the inbox with fsnotify and emits an [Event] when a request is
+// added, updated or removed, or fails to parse. It debounces each file and
+// re-reads a file that fails to parse a few times before reporting it, so a
+// request written in several chunks is parsed once, when complete; atomic
+// renames into the inbox are picked up as new files. Start [Watch] before
+// calling [Scan] so no file is missed in between.
+//
 // # Key types
 //
 //   - [Request] / [Choice] — a pending decision as read from the inbox;
 //     [ParseRequest] decodes and validates one.
 //   - [Answer] — the user's pick, written to the outbox by [WriteAnswer].
+//   - [Pending] — a parsed request plus its inbox file name; returned by
+//     [Scan] and carried by [Event]s from [Watch].
+//   - [Event] / [EventKind] — inbox changes reported by [Watch].
 //   - [DefaultInbox] / [DefaultOutbox] / [EnsureDirs] — default locations
 //     and directory creation.
 //
 // # Collaborators
 //
-// Has no internal dependencies. Used by the decision TUI command and its
-// inbox watcher.
+// Has no internal dependencies. Used by the decision TUI command.
 package decision
