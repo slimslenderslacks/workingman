@@ -29,6 +29,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/channels/whatsapp/bridge` | daemon | Package bridge runs and talks to the vendored Baileys WhatsApp bridge: the "personal number, QR pairing, no public webhook" WhatsApp backend. | `Process` | `APIError`, `Backoff`, `Client`, `Event`, `Health`, `Launch`, `ReadKey`, `SendResult`, `Starter`, `Supervisor`, `SupervisorStatus` |
 | `internal/channels/whatsapp/setup` | daemon | Package setup holds the non-interactive core of `orch whatsapp setup`, `status` and `test`. | — | `Cred`, `Current`, `Guide`, `SaveResult`, `Store`, `Update`, `WebhookSettings` |
 | `internal/daemon` | daemon | Package daemon is the orch control loop: it watches the orch roots, drives each project and task through its state machine, and launches the agent sessions that do the work. | `ChannelSender` | `ACPInfo`, `AuditEvent`, `ChannelOption`, `Daemon`, `DaemonInfo`, `MissedSchedule`, `OfflineOptions`, `Option`, `ProjectLive`, `ProjectSnapshot`, `PullRequestSummary`, `ReviewGatewayConfig`, `ReviewPollInfo`, `RuntimeInfo`, `SessionInfo`, `SessionSnapshot`, `SessionStatus`, `SleepyHeadSession`, `Snapshot`, `TaskSnapshot`, `WolfSession`, `WorkingmanAgentConfig`, `WorkingmanAgentSession` |
+| `internal/decision` | tui | Package decision holds the data model and file I/O for the standalone host-side decision TUI. | — | `Answer`, `Choice`, `Request` |
 | `internal/gitsign` | shared | Package gitsign makes a sandboxed agent commit as the host user, SSH-sign those commits, and check that the SSH agent forwarded into the sandbox can sign and push. | — | `Config`, `PushResult`, `RunFunc` |
 | `internal/mcpgateway` | shared | Package mcpgateway gives every sandbox workingman creates its own MCP gateway: a sub-gateway of the host's standalone-codemode gateway, minted with POST /gateways and torn down with DELETE /gateways/{id}. | — | `Client`, `Content`, `Gateway`, `Manager`, `RPCError`, `Record`, `ServerState`, `Session`, `SessionOptions`, `Store`, `Tool`, `ToolError`, `ToolResult`, `UnknownServersError` |
 | `internal/notify` | daemon | Package notify is the daemon's user-notification interface: how an agent that needs human attention reaches a person. | `Sender`, `TopicSender` | `Async`, `Call`, `Multi`, `Noop`, `Osascript`, `Recorder` |
@@ -86,6 +87,7 @@ graph LR
     internal_taskgraph["taskgraph"]
   end
   subgraph grp_tui["tui"]
+    internal_decision["decision"]
     internal_tui["tui"]
   end
   subgraph grp_shared["shared"]
@@ -201,7 +203,7 @@ graph LR
   classDef daemon fill:#dbe9ff,stroke:#2f6fd6,color:#000
   class internal_acpchat,internal_agent,internal_audit,internal_channels,internal_channels_channeltest,internal_channels_signal,internal_channels_signal_setup,internal_channels_whatsapp,internal_channels_whatsapp_bridge,internal_channels_whatsapp_setup,internal_daemon,internal_notify,internal_onepassword,internal_power,internal_prompts,internal_router,internal_runner,internal_scheduler,internal_service,internal_setup,internal_taskgraph daemon
   classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
-  class internal_tui tui
+  class internal_decision,internal_tui tui
   classDef shared fill:#fff1cc,stroke:#c99a06,color:#000
   class internal_acpclient,internal_gitsign,internal_mcpgateway,internal_policy,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace shared
   classDef wrapper fill:#f3e2fb,stroke:#8e44ad,color:#000
@@ -230,6 +232,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/channels/whatsapp/bridge` | — | `channels/whatsapp` |
 | `internal/channels/whatsapp/setup` | `channels`, `channels/whatsapp` | `cmd/orch` |
 | `internal/daemon` | `agent`, `audit`, `channels`, `gitsign`, `mcpgateway`, `notify`, `policy`, `power`, `project`, `prompts`, `runner`, `sbx`, `scheduler`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |
+| `internal/decision` | — | — |
 | `internal/gitsign` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `runner` |
 | `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `cmd/orch`, `acpwrapper`, `daemon`, `runner` |
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
