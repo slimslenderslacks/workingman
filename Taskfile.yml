@@ -5,8 +5,8 @@ tasks:
     deps: [build]
 
   build:
-    desc: Build orch, acp-wrapper and op-read into the repo root
-    deps: [orch, acp-wrapper, op-read]
+    desc: Build orch, acp-wrapper, op-read and decision-tui into the repo root
+    deps: [orch, acp-wrapper, op-read, decision-tui]
 
   orch:
     desc: Build the orch daemon
@@ -44,6 +44,18 @@ tasks:
     generates:
       - op-read
 
+  decision-tui:
+    desc: Build decision-tui, the standalone host TUI for answering decision requests
+    cmds:
+      - go build -o decision-tui ./cmd/decision-tui
+    sources:
+      - cmd/decision-tui/**/*.go
+      - internal/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - decision-tui
+
   test:
     desc: Run go vet and the Go test suite (mirrors ci.yml)
     cmds:
@@ -64,4 +76,4 @@ tasks:
   clean:
     desc: Remove built binaries
     cmds:
-      - rm -f orch acp-wrapper op-read
+      - rm -f orch acp-wrapper op-read decision-tui
