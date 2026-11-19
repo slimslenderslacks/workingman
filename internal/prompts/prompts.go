@@ -44,6 +44,27 @@ type Data struct {
 	ProjectChanges []string // for PlanningAgent: human-readable project.yaml changes since the last successful plan
 	Worktree       string   // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
 
+	// TaskWorktree, for the TaskAgent and CommitAgent, is the task's own
+	// worktree root (<shared>/.worktrees/<task>, docs/parallel-task-worktrees.md
+	// W2), holding one git worktree per repo on TaskBranch. Empty selects the
+	// legacy wording: the task works, and the commit agent commits, in the
+	// shared workspace on Branch.
+	TaskWorktree string
+	// TaskBranch is the task's branch, wm/<Branch>/<task> (W3).
+	TaskBranch string
+	// TaskBase is the per-repo commit TaskBranch started from (the task file's
+	// base:), which the task agent diffs against to see what earlier attempts
+	// left and the commit agent compares with to find repos with work.
+	TaskBase []RepoCommit
+	// Attempt, for the TaskAgent, is the task's attempts count: 0 on the first
+	// run, n on the nth automatic retry. A retry with a TaskWorktree runs in the
+	// worktree the previous attempt left, so the prompt says so.
+	Attempt int
+	// Resumed, for the TaskAgent, is true when the daemon reused an existing
+	// worktree for this run (a stop/start, a restart, a wolf reset), so it may
+	// hold an earlier run's changes even when Attempt is 0.
+	Resumed bool
+
 	// PushBranch, for the CommitAgent, tells it to push the branch after
 	// committing instead of leaving the commit local. Set by the daemon for a
 	// review-fix task (one carrying a `source:` — it addresses a live PR review
@@ -84,6 +105,12 @@ type Data struct {
 	ReplanInstruction string
 }
 
+// RepoCommit is one repo's commit, as in a task file's base: or commits:.
+type RepoCommit struct {
+	Repo string // workspace dir name of the repo
+	Hash string
+}
+
 // BehindProject is one cron project the SleepyHeadAgent must report on.
 type BehindProject struct {
 	Name        string // work-stream name
@@ -111,6 +138,8 @@ var tmplFuncs = template.FuncMap{
 	"sub":        func(a, b int) int { return a - b },
 	"nameBudget": sbx.NameBudget,
 	"dir":        filepath.Dir,
+	"add":        func(a, b int) int { return a + b },
+	"join":       filepath.Join,
 }
 
 var tmpls = template.Must(template.New("").Funcs(tmplFuncs).ParseFS(templatesFS, "templates/*.tmpl"))

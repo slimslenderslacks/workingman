@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/slimslenderslacks/work/internal/project"
+	"github.com/slimslenderslacks/work/internal/worktree"
 )
 
 // addTree walks root and registers a watch on every directory it finds.
@@ -20,10 +21,22 @@ func (d *Daemon) addTree(root string) error {
 			return err
 		}
 		if entry.IsDir() {
+			if p != root && skipWatchDir(entry.Name()) {
+				return filepath.SkipDir
+			}
 			return d.watcher.Add(p)
 		}
 		return nil
 	})
+}
+
+// skipWatchDir reports whether a directory, and everything under it, is left
+// unwatched. A `.worktrees` directory holds per-task git worktrees
+// (docs/parallel-task-worktrees.md W2): full checkouts of every repo, which
+// would exhaust the watch budget and churn the daemon with events from agents
+// editing source, and never hold a project, task or intake file.
+func skipWatchDir(name string) bool {
+	return name == worktree.DirName
 }
 
 // startupScanConcurrency bounds how many projects' revisitProject calls run
@@ -57,6 +70,9 @@ func (d *Daemon) startupScan() {
 				return nil
 			}
 			if entry.IsDir() {
+				if p != root && skipWatchDir(entry.Name()) {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			if filepath.Base(p) != project.FileName {
@@ -90,11 +106,17 @@ func (d *Daemon) maybeWatchNewDir(path string) bool {
 	// event the project.md (or project.yaml) inside has often already
 	// landed. Without this scan the file's own Create event is missed (the
 	// watch wasn't installed yet) and the project never gets dispatched.
+	if skipWatchDir(filepath.Base(path)) {
+		return true
+	}
 	_ = filepath.WalkDir(path, func(p string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if entry.IsDir() {
+			if skipWatchDir(entry.Name()) {
+				return filepath.SkipDir
+			}
 			if err := d.watcher.Add(p); err != nil {
 				d.audit.Log("watch_add_error", "path", p, "err", err.Error())
 				return nil

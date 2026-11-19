@@ -10,8 +10,9 @@
 // needed, creates a project's new_repos on GitHub with `gh repo create`,
 // resets each repo to its base_branch on first creation, and handles wsp's
 // odd exit codes so that Create and Remove are idempotent. [StubManager] only
-// creates and removes directories and never runs wsp or git. It is used by
-// tests and `orch --workspace-manager=stub`.
+// creates and removes directories and never runs wsp; with Git set
+// ([NewGitStub]) it also `git init`s each repo so worktree code can run
+// against it. It is used by tests and `orch --workspace-manager=stub`.
 //
 // # Key types
 //

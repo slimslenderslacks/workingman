@@ -16,6 +16,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
+	"github.com/slimslenderslacks/work/internal/worktree"
 )
 
 // Daemon watches a list of root directories for changes to project.yaml,
@@ -127,6 +128,10 @@ type Daemon struct {
 	powerPaused     bool
 	powerDeferred   map[string]bool
 	powerRevisit    func(string) // test hook; nil = revisitProject
+
+	// worktrees runs the git operations on per-task worktrees (see
+	// worktree.go). The zero value runs the real git binary.
+	worktrees worktree.Manager
 
 	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
 	// unless WithStateFile configured a path.

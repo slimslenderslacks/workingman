@@ -1254,9 +1254,12 @@ func firstUncommittedSuccess(g *taskgraph.Graph) *task.Task {
 	return nil
 }
 
-// launchTaskAgent dispatches the first ready task to a task agent in a fresh
-// workspace, marking it running on disk first (markTaskRunning). On session end the daemon re-reads the task file and, if the
-// agent wrote status:success, launches the commit agent for the same task.
+// launchTaskAgent dispatches the first ready task to a task agent, marking it
+// running on disk first (markTaskRunning). When worktrees are enabled the
+// agent runs in the task's own worktree (prepareTaskWorktree), otherwise in
+// the shared workspace. On session end the daemon re-reads the task file and,
+// if the agent wrote status:success, launches the commit agent for the same
+// task.
 func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task.Task) {
 	if d.runner == nil {
 		return
@@ -1268,7 +1271,8 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 	root := filepath.Dir(projectPath)
 	plan := runner.Plan{
 		Kind: agent.TaskAgent,
-		// No WorkingDir: workspace.Manager creates one keyed on Branch.
+		// No WorkingDir: workspace.Manager creates one keyed on Branch, and
+		// prepareTaskWorktree may point the agent at its task worktree in it.
 		Branch:      p.Branch,
 		Repos:       workspaceReposFor(p),
 		ProjectPath: projectPath,
@@ -1287,6 +1291,23 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 	// file — and the TUI — say running while the workspace is provisioned and
 	// the agent works, and a concurrent dispatch's Ready() can't pick it again.
 	marked := d.markTaskRunning(t)
+	// Cut (or reuse) the task's own worktree and point the plan at it
+	// (docs/parallel-task-worktrees.md W4). A failure is a failed launch: the
+	// task goes back to ready and the project blocks for the wolf.
+	if err := d.prepareTaskWorktree(projectPath, p, t, &plan); err != nil {
+		repo := ""
+		var wce *worktreeCreateError
+		if errors.As(err, &wce) {
+			repo = wce.repo
+		}
+		d.audit.Log("worktree_create_error", "path", projectPath, "task", t.Name, "repo", repo, "err", err.Error())
+		if marked {
+			d.releaseRunningTask(plan.TaskPath, "worktree_failed")
+		}
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("could not prepare the worktree for task %q: %v", t.Name, err))
+		return
+	}
 	tracked, err := d.startSessionTracked(projectPath, plan, func(error) {
 		d.afterTaskSession(projectPath, plan.TaskPath, p)
 	})

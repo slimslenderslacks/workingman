@@ -6,10 +6,12 @@
 > around the code; [docs/package-docs.md](docs/package-docs.md) explains the
 > `doc.go` convention that feeds it.
 >
-> **Planned change:** [docs/parallel-task-worktrees.md](docs/parallel-task-worktrees.md)
+> **In progress:** [docs/parallel-task-worktrees.md](docs/parallel-task-worktrees.md)
 > is the design for running a project's tasks in parallel, each in its own git
 > worktree, with the commit agent serializing integration onto the shared
-> branch. The task and commit agent sections below describe today's behavior.
+> branch. Phase 1 has shipped: every non-push task already runs in its own
+> worktree (concurrency is still 1), as the task and commit agent sections
+> below describe.
 
 The orchestrator launches eight kinds of `claude` sessions. Seven run over a
 project's lifecycle: **project → planning → task → commit**, with **wolf**,
@@ -219,21 +221,40 @@ working` (or has pending manual tasks in `reviewing`/`done`) and has a task in
 (`t.IsPushTask()`) skips the task agent entirely and goes straight to the
 commit agent (see below).
 
-**Workspace/session.** *No* `WorkingDir` — `Runner.resolveWorkingDir` calls
-`workspace.Manager.Create(ctx, branch, repos)` (wsp), provisioning/reusing a
-workspace named after the project's `branch`, containing every repo in
-`p.Repos` + `p.NewRepos` on that branch. Sandbox name is
-`"<work-stream>-<task-name>"` — each task gets its **own** sandbox (so a
-task's `static_mcps`/`policies` can differ from siblings), mounted with two
-workspaces: the wsp worktree itself and the project's control/orch dir
-(needed so the task agent's status write-back to `tasks/<name>.yaml` lands
-somewhere that exists inside the sandbox).
+**Workspace/session.** *No* `WorkingDir`. The daemon's `launchTaskAgent`
+first provisions/reuses the project's **shared workspace** with
+`workspace.Manager.Create(ctx, branch, repos)` (wsp) — named after the
+project's `branch`, containing every repo in `p.Repos` + `p.NewRepos` on that
+branch — and then, in `prepareTaskWorktree` (`internal/daemon/worktree.go`),
+gives the task its **own worktree**: `<shared>/.worktrees/<task>/`, one
+`git worktree` per repo on the task branch `wm/<branch>/<task>`
+(`internal/worktree`). The first dispatch cuts it from the shared tip; every
+later dispatch (a retry, `:start` after a stop, a wolf reset) reuses it
+exactly as the last run left it, dirty or not. The daemon stamps `worktree`,
+`task_branch` and `base` on the task file, and a failure to cut it releases
+the task and blocks the project (`worktree_create_error`). The agent's cwd
+is the worktree root (`Plan.TaskWorktree`; `.orch/` is written there), and
+sandbox name `"<work-stream>-<task-name>"` — each task gets its **own**
+sandbox (so a task's `static_mcps`/`policies` can differ from siblings) —
+mounts the worktree, each repo's git common dir (so the worktree's `.git`
+pointer resolves and its commits land in the shared repo), the shared
+`.gomodcache` when staged, and the project's control/orch dir (so the status
+write-back to `tasks/<name>.yaml` lands somewhere that exists inside the
+sandbox). It never mounts the shared working trees.
+
+Legacy path: with a workspace manager that isn't git-backed (the plain stub),
+for a push task, or while legacy work is still in the shared tree (another
+task with no `task_branch` at `running`/`success`, or uncommitted changes in a
+shared repo; `worktree_skipped_legacy`), the task runs in the shared
+workspace as it did before worktrees.
 
 **Reads/writes.** Reads its own `TaskPath` (task yaml) and the project file.
-Does the actual code work in the workspace. Writes only `status:
-success|failed` (+ `failure_reason` on failure) back to its task file — it
-must NOT commit, push, or touch `project.yaml`; that's the commit agent's and
-daemon's job.
+Does the actual code work in its worktree; it may commit on its own task
+branch (or leave the work uncommitted) but must not touch any other ref or
+push. Writes only `status: success|failed` (+ `failure_reason` on failure)
+back to its task file — it must NOT touch `project.yaml`; integrating the
+work is the commit agent's and daemon's job. (On the legacy path it must not
+commit either.)
 The agent's `acp-wrapper` also annotates the task file (via `task.Update`,
 `internal/acpwrapper/record.go`): `resolved_harness:` (the sbx template the
 sandbox was created from) once the sandbox exists, and `resolved_model:` (the
@@ -245,15 +266,20 @@ resolved ones when present.
 **Prompt structure (`task.tmpl`).** Short and direct — this is the exact text
 this very orchestrator run received (see `.orch/instructions.md` in this
 task's own sandbox): task name/paths up top, "read the description and do the
-work," explicit instruction that even a git-no-op (a GitHub-API-only change)
+work" — for a worktree task, that it is on its own branch and must leave
+every other ref alone, plus, on a retry (`attempts > 0`) or a resumed run, a
+block saying the worktree may hold the earlier run's committed and
+uncommitted changes, how to inspect them against `base`, and that it may
+keep, fix or undo them — an explicit instruction that even a git-no-op (a GitHub-API-only change)
 should still exit `success` so the commit agent can finalize it, and the fixed
 status enum with a call-out that `committed` from a task agent is an
 invariant violation.
 
 **Completion signal / lifecycle.** `afterTaskSession` re-reads the task file:
-`success` → `launchCommitAgent`; `failed`/`running`/`ready` (agent crashed or
+`success` → re-stamp `base` (merge base with the shared branch) and
+`launchCommitAgent`; `failed`/`running`/`ready` (agent crashed or
 never started) → `handleTaskFailure`, which bumps `Attempts` and resets to
-`ready` for a relaunch, up to `maxTaskAttempts` (3), after which it retains
+`ready` for a relaunch in the **same** worktree, up to `maxTaskAttempts` (3), after which it retains
 the sandbox (`retainSandbox`, sets `save_sandbox: true` for post-mortem) and
 blocks the project (→ wolf); `blocked` → retains the sandbox and blocks
 immediately (no retry budget spent); `committed` → treated as an invariant
@@ -272,21 +298,33 @@ for any task stuck at `success` (covers a daemon restart between task-end and
 commit-start). A push task (`t.IsPushTask()`) is dispatched straight here from
 `dispatchReadyTask`, with `PushBranch: true`.
 
-**Workspace/session.** Same shape as the task agent — no `WorkingDir`, so it
-reuses/re-provisions the same wsp workspace, and shares the **same sandbox**
-as the task it's committing (`SandboxNameFor` uses the same
-`"<work-stream>-<task-name>"` for both `TaskAgent` and `CommitAgent`), forwarding
-the task's `StaticMCPs`/`Policies`/`SaveSandbox` in case the commit happens to
-be the sandbox's first launch (e.g. a retry after a crash).
+**Workspace/session.** No `WorkingDir`, so it runs in the project's shared
+wsp workspace — where the shared branch is checked out, and under which the
+task's worktree sits at `.worktrees/<task>/`. It has a sandbox of its **own**,
+`"<work-stream>-<task-name>-commit"` (`SandboxNameFor`), mounting the shared
+workspace and the control dir: its mounts differ from the task sandbox's, so
+reusing that one would make acp-wrapper recreate it on every hand-off. It
+gets the task's `StaticMCPs`/`Policies`/`SaveSandbox`/model/harness.
 
-**Reads/writes.** Reads the task file and does `git add`/`git commit` (and,
-for a push task, `git push`) directly in each repo of the workspace, using
+**Reads/writes.** Reads the task file. For a worktree task
+(`Plan.TaskWorktree` set from the task's `task_branch`) it commits any
+leftovers in the task worktree and fast-forwards the shared branch to the
+task branch (`git merge --ff-only`); a legacy or push task does `git
+add`/`git commit` (and, for a push task, `git push`) directly in each repo of
+the shared workspace. Either way it uses
 the git identity injected by the environment (never `git config
 user.name`/`--author`). Writes `status: committed`, a `summary:`, a
 `commits:` list (repo dir name + full SHA), and an optional `created_files:`
 list back to the task file.
 
-**Prompt structure (`commit.tmpl`).** Two modes gated by `{{if .PushBranch}}`:
+**Prompt structure (`commit.tmpl`).** A worktree task (`{{if .TaskWorktree}}`)
+gets its own branch: step 0 commit leftovers in the task worktree, skip repos
+whose task branch still equals `base`, check the shared checkout is clean and
+on the shared branch, fast-forward it with `--ff-only` (never rebase, merge,
+reset or force), record the published SHAs. A dirty shared tree or a failed
+fast-forward (the shared branch moved outside the pipeline) → `status:
+blocked`. No rebase yet: with one task at a time the shared tip cannot move
+between dispatch and integration. Otherwise, two modes gated by `{{if .PushBranch}}`:
 - **Ordinary commit** (default): for every repo with modifications, stage,
   make one commit with a subject under 72 chars derived from the task
   description, capture the SHA — then write `status: committed` + `summary` +
@@ -309,7 +347,11 @@ tab shows that error instead of a "starting" placeholder, and
 `afterCommitSession` puts it in the project's `blocked_reason`.
 
 **Completion signal / lifecycle.** `afterCommitSession` requires `status:
-committed`; anything else blocks the project for the wolf. On success it
+committed`; anything else blocks the project for the wolf. For a worktree
+task `finishCommittedTask` then checks that the task branch is an ancestor of
+the shared branch in every repo (`integration_verify_failed` → block, worktree
+kept) and removes the worktree and branch — the only point in a task's life
+where they go (`worktree_removed`; a failed removal is only logged). On success it
 stamps `completed_at` (once), reloads the task graph, and either
 transitions the project to `done`/`reviewing` (`transitionProjectComplete`,
 all committed) or dispatches the next ready task (`firstUncommittedSuccess`

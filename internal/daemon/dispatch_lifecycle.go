@@ -68,6 +68,7 @@ func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Proje
 	)
 	switch t.Status {
 	case task.StatusSuccess:
+		d.restampBase(p, t)
 		d.launchCommitAgent(projectPath, p, t)
 	case task.StatusFailed, task.StatusRunning, task.StatusReady:
 		d.handleTaskFailure(projectPath, taskPath, p, t)
@@ -86,7 +87,10 @@ func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Proje
 
 // handleTaskFailure bumps Attempts and either resets the task to ready for
 // another run, or — if the retry budget is exhausted — leaves the task as
-// failed and blocks the project. The task file is written by the daemon, but
+// failed and blocks the project. Either way a worktree task keeps its worktree
+// and branch exactly as the failed attempt left them, dirty or not
+// (docs/parallel-task-worktrees.md W6): the retry runs in the same worktree,
+// and a blocked task's worktree is there for the wolf to inspect. The task file is written by the daemon, but
 // task-file events are observation-only (handleTask), so no fsnotify loop is
 // created. The relaunch moves the task straight on to running again.
 func (d *Daemon) handleTaskFailure(projectPath, taskPath string, p *project.Project, t *task.Task) {
@@ -237,17 +241,15 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 // tree by the commit agent, so there is nothing to verify or clean up. It
 // reports whether afterCommitSession should carry on dispatching.
 //
-// Only the legacy branch is wired so far: nothing writes task_branch yet, so a
-// task carrying one (hand-edited) is finished the legacy way too. The worktree
-// branch — the ancestor check (I3) and worktree cleanup (W6) — lands with the
-// phases that create worktrees.
+// A worktree task is finished by finishWorktreeTask: the ancestor check that
+// its branch landed on the shared branch, then the W6 cleanup. A daemon with
+// no git-backed workspaces can't run those, so it finishes such a task the
+// legacy way.
 func (d *Daemon) finishCommittedTask(projectPath string, p *project.Project, t *task.Task) bool {
-	if !t.HasTaskBranch() {
+	if !t.HasTaskBranch() || !d.worktreesEnabled() {
 		return true // legacy: committed in the shared tree
 	}
-	// Worktree task: the I3 ancestor check and W6 cleanup go here. Until they
-	// exist it is finished exactly like a legacy task.
-	return true
+	return d.finishWorktreeTask(projectPath, p, t)
 }
 
 // dispatchReadyTask launches the right agent for a ready task. A push task has
@@ -367,8 +369,9 @@ func (d *Daemon) releaseOrphanedTasks(projectPath string) {
 	}
 }
 
-// launchCommitAgent runs in the same workspace shape as a task agent — it
-// needs the repos checked out so it can `git commit` inside each one. On
+// launchCommitAgent runs in the project's shared workspace — it needs the
+// repos checked out so it can `git commit` inside each one, and for a worktree
+// task the shared branch it fast-forwards is checked out there too. On
 // session end the daemon re-reads the task and, if it reached committed,
 // either launches the next ready task or marks the project done.
 func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *task.Task) {
@@ -388,18 +391,16 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		TasksDir:    filepath.Join(root, "tasks"),
 		TaskPath:    t.Path,
 		TaskName:    t.Name,
-		// Commit shares the task's per-task sandbox (same sandbox name);
-		// passing the same MCPs + policies keeps the rule set consistent on
-		// reuse. `sbx create` is skipped when the sandbox already exists, so
-		// policies typically remain whatever the task agent's first create
-		// applied — we forward them here for the case where commit happens
-		// to be the first launch (retry after a crash, etc.).
+		// Commit runs in a sandbox of its own (<work-stream>-<task>-commit,
+		// see runner.SandboxNameFor), mounting the shared workspace rather
+		// than the task's worktree; it gets the task's MCPs and policies so
+		// it can reach whatever the task could.
 		StaticMCPs:  t.StaticMCPs,
 		Policies:    t.Policies,
 		SaveSandbox: t.SaveSandbox,
 		// Commit runs under the task's model for now; it may get its own later.
 		Model: t.Model,
-		// ...and in the task's harness: it shares the task's sandbox.
+		// ...and in the task's harness.
 		Harness: t.Harness,
 		// Only a push task publishes: it pushes the commit-only fixes earlier
 		// review tasks accumulated in the worktree to the remote PR branch. Every
@@ -408,6 +409,10 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		// so the reviewer sees a coherent batch rather than a stream of commits).
 		PushBranch: t.IsPushTask(),
 	}
+	// A worktree task's commit agent lands its branch on the shared branch
+	// instead of committing the shared tree (the commit prompt's worktree
+	// branch).
+	d.commitWorktree(p, t, &plan)
 	// A push task goes straight from ready to this agent, so the commit agent
 	// is what's running it; any other task is already at success.
 	marked := t.IsPushTask() && d.markTaskRunning(t)

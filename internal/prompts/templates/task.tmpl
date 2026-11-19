@@ -8,16 +8,44 @@ Workspace: {{.Workspace}}
 The daemon has already set this task to `status: running`; you do not need to
 change it until you finish.
 
-Read the task description in the task file and complete the work inside this
+{{if .TaskWorktree}}Read the task description in the task file and complete the work inside this
+workspace. It is this task's own worktree: it holds one directory per repo
+listed in the project file, each a git worktree checked out on this task's
+branch `{{.TaskBranch}}`, not on the project branch `{{.Branch}}`. Other tasks
+work in worktrees of their own, and the shared checkout of `{{.Branch}}` is
+not mounted here. Make whatever code changes the task description requires,
+in these directories only.
+
+You may commit your work on `{{.TaskBranch}}` if that helps you, or leave it
+uncommitted: the commit agent commits whatever you leave and integrates the
+branch onto `{{.Branch}}`. Do not check out, create, move, reset or delete
+any other branch or ref — in particular never touch `{{.Branch}}` — and do not
+push.
+{{if or .Attempt .Resumed}}
+{{if .Attempt}}This is attempt {{add .Attempt 1}} of this task: an earlier attempt ended without
+success, and this worktree is exactly as that attempt left it.{{else}}This task ran here before and was interrupted (stopped, or the daemon
+restarted), and this worktree is exactly as that run left it.{{end}} It may contain
+its committed and uncommitted changes. Look before you start:
+{{range .TaskBase}}
+  - `{{.Repo}}`: `git -C {{join $.TaskWorktree .Repo}} status`,
+    `git -C {{join $.TaskWorktree .Repo}} log --oneline {{.Hash}}..HEAD` and
+    `git -C {{join $.TaskWorktree .Repo}} diff {{.Hash}}`{{end}}{{if not .TaskBase}}
+  - `git status`, `git log` and `git diff` in each repo directory{{end}}
+
+Keep, fix or undo those changes as the task needs. To start a repo over from
+where this task began, run `git reset --hard <base>` and `git clean -fd` in it
+(the base is the commit above), and only on `{{.TaskBranch}}`.
+{{end}}{{else}}Read the task description in the task file and complete the work inside this
 workspace. The workspace already contains the repos listed in the project
 file, all on branch `{{.Branch}}`. Make whatever code changes the task
 description requires.
-
+{{end}}
 When done, edit the task file to set `status: success` (or `status: failed`
 with a `failure_reason` if you cannot complete it). The daemon will trigger
 the commit agent on success and will restart the task on failure (up to a
-limit). Do not commit, push, or change `project.yaml` — that is the
-daemon's and commit agent's job.
+limit). {{if .TaskWorktree}}Do not push or change `project.yaml` — integrating your branch is
+the daemon's and commit agent's job.{{else}}Do not commit, push, or change `project.yaml` — that is the
+daemon's and commit agent's job.{{end}}
 
 This holds even when your work leaves nothing for git to commit — e.g. the
 task was a GitHub-API edit (updating the PR body or labels via the github

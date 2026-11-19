@@ -1,7 +1,8 @@
 # Parallel tasks via per-task worktrees
 
-**Status:** plan, complete. No code changes yet; implementation follows the
-[phased rollout](#phased-rollout).
+**Status:** plan, complete. Phases 0 and 1 of the
+[phased rollout](#phased-rollout) are implemented (see
+[Phase 1 as built](#phase-1-as-built)); the rest is still to do.
 
 ## Goal
 
@@ -2736,6 +2737,58 @@ dispatch and integration, so every integration takes the I2 fast path.
 - **Rollback:** revert. A task in flight at the time of the revert has its
   work on `wm/…` (D7 downgrade row). Release notes say to drain first; the
   branches are not deleted, so a human can merge them by hand.
+
+#### Phase 1 as built
+
+Phase 1 follows the list above. The code forced or suggested these
+differences, and the sections they touch were not otherwise changed:
+
+- **Worktrees need a git-backed workspace manager.** A new
+  `workspace.GitBacked` interface says whether a manager's workspaces hold
+  real git repos: `WspManager` always does, and `StubManager` does only when
+  built with `Git` set (`workspace.NewGitStub`, which `git init`s each repo
+  with one empty commit). The daemon cuts worktrees only when the manager is
+  git-backed (`worktreesEnabled`). Otherwise every task takes the legacy path,
+  as before. `orch --workspace-manager=stub` keeps the plain stub, so it runs
+  without worktrees.
+- **The D7 legacy gate lives in `prepareTaskWorktree`, not `schedule`**
+  (`schedule` arrives in phase 4). A task with no `task_branch` stays on the
+  legacy path, in the shared tree, while another task with no `task_branch`
+  is `running` or `success`. It also stays there while any shared repo has
+  uncommitted changes, which covers legacy work whose task already moved on.
+  This is logged as `worktree_skipped_legacy`. The task is not refused or
+  blocked; it runs exactly as it would have before phase 1. Once a task has
+  a `task_branch`, it always goes through `worktree.Manager.Ensure`.
+- **The resumed case gets its own prompt.** Besides the retry block
+  (`attempts > 0`), `task.tmpl` tells the agent when the daemon reused a
+  worktree with `attempts == 0` (`prompts.Data.Resumed`: a stop/start, a
+  restart, or a wolf reset). That worktree may hold an interrupted run's
+  changes too. `prompts.Data` and `.orch/context.yaml` also carry
+  `TaskWorktree`, `TaskBranch` and `TaskBase`.
+- **Ensure records `base` only for repos it cut or re-attached.** A reused
+  repo keeps the base already in the task file. A repo whose branch was cut
+  fresh (the first dispatch, or a repo added later) records the tip it was
+  cut from. A re-attached branch records its merge base only when the task
+  had none for that repo.
+- **The commit agent checks the shared checkout itself.** Phase 1's
+  worktree branch of `commit.tmpl` makes the agent check that each shared repo
+  is clean and on the shared branch before the fast-forward, and write
+  `blocked` otherwise. That is I3's clean-tree rule. The daemon-side
+  `prepareIntegration` still comes in phase 2.
+- **The W6 ancestor check ships with the cleanup.** `finishWorktreeTask`
+  checks that `wm/<pb>/<task>` is an ancestor of `refs/heads/<pb>` in every
+  repo where the branch exists, before it removes anything. It logs
+  `integration_verify_failed` and blocks when the check fails, keeping the
+  worktree. Phase 2 extends the check to every `commits[].hash`.
+- **The audit events phase 1 emits** come from D3: `worktree_created`,
+  `worktree_reused`, `worktree_stale_moved`, `worktree_create_error`,
+  `worktree_removed`, `task_worktree_remove_error`,
+  `integration_verify_failed` and `task_released why=worktree_failed`, plus
+  the new `worktree_skipped_legacy`. Phase 3 adds the rest.
+- **The watcher also skips `.worktrees` in `startupScan`,** not only in
+  `addTree` and `maybeWatchNewDir`.
+- **Stop/start is tested at the dispatch step** (`prepareTaskWorktree` twice
+  over a worktree holding an edit), not through a full stop/start daemon run.
 
 ### Phase 2: the commit agent integrates task branches
 

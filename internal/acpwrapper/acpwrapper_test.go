@@ -1350,3 +1350,30 @@ func TestSessionRecordReflectsPushBroken(t *testing.T) {
 		t.Errorf("PushBroken = false, want true")
 	}
 }
+
+// A task agent mounts <shared>/.gomodcache itself (its cwd is its task
+// worktree, which holds no cache), so a mount named .gomodcache is the cache.
+func TestGoModCacheDirAcceptsCacheMount(t *testing.T) {
+	shared := t.TempDir()
+	cache := filepath.Join(shared, ".gomodcache")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := Config{Workspaces: []string{filepath.Join(shared, ".worktrees", "t"), t.TempDir(), cache}}
+	if got := c.goModCacheDir(); got != cache {
+		t.Errorf("goModCacheDir = %q, want the mounted cache %q", got, cache)
+	}
+	c = Config{Workspaces: []string{cache + ":ro"}}
+	if got := c.goModCacheDir(); got != "" {
+		t.Errorf("goModCacheDir = %q for a read-only cache mount, want empty", got)
+	}
+	c = Config{Workspaces: []string{filepath.Join(shared, "missing", ".gomodcache")}}
+	if got := c.goModCacheDir(); got != "" {
+		t.Errorf("goModCacheDir = %q for a missing cache mount, want empty", got)
+	}
+	// The old form, a cache at a workspace's root, still works.
+	c = Config{Workspaces: []string{shared}}
+	if got := c.goModCacheDir(); got != cache {
+		t.Errorf("goModCacheDir = %q, want %q", got, cache)
+	}
+}

@@ -35,6 +35,14 @@ type Context struct {
 	ProjectChanges []string `yaml:"project_changes,omitempty"`
 	Worktree       string   `yaml:"worktree,omitempty"`
 
+	// TaskWorktree/TaskBranch/TaskBase/Attempt describe a task's own worktree
+	// for the task and commit agents. See prompts.Data for the meanings.
+	TaskWorktree string   `yaml:"task_worktree,omitempty"`
+	TaskBranch   string   `yaml:"task_branch,omitempty"`
+	TaskBase     []Commit `yaml:"task_base,omitempty"`
+	Attempt      int      `yaml:"attempt,omitempty"`
+	Resumed      bool     `yaml:"resumed,omitempty"`
+
 	// PushBranch tells the commit agent to push after committing (review-fix
 	// tasks) rather than leaving the commit local. See prompts.Data.PushBranch.
 	PushBranch bool `yaml:"push_branch,omitempty"`
@@ -49,6 +57,13 @@ type Context struct {
 	SnapshotFile string   `yaml:"snapshot_file,omitempty"`
 	AuditLog     string   `yaml:"audit_log,omitempty"`
 	SessionsRoot string   `yaml:"sessions_root,omitempty"`
+}
+
+// Commit is one repo's commit in .orch/context.yaml (same shape as a task
+// file's commits:).
+type Commit struct {
+	Repo string `yaml:"repo"`
+	Hash string `yaml:"hash"`
 }
 
 // Skill is a directory of files copied verbatim into the workspace's

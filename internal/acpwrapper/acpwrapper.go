@@ -354,6 +354,9 @@ func JoinMount(path string, readOnly bool) string {
 	return path
 }
 
+// goModCacheName is the directory name of a staged offline Go module cache.
+const goModCacheName = ".gomodcache"
+
 // goModCacheDir returns the path to a pre-populated, writable Go module cache
 // staged for this session, or "" if none exists. The task sandbox has no
 // network credentials, so it cannot `go mod download` private
@@ -363,8 +366,11 @@ func JoinMount(path string, readOnly bool) string {
 // one of the session's workspaces. That workspace is bind-mounted read-write at
 // its real host path, so the same path resolves inside the sandbox.
 //
-// Detection is by presence: the first workspace carrying a `.gomodcache`
-// directory wins. Stage it at the root of the code worktree (which is NOT
+// Detection is by presence: the first workspace that either IS a directory
+// named `.gomodcache` or carries one at its root wins. The first form is how a
+// task agent sees it: its cwd is its own task worktree, which has no cache, so
+// the daemon mounts `<shared>/.gomodcache` itself as an extra workspace
+// (docs/parallel-task-worktrees.md W5). Stage it at the root of the code worktree (which is NOT
 // itself a git repo — the repos are subdirectories, so `.gomodcache` sits
 // outside them and can't be committed) rather than the orch control workspace,
 // because the daemon recursively watches the orch tree and the cache's tens of
@@ -380,7 +386,13 @@ func (c Config) goModCacheDir() string {
 		if ro {
 			continue // a read-only mount can't serve as a writable module cache
 		}
-		cache := filepath.Join(ws, ".gomodcache")
+		if filepath.Base(filepath.Clean(ws)) == goModCacheName {
+			if info, err := os.Stat(ws); err == nil && info.IsDir() {
+				return filepath.Clean(ws)
+			}
+			continue
+		}
+		cache := filepath.Join(ws, goModCacheName)
 		if info, err := os.Stat(cache); err == nil && info.IsDir() {
 			return cache
 		}
