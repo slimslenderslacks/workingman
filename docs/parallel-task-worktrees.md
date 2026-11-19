@@ -1,6 +1,7 @@
 # Parallel tasks via per-task worktrees
 
-**Status:** plan (no code changes yet).
+**Status:** plan, complete. No code changes yet; implementation follows the
+[phased rollout](#phased-rollout).
 
 ## Goal
 
@@ -36,8 +37,25 @@ rollout.
    audit events, the state snapshot
 7. [Interactions](#interactions) — review agent, PRs, cron, wolf, stop/start,
    daemon restart recovery
-8. [Risks & open questions](#risks--open-questions)
-9. [Phased rollout](#phased-rollout)
+8. [Risks & open questions](#risks--open-questions) — semantic conflicts,
+   shared host resources, cost, multi-repo atomicity, signing, hint accuracy,
+   the commit sandbox, rule-breaking agents
+9. [Phased rollout](#phased-rollout) — phases 0–6, each with files touched,
+   tests and rollback
+
+Requirement → section map:
+
+| The plan must cover | Where |
+|---|---|
+| Current behavior, verified from code | [Current behavior](#current-behavior) §1–§7 |
+| Where/how per-task worktrees are created, named, cleaned up | W2–W7 |
+| Integration strategy (merge vs rebase vs cherry-pick) and conflicts | I1–I6 |
+| Scheduler/dispatch, per-project concurrency limit, serialized commit queue | S1–S8 |
+| How the planner marks tasks independent (`depends_on`, file/area hints) | H1–H4 |
+| Task YAML, `project.yaml`, audit events, snapshot | D1–D7 |
+| Review agent, PRs, cron, wolf, stop/start, daemon restart | X1–X8 |
+| Risks and open questions | R1–R9 |
+| Phased rollout with files touched | Phases 0–6 |
 
 ---
 
@@ -52,7 +70,7 @@ different, the code wins and the difference is noted. References are
 
 - `internal/daemon/daemon.go:Run` installs an fsnotify watch on every directory
   under each `--root` (`internal/daemon/watcher.go:addTree`). Next it runs
-  `reconcileSessions` (adopts live ACP sessions left by a previous daemon, §7),
+  `reconcileSessions` (adopts live ACP sessions left by a previous daemon, §6),
   then `startupScan`, then starts `reapLoop`, then enters the event loop.
 - `internal/daemon/daemon.go:dispatchEvent` runs each fsnotify event on its own
   goroutine, **chained per containing directory**. Events for one project's
@@ -75,7 +93,7 @@ different, the code wins and the difference is noted. References are
   callbacks, cron and the startup scan use it.
 - `internal/daemon/watcher.go:startupScan` walks every `project.yaml` with a
   fan-out of `startupScanConcurrency = 8` projects. For each one it calls
-  `releaseOrphanedTasks` (§7) and then `revisitProject`.
+  `releaseOrphanedTasks` (§6) and then `revisitProject`.
 
 ### 2. How the daemon picks the next task — one at a time
 
@@ -386,9 +404,11 @@ Why this layout:
 
 - **The task worktree root has the same shape as a wsp workspace:** one
   `DirName()` directory per repo. The task prompt's "the workspace contains the
-  repos …", `task.Commit.Repo` ("workspace-relative directory name") and the
-  `.gomodcache` probe in `acpwrapper` (`goModCacheDir`, which looks at every
-  workspace mount) all keep working without changes.
+  repos …" and `task.Commit.Repo` ("workspace-relative directory name") keep
+  working without changes. The `.gomodcache` probe in `acpwrapper`
+  (`goModCacheDir`) does **not**: it looks for `.gomodcache` at the root of
+  each workspace mount, and the cache is staged at `<shared>/.gomodcache`,
+  which a task agent no longer mounts. W5 adds an explicit mount for it.
 - **`.orch/` moves to a per-task directory.** `setup.Apply` writes into the
   root of the working dir. Giving each task agent its own root fixes the
   `.orch/` overwrite hazard that §4 notes would appear as soon as two agents
@@ -487,11 +507,14 @@ git -C <shared>/<repo> worktree add -b wm/<pb>/<task> \
   provisioning failures that `startSessionTracked` reports today are handled
   the same way.
 
-Creation is idempotent, which matters for restart recovery. If
-`.worktrees/<task>/<repo>` already exists **and** is registered in
-`git worktree list --porcelain` on `wm/<pb>/<task>`, the daemon reuses it.
-Anything else (a stray directory, a branch on the wrong commit, a worktree
-whose directory vanished) is removed and recreated (W6). `git worktree add`
+Creation is idempotent, which matters for restart recovery. Reuse is
+allowed in **one** case only: the task is still `running` with a live,
+adopted session (X7), and `.worktrees/<task>/<repo>` exists **and** is
+registered in `git worktree list --porcelain` on `wm/<pb>/<task>`. A dispatch
+from `ready` always re-cuts from the current tip, after saving an attempt ref
+if the old worktree holds commits or edits (X4). Anything else (a stray
+directory, a branch on the wrong commit, a worktree whose directory vanished)
+is removed and recreated (W6). `git worktree add`
 refuses to check out a branch that is checked out elsewhere, which gives a
 second guard against two sessions sharing one task worktree.
 
@@ -508,6 +531,7 @@ objects in the **common** git dir. A task sandbox therefore needs:
 | task | `<shared>/.worktrees/<task>/` | rw |
 |  | `<shared>/<repo>/.git` for each repo (`git rev-parse --git-common-dir`) | rw (objects, refs and the worktree's admin dir are written there) |
 |  | control dir (`filepath.Dir(projectPath)`) | rw (as today, for `tasks/<name>.yaml`) |
+|  | `<shared>/.gomodcache`, when staged | rw (offline module cache; `goModCacheDir` learns to accept a mount whose base name is `.gomodcache`) |
 | commit (non-push) | `<shared>` (cwd, as today) | rw |
 |  | control dir | rw |
 | commit (push task) | unchanged: `<shared>`, control dir | rw |
@@ -525,12 +549,14 @@ objects in the **common** git dir. A task sandbox therefore needs:
 - **The commit agent's cwd stays the shared workspace.** That is where the
   shared branch is checked out and where the fast-forward has to happen. The
   task worktree lives under it at `.worktrees/<task>/`, so no extra mount is
-  needed. The commit agent keeps reusing the task's sandbox name
-  (`SandboxNameFor(CommitAgent, …, taskName)`). Its mounts now differ from the
-  task's, so the acp-wrapper's `ensureSandbox` must recreate the sandbox
-  rather than reuse it when the mount set has changed. The alternative is a
-  distinct `-commit` sandbox suffix. Both are listed in the rollout, and a
-  distinct suffix is simpler and recommended.
+  needed. Today the commit agent reuses its task's sandbox
+  (`SandboxNameFor(CommitAgent, …, taskName)`), but its mounts now differ
+  from the task's. Keeping the shared name would force the acp-wrapper's
+  `ensureSandbox` to recreate the sandbox whenever the mount set changes. A
+  distinct commit sandbox is simpler, and the rollout uses one from phase 1
+  on: one per task (`<work-stream>-<task>-commit`), with the task's
+  `static_mcps`/`policies`/`harness` copied in as `launchCommitAgent` does
+  today. Whether one per project would do is open question R7.
 - **Planning and the wolf are unchanged.** The planner's second mount is now
   better than it was: it shows only *integrated* work, not some task's
   half-finished edits (the caveat in §7). The wolf additionally gets each
@@ -566,9 +592,9 @@ fatal to the pipeline.
 | **Successful integration** (task reaches `committed`) | First verify, for each repo with commits, `git merge-base --is-ancestor wm/<pb>/<task> refs/heads/<pb>`. Then remove the worktree, delete the branch and drop any `refs/wm/…/attempt-*`. The shared branch and the task file's `commits:` are the permanent record. If the ancestor check fails, nothing is removed; the integration did not really land, so this is treated like I4's "commit agent lied" case (block). | `afterCommitSession`, before the graph reload that dispatches the next task |
 | **Failure with automatic retry** (`handleTaskFailure`, `attempts < maxTaskAttempts`) | If the failed attempt's branch has commits, save its tip as `refs/wm/<pb>/<task>/attempt-<n>`, keep the working tree diff as a commit on that ref (`git stash create`-style) when it is dirty, then remove the worktree and branch. The retry cuts a **fresh** worktree from the **current** shared tip at its dispatch. That differs from today, where a retry inherits the failed attempt's uncommitted edits in the shared tree, mixed with whatever else is there. A clean start is the more predictable behavior. The previous attempt stays diff-able through the saved ref. | `handleTaskFailure`, before `launchTaskAgent` |
 | **Re-run after an integration conflict** (I4) | Same as a retry: save the attempt ref, remove, and re-cut from the new tip. | conflict path in `afterCommitSession` |
-| **Terminal failure / blocked** (retries exhausted, agent wrote `blocked`, integration blocked) | **Keep** the worktree and branch, mirroring `retainSandbox`, so the wolf (and a human) can inspect them. The task file records `worktree: <path>`. When the wolf (or `:start` after a manual fix) resets the task to `ready`, the next dispatch replaces the worktree with a fresh one (W4 idempotency), after saving its ref. | `retainSandbox` call sites |
+| **Terminal failure / blocked** (retries exhausted, agent wrote `blocked`, integration blocked) | **Keep** the worktree and branch, mirroring `retainSandbox`, so the wolf (and a human) can inspect them. The task file records `worktree: <path>`. When the wolf (or `:start` after a manual fix) resets the task to `ready`, the next dispatch saves its ref and re-cuts a fresh worktree from the current tip (W4, X4). | `retainSandbox` call sites |
 | **Stop** (`enforceStopped`) | Keep everything. A stopped task is released back to `ready` (`releaseRunningTask`), and `:start` re-dispatches it into a fresh worktree. A task stopped at `success` keeps its worktree, because that branch is exactly what the commit queue will integrate on `:start`. | — |
-| **Archive** (`cleanup: true` → archive agent → `archive: true` → TUI `:archive`) | Before the archive agent launches, the daemon removes worktrees whose tasks are `committed` and runs `git worktree prune`. Any task worktree still holding **unintegrated** commits (a task at `success`/`failed`/`blocked`) is listed in the archive agent's context, so its report names the work that would be lost. `wsp rm --force` then deletes whatever is left with the workspace. | `launchArchiveAgent`; `internal/tui/archive.go` unchanged |
+| **Archive** (`cleanup: true` → archive agent → `archive: true` → TUI `:archive`) | Before the archive agent launches, the daemon removes worktrees whose tasks are `committed` and runs `git worktree prune`. Any task worktree still holding **unintegrated** commits (a task at `success`/`failed`/`blocked`) is listed in the archive agent's context, so its report names the work that would be lost. `wsp rm --force` then deletes whatever is left with the workspace. | `launchArchiveAgent`; `internal/tui/archive.go` deletes the project's `wm/` refs before `wsp rm` (X6) |
 | **Project file deleted / project gone** | Nothing new. The workspace was never removed by the daemon, and it still is not. | — |
 
 ### W7. Orphan GC in the reaper
@@ -587,8 +613,10 @@ shared workspace, the sweep works through four steps:
    - **`committed`:** cleanup after a successful integration was interrupted
      (crash or restart). Remove.
    - **`ready` with no live session:** an orphaned dispatch that
-     `releaseOrphanedTasks` reset. Remove. The next dispatch re-cuts anyway,
-     and removing early frees disk and avoids a stale base.
+     `releaseOrphanedTasks` reset, or a task released by a stop. Save an
+     attempt ref if the worktree holds commits or edits, then remove. The
+     next dispatch re-cuts anyway (X4), and removing early frees disk and
+     avoids a stale base.
    - **`running` with a live session** (`taskSessionLive`, re-keyed per task
      by [Scheduler & dispatch](#scheduler--dispatch)) and **`success`**
      (waiting in the commit queue): keep.
@@ -678,9 +706,10 @@ steps run in order:
 0. **Commit leftovers.** In each `.worktrees/<task>/<repo>` with
    modifications, stage and make one commit, as today. This keeps the current
    division of labour: the task agent may commit, and the commit agent
-   guarantees nothing is left uncommitted. Repos where
-   `git rev-list refs/heads/<pb>..wm/<pb>/<task>` is empty are skipped for
-   the remaining steps.
+   guarantees nothing is left uncommitted. Repos where the task branch still
+   equals its recorded `base` are skipped for the remaining steps. (The rule
+   is "equals `base`", not "`<pb>..task` is empty", so that a repo already
+   published by an interrupted attempt stays in `commits:`; see X7.)
 1. **Snapshot the tip.** Record `onto[repo] = git rev-parse refs/heads/<pb>`
    for every remaining repo.
 2. **Prepare (all repos before any publish).** In each task worktree, run
@@ -698,7 +727,9 @@ steps run in order:
    integration failure (I4, "transient").
 4. **Record.** Write `status: committed`, `summary`, `commits:` with the
    **post-integration** hash of each repo's shared tip (the same field as
-   today), and `created_files`.
+   today), and `created_files`. `commits:` lists every repo whose task branch
+   differs from `base` and is an ancestor of the shared branch, including
+   repos published by an earlier, interrupted attempt (X7).
 
 The daemon then verifies the result in `afterCommitSession`:
 `git merge-base --is-ancestor <commits[i].hash> refs/heads/<pb>` for every
@@ -749,14 +780,15 @@ Why re-run is the default for conflicts, and not commit-agent resolution:
 
 A later, opt-in improvement is a per-project `conflict_resolution: agent`
 setting that lets the commit agent attempt the resolution itself before
-falling back to re-run. It belongs in the open questions, not in v1.
+falling back to re-run. It is an open question
+([R9](#r9-smaller-open-questions)), not part of v1.
 
 **Semantic conflicts** (a rebase that applies cleanly but breaks the build)
 are **not** detected by integration, just as a sequential pipeline would not
 detect them either. They surface in later tasks, in the review agent's CI
 checks, or in an optional per-project `verify:` command run in the task
 worktree after step 2 and before step 3. That command is deferred to
-[Risks & open questions](#risks--open-questions).
+[R1](#r1-semantic-conflicts-that-merge-cleanly).
 
 ### I5. `attempts` and `failure_reason` semantics
 
@@ -873,7 +905,7 @@ questions:
 - **`launchPlanningAgent`** keeps its current rule. It waits for the bare
   slot (project or review agent). It runs alongside task and commit slots,
   which is `runsAlongsidePlanning` generalized to key prefixes. A cron re-plan
-  (`p.Replan`) waits for `projectBusy`.
+  (`p.Replan`) waits for `!projectBusy(path) && !commitBusy[path]` (X2).
 - **`taskSessionLive(path, name)`** checks `#task:<name>` for a task agent,
   and `#commit` with `taskName == name` for a commit agent. It no longer reads
   `sessions[path].taskName`.
@@ -1055,7 +1087,7 @@ Alternatives considered:
   for nothing.
 - **"Most dependents first"**: integrating the task that unblocks the most
   `ready` tasks raises parallelism. It is a reasonable later refinement. It
-  is listed in [Risks & open questions](#risks--open-questions) rather than
+  is listed in [R9](#r9-smaller-open-questions) rather than
   in v1, because FIFO is easy to predict and test, and tasks with dependents
   already get scheduling priority (H3).
 
@@ -1355,7 +1387,7 @@ rewritten; the union is computed in `Runnable`.
   planner did not foresee. These events, together with `integration_conflicted`
   counts, show whether hints are good enough to raise `max_parallel_tasks`.
 - A later phase could auto-serialize a project whose hints keep missing
-  ([Risks & open questions](#risks--open-questions)).
+  ([R6](#r6-planner-hint-accuracy)).
 
 **What hints do not do.** They never order tasks the way `depends_on` does,
 never make a task `Ready()` that otherwise wouldn't be, and have no effect at
@@ -1752,7 +1784,7 @@ snapshot (`ProjectView`/`TaskView` in `projects.go`). It needs these changes:
 | Existing `project.yaml` (no `max_parallel_tasks`) | Limit 1, so the pipeline behaves as today (S1). Worktree isolation still applies. |
 | A project **mid-run** when the new daemon first starts | A task at `running` with no `worktree:` was started by the old daemon in the shared tree. Reconcile adopts its session as today (`#task:<name>`, X7), and it finishes in the shared tree. Its commit then goes through the **legacy commit path**: `commit.tmpl` without the worktree branch, committing the shared tree directly, which is exactly today's behavior. `afterCommitSession` skips the worktree cleanup and ancestor check for a task with no `task_branch`. A task at `success` with no `task_branch` integrates the same way. One code path, keyed on "does this task have a `task_branch`?", keeps every in-flight project on the old daemon finishing correctly. |
 | Shared tree dirty when the first worktree task is dispatched (left over from a legacy task) | `schedule` refuses to cut a worktree while any legacy task (no `task_branch`) is `running` or `success`. Those must drain first, which is automatic at `limit: 1`. Otherwise the integration's clean-tree check (I3) would block on files that belong to the legacy task. |
-| Downgrade: old daemon reads new files | Every new field is ignored. The old daemon commits the shared tree, which no longer holds the task's work, because that is in the worktree. **A downgrade with tasks at `running`/`success` loses track of their work.** The commits are still on `wm/…` branches and nothing is deleted, but the old daemon won't integrate them. The rollout ([Phased rollout](#phased-rollout)) should ship the reader side (fields parsed, legacy path kept) before the writer side, and document "drain to idle before downgrading". |
+| Downgrade: old daemon reads new files | Every new field is ignored. The old daemon commits the shared tree, which no longer holds the task's work, because that is in the worktree. **A downgrade with tasks at `running`/`success` loses track of their work.** The commits are still on `wm/…` branches and nothing is deleted, but the old daemon won't integrate them. The rollout ships the reader side (fields parsed, legacy path kept) first, in [phase 0](#phase-0-schema-readers-and-the-legacy-path-no-behavior-change), and documents "drain to idle before downgrading". |
 | Snapshot readers | `version: 1`, additive fields. The only value change is `sessions[].key` markers, which is documented. |
 | Audit readers (`audit.ParseLine`, snapshot `audit_events`) | New event names and fields. The parser is generic. |
 
@@ -2111,11 +2143,11 @@ anything.
 session, and its last integration may have stopped anywhere in I3. Recovery
 does **not** try to work out which step was reached. It relies on the
 procedure being **resumable**: running the commit agent again from the top
-converges. This needs two small amendments to I3:
+converges. Two rules in I3 exist for this:
 
-- **Step 0's skip rule** becomes "skip repos where the task branch equals
-  `base`", rather than "where `<pb>..task` is empty". A repo published by
-  the interrupted attempt has `<pb>..task` empty but still belongs in
+- **Step 0's skip rule** is "skip repos where the task branch equals
+  `base`", not "where `<pb>..task` is empty". A repo published by the
+  interrupted attempt has `<pb>..task` empty but still belongs in
   `commits:`.
 - **Step 4 records** the shared tip of every repo whose task branch is an
   ancestor of the shared branch and differs from `base`. That includes repos
@@ -2218,8 +2250,451 @@ step 0/4 rules), `restart_test.go`.
 
 ## Risks & open questions
 
-_To be written (task `write-rollout-and-risks`)._
+Risks are ordered roughly by how likely they are to bite once
+`max_parallel_tasks > 1`. Each one says what limits it in this design, and
+what is left open. At the default limit of 1, almost all of them disappear:
+the pipeline is today's, plus isolation.
+
+### R1. Semantic conflicts that merge cleanly
+
+Two tasks with disjoint `touches` can still break each other. Task A renames a
+function, and task B, cut from a tip before the rename, adds a new caller of
+the old name. Both rebase cleanly, and the shared branch no longer builds. I4
+already notes that integration cannot see this. Today's sequential pipeline
+avoids most of these cases by accident, because each task starts from a tip
+that already holds every earlier task.
+
+- **Mitigation in v1:** none at integration time. The breakage surfaces in the
+  next task to build, in the review agent's CI checks, or in a human's PR
+  review. Hints reduce the odds (a rename is a broad `touches`), and so does
+  the conservative overlap rule (H2).
+- **Open: a `verify:` command.** An optional per-project `verify:` (for
+  example `go build ./... && go test ./internal/...`) would run in the task
+  worktree after the rebase (I3 step 2) and before publishing (step 3). A
+  failure is handled like a conflict: re-run on the new tip. Questions:
+  - Should it run in the commit agent's sandbox, which is unattended and
+    costs a slow build per integration, or on the host?
+  - Does it run on the fast path too, where nothing was rebased? Skipping it
+    there keeps `limit: 1` as cheap as today.
+  - Which tasks may skip it (docs-only `touches`)?
+- **Open: post-integration build check.** A cheaper alternative is to build
+  the shared branch after each integration and block on the first red build.
+  That attributes the break to one task without delaying integration, but it
+  leaves the branch red until the wolf acts.
+
+### R2. Shared build caches, ports and other host resources
+
+Sandboxes isolate processes, not everything a task agent touches:
+
+- **Go module cache.** `<shared>/.gomodcache` is a single rw directory. W5
+  mounts it into every task sandbox. `go` takes file locks in the module
+  cache and tolerates concurrent writers, so parallel builds are safe. The
+  cache only grows, and with `GOPROXY=off` a task that needs a module nobody
+  staged fails the same way it does today.
+- **Build caches.** `GOCACHE` and `node_modules`/`.venv` live inside each
+  sandbox or each worktree, so parallel tasks do not share them. That is safe
+  but cold: every worktree pays a full first build and, for npm or Python
+  repos, a full dependency install. That is a cost risk (R3) rather than a
+  correctness one.
+- **Ports.** Each sandbox has its own network namespace, so two task agents
+  each running a dev server on `:8080` don't collide. Collisions are possible
+  only through `host.docker.internal` (a shared service on the host) or
+  through Docker: a task that runs `docker compose up` against the host's
+  Docker daemon shares container names, published ports and volumes with
+  every other task doing the same. **Open:** should such tasks declare an
+  `areas: [docker]` tag (H1), or should the planning prompt name it as a
+  standard area?
+- **External state.** Tasks that call external APIs, create cloud resources
+  or write to a shared database are invisible to `touches`. They need an
+  `areas` tag, and the planner is told so (H4). This depends on the planner,
+  see R6.
+- **The control dir.** Several agents now write `tasks/*.yaml` at the same
+  time. Each writes only its own file, and the daemon writes back with
+  `task.Update`. The fsnotify chain sees more events, but task events are
+  observation-only. No change.
+
+### R3. Resource and cost limits
+
+Each in-flight task is a sandbox (a microVM), a model session and a
+worktree checkout. `limit × projects` of those can run at once.
+
+- **Bounds:** the per-project `max_parallel_tasks` defaults to 1, and the
+  global `--max-parallel-tasks` caps task agents across projects (S3). A
+  restart burst is bounded by the same cap (S6). The power gate still stops
+  new launches on battery (S6).
+- **Disk.** A worktree is a full checkout per repo per in-flight task, plus
+  retained worktrees of failed and blocked tasks. Git objects are shared
+  through the common dir, so the cost is working-tree size, not history. The
+  sweep (W7) frees committed and orphaned worktrees. **Open:** a cap or a TTL
+  on retained worktrees, which today live until the wolf or `:archive` deals
+  with them.
+- **Model spend.** Conflict re-runs spend a whole task run. In the worst case
+  a task runs `maxTaskAttempts = 3` times plus `maxIntegrationAttempts = 2`
+  commit-agent retries per run. Parallelism raises spend per hour, not per
+  task, unless conflicts are frequent. `integration_conflicted` and
+  `touches_exceeded` counts (D3) are the signal to watch before raising a
+  limit.
+- **Open:** should `orch service install` set a finite global cap by default
+  (for example 4)? A default of 0 keeps today's behavior, but the first user
+  to set `max_parallel_tasks: 8` on three projects gets 24 sandboxes.
+
+### R4. Multi-repo partial integration
+
+I3 publishes repo by repo. The prepare/publish split means a conflict never
+leaves some repos published, unless something outside the queue moves a
+shared tip between steps 1 and 3. That case blocks with `result: partial`.
+
+- **Residual risk:** a human or the wolf committing on the shared branch
+  while an integration runs. The ff-only retry covers a moved tip, and the
+  partial block covers a moved tip that also conflicts. Both are rare.
+- **Not atomic across repos.** A reader (the planner's mount, a push task
+  that is not queued, or a human) can observe repo A integrated and repo B
+  not, for the seconds between the two fast-forwards. Push tasks are queued,
+  so they never see it. The planner may, and it is harmless there.
+- **Repos added mid-run** (X5): a worktree that lacks a repo cannot change
+  it. A task planned before the repo was added that turns out to need it
+  fails and re-runs into a fresh worktree that has it. That costs an attempt.
+  **Open:** whether to re-cut a worktree when `workspaceReposFor(p)` changes
+  between dispatch and the first agent turn.
+
+### R5. Signing throughput and the shared ssh-agent
+
+Every rebased commit is re-signed in the commit agent's sandbox through the
+forwarded ssh-agent (I2), and all sandboxes proxy to the one private agent
+that `start.sh` loads (docs/ssh-agent.md).
+
+- **Throughput:** the commit queue serializes integrations, so at most one
+  integration signs at a time per project. Task agents that commit themselves
+  sign in parallel across sandboxes. `ssh-keygen -Y sign` against an
+  in-memory agent key is milliseconds per commit, so this is not expected to
+  be a bottleneck. It is still unmeasured with N sandboxes hitting one agent
+  at once. **Open:** a load check on the host (N sandboxes × M signs) before
+  phase 4 raises a limit.
+- **Fast path keeps signatures.** When nothing landed between dispatch and
+  integration, the fast-forward keeps the task's own signatures (I2). The
+  re-signing cost appears only with real parallelism.
+- **Signing preflight per sandbox.** `gitsign.Preflight` runs on every ACP
+  launch, so N parallel launches mean N `ssh-add -l` probes. That is cheap,
+  but a dead agent now fails N launches at once instead of one, and blocks
+  the project N times. The X3 "append, don't relaunch" rule keeps that to
+  one wolf.
+
+### R6. Planner hint accuracy
+
+The whole parallel benefit depends on `touches`/`areas` being right:
+
+- **Too broad:** tasks serialize. That is safe, and it costs only throughput.
+- **Too narrow:** tasks overlap, the second to integrate conflicts and
+  re-runs (I4), or worse, they merge cleanly and break semantically (R1).
+- **Missing:** the task is exclusive, which is safe (H1).
+
+Mitigations: exclusive by default, conservative overlap (H2), conflict
+feedback that widens a re-run's hints (H3), and a `touches_exceeded` audit
+after every integration. **Open questions:**
+
+- **Auto-serialize on bad hints.** Should the daemon lower a project's
+  effective limit to 1 after K conflicts or `touches_exceeded` events in one
+  cycle, until a human raises it again? It is cheap to implement, but it is
+  the first time the daemon would override a human-set field's effect.
+- **Hint quality metrics.** A per-project ratio of `touches_actual` to
+  `touches`, shown in the snapshot, would tell a human whether raising the
+  limit is safe. Is it worth a snapshot field, or is the audit log enough?
+- **Review-created tasks** carry no hints (H4) and so run serially. Should
+  the review agent declare `touches` from the PR comment's file path?
+
+### R7. The commit agent's sandbox and per-task policies
+
+W5 recommends a distinct sandbox for the commit agent, because its mounts
+differ from the task's. Today the commit agent reuses the task's sandbox, and
+with it the task's `static_mcps`, `policies` and `harness`
+(`launchCommitAgent` copies them from the task).
+
+- **One `<work-stream>-commit` sandbox per project** is simplest, and the
+  queue means one is enough. But it must pick one set of policies. A push
+  task needs network access to the git remote, while most integrations need
+  none.
+- **One `<work-stream>-<task>-commit` sandbox per task** keeps per-task
+  policies and costs a sandbox create per integration. The task-name budget
+  (`sbx.NameBudget`) does not account for the extra `-commit`, so long task
+  names get the deterministic hash shortening of `sbx.FitName`. That is
+  harmless, but the name is less readable in `sbx ls`.
+- **Open:** whether integrations need any of the task's MCPs or policies at
+  all. If not, the per-project sandbox with fixed integration policies, plus
+  per-push-task sandboxes, is the answer. Phase 1 starts with per-task commit
+  sandboxes (the closest to today), and the question can be revisited once
+  integrations are observable.
+
+### R8. Recovery and rule-breaking
+
+- **Agents that touch the shared branch.** A task agent can move
+  `refs/heads/<pb>` through the rw common-dir mount (W5). Integration's
+  compare-and-swap and the daemon's ancestor check catch it, and they block.
+  They do not prevent it. **Open:** mount the common dir with
+  `refs/heads/<pb>` protected (for example with a `reference-transaction`
+  hook installed by the daemon that rejects updates to `<pb>` from task
+  worktrees). That hook would run inside every sandbox's git, so it has to be
+  a plain shell script.
+- **Dirty shared tree.** Any human or wolf edit in the shared workspace
+  blocks integration (I3). That is the safe choice, but it may be surprising
+  to a user who habitually edits in `~/dev/workspaces/<branch>/`. The
+  `:session` banner and wolf prompt warn about it (X3). Documentation has to
+  say it too.
+- **Downgrade.** D7: an older daemon loses track of in-flight worktree work.
+  "Drain to idle before downgrading" is a documentation rule, not something
+  the code enforces.
+- **git version.** `git worktree add`, `--porcelain` listing and `git
+  rebase` behavior differ across git versions, both on the host and in each
+  sandbox template. **Open:** a minimum git version check in the daemon's
+  startup preflight (`git worktree` has been stable since 2.17, and
+  `--git-common-dir` since 2.13).
+
+### R9. Smaller open questions
+
+- **Queue order.** FIFO by `succeeded_at` (S5). "Most dependents first" could
+  raise parallelism. It is deferred until measured.
+- **Agent-side conflict resolution** (`conflict_resolution: agent`, D2) is
+  reserved but not designed. It needs a prompt, a budget and a rule for when
+  to fall back to a re-run.
+- **Stacked dependents** (starting B on A's unintegrated branch) were
+  rejected for v1 (S5). They could be revisited if commit-queue latency turns
+  out to dominate.
+- **TUI grouping** of many task sessions per project (D5) waits for real
+  usage.
+- **Branch-name collisions** between projects whose branches nest (W3) are
+  detected, not prevented. If they show up in practice, escape `/` in
+  `<project-branch>`.
 
 ## Phased rollout
 
-_To be written (task `write-rollout-and-risks`)._
+Each phase is a separate PR that leaves `main` working and releasable on its
+own, and each can be reverted without touching data written by the phases
+before it. Behavior visible to a user changes in only two places: phase 1
+(task agents work in worktrees) and phase 4 (more than one task at a time).
+Everything else is internal, or is off until a project opts in.
+
+The "Rollback" line in each phase says what a revert of that PR does to a
+project that is mid-run. As D7 requires, the code that **reads** a new field
+always ships no later than the code that **writes** it.
+
+### Phase 0: schema readers and the legacy path (no behavior change)
+
+Ship the schema before anything writes it, so that every later phase can be
+rolled back to a daemon that at least parses its files.
+
+- **Changes:**
+  - `internal/task/task.go`: `Touches *[]string`, `Areas`, `Worktree`,
+    `TaskBranch`, `Base`, `SucceededAt`, `Integration`, `AttemptRefs`,
+    `TouchesActual`, and `t.Exclusive()`. All `omitempty`. No status values
+    change (D1).
+  - `internal/project/project.go`: `MaxParallelTasks`, `ConflictResolution`,
+    and `p.MaxParallel()` (D2).
+  - `internal/project/planned_snapshot.go`: `max_parallel_tasks`.
+  - `internal/daemon/dispatch_lifecycle.go`: the "does this task have a
+    `task_branch`?" switch, wired with only the legacy branch for now.
+- **Tests:** YAML round-trips in `internal/task` (`touches: []` survives a
+  `Save`; absent stays absent), `MaxParallel()` clamps, older files load
+  unchanged, an unknown `conflict_resolution` warns.
+- **Rollback:** revert. No file in the wild has the fields yet.
+
+### Phase 1: per-task worktrees, concurrency still 1
+
+Every non-push task runs in its own worktree. The commit agent still commits
+and integrates, but the queue is trivially one deep, because the main slot
+stays single-occupancy. With `limit: 1` the tip cannot move between
+dispatch and integration, so every integration takes the I2 fast path.
+
+- **Changes:**
+  - New `internal/worktree` package: path layout (W2), branch and ref names
+    (W3), `Create` (W4, including the reuse rule), `Remove`, `SaveAttempt`
+    (W6), `GitCommonDir`. It wraps `git` through an injectable runner, like
+    `internal/workspace`. It is shared by the daemon and the TUI (X6).
+  - `internal/runner/runner.go`: `Plan.TaskWorktree`; `resolveWorkingDir`
+    and `sandboxWorkspaces` for task agents (W5). The commit agent gets its
+    own sandbox name (`<work-stream>-<task>-commit`, R7) with
+    `[shared, control-dir]` mounts. That is needed from this phase on,
+    because the task sandbox no longer mounts the shared tree.
+  - `internal/acpwrapper/acpwrapper.go`: `goModCacheDir` accepts a mount
+    named `.gomodcache` (W5).
+  - `internal/daemon/dispatch.go` (`launchTaskAgent`): cut the worktree after
+    `markTaskRunning` and stamp `worktree`/`task_branch`/`base`; a failure
+    gives `worktree_create_error` → release → block.
+  - `internal/daemon/dispatch_lifecycle.go`: `handleTaskFailure` saves an
+    attempt ref and removes the worktree before a retry; the `retainSandbox`
+    sites keep it; `afterCommitSession` cleans up after `committed`.
+  - `internal/prompts/templates/task.tmpl`: worktree wording ("your
+    worktree is on branch `wm/…`; do not touch other refs").
+  - `internal/prompts/templates/commit.tmpl`: worktree branch, with I3 step 0
+    (commit leftovers) and step 3 (ff-only publish), but no rebase yet. If
+    the ff-only fails (the tip was moved outside the queue, by a human or
+    the wolf), the commit agent writes `blocked`, and the project blocks as a
+    push rejection does today. Phase 2 replaces that block with the rebase
+    and the I4 routing.
+  - `internal/daemon/watcher.go`: skip `.worktrees` in `addTree` and
+    `maybeWatchNewDir`.
+  - `internal/workspace/stub.go`: `StubManager` creates real git repos
+    (`git init`) when a test asks for them, so the worktree code runs in
+    daemon tests.
+- **Tests:** `internal/worktree` unit tests against temp repos (create,
+  reuse, re-cut, save attempt, remove, nested-branch collision); daemon tests
+  showing a task's edits land in `.worktrees/<task>/` and never in the
+  shared tree; a retry starting from a fresh worktree with an attempt ref; a
+  legacy in-flight task finishing through the shared tree (D7);
+  `goModCacheDir` with the new mount.
+- **Rollback:** revert. A task in flight at the time of the revert has its
+  work on `wm/…` (D7 downgrade row). Release notes say to drain first; the
+  branches are not deleted, so a human can merge them by hand.
+
+### Phase 2: the commit agent integrates task branches
+
+The commit agent does real integration: rebase onto the shared tip, the
+prepare/publish split, conflict and transient handling. The daemon verifies
+the result. With concurrency still 1 the rebase stays a no-op in practice,
+but a human or wolf commit on the shared branch now exercises it. So does
+every test.
+
+- **Changes:**
+  - `commit.tmpl`: full I3 procedure (rebase, abort on conflict across
+    repos, ff-only retry, `integration:` reporting, the resumable step 0/4
+    rules from X7).
+  - `internal/daemon/dispatch_lifecycle.go`: `afterCommitSession` routes on
+    I4 (verify with `merge-base --is-ancestor`, conflict → re-run with
+    `attempts++`, transient → relaunch up to `maxIntegrationAttempts`,
+    partial/verify failure → block); `prepareIntegration` (abort a stale
+    rebase, clear stale `index.lock`, block on a dirty shared tree).
+  - `wolf.tmpl`: the integration-conflict paragraph (I6).
+- **Tests:** a conflict re-run (two tasks forced to conflict by a manual
+  commit on the shared branch between dispatch and integration), conflict
+  exhaustion blocking with the I6 reason, a transient ff-only failure
+  retrying the commit agent only, a multi-repo conflict in repo B leaving
+  repo A unpublished, verify failure blocking, the resumable procedure after
+  a commit agent killed between the two repos' fast-forwards.
+- **Rollback:** revert to phase 1's commit template. Tasks with an
+  `integration:` block from a conflict are plain `ready` tasks to phase 1,
+  which ignores the field.
+
+### Phase 3: audit, snapshot and TUI
+
+Make the new state visible before raising concurrency, so that the first
+parallel runs can be watched.
+
+- **Changes:**
+  - `internal/daemon` (`worktree.go`, `dispatch_lifecycle.go`): the D3
+    events, plus `task_retry cause` and `task_released why=worktree_failed`.
+  - `internal/daemon/snapshot.go`, `snapshot_live.go`, `snapshot_text.go`:
+    the D4 fields (`max_parallel_tasks`, `commit_queue`, per-task worktree,
+    queue and integration fields, `completed_at`).
+  - `docs/state-snapshot.md`: new fields and every session-key marker,
+    including the missing `#planning` (§7).
+  - `internal/tui` (`projects.go`, `project_detail.go`, `tui.go`): `TaskView`
+    fields, the `success` glyph split, `Q:` count, row hints, opening a
+    task's worktree (D5).
+  - `internal/prompts/templates/workingman.tmpl`: point the workingman agent
+    at the new snapshot fields (X8).
+- **Tests:** `snapshot_test.go` golden output with queued, integrating and
+  conflicted tasks; `orch status` text; TUI view-model tests for the glyphs
+  and breakdown counts.
+- **Rollback:** revert. Readers ignore missing fields, and the snapshot
+  `version` stays 1.
+
+### Phase 4: concurrency above 1, behind `max_parallel_tasks`
+
+The main slot is split and `schedule` replaces `dispatchReadyOrPending`.
+Nothing changes for a project that does not set `max_parallel_tasks`. At
+this phase a task with no hints is exclusive and hints are not yet written
+by the planner, so a project only runs in parallel when a human writes hints
+on its tasks by hand. That makes it a controlled trial.
+
+- **Changes:**
+  - `internal/daemon/daemon.go`: `commitBusy`, `schedMu`, `taskTokens`,
+    `capDeferred`; `WithMaxParallelTasks`.
+  - `cmd/orch/main.go`: `--max-parallel-tasks`.
+  - `internal/daemon/dispatch.go`: `schedule` (S4), `projectBusy`,
+    per-task `#task:<name>` keys, the `runsAlongsidePlanning` prefix form,
+    the re-plan gate (X2), the cleanup gate (X6), the stuck-graph block moved
+    in.
+  - `internal/daemon/dispatch_lifecycle.go`: `#commit` with
+    `beginCommit`/`endCommit`, `succeeded_at` stamping, deferred
+    token/`commitBusy` releases (X4), `taskSessionLive` and
+    `releaseOrphanedTasks` per task, `firstUncommittedSuccess` removed,
+    `transitionProjectBlocked` appending (X3), `launchWolfAgent`
+    `InFlightTasks`, the archive drain wait.
+  - `internal/taskgraph/graph.go` and new `overlap.go`: `InFlight`, `Queued`,
+    `WaitingOnIntegration`, `Runnable` with greedy admission and barriers,
+    the H2 overlap test. At this phase `Runnable` uses only the declared hints
+    and the exclusive rule, ordered by name.
+  - `internal/daemon/power_gate.go`: checked in `schedule` (S6).
+  - `internal/daemon/review.go`, `reconcile.go`, `reaper.go`, `stop.go`:
+    busy checks and re-keyed adoption (X1, X7). The adopted-session callbacks
+    become `afterTaskSession`/`afterCommitSession`, and
+    `resumeOrphanedOutcomes` is added.
+  - `internal/prompts` (`Data.InFlightTasks`) and `wolf.tmpl`.
+- **Tests:** the S8 list (limit 2 vs 1, dependents waiting on integration,
+  simultaneous session ends under `-race`, global cap across projects,
+  battery), the X7 restart list, the `stop_test.go` and
+  `wolf_tandem_test.go` extensions (X3, X4), and `archive_dispatch_test.go`
+  for drain-then-archive. Plus one end-to-end daemon test with three tasks,
+  two of them independent, at limit 2, under the stub manager with real git.
+- **Rollback:** revert. Phases 1–3 still parse every field written here.
+  `succeeded_at` is ignored, so the queue falls back to name order, which is
+  today's `firstUncommittedSuccess`. Projects with `max_parallel_tasks > 1`
+  run serially again. Any extra in-flight task is adopted under the bare
+  key by the old `reconcileSessions`, so only one of them is tracked; drain
+  before reverting.
+
+### Phase 5: planner hints and overlap-aware scheduling
+
+The planner starts writing hints, so parallelism becomes automatic for
+projects that set a limit.
+
+- **Changes:**
+  - `internal/prompts/templates/planning.tmpl`: the H4 block (rendered only
+    when `MaxParallelTasks > 1`), the result-field list, the "don't edit
+    in-flight hints" rule. `task.tmpl` gets the hint line; `wolf.tmpl` the
+    hint-tightening sentence.
+  - `internal/prompts` / `internal/setup`: `MaxParallelTasks`, `Repos` with
+    `DirName`, hints in `.orch/context.yaml`.
+  - `internal/taskgraph`: `Runnable` priority (re-runs first, most
+    transitive dependents, then name; H3), conflict feedback (re-run hints
+    widened by `integration.files`), and `Load` repair warnings for bad
+    globs and tags.
+  - `internal/daemon/dispatch_lifecycle.go`: the `touches_exceeded` audit and
+    `touches_actual` after integration.
+- **Tests:** `internal/prompts` template output for limit 1 (unchanged) and
+  limit 2 (hint block present); `overlap_test.go` table tests; `Runnable`
+  priority and barrier tests (no starvation of an exclusive task); conflict
+  feedback serializing a re-run against a task declaring the conflicting
+  file.
+- **Rollback:** revert. Hints already written stay in task files and are
+  read by phase 4's simpler `Runnable`, which is still correct, just less
+  clever.
+
+### Phase 6: restart recovery hardening and worktree GC
+
+Clean up what crashes, deleted tasks and long-lived projects leave behind.
+
+- **Changes:**
+  - `internal/daemon/reaper.go`: the W7 sweep (prune, per-worktree verdict,
+    branchless refs, attempt-ref deletion), on its own slower interval.
+  - `internal/daemon/watcher.go`: `startupScan` runs the sweep after
+    `releaseOrphanedTasks` and before `schedule` (S6, X7).
+  - `internal/daemon/dispatch_lifecycle.go` (`launchArchiveAgent`) and
+    `archive.tmpl`: pre-archive cleanup and the unintegrated-work list (X6).
+  - `internal/tui/archive.go`: delete `refs/heads/wm/<pb>/*` and
+    `refs/wm/<pb>/*` before `wsp rm`, through `internal/worktree`.
+  - `internal/daemon/interactive.go`: the `:session` banner warning, and
+    opening a task's worktree as cwd (X3).
+  - Startup git-version preflight (R8).
+- **Tests:** the sweep's decision table (one test per W7 case, including
+  "task file deleted" saving an attempt ref first); a restart with a
+  half-created worktree; `tui/archive_test.go` checking refs are gone after
+  `:archive`.
+- **Rollback:** revert. Without the sweep, worktrees of committed tasks
+  are still removed by phase 1's inline cleanup. Only crash leftovers
+  accumulate, until `:archive` removes the whole workspace.
+
+### After phase 6
+
+Candidates, each gated on data from phases 3–6 (R1, R6, R9): the `verify:`
+command, auto-serializing a project with bad hints, a default global cap in
+`orch service install`, queue ordering by dependents, `conflict_resolution:
+agent`, and a protected-ref hook for the shared branch.

@@ -5,6 +5,11 @@
 > synopsis, exported types and the import graph. Read it first to find your way
 > around the code; [docs/package-docs.md](docs/package-docs.md) explains the
 > `doc.go` convention that feeds it.
+>
+> **Planned change:** [docs/parallel-task-worktrees.md](docs/parallel-task-worktrees.md)
+> is the design for running a project's tasks in parallel, each in its own git
+> worktree, with the commit agent serializing integration onto the shared
+> branch. The task and commit agent sections below describe today's behavior.
 
 The orchestrator launches eight kinds of `claude` sessions. Seven run over a
 project's lifecycle: **project → planning → task → commit**, with **wolf**,
