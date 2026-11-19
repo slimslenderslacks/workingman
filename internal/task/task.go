@@ -262,6 +262,48 @@ type Task struct {
 	// source. See Source for the field meanings.
 	Source *Source `yaml:"source,omitempty"`
 
+	// Touches lists the globs (first segment the repo's workspace dir name)
+	// the task expects to create, edit or delete. Written by the planner or the
+	// wolf as a scheduling hint (docs/parallel-task-worktrees.md H1). A pointer
+	// so absent (nil: no hint, see Exclusive) stays distinct from an explicit
+	// `touches: []` ("touches nothing"), which a plain omitempty slice would
+	// drop on the next Save.
+	Touches *[]string `yaml:"touches,omitempty"`
+
+	// Areas are kebab-case tags for shared hotspots (go-deps, db-schema, ...).
+	// Two tasks with a tag in common overlap whatever their Touches say (H1).
+	Areas []string `yaml:"areas,omitempty"`
+
+	// Worktree is the absolute path of the task's worktree root
+	// (<shared>/.worktrees/<task>). Daemon-written when the worktree is first
+	// cut, kept across retries and re-runs, cleared after cleanup at
+	// `committed` (W4, W6). Empty means no worktree: the task runs in the
+	// shared tree (the legacy path).
+	Worktree string `yaml:"worktree,omitempty"`
+
+	// TaskBranch is the per-task branch, wm/<project-branch>/<task>.
+	// Daemon-written and stored rather than recomputed, so a later rename of
+	// project.branch cannot orphan it (W3). Empty selects the legacy commit
+	// path; see HasTaskBranch.
+	TaskBranch string `yaml:"task_branch,omitempty"`
+
+	// Base is the per-repo shared tip the worktree was cut from, re-stamped
+	// as the merge base each time the task reaches `success` (W4).
+	Base []Commit `yaml:"base,omitempty"`
+
+	// SucceededAt is when the daemon first observed this task at `success`.
+	// It orders the commit queue (S5) and is cleared when the task goes back
+	// to `ready`.
+	SucceededAt *time.Time `yaml:"succeeded_at,omitempty"`
+
+	// Integration is the outcome of the latest attempt to land this task on
+	// the shared branch (I4, I5). Cleared on `committed`.
+	Integration *Integration `yaml:"integration,omitempty"`
+
+	// TouchesActual lists changed paths outside the declared hints, recorded
+	// by the daemon after a successful integration. Informational only (H3).
+	TouchesActual []string `yaml:"touches_actual,omitempty"`
+
 	// Path is the absolute file path the task was loaded from. It is set by
 	// Load and excluded from YAML so it round-trips cleanly. Callers use it
 	// when they need to read or write the task file again (e.g. the daemon
@@ -278,6 +320,21 @@ type Task struct {
 type Commit struct {
 	Repo string `yaml:"repo"`
 	Hash string `yaml:"hash"`
+}
+
+// Integration is the commit agent's report of its latest attempt to land
+// this task on the shared branch (see docs/parallel-task-worktrees.md I4).
+// Result, Repo, Files, Onto, Output and Published are written by the commit
+// agent; Landed and Attempts by the daemon.
+type Integration struct {
+	Result    string   `yaml:"result"`              // conflict | verify_failed | error | partial
+	Repo      string   `yaml:"repo,omitempty"`      // repo that failed
+	Files     []string `yaml:"files,omitempty"`     // conflicting paths, repo-relative
+	Onto      []Commit `yaml:"onto,omitempty"`      // shared tips it tried to rebase onto
+	Output    string   `yaml:"output,omitempty"`    // verify_failed only: tail of the build check's output
+	Published []string `yaml:"published,omitempty"` // repos already fast-forwarded (partial only)
+	Landed    []string `yaml:"landed,omitempty"`    // tasks integrated between base and onto (daemon)
+	Attempts  int      `yaml:"attempts,omitempty"`  // commit-agent retries for this task run (daemon)
 }
 
 // Source identifies the external PR signal a review-agent-created task exists to
@@ -337,6 +394,22 @@ const SourceKindPush = "pr-push"
 // SourceKindPush).
 func (t *Task) IsPushTask() bool {
 	return t.Source != nil && t.Source.Kind == SourceKindPush
+}
+
+// Exclusive reports whether the task declares no independence hints at all —
+// neither touches nor areas — and so overlaps every other task (H1). An
+// explicit `touches: []` is not exclusive: it means "touches nothing". This is
+// the single place the rule lives so taskgraph and the TUI agree on it.
+func (t *Task) Exclusive() bool {
+	return t.Touches == nil && len(t.Areas) == 0
+}
+
+// HasTaskBranch reports whether the task runs on its own per-task branch
+// (and worktree). A task without one — every task today, and any task an
+// older daemon started — takes the legacy path: it works and commits in the
+// shared tree (D7).
+func (t *Task) HasTaskBranch() bool {
+	return t.TaskBranch != ""
 }
 
 // Load reads and parses the task file at path, records path in Task.Path, and

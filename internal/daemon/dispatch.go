@@ -163,6 +163,9 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 		d.launchProjectRootAgent(path, agent.ProjectAgent, p)
 		return
 	}
+	for _, w := range p.Warnings() {
+		d.audit.Log("project_config_warning", "path", path, "warning", w)
+	}
 	// Stamp created_at the first time we see a populated project on disk.
 	// The save uses `updated_by: daemon`, which prevents the resulting
 	// fsnotify event from re-entering dispatch via handleProject — but

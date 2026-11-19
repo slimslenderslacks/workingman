@@ -180,6 +180,9 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		d.transitionProjectBlocked(projectPath, p, reason)
 		return
 	}
+	if !d.finishCommittedTask(projectPath, p, t) {
+		return
+	}
 
 	// Stamp the completion time the first time we observe the task committed,
 	// then re-save. This runs after the commit agent's session has ended, so
@@ -225,6 +228,26 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		return
 	}
 	d.dispatchReadyTask(projectPath, p, ready[0])
+}
+
+// finishCommittedTask is the one place that tells a worktree task from a
+// legacy one at `committed` (docs/parallel-task-worktrees.md D7), keyed on
+// "does this task have a task_branch?". A legacy task — every task today, and
+// any task an older daemon started — was committed straight onto the shared
+// tree by the commit agent, so there is nothing to verify or clean up. It
+// reports whether afterCommitSession should carry on dispatching.
+//
+// Only the legacy branch is wired so far: nothing writes task_branch yet, so a
+// task carrying one (hand-edited) is finished the legacy way too. The worktree
+// branch — the ancestor check (I3) and worktree cleanup (W6) — lands with the
+// phases that create worktrees.
+func (d *Daemon) finishCommittedTask(projectPath string, p *project.Project, t *task.Task) bool {
+	if !t.HasTaskBranch() {
+		return true // legacy: committed in the shared tree
+	}
+	// Worktree task: the I3 ancestor check and W6 cleanup go here. Until they
+	// exist it is finished exactly like a legacy task.
+	return true
 }
 
 // dispatchReadyTask launches the right agent for a ready task. A push task has

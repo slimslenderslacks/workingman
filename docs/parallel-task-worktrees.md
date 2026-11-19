@@ -1660,8 +1660,13 @@ What is deliberately **not** added to `project.yaml`:
   `TaskPath` (X7).
 
 `project.Project` gets a method `p.MaxParallel() int` that returns the
-effective limit (the clamp in S3). The snapshot, the TUI, `prompts.Data` and
-`schedule` all call it, so the "0 means 1" rule lives in one place.
+effective limit (the clamp in S3; negative values clamp to 1 as well). The
+snapshot, the TUI, `prompts.Data` and `schedule` all call it, so the "0 means
+1" rule lives in one place. `conflict_resolution` gets the same treatment:
+`p.EffectiveConflictResolution()` returns the mode to apply, and
+`p.Warnings()` lists settings that loaded but were not understood. Load never
+fails on them; `dispatchProject` logs each one as `project_config_warning`
+(`path`, `warning`) on every observation of a populated project.
 
 The other project-control files are unchanged in shape:
 
@@ -1718,6 +1723,12 @@ here and in `docs/state-snapshot.md`. All of them carry `path` (the
 | `task_deferred_cap` | `tokens_in_use` | Global cap reached. |
 | `task_waiting_integration` | `waiting_on` | A task's dep is at `success`, once per (task, dep). |
 | `scheduler_idle` | `in_flight`, `queued`, `deferred` | A pass started nothing but work is in flight. Replaces repeated `no_ready_tasks` lines when a pass is not a dead end. |
+
+**Configuration** (`dispatchProject`, shipped in phase 0). Carries `path` but no `task`:
+
+| Event | Extra fields | When |
+|---|---|---|
+| `project_config_warning` | `warning` | A `project.yaml` setting loaded but was not understood and fell back to its default, for example an unknown `conflict_resolution` (D2). Logged on every observation of the project until the file is fixed. |
 
 **Changed existing events:**
 
@@ -2648,13 +2659,21 @@ rolled back to a daemon that at least parses its files.
 - **Changes:**
   - `internal/task/task.go`: `Touches *[]string`, `Areas`, `Worktree`,
     `TaskBranch`, `Base`, `SucceededAt`, `Integration` (with `Output`),
-    `TouchesActual`, and `t.Exclusive()`. All `omitempty`. No status values
-    change (D1).
+    `TouchesActual`, `t.Exclusive()`, and `t.HasTaskBranch()` (the D7
+    switch's predicate). All `omitempty`. No status values change (D1).
   - `internal/project/project.go`: `MaxParallelTasks`, `Verify`,
-    `ConflictResolution`, and `p.MaxParallel()` (D2).
-  - `internal/project/planned_snapshot.go`: `max_parallel_tasks`.
+    `ConflictResolution`, `p.MaxParallel()`,
+    `p.EffectiveConflictResolution()` and `p.Warnings()` (D2).
+    `internal/daemon/dispatch.go: dispatchProject` logs each warning as
+    `project_config_warning`.
+  - `internal/project/planned_snapshot.go`: `max_parallel_tasks`. `Describe`
+    compares the effective limits, so a snapshot without the field against a
+    project with `0` or `1` is not reported as a change.
   - `internal/daemon/dispatch_lifecycle.go`: the "does this task have a
-    `task_branch`?" switch, wired with only the legacy branch for now.
+    `task_branch`?" switch, `finishCommittedTask`, called from
+    `afterCommitSession` once the task is at `committed`. Only the legacy
+    branch is wired for now: a task with a `task_branch` is finished the
+    legacy way too until phase 2 adds the ancestor check and cleanup.
 - **Tests:** YAML round-trips in `internal/task` (`touches: []` survives a
   `Save`; absent stays absent), `MaxParallel()` clamps, older files load
   unchanged, an unknown `conflict_resolution` warns.
