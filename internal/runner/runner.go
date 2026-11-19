@@ -65,6 +65,16 @@ type Plan struct {
 	// this launch rather than cutting a new one, so it may hold an earlier
 	// run's changes. Only the task prompt reads it.
 	Resumed bool
+	// Integration is the task's latest integration report (the task file's
+	// integration:), set for a TaskAgent re-run after an integration conflict
+	// or a failed build check (docs/parallel-task-worktrees.md I4). Only the
+	// task prompt reads it.
+	Integration *task.Integration
+	// Verify is the project's pre-integration build check command (R1) and
+	// DocsOnly the daemon's verdict that the task changed documentation only,
+	// so the check is skipped. Only the commit prompt reads them.
+	Verify   string
+	DocsOnly bool
 	// WorktreeMounts are the extra host paths a TaskAgent with a TaskWorktree
 	// mounts read-write next to it (W5): each repo's git common dir — where
 	// the worktree's objects, refs and admin dir live — and the shared
@@ -706,6 +716,9 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		TaskBase:                promptCommits(p.TaskBase),
 		Attempt:                 p.Attempt,
 		Resumed:                 p.Resumed,
+		Integration:             promptIntegration(p.Integration),
+		Verify:                  p.Verify,
+		DocsOnly:                p.DocsOnly,
 		PushBranch:              p.PushBranch,
 		Sandboxed:               useACP && (p.Kind == agent.WolfAgent || p.Kind == agent.SleepyHeadAgent),
 		Roots:                   p.Observe.Roots,
@@ -742,6 +755,8 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		TaskBase:                setupCommits(p.TaskBase),
 		Attempt:                 p.Attempt,
 		Resumed:                 p.Resumed,
+		Verify:                  p.Verify,
+		DocsOnly:                p.DocsOnly,
 		PushBranch:              p.PushBranch,
 		Sandboxed:               useACP && (p.Kind == agent.WolfAgent || p.Kind == agent.SleepyHeadAgent),
 		Roots:                   p.Observe.Roots,
@@ -1756,6 +1771,20 @@ func promptCommits(in []task.Commit) []prompts.RepoCommit {
 }
 
 // setupCommits converts task commits into the .orch/context.yaml shape.
+func promptIntegration(in *task.Integration) *prompts.IntegrationReport {
+	if in == nil {
+		return nil
+	}
+	return &prompts.IntegrationReport{
+		Result: in.Result,
+		Repo:   in.Repo,
+		Files:  in.Files,
+		Onto:   promptCommits(in.Onto),
+		Output: in.Output,
+		Landed: in.Landed,
+	}
+}
+
 func setupCommits(in []task.Commit) []setup.Commit {
 	if len(in) == 0 {
 		return nil

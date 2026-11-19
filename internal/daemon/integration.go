@@ -1,0 +1,423 @@
+package daemon
+
+import (
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/slimslenderslacks/work/internal/project"
+	"github.com/slimslenderslacks/work/internal/task"
+	"github.com/slimslenderslacks/work/internal/taskgraph"
+	"github.com/slimslenderslacks/work/internal/worktree"
+)
+
+// maxIntegrationAttempts is how many times the daemon relaunches the commit
+// agent for the same task after a transient integration failure
+// (docs/parallel-task-worktrees.md I4): the shared tip moved outside the
+// queue, a git lock, a sandbox that would not start, or a session that ended
+// with the task still at success. It is tracked in integration.attempts, not
+// attempts, because the task's own work is fine and is not re-run. Once it is
+// spent the project blocks.
+const maxIntegrationAttempts = 2
+
+// Integration results the commit agent reports in the task file's
+// integration.result (I4).
+const (
+	integrationConflict     = "conflict"
+	integrationVerifyFailed = "verify_failed"
+	integrationError        = "error"
+	integrationPartial      = "partial"
+)
+
+// integrationLaunch is what launchCommitAgent knew about a worktree task's
+// integration when it started the commit agent, handed to afterCommitSession
+// so it can route and audit the outcome. Nil for a push task, a legacy task,
+// or a daemon without worktrees.
+type integrationLaunch struct {
+	// onto is the shared tip of each repo just before the commit agent ran.
+	// When every repo's tip still equals the task's base, the integration is
+	// the I2 fast path: nothing to rebase, so no build check either.
+	onto map[string]string
+	// verify and docsOnly are the build check settings the prompt carried.
+	verify   string
+	docsOnly bool
+	// attempts is integration.attempts at launch. The commit agent rewrites
+	// the integration block when it reports a failure and may drop the
+	// daemon's counter, so the routing takes the larger of this and the file.
+	attempts int
+}
+
+// fastPath reports whether no repo's shared tip had moved past the task's
+// base when the commit agent started.
+func (il *integrationLaunch) fastPath(t *task.Task) bool {
+	for _, b := range t.Base {
+		if tip, ok := il.onto[b.Repo]; ok && tip != b.Hash {
+			return false
+		}
+	}
+	return true
+}
+
+// prepareIntegration is the host-side step before every commit agent launch
+// for a worktree task (X7 part 4). It makes an interrupted integration safe to
+// run again from the top: a stale index.lock (no session can hold it; the main
+// slot is free) is removed, and a rebase left in progress in the task worktree
+// is aborted, which restores the branch's pre-rebase tip. A dirty shared tree
+// is not touched: it may hold a human's edits, so the caller blocks on the
+// returned error. It returns each repo's shared tip.
+func (d *Daemon) prepareIntegration(projectPath string, p *project.Project, t *task.Task, root string) (map[string]string, error) {
+	shared, err := d.runner.Workspaces.Path(p.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+	onto := map[string]string{}
+	for _, repo := range repoDirNames(p) {
+		sharedRepo := filepath.Join(shared, repo)
+		if _, err := os.Stat(sharedRepo); err != nil {
+			continue
+		}
+		dirs := []string{sharedRepo}
+		wt := filepath.Join(root, repo)
+		hasWT := false
+		if _, err := os.Stat(wt); err == nil {
+			dirs = append(dirs, wt)
+			hasWT = true
+		}
+		for _, dir := range dirs {
+			lock, err := d.worktrees.GitPath(d.ctx, dir, "index.lock")
+			if err != nil {
+				continue
+			}
+			if _, err := os.Stat(lock); err == nil {
+				if err := os.Remove(lock); err != nil {
+					return nil, fmt.Errorf("remove stale %s: %w", lock, err)
+				}
+				d.audit.Log("integration_lock_cleared", "path", projectPath, "task", t.Name, "repo", repo, "lock", lock)
+			}
+		}
+		if hasWT {
+			if busy, err := d.worktrees.RebaseInProgress(d.ctx, wt); err == nil && busy {
+				if err := d.worktrees.AbortRebase(d.ctx, wt); err != nil {
+					return nil, fmt.Errorf("abort the interrupted rebase in %s: %w", wt, err)
+				}
+				d.audit.Log("integration_rebase_aborted", "path", projectPath, "task", t.Name, "repo", repo)
+			}
+		}
+		if dirty, err := d.worktrees.Dirty(d.ctx, sharedRepo); err == nil && dirty {
+			return nil, fmt.Errorf("shared workspace %s has uncommitted changes (interrupted integration?)", repo)
+		}
+		if tip, err := d.worktrees.RevParse(d.ctx, sharedRepo, "refs/heads/"+p.Branch); err == nil {
+			onto[repo] = tip
+		}
+	}
+	return onto, nil
+}
+
+// docsOnly is the daemon's verdict that a task changed documentation only, so
+// the commit agent skips the build check (R1). Both have to agree: the task
+// declares touches, all of them documentation, and its actual diff against
+// base (committed and not) touches documentation only. A task with no hints,
+// or one that strayed outside them, is checked.
+func (d *Daemon) docsOnly(t *task.Task, root string) bool {
+	if t.Touches == nil || len(*t.Touches) == 0 || len(t.Areas) > 0 {
+		return false
+	}
+	for _, g := range *t.Touches {
+		if !isDocPath(g) {
+			return false
+		}
+	}
+	for _, b := range t.Base {
+		paths, err := d.worktrees.ChangedPaths(d.ctx, filepath.Join(root, b.Repo), b.Hash)
+		if err != nil {
+			return false
+		}
+		for _, p := range paths {
+			if !isDocPath(p) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isDocPath reports whether a path (or a touches glob) is documentation: a
+// markdown file, or anything under a docs/ directory.
+func isDocPath(p string) bool {
+	p = filepath.ToSlash(p)
+	if strings.EqualFold(path.Ext(p), ".md") {
+		return true
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "docs" {
+			return true
+		}
+	}
+	return false
+}
+
+// routeIntegrationFailure is afterCommitSession's I4 routing for a worktree
+// task whose commit agent did not reach committed. It reads the commit agent's
+// report from the task file:
+//
+//   - blocked: the agent found something it must not fix (a dirty or
+//     wrong-branch shared checkout). Block.
+//   - failed, integration.result conflict or verify_failed: re-run the task
+//     in its worktree (conflictReRun).
+//   - failed, integration.result partial: some repos are published and the
+//     rest are not, which only a tip moved outside the queue causes. Block.
+//   - otherwise (failed with result error or no report, still success, or a
+//     commit agent that could not start): transient. Relaunch the commit
+//     agent only, up to maxIntegrationAttempts, then block.
+func (d *Daemon) routeIntegrationFailure(projectPath string, p *project.Project, t *task.Task, startFailure string, il *integrationLaunch) {
+	result := ""
+	if t.Integration != nil {
+		result = t.Integration.Result
+	}
+	switch {
+	case t.Status == task.StatusBlocked:
+		d.retainSandbox(t.Path, t)
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("commit agent blocked task %q: %s", t.Name, t.BlockedReason))
+	case t.Status == task.StatusFailed && (result == integrationConflict || result == integrationVerifyFailed):
+		if result == integrationVerifyFailed {
+			d.audit.Log("integration_verify_check_failed", "path", projectPath, "task", t.Name,
+				"repo", t.Integration.Repo, "onto", formatCommits(t.Integration.Onto), "attempts", strconv.Itoa(t.Attempts))
+		}
+		d.conflictReRun(projectPath, p, t)
+	case t.Status == task.StatusFailed && result == integrationPartial:
+		d.audit.Log("integration_partial", "path", projectPath, "task", t.Name,
+			"published", strings.Join(t.Integration.Published, ","), "repo", t.Integration.Repo)
+		d.retainSandbox(t.Path, t)
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("task %q was partially integrated: %s published, %s not (%s); finish it by hand from its worktree",
+				t.Name, strings.Join(t.Integration.Published, ", "), t.Integration.Repo, t.FailureReason))
+	case t.Status == task.StatusFailed || t.Status == task.StatusSuccess:
+		d.retryIntegration(projectPath, p, t, startFailure, il)
+	default:
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("commit agent ended with task %q in status %q", t.Name, t.Status))
+	}
+}
+
+// retryIntegration handles a transient integration failure: the task goes
+// back to success (its work is fine) with integration.attempts bumped, and the
+// same task's commit agent is relaunched, so nothing overtakes it in the queue
+// (S5). Once maxIntegrationAttempts relaunches are spent the project blocks.
+func (d *Daemon) retryIntegration(projectPath string, p *project.Project, t *task.Task, startFailure string, il *integrationLaunch) {
+	attempts := 0
+	if t.Integration != nil {
+		attempts = t.Integration.Attempts
+	}
+	if il != nil && il.attempts > attempts {
+		attempts = il.attempts
+	}
+	why := startFailure
+	if why == "" && t.FailureReason != "" {
+		why = t.FailureReason
+	}
+	if why == "" {
+		why = fmt.Sprintf("commit agent ended with the task at %s", t.Status)
+	}
+	if attempts >= maxIntegrationAttempts {
+		d.retainSandbox(t.Path, t)
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("integration of task %q failed after %d commit agent retries: %s", t.Name, attempts, why))
+		return
+	}
+	attempts++
+	if err := task.Update(t.Path, func(cur *task.Task) bool {
+		cur.Status = task.StatusSuccess
+		cur.FailureReason = ""
+		if cur.Integration == nil {
+			cur.Integration = &task.Integration{Result: integrationError}
+		}
+		cur.Integration.Attempts = attempts
+		return true
+	}); err != nil {
+		d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
+		d.transitionProjectBlocked(projectPath, p, "task save error: "+err.Error())
+		return
+	}
+	d.audit.Log("integration_retry", "path", projectPath, "task", t.Name,
+		"integration_attempts", strconv.Itoa(attempts), "err", why)
+	cur, err := task.Load(t.Path)
+	if err != nil {
+		d.transitionProjectBlocked(projectPath, p, "task load error: "+err.Error())
+		return
+	}
+	d.launchCommitAgent(projectPath, p, cur)
+}
+
+// conflictReRun handles a rebase conflict or a failed build check (I4): the
+// task re-runs in its worktree, which the commit agent's abort left at the
+// pre-rebase tip, fully committed. The re-run's prompt (the integration block,
+// kept for it) tells the agent to rebase onto the shared branch and resolve
+// what is named. It costs an attempt, like any retry; once they are spent the
+// project blocks with a reason naming the tasks that landed in between (I6),
+// and the worktree is kept.
+func (d *Daemon) conflictReRun(projectPath string, p *project.Project, t *task.Task) {
+	in := t.Integration
+	landed := d.landedSince(projectPath, p, t)
+	cause := "conflict"
+	if in.Result == integrationConflict {
+		d.audit.Log("integration_conflicted", "path", projectPath, "task", t.Name, "repo", in.Repo,
+			"files", strings.Join(in.Files, ","), "landed", strings.Join(landed, ","), "attempts", strconv.Itoa(t.Attempts))
+	} else {
+		cause = "verify"
+	}
+
+	if t.Attempts >= maxTaskAttempts {
+		// retainSandbox saves t whole, so the in-memory copy carries landed too.
+		t.Integration.Landed = landed
+		if err := task.Update(t.Path, func(cur *task.Task) bool {
+			if cur.Integration == nil {
+				return false
+			}
+			cur.Integration.Landed = landed
+			return true
+		}); err != nil {
+			d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
+		}
+		d.audit.Log("task_retry_exhausted", "task", t.Name, "attempts", strconv.Itoa(t.Attempts), "cause", cause)
+		d.retainSandbox(t.Path, t)
+		d.transitionProjectBlocked(projectPath, p, conflictBlockReason(p, t, landed))
+		return
+	}
+
+	var updated *task.Task
+	if err := task.Update(t.Path, func(cur *task.Task) bool {
+		cur.Attempts++
+		cur.Status = task.StatusReady
+		cur.FailureReason = ""
+		cur.SucceededAt = nil
+		if cur.Integration == nil {
+			cur.Integration = &task.Integration{Result: in.Result, Repo: in.Repo, Files: in.Files, Onto: in.Onto, Output: in.Output}
+		}
+		cur.Integration.Landed = landed
+		cur.Integration.Attempts = 0
+		updated = cur
+		return true
+	}); err != nil {
+		d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
+		d.transitionProjectBlocked(projectPath, p, "task save error: "+err.Error())
+		return
+	}
+	d.audit.Log("task_retry", "task", updated.Name, "attempts", strconv.Itoa(updated.Attempts), "cause", cause)
+	d.launchTaskAgent(projectPath, p, updated)
+}
+
+// conflictBlockReason is the I6 blocked_reason for a task whose conflict
+// re-runs are spent: the task, what landed since its base, where, and how many
+// attempts it had.
+func conflictBlockReason(p *project.Project, t *task.Task, landed []string) string {
+	in := t.Integration
+	with := "commits on " + p.Branch
+	if len(landed) > 0 {
+		with = fmt.Sprintf("%q", landed)
+	}
+	if in.Result == integrationVerifyFailed {
+		return fmt.Sprintf("task %q failed its build check after rebasing onto %s (landed: %s) after %d attempts",
+			t.Name, p.Branch, with, t.Attempts)
+	}
+	where := in.Repo
+	if len(in.Files) > 0 {
+		where += ": " + strings.Join(in.Files, ", ")
+	}
+	return fmt.Sprintf("task %q conflicted with %s in %s after %d attempts", t.Name, with, where, t.Attempts)
+}
+
+// landedSince lists the committed tasks whose commits landed on the shared
+// branch between t's base and the tips its integration tried to rebase onto,
+// in the repo that failed (every repo when none is named): the tasks it
+// conflicted with (I4 `landed`). Best-effort; git errors leave a task out.
+func (d *Daemon) landedSince(projectPath string, p *project.Project, t *task.Task) []string {
+	shared, err := d.runner.Workspaces.Path(p.Branch)
+	if err != nil {
+		return nil
+	}
+	base := map[string]string{}
+	for _, c := range t.Base {
+		base[c.Repo] = c.Hash
+	}
+	onto := map[string]string{}
+	if t.Integration != nil {
+		for _, c := range t.Integration.Onto {
+			onto[c.Repo] = c.Hash
+		}
+	}
+	g, err := taskgraph.Load(filepath.Join(filepath.Dir(projectPath), "tasks"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, o := range g.Tasks() {
+		if o.Name == t.Name || o.Status != task.StatusCommitted {
+			continue
+		}
+		for _, c := range o.Commits {
+			if t.Integration != nil && t.Integration.Repo != "" && c.Repo != t.Integration.Repo {
+				continue
+			}
+			dir := filepath.Join(shared, c.Repo)
+			tip := onto[c.Repo]
+			if tip == "" {
+				tip = "refs/heads/" + p.Branch
+			}
+			in, err := d.worktrees.IsAncestor(d.ctx, dir, c.Hash, tip)
+			if err != nil || !in {
+				continue
+			}
+			if b := base[c.Repo]; b != "" {
+				if before, err := d.worktrees.IsAncestor(d.ctx, dir, c.Hash, b); err != nil || before {
+					continue
+				}
+			}
+			out = append(out, o.Name)
+			break
+		}
+	}
+	return out
+}
+
+// auditVerifyCheck records, for a worktree task that just integrated, whether
+// the pre-integration build check ran (R1): passed, or skipped and why. A
+// failed check is recorded where it is routed (routeIntegrationFailure).
+func (d *Daemon) auditVerifyCheck(projectPath string, t *task.Task, il *integrationLaunch) {
+	if il == nil {
+		return
+	}
+	switch {
+	case il.verify == "":
+		d.audit.Log("integration_verify_check_skipped", "path", projectPath, "task", t.Name, "why", "not_configured")
+	case il.fastPath(t):
+		d.audit.Log("integration_verify_check_skipped", "path", projectPath, "task", t.Name, "why", "fast_path")
+	case il.docsOnly:
+		d.audit.Log("integration_verify_check_skipped", "path", projectPath, "task", t.Name, "why", "docs_only")
+	default:
+		d.audit.Log("integration_verify_check_passed", "path", projectPath, "task", t.Name,
+			"onto", formatOnto(il.onto))
+	}
+}
+
+func formatOnto(onto map[string]string) string {
+	var cs []task.Commit
+	for repo, hash := range onto {
+		cs = append(cs, task.Commit{Repo: repo, Hash: hash})
+	}
+	sort.Slice(cs, func(i, j int) bool { return cs[i].Repo < cs[j].Repo })
+	return formatCommits(cs)
+}
+
+// worktreeRoot is t's worktree root: the path the task file records, else the
+// derived one.
+func worktreeRoot(shared string, t *task.Task) string {
+	if t.Worktree != "" {
+		return t.Worktree
+	}
+	return worktree.Root(shared, t.Name)
+}

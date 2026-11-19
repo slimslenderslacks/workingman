@@ -100,8 +100,15 @@ func TestRenderCommitWorktree(t *testing.T) {
 		"git -C /ws/.worktrees/api/<repo> status --porcelain",
 		"`gateway`: `abc123`",
 		"merge --ff-only wm/feat/x/api",
-		"Do NOT\n   rebase",
+		"rebase onto[<repo>]",
+		"git rebase --abort",
+		"reset --hard\n     saved[<repo>]",
+		"at most twice",
+		"result: <conflict | verify_failed | partial | error>",
+		"safe to run again from the top",
+		"still equals its base",
 		"status: blocked",
+		"status: failed",
 		"Do not push",
 		"status: committed",
 	} {
@@ -119,5 +126,92 @@ func TestRenderCommitWorktree(t *testing.T) {
 	}
 	if strings.Contains(legacy, "ff-only") || !strings.Contains(legacy, "sitting in the\nworking tree") {
 		t.Errorf("legacy commit prompt changed:\n%s", legacy)
+	}
+}
+
+// The build check paragraph appears only when the project sets verify:, and a
+// docs-only task is told to skip it.
+func TestRenderCommitWorktreeBuildCheck(t *testing.T) {
+	d := worktreeData()
+	d.Workspace = "/ws"
+	none, err := Render(agent.CommitAgent, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(none, "Build check") {
+		t.Errorf("no verify: configured, but the prompt has a build check:\n%s", none)
+	}
+	d.Verify = "go build ./..."
+	out, err := Render(agent.CommitAgent, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Build check", "go build ./...", "result: verify_failed", "If nothing was rebased"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("build check prompt missing %q:\n%s", want, out)
+		}
+	}
+	d.DocsOnly = true
+	docs, err := Render(agent.CommitAgent, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(docs, "documentation only") || strings.Contains(docs, "go build ./...") {
+		t.Errorf("docs-only prompt should skip the check:\n%s", docs)
+	}
+}
+
+// A conflict re-run is told what conflicted, what landed, and to rebase its
+// own branch onto the shared branch.
+func TestRenderTaskConflictReRun(t *testing.T) {
+	d := worktreeData()
+	d.Attempt = 1
+	d.Integration = &IntegrationReport{Result: "conflict", Repo: "gateway", Files: []string{"api/handler.go"}, Landed: []string{"auth"}}
+	out, err := Render(agent.TaskAgent, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"This run is a re-run", "conflicted in `gateway`", "`api/handler.go`", "`auth`",
+		"git rebase refs/heads/feat/x", "git rebase --continue", "This is attempt 2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("re-run prompt missing %q:\n%s", want, out)
+		}
+	}
+	d.Integration = &IntegrationReport{Result: "verify_failed", Output: "undefined: Foo"}
+	out, err = Render(agent.TaskAgent, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "build check\nthen failed") || !strings.Contains(out, "undefined: Foo") {
+		t.Errorf("verify re-run prompt missing the failure:\n%s", out)
+	}
+	plain, _ := Render(agent.TaskAgent, worktreeData())
+	if strings.Contains(plain, "re-run") {
+		t.Errorf("an ordinary run must not carry the re-run block:\n%s", plain)
+	}
+}
+
+// The wolf learns the three ways out of an integration block and is warned
+// off the shared branch while an integration is in flight.
+func TestRenderWolfIntegrationParagraph(t *testing.T) {
+	out, err := Render(agent.WolfAgent, Data{Workspace: "/orch/p", ProjectPath: "/orch/p/project.yaml", Branch: "feat/x", Worktree: "/ws"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Integration conflicts",
+		"`wm/feat/x/<task>`",
+		"(`/ws`)",
+		"`attempts: 0`",
+		"reuses\n     the worktree",
+		"`integration.result: partial`",
+		"THE SHARED BRANCH",
+		"do not commit, rebase, reset or otherwise move\n`feat/x`",
+		"A block does not stop a commit agent",
+		"set that task to `success`",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wolf prompt missing %q:\n%s", want, out)
+		}
 	}
 }

@@ -133,6 +133,7 @@ func (d *Daemon) prepareTaskWorktree(projectPath string, p *project.Project, t *
 	plan.TaskBase = base
 	plan.Attempt = t.Attempts
 	plan.Resumed = !res.Fresh()
+	plan.Integration = t.Integration
 	plan.WorktreeMounts = mounts
 	return nil
 }
@@ -280,6 +281,24 @@ func (d *Daemon) finishWorktreeTask(projectPath string, p *project.Project, t *t
 		return false
 	}
 	spec := worktreeSpec(shared, p, t)
+	// Every recorded commit must be on the shared branch (I3): the agent's word
+	// alone is not what makes `committed` mean "integrated".
+	for _, c := range t.Commits {
+		dir := filepath.Join(shared, c.Repo)
+		ok, err := d.worktrees.IsAncestor(d.ctx, dir, c.Hash, p.Branch)
+		if err == nil && ok {
+			continue
+		}
+		why := "not an ancestor of " + p.Branch
+		if err != nil {
+			why = err.Error()
+		}
+		d.audit.Log("integration_verify_failed", "path", projectPath, "task", t.Name, "repo", c.Repo,
+			"hash", c.Hash, "why", why)
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("task %q is committed but its commit %s in %s is %s", t.Name, c.Hash, c.Repo, why))
+		return false
+	}
 	for _, repo := range spec.Repos {
 		dir := filepath.Join(shared, repo)
 		exists, err := d.worktrees.BranchExists(d.ctx, dir, spec.Branch)
@@ -299,6 +318,43 @@ func (d *Daemon) finishWorktreeTask(projectPath string, p *project.Project, t *t
 		d.transitionProjectBlocked(projectPath, p,
 			fmt.Sprintf("task %q is committed but %s in %s is %s", t.Name, spec.Branch, repo, why))
 		return false
+	}
+
+	// The task branch landed, but a repo whose branch moved past its base has
+	// no commits: entry. The commit agent
+	// claimed committed without recording what it published, so the record
+	// the review agent and push tasks read would be wrong. Block (I4).
+	recorded := map[string]bool{}
+	for _, c := range t.Commits {
+		recorded[c.Repo] = true
+	}
+	for _, b := range t.Base {
+		if recorded[b.Repo] {
+			continue
+		}
+		dir := filepath.Join(shared, b.Repo)
+		tip, err := d.worktrees.RevParse(d.ctx, dir, "refs/heads/"+spec.Branch)
+		if err != nil || tip == b.Hash {
+			continue
+		}
+		d.audit.Log("integration_verify_failed", "path", projectPath, "task", t.Name, "repo", b.Repo,
+			"hash", tip, "why", "missing from commits")
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("task %q is committed but its work in %s (%s) is missing from its commits", t.Name, b.Repo, tip))
+		return false
+	}
+
+	if t.Integration != nil {
+		t.Integration = nil
+		if err := task.Update(t.Path, func(cur *task.Task) bool {
+			if cur.Integration == nil {
+				return false
+			}
+			cur.Integration = nil
+			return true
+		}); err != nil {
+			d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
+		}
 	}
 
 	if err := d.worktrees.Remove(d.ctx, spec); err != nil {
@@ -322,22 +378,35 @@ func (d *Daemon) finishWorktreeTask(projectPath string, p *project.Project, t *t
 }
 
 // commitWorktree points a commit agent's plan at its task's worktree, which
-// selects the worktree branch of the commit prompt (I3 steps 0 and 3). A push
-// task, a legacy task (no task branch) and a daemon without worktrees keep
-// today's prompt, committing the shared tree.
-func (d *Daemon) commitWorktree(p *project.Project, t *task.Task, plan *runner.Plan) {
+// selects the worktree branch of the commit prompt (the I3 procedure), after
+// prepareIntegration has cleaned up after any interrupted integration. It
+// returns what afterCommitSession needs to route the outcome, or nil for a
+// push task, a legacy task (no task branch) or a daemon without worktrees,
+// which keep today's prompt, committing the shared tree.
+func (d *Daemon) commitWorktree(projectPath string, p *project.Project, t *task.Task, plan *runner.Plan) (*integrationLaunch, error) {
 	if !t.HasTaskBranch() || t.IsPushTask() || !d.worktreesEnabled() {
-		return
+		return nil, nil
 	}
-	root := t.Worktree
-	if root == "" {
-		shared, err := d.runner.Workspaces.Path(p.Branch)
-		if err != nil {
-			return
-		}
-		root = worktree.Root(shared, t.Name)
+	shared, err := d.runner.Workspaces.Path(p.Branch)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+	root := worktreeRoot(shared, t)
+	onto, err := d.prepareIntegration(projectPath, p, t, root)
+	if err != nil {
+		return nil, err
+	}
+	il := &integrationLaunch{onto: onto, verify: p.Verify}
+	if t.Integration != nil {
+		il.attempts = t.Integration.Attempts
+	}
+	if il.verify != "" {
+		il.docsOnly = d.docsOnly(t, root)
 	}
 	plan.TaskWorktree = root
 	plan.TaskBranch = t.TaskBranch
 	plan.TaskBase = t.Base
+	plan.Verify = il.verify
+	plan.DocsOnly = il.docsOnly
+	return il, nil
 }

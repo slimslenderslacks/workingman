@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -408,6 +409,86 @@ func (m Manager) IsAncestor(ctx context.Context, dir, commit, rev string) (bool,
 		return false, nil
 	}
 	return false, err
+}
+
+// GitPath resolves a path inside the git dir of the checkout at dir (`git
+// rev-parse --git-path`), which for a worktree is its own admin dir: where its
+// index.lock and an in-progress rebase's state live.
+func (m Manager) GitPath(ctx context.Context, dir, name string) (string, error) {
+	out, err := m.git(ctx, dir, "rev-parse", "--path-format=absolute", "--git-path", name)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(out) {
+		out = filepath.Join(dir, out)
+	}
+	return filepath.Clean(out), nil
+}
+
+// RebaseInProgress reports whether the checkout at dir is in the middle of a
+// rebase (a rebase-merge or rebase-apply dir exists in its git dir).
+func (m Manager) RebaseInProgress(ctx context.Context, dir string) (bool, error) {
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		p, err := m.GitPath(ctx, dir, name)
+		if err != nil {
+			return false, err
+		}
+		if _, err := os.Stat(p); err == nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// AbortRebase runs `git rebase --abort` in the checkout at dir, restoring the
+// branch to its pre-rebase tip.
+func (m Manager) AbortRebase(ctx context.Context, dir string) error {
+	_, err := m.git(ctx, dir, "rebase", "--abort")
+	return err
+}
+
+// ChangedPaths lists the repo-relative paths that differ between base and the
+// checkout at dir: committed (`git diff --name-only base..HEAD`) plus
+// uncommitted and untracked ones (`git status --porcelain`). Sorted, no
+// duplicates.
+func (m Manager) ChangedPaths(ctx context.Context, dir, base string) ([]string, error) {
+	seen := map[string]bool{}
+	if base != "" {
+		out, err := m.git(ctx, dir, "diff", "--name-only", base+"..HEAD")
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range strings.Split(out, "\n") {
+			if l != "" {
+				seen[l] = true
+			}
+		}
+	}
+	run := m.Run
+	if run == nil {
+		run = ExecGit
+	}
+	raw, err := run(ctx, dir, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+	for _, l := range strings.Split(string(raw), "\n") {
+		if len(l) < 4 {
+			continue
+		}
+		p := l[3:]
+		if i := strings.Index(p, " -> "); i >= 0 {
+			seen[p[:i]] = true
+			p = p[i+4:]
+		}
+		seen[strings.Trim(p, `"`)] = true
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // qualify turns a bare branch name into its full ref so it cannot be confused

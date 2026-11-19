@@ -64,6 +64,16 @@ type Data struct {
 	// worktree for this run (a stop/start, a restart, a wolf reset), so it may
 	// hold an earlier run's changes even when Attempt is 0.
 	Resumed bool
+	// Integration, for the TaskAgent, is set when this run is a re-run after
+	// the commit agent could not integrate the task's branch: a rebase
+	// conflict or a failed build check (docs/parallel-task-worktrees.md I4).
+	// The prompt tells the agent to rebase onto Branch and resolve it.
+	Integration *IntegrationReport
+	// Verify, for the CommitAgent, is the project's pre-integration build
+	// check command (R1); empty means none. DocsOnly is the daemon's verdict
+	// that the task changed documentation only, which skips the check.
+	Verify   string
+	DocsOnly bool
 
 	// PushBranch, for the CommitAgent, tells it to push the branch after
 	// committing instead of leaving the commit local. Set by the daemon for a
@@ -109,6 +119,17 @@ type Data struct {
 type RepoCommit struct {
 	Repo string // workspace dir name of the repo
 	Hash string
+}
+
+// IntegrationReport is a task file's integration: block as the task prompt
+// needs it (task.Integration).
+type IntegrationReport struct {
+	Result string // conflict | verify_failed | error | partial
+	Repo   string
+	Files  []string
+	Onto   []RepoCommit
+	Output string
+	Landed []string
 }
 
 // BehindProject is one cron project the SleepyHeadAgent must report on.

@@ -42,6 +42,10 @@ type Context struct {
 	TaskBase     []Commit `yaml:"task_base,omitempty"`
 	Attempt      int      `yaml:"attempt,omitempty"`
 	Resumed      bool     `yaml:"resumed,omitempty"`
+	// Verify/DocsOnly are the commit agent's build check command and the
+	// docs-only verdict that skips it. See prompts.Data.
+	Verify   string `yaml:"verify,omitempty"`
+	DocsOnly bool   `yaml:"docs_only,omitempty"`
 
 	// PushBranch tells the commit agent to push after committing (review-fix
 	// tasks) rather than leaving the commit local. See prompts.Data.PushBranch.

@@ -1,8 +1,9 @@
 # Parallel tasks via per-task worktrees
 
-**Status:** plan, complete. Phases 0 and 1 of the
+**Status:** plan, complete. Phases 0, 1 and 2 of the
 [phased rollout](#phased-rollout) are implemented (see
-[Phase 1 as built](#phase-1-as-built)); the rest is still to do.
+[Phase 1 as built](#phase-1-as-built) and
+[Phase 2 as built](#phase-2-as-built)); the rest is still to do.
 
 ## Goal
 
@@ -2840,6 +2841,69 @@ every test.
 - **Rollback:** revert to phase 1's commit template. Tasks with an
   `integration:` block from a conflict are plain `ready` tasks to phase 1,
   which ignores the field.
+
+#### Phase 2 as built
+
+Phase 2 follows the list above. The code forced or suggested these
+differences:
+
+- **`prepareIntegration` runs in `launchCommitAgent`,** since `schedule`
+  arrives in phase 4. It runs before every commit agent launch for a worktree
+  task (in `internal/daemon/integration.go`), and its dirty-shared-tree check
+  blocks the project *instead of* launching the agent. The commit agent keeps
+  its own clean-tree check (I3 step 1) for a tree dirtied after launch.
+  `prepareIntegration` also snapshots each repo's shared tip. The daemon
+  compares that with `base` to tell the fast path from a real rebase, for the
+  `integration_succeeded fast_forward=` field and the build-check events.
+- **The daemon writes the build-check events, not the agent.**
+  `integration_verify_check_failed` is logged when a `verify_failed` report is
+  routed. `_passed` and `_skipped` (`why=not_configured|fast_path|docs_only`)
+  are logged after a verified integration, from the state at launch: if the
+  project has a `verify:`, the tip had moved past `base` and the task is not
+  docs-only, then the commit agent was told to run the check, and it
+  integrated, so the check passed. A tip that moves *during* the run is still
+  logged as `fast_path`. That makes the event slightly undercount real runs,
+  which is acceptable for a rate.
+- **Docs-only verdict** (`docsOnly`): the task declares a non-empty `touches`
+  and no `areas`, every glob is documentation, and every path in the actual
+  diff against `base` (committed, modified and untracked) is too.
+  Documentation means a `.md` file or anything under a `docs/` directory.
+- **What counts as transient.** Besides a `result: error` report, the
+  transient path takes a commit agent that ended with the task still at
+  `success`, a `failed` with no `integration:` report, and a commit agent
+  that could not start. That covers the case of a commit agent killed
+  between two repos' fast-forwards: the relaunch re-runs the procedure from
+  the top (X7). The daemon puts the task back to `success` and bumps
+  `integration.attempts`. It takes the larger of the counter at launch and
+  the one in the file, because the agent replaces the whole `integration:`
+  block when it reports. A commit agent that writes `blocked` on a worktree
+  task (the step-1 clean-tree check) blocks the project, as in phase 1.
+- **`landed`** is derived when a conflict or build-check failure is routed:
+  the `committed` tasks with a `commits:` hash in the failing repo (or any
+  repo, when none is named) that is an ancestor of `onto` (or of the current
+  tip) but not of `base`.
+- **A conflict re-run** resets `integration.attempts` to 0, keeps the rest of
+  the block for the prompt, and logs `task_retry cause=conflict|verify`. An
+  ordinary failure keeps logging `task_retry` without `cause`. The
+  `integration:` block is cleared by the daemon when the task is verified at
+  `committed`, not by the commit agent.
+- **Verification is wider than the ancestor check.** Besides every
+  `commits[].hash` and the task branch being ancestors of the shared branch,
+  `finishWorktreeTask` blocks when a repo whose task branch moved past its
+  `base` has no `commits:` entry. Without that, a commit agent that
+  published but forgot to record a repo would leave `commits:` wrong for the
+  review agent and push tasks.
+- **The wolf's in-flight signal** is "any task at `success`", read from the
+  task files, until phase 3's snapshot fields and phase 4's `InFlightTasks`
+  arrive. With concurrency 1 that is exact.
+- **`internal/worktree`** gains `GitPath`, `RebaseInProgress`, `AbortRebase`
+  and `ChangedPaths`. `prompts.Data` gains `Integration` (task prompt),
+  `Verify` and `DocsOnly` (commit prompt). `.orch/context.yaml` carries
+  `verify` and `docs_only`.
+- **Restart recovery is tested at the integration step.** The tests cover
+  `prepareIntegration` over an interrupted rebase and a stale lock, and a
+  commit agent that exits between fast-forwards. They do not cover a full
+  daemon restart; X7's restart tests belong to phases 4 and 6.
 
 ### Phase 3: audit, snapshot and TUI
 

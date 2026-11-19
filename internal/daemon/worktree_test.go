@@ -40,6 +40,11 @@ type wtEnv struct {
 	shared   string // the project's shared workspace
 	tasksDir string
 
+	// repos are the project's repo dir names (all under the docker org);
+	// verify is its pre-integration build check. Set before provision/saveProject.
+	repos  []string
+	verify string
+
 	mu      sync.Mutex
 	scripts map[agent.Kind][]string // per-kind scripts, consumed in launch order
 	starts  map[agent.Kind]int
@@ -61,6 +66,7 @@ func newWtEnv(t *testing.T) *wtEnv {
 		tasksDir: filepath.Join(root, "tasks"),
 		scripts:  map[agent.Kind][]string{},
 		starts:   map[agent.Kind]int{},
+		repos:    []string{"gateway"},
 	}
 	if err := os.MkdirAll(e.tasksDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -92,7 +98,11 @@ func (e *wtEnv) command(kind agent.Kind, _ string) []string {
 // before the daemon first dispatches (the daemon's own Create is idempotent).
 func (e *wtEnv) provision() {
 	e.t.Helper()
-	if _, err := e.stub.Create(context.Background(), wtBranch, []workspace.Repo{{Identity: "github.com/docker/gateway"}}); err != nil {
+	var repos []workspace.Repo
+	for _, r := range e.repos {
+		repos = append(repos, workspace.Repo{Identity: "github.com/docker/" + r})
+	}
+	if _, err := e.stub.Create(context.Background(), wtBranch, repos); err != nil {
 		e.t.Fatalf("provision: %v", err)
 	}
 }
@@ -123,11 +133,16 @@ func (e *wtEnv) start() *Daemon {
 func (e *wtEnv) saveProject() string {
 	e.t.Helper()
 	path := filepath.Join(e.root, "project.yaml")
+	var repos []project.Repo
+	for _, r := range e.repos {
+		repos = append(repos, project.Repo{Org: "docker", Name: r})
+	}
 	if err := project.SaveAs(path, &project.Project{
 		Description: "worktree test",
 		Branch:      wtBranch,
 		Status:      project.StatusWorking,
-		Repos:       []project.Repo{{Org: "docker", Name: "gateway"}},
+		Repos:       repos,
+		Verify:      e.verify,
 	}, project.WriterAgent); err != nil {
 		e.t.Fatalf("SaveAs: %v", err)
 	}

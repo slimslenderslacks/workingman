@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
@@ -151,10 +152,16 @@ func (d *Daemon) retainSandbox(taskPath string, t *task.Task) {
 // afterCommitSession runs after a commit agent's session has ended. The
 // commit agent should have moved the task to status:committed. We reload the
 // graph and either dispatch the next ready task or transition the project to
-// done if every task is committed. Any other terminal state from the commit
-// agent is treated as a hard failure — the project is blocked for the wolf
-// agent to investigate.
-func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Project, startFailure string) {
+// done if every task is committed.
+//
+// For a worktree task (il set) any other outcome is routed on the commit
+// agent's integration report (docs/parallel-task-worktrees.md I4,
+// routeIntegrationFailure): a conflict or failed build check re-runs the task,
+// a transient failure relaunches the commit agent, a partial publish or a
+// broken invariant blocks. For a legacy or push task any other terminal state
+// is treated as a hard failure — the project is blocked for the wolf agent to
+// investigate.
+func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Project, startFailure string, il *integrationLaunch) {
 	if d.isStopped(projectPath) {
 		// Same guard as afterTaskSession: a commit agent enforceStopped killed
 		// mid-commit leaves the task at whatever non-committed status it had
@@ -175,6 +182,10 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		"after", "commit-session",
 	)
 	if t.Status != task.StatusCommitted {
+		if il != nil {
+			d.routeIntegrationFailure(projectPath, p, t, startFailure, il)
+			return
+		}
 		reason := fmt.Sprintf("commit agent ended with task %q in status %q", t.Name, t.Status)
 		if startFailure != "" {
 			// The agent never ran: say why, rather than leave the wolf (and the
@@ -186,6 +197,11 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 	}
 	if !d.finishCommittedTask(projectPath, p, t) {
 		return
+	}
+	if il != nil {
+		d.auditVerifyCheck(projectPath, t, il)
+		d.audit.Log("integration_succeeded", "path", projectPath, "task", t.Name,
+			"commits", formatCommits(t.Commits), "fast_forward", strconv.FormatBool(il.fastPath(t)))
 	}
 
 	// Stamp the completion time the first time we observe the task committed,
@@ -411,8 +427,16 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 	}
 	// A worktree task's commit agent lands its branch on the shared branch
 	// instead of committing the shared tree (the commit prompt's worktree
-	// branch).
-	d.commitWorktree(p, t, &plan)
+	// branch). prepareIntegration first makes an interrupted integration safe
+	// to run again (X7); a dirty shared tree blocks rather than being guessed
+	// at (I3).
+	il, err := d.commitWorktree(projectPath, p, t, &plan)
+	if err != nil {
+		d.audit.Log("integration_prepare_error", "path", projectPath, "task", t.Name, "err", err.Error())
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("cannot integrate task %q: %v", t.Name, err))
+		return
+	}
 	// A push task goes straight from ready to this agent, so the commit agent
 	// is what's running it; any other task is already at success.
 	marked := t.IsPushTask() && d.markTaskRunning(t)
@@ -421,7 +445,7 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		if waitErr != nil {
 			startFailure = d.runner.StartFailure(plan)
 		}
-		d.afterCommitSession(projectPath, plan.TaskPath, p, startFailure)
+		d.afterCommitSession(projectPath, plan.TaskPath, p, startFailure, il)
 	})
 	if marked && (err != nil || (!tracked && !d.taskSessionLive(projectPath, t.Name))) {
 		d.releaseRunningTask(plan.TaskPath, "launch_failed")

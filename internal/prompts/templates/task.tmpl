@@ -21,7 +21,31 @@ uncommitted: the commit agent commits whatever you leave and integrates the
 branch onto `{{.Branch}}`. Do not check out, create, move, reset or delete
 any other branch or ref — in particular never touch `{{.Branch}}` — and do not
 push.
-{{if or .Attempt .Resumed}}
+{{with .Integration}}
+This run is a re-run: the commit agent could not integrate this task's branch
+onto `{{$.Branch}}`, because `{{$.Branch}}` moved on while the task worked.
+{{if eq .Result "verify_failed"}}The branch rebased cleanly onto `{{$.Branch}}`, but the project's build check
+then failed{{if .Repo}} (in `{{.Repo}}`){{end}}.{{if .Output}} The tail of its output:
+
+{{.Output}}
+{{end}}{{else}}Rebasing it conflicted{{if .Repo}} in `{{.Repo}}`{{end}}{{if .Files}}, in:
+{{range .Files}}
+  - `{{.}}`{{end}}{{else}}.{{end}}{{end}}
+{{if .Landed}}
+Tasks that landed on `{{$.Branch}}` since this task started: {{range $i, $n := .Landed}}{{if $i}}, {{end}}`{{$n}}`{{end}}.
+{{end}}
+The commit agent aborted, so your branch is exactly as the last attempt left
+it, fully committed. Bring it up to date yourself: in each repo directory, run
+`git rebase refs/heads/{{$.Branch}}`, resolve {{if eq .Result "verify_failed"}}what the build check reports{{else}}the conflicts in the files above{{end}}
+using the code that has landed since (read it: `git log <base>..refs/heads/{{$.Branch}}`),
+`git add` and `git rebase --continue`, and check that the result still does
+what the task asks and builds. If the old approach no longer fits, you may
+start over from the new tip instead (`git reset --hard refs/heads/{{$.Branch}}`).
+Rebasing your own branch onto `{{$.Branch}}` is the one exception to the rule
+about other refs above: you still never move `{{$.Branch}}` itself. If a
+previous run was interrupted mid-rebase, `git status` says so: continue or
+abort it.
+{{end}}{{if or .Attempt .Resumed}}
 {{if .Attempt}}This is attempt {{add .Attempt 1}} of this task: an earlier attempt ended without
 success, and this worktree is exactly as that attempt left it.{{else}}This task ran here before and was interrupted (stopped, or the daemon
 restarted), and this worktree is exactly as that run left it.{{end}} It may contain

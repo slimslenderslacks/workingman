@@ -349,3 +349,59 @@ func TestParseWorktreeList(t *testing.T) {
 		t.Errorf("parse = %+v", got)
 	}
 }
+
+// RebaseInProgress / AbortRebase / GitPath operate on the worktree's own git
+// dir, and ChangedPaths sees committed, modified and untracked paths.
+func TestRebaseRecoveryAndChangedPaths(t *testing.T) {
+	shared := newShared(t, "feat/x", "a")
+	ctx := context.Background()
+	s := spec(shared, "api", "a")
+	res, err := (Manager{}).Ensure(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := res.Repos[0].Base
+	repo := filepath.Join(shared, "a")
+	wt := Path(shared, "api", "a")
+	m := Manager{}
+
+	writeT(t, filepath.Join(wt, "README"), "task\n")
+	gitT(t, wt, "commit", "-q", "-am", "task")
+	saved := gitT(t, wt, "rev-parse", "HEAD")
+	writeT(t, filepath.Join(repo, "README"), "human\n")
+	gitT(t, repo, "commit", "-q", "-am", "human")
+
+	if busy, err := m.RebaseInProgress(ctx, wt); err != nil || busy {
+		t.Fatalf("before rebase: busy=%v err=%v", busy, err)
+	}
+	cmd := exec.Command("git", "-C", wt, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "rebase", "-q", "feat/x")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("expected a conflict: %s", out)
+	}
+	if busy, err := m.RebaseInProgress(ctx, wt); err != nil || !busy {
+		t.Fatalf("mid-rebase: busy=%v err=%v", busy, err)
+	}
+	if busy, _ := m.RebaseInProgress(ctx, repo); busy {
+		t.Error("the shared checkout must not see the worktree's rebase")
+	}
+	lock, err := m.GitPath(ctx, wt, "index.lock")
+	if err != nil || !strings.Contains(lock, filepath.Join(".git", "worktrees")+string(filepath.Separator)) {
+		t.Errorf("GitPath(index.lock) = %q, %v: want the worktree's admin dir", lock, err)
+	}
+	if err := m.AbortRebase(ctx, wt); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitT(t, wt, "rev-parse", "HEAD"); got != saved {
+		t.Errorf("after abort HEAD = %s, want %s", got, saved)
+	}
+
+	writeT(t, filepath.Join(wt, "new.txt"), "x\n")
+	writeT(t, filepath.Join(wt, "docs", "a.md"), "x\n")
+	got, err := m.ChangedPaths(ctx, wt, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "README,docs/a.md,new.txt" {
+		t.Errorf("ChangedPaths = %v", got)
+	}
+}
