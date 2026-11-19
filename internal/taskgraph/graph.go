@@ -320,3 +320,79 @@ func formatCycle(path []string, closer string) string {
 	}
 	return closer
 }
+
+// InFlight returns the tasks that count against max_parallel_tasks
+// (docs/parallel-task-worktrees.md S3): every task at `running` or `success`,
+// sorted by name. A `success` task is queued or integrating; its work has not
+// landed yet, so it still holds a slot. A push task counts from the moment its
+// commit agent marks it `running`.
+func InFlight(tasks []*task.Task) []*task.Task {
+	var out []*task.Task
+	for _, t := range tasks {
+		if t.Status == task.StatusRunning || t.Status == task.StatusSuccess {
+			out = append(out, t)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// InFlight is the package-level InFlight over the graph's tasks.
+func (g *Graph) InFlight() []*task.Task { return InFlight(g.Tasks()) }
+
+// Deferred is a Ready task that Runnable held back because it overlaps
+// another task (H3). Overlaps names the in-flight tasks, the tasks admitted
+// earlier in the same pass and the earlier deferred tasks (the barrier) that
+// it overlaps, in that order.
+type Deferred struct {
+	Task     *task.Task
+	Overlaps []string
+}
+
+// Admission is the result of one Runnable pass: the tasks to start, in
+// admission order, and the tasks deferred for overlap.
+type Admission struct {
+	Admit    []*task.Task
+	Deferred []Deferred
+}
+
+// Runnable picks which Ready tasks a scheduling pass may start alongside
+// inflight (H3), admitting at most slots of them. The caller computes slots as
+// min(limit − len(inflight), free global tokens); slots <= 0 admits nothing.
+//
+// Candidates are Ready() minus push tasks, which join the commit queue
+// directly (Queued) instead of taking a task slot. They are walked in name
+// order. A candidate is admitted if it overlaps (Overlap) no task in inflight,
+// none admitted earlier in this pass and none deferred earlier in this pass.
+// Otherwise it is deferred, and joins the barrier: a later candidate that
+// overlaps a deferred one is deferred too, so a stream of later tasks cannot
+// overtake an earlier one forever. An exclusive task (no hints) is therefore a
+// full barrier: once it is deferred nothing behind it is admitted until it can
+// start alone. The walk stops as soon as slots is used up; candidates after
+// that point are neither admitted nor deferred.
+//
+// With one slot and nothing in flight this is ready[0], today's serial
+// dispatch, whatever the hints say.
+func (g *Graph) Runnable(inflight []*task.Task, slots int) Admission {
+	var adm Admission
+	var barrier []*task.Task
+	for _, t := range g.Ready() {
+		if len(adm.Admit) >= slots {
+			break
+		}
+		if t.IsPushTask() {
+			continue
+		}
+		var over []string
+		over = append(over, overlapping(t, inflight)...)
+		over = append(over, overlapping(t, adm.Admit)...)
+		over = append(over, overlapping(t, barrier)...)
+		if len(over) > 0 {
+			adm.Deferred = append(adm.Deferred, Deferred{Task: t, Overlaps: over})
+			barrier = append(barrier, t)
+			continue
+		}
+		adm.Admit = append(adm.Admit, t)
+	}
+	return adm
+}

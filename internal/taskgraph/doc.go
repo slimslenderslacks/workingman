@@ -10,6 +10,12 @@
 // dependency committed) or whether it is [Graph.AllCommitted]. A missing
 // tasks/ directory loads as an empty graph.
 //
+// For parallel dispatch (docs/parallel-task-worktrees.md S3-S5, H2-H3) the
+// package also answers which tasks hold a slot ([InFlight]), which wait for
+// the commit agent and in what order ([Queued], [WaitingOnIntegration]), and
+// which Ready tasks a scheduling pass may start ([Graph.Runnable]), using the
+// tasks' independence hints ([Overlap]).
+//
 // Load repairs per-file mistakes and rejects whole-graph ones. A blank or
 // malformed task name, or one too long for the project's sandbox-name budget,
 // is rewritten to a slug, depends_on edges are rewritten to match, and the
@@ -23,10 +29,15 @@
 //   - [Graph] — the loaded DAG: Tasks, Task, Ready, AllCommitted, Empty,
 //     HasPendingSeed and Warnings.
 //   - [Load] — reads and validates a tasks/ directory.
+//   - [InFlight], [Queued], [WaitingOnIntegration] — slot, commit-queue and
+//     waiting views over a plain task slice, shared with lenient readers.
+//   - [Graph.Runnable] / [Admission] — greedy admission with barriers.
+//   - [Overlap] / [GlobsOverlap] — the H2 overlap test.
 //
 // # Collaborators
 //
-// Built on internal/task (Load, ValidNameFor, SlugifyFor). Used only by
+// Built on internal/task (Load, ValidNameFor, SlugifyFor). Used by
 // internal/daemon. internal/tui reads task files directly with a lenient
-// loader instead, so one bad file can't hide the whole Tasks pane.
+// loader instead, so one bad file can't hide the whole Tasks pane, and calls
+// only the slice functions (Queued, WaitingOnIntegration) on the result.
 package taskgraph

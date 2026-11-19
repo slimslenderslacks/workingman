@@ -1294,7 +1294,7 @@ t5  D success → queue [D] … C success → queue [D, C] → D, then C
 
 | Package / file | Change |
 |---|---|
-| `internal/taskgraph/graph.go` | `InFlight()`, `CommitQueue()` / `QueueHead()` (FIFO by `succeeded_at`), `Runnable(inflight)` (Ready ∩ no-overlap, priority order; H3), overlap helpers. `Ready()` and `depsCommitted` unchanged. |
+| `internal/taskgraph/graph.go`, `queue.go`, `overlap.go` | `InFlight()`, `Queued()` (FIFO by `succeeded_at`; the head is `Queued()[0]`), `WaitingOnIntegration`, `Runnable(inflight, slots)` (Ready ∩ no-overlap, priority order; H3), `Overlap` / `GlobsOverlap`. `Ready()` and `depsCommitted` unchanged. |
 | `internal/daemon/dispatch.go` | `dispatchReadyOrPending` → `schedule`. Per-task `launchTaskAgent` key. `projectBusy`. `launchPlanningAgent` / `launchProjectRootAgent` slot checks. `schedMu`. Stuck-graph block moved here. |
 | `internal/daemon/dispatch_lifecycle.go` | `afterTaskSession` stamps `succeeded_at`, releases the token, then calls `schedule` instead of `launchCommitAgent`. `afterCommitSession` releases `commitBusy` and calls `schedule` instead of picking `ready[0]` itself. `launchCommitAgent` on `#commit` with `beginCommit`/`endCommit`. `taskSessionLive` re-keyed. `releaseOrphanedTasks` per-task. `firstUncommittedSuccess` removed (subsumed by the queue). |
 | `internal/daemon/power_gate.go` | `deferForPower` consulted in `schedule`. Resume unchanged. |
@@ -3047,6 +3047,47 @@ on its tasks by hand. That makes it a controlled trial.
   run serially again. Any extra in-flight task is adopted under the bare
   key by the old `reconcileSessions`, so only one of them is tracked; drain
   before reverting.
+
+#### Phase 4 as built: the task graph
+
+Phase 4 ships in two tasks. The first adds the pure `internal/taskgraph`
+layer; the daemon wiring (`schedule`, the slot split, `#commit`, tokens and
+`--max-parallel-tasks`) follows in the second, so the daemon still dispatches
+serially after the first. The code forced or suggested these differences:
+
+- **`Queued` and `WaitingOnIntegration` already existed** (phase 3, in
+  `queue.go`). There is no separate `CommitQueue` / `QueueHead`:
+  `commitQueueHead` is `Queued()[0]`. `InFlight` sits beside them as a
+  function over a plain task slice (tasks at `running` or `success`, by name),
+  with a `Graph.InFlight` method, so lenient readers can count slots too.
+- **`Runnable(inflight, slots) Admission`.** It takes the number of slots
+  instead of leaving S4's loop to count `free`, because the barrier walk and
+  the slot cap have to be one walk: the walk stops once `slots` tasks are
+  admitted, and candidates after that point are neither admitted nor
+  deferred. `schedule` passes `min(limit − len(inflight), free tokens)`
+  (S3). It gets the tokens up front and gives back the ones it does not use,
+  rather than taking a token per candidate. `slots <= 0` admits nothing.
+- **`Admission` reports the deferrals.** Besides `Admit`, it lists every
+  `Deferred` task with the names it overlaps: in-flight tasks first, then
+  tasks admitted earlier in the pass, then earlier deferred tasks (the
+  barrier). That list is the `overlaps` field of `task_deferred_overlap`, and
+  later `live.deferred`.
+- **Push tasks are skipped.** A push task at `ready` is in `Ready()`, but it
+  joins the commit queue directly (S5), so `Runnable` never admits or defers
+  it.
+- **Ordering is by name only** at this phase. H3's re-runs-first and
+  most-dependents ordering, and the conflict feedback from
+  `integration.files`, come in phase 5. With one slot and nothing in flight,
+  `Runnable` admits `Ready()[0]` whatever the hints say, which is today's
+  serial dispatch.
+- **Overlap edge cases.** H2's rules are in `GlobsOverlap`, with these
+  choices made conservatively: an empty glob, or a malformed pattern that
+  `path.Match` rejects, overlaps everything; when one glob runs out of
+  segments, the two overlap if its last segment reads as a directory (no
+  wildcard, no extension), or if the longer glob has only `**` left; globs
+  are `path.Clean`ed first, so a trailing `/` is ignored. Two `touches: []`
+  tasks never overlap. Load does not yet repair bad globs or tags (H1); that
+  is phase 5. Until then a malformed glob is simply treated as overlapping.
 
 ### Phase 5: planner hints and overlap-aware scheduling
 
