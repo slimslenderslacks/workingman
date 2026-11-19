@@ -154,14 +154,25 @@ unattended runs would hang.
 ## Build
 
 ```sh
-task build    # orch, acp-wrapper and op-read
+task build    # orch, acp-wrapper, op-read and decision-tui
 # or by hand:
 go build -o orch ./cmd/orch
 go build -o acp-wrapper ./cmd/acp-wrapper
 go build -o op-read ./cmd/op-read
+go build -o decision-tui ./cmd/decision-tui
 ```
 
-start.sh rebuilds all three on every start.
+start.sh rebuilds orch, acp-wrapper and op-read on every start.
+
+## Decision TUI
+
+`decision-tui` is a standalone host-side terminal UI for answering decision
+requests: JSON files dropped into `~/.workingman/decisions/inbox` are listed,
+you pick one of each request's own choices, and the answer is written
+atomically to `~/.workingman/decisions/outbox/<id>.json`. It is not wired into
+the daemon yet. Request/answer formats, key bindings and the producer contract:
+[docs/decision-tui.md](docs/decision-tui.md); example files in
+[examples/decisions/](examples/decisions/).
 
 ## Start the daemon
 

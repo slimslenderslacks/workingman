@@ -276,3 +276,56 @@ func TestEnsureDirsAndDefaults(t *testing.T) {
 		t.Fatalf("DefaultOutbox = %q, %v", out, err)
 	}
 }
+
+// TestExampleFiles keeps examples/decisions (referenced from
+// docs/decision-tui.md) in sync with the request and answer formats.
+func TestExampleFiles(t *testing.T) {
+	dir := filepath.Join("..", "..", "examples", "decisions")
+	data, err := os.ReadFile(filepath.Join(dir, "example-request.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ParseRequest(data)
+	if err != nil {
+		t.Fatalf("example request: %v", err)
+	}
+	if r.CreatedAt == nil || r.Source == "" || strings.TrimSpace(r.Summary) == "" {
+		t.Fatalf("example request should show every field: %+v", r)
+	}
+	var unknown map[string]json.RawMessage
+	if err := json.Unmarshal(data, &unknown); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"id", "title", "summary", "choices", "created_at", "source"} {
+		delete(unknown, k)
+	}
+	if len(unknown) != 0 {
+		t.Fatalf("example request has fields Request does not know: %v", unknown)
+	}
+
+	data, err = os.ReadFile(filepath.Join(dir, "example-answer.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec.DisallowUnknownFields()
+	var a Answer
+	if err := dec.Decode(&a); err != nil {
+		t.Fatalf("example answer: %v", err)
+	}
+	if a.ID != r.ID {
+		t.Fatalf("example answer id %q, want request id %q", a.ID, r.ID)
+	}
+	var picked *Choice
+	for i := range r.Choices {
+		if r.Choices[i].ID == a.ChoiceID {
+			picked = &r.Choices[i]
+		}
+	}
+	if picked == nil || picked.Label != a.ChoiceLabel {
+		t.Fatalf("example answer choice %q/%q is not one of the request's choices", a.ChoiceID, a.ChoiceLabel)
+	}
+	if a.AnsweredAt.IsZero() {
+		t.Fatal("example answer has no answered_at")
+	}
+}

@@ -1,0 +1,12 @@
+{
+  "id": "workingman-db-choice",
+  "title": "Choose the state store for the orch daemon",
+  "summary": "The daemon currently keeps its state in `cron_state.json` and a handful of\nother files. We want a single store.\n\n## Options\n\n- **SQLite** — one file, transactional, needs cgo or a pure-Go driver.\n- **bbolt** — pure Go key/value store, no SQL.\n- **Keep JSON files** — no new dependency, but no transactions.\n\nPick one; the planning agent will create the migration tasks.",
+  "choices": [
+    {"id": "sqlite", "label": "SQLite"},
+    {"id": "bbolt", "label": "bbolt"},
+    {"id": "json", "label": "Keep the JSON files"}
+  ],
+  "created_at": "2026-11-19T10:00:00Z",
+  "source": "decision-tui-docs example"
+}

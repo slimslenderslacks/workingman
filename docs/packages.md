@@ -60,6 +60,7 @@ imported. The `cmd/` binaries are the entry points.
 graph LR
   subgraph grp_entry["entry"]
     cmd_acp_wrapper["cmd/acp-wrapper"]
+    cmd_decision_tui["cmd/decision-tui"]
     cmd_op_read["cmd/op-read"]
     cmd_orch["cmd/orch"]
   end
@@ -110,6 +111,7 @@ graph LR
   cmd_acp_wrapper --> internal_gitsign
   cmd_acp_wrapper --> internal_mcpgateway
   cmd_acp_wrapper --> internal_policy
+  cmd_decision_tui --> internal_decision
   cmd_op_read --> internal_onepassword
   cmd_orch --> internal_agent
   cmd_orch --> internal_audit
@@ -199,7 +201,7 @@ graph LR
   internal_tui --> internal_workspace
 
   classDef entry fill:#e8e8e8,stroke:#555,stroke-width:2px,color:#000
-  class cmd_acp_wrapper,cmd_op_read,cmd_orch entry
+  class cmd_acp_wrapper,cmd_decision_tui,cmd_op_read,cmd_orch entry
   classDef daemon fill:#dbe9ff,stroke:#2f6fd6,color:#000
   class internal_acpchat,internal_agent,internal_audit,internal_channels,internal_channels_channeltest,internal_channels_signal,internal_channels_signal_setup,internal_channels_whatsapp,internal_channels_whatsapp_bridge,internal_channels_whatsapp_setup,internal_daemon,internal_notify,internal_onepassword,internal_power,internal_prompts,internal_router,internal_runner,internal_scheduler,internal_service,internal_setup,internal_taskgraph daemon
   classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
@@ -217,6 +219,7 @@ The same graph as text: each package's internal imports and importers.
 | Package | Imports | Imported by |
 |---|---|---|
 | `cmd/acp-wrapper` | `acpwrapper`, `gitsign`, `mcpgateway`, `policy` | — |
+| `cmd/decision-tui` | `decision` | — |
 | `cmd/op-read` | `onepassword` | — |
 | `cmd/orch` | `agent`, `audit`, `channels`, `channels/signal`, `channels/signal/setup`, `channels/whatsapp`, `channels/whatsapp/setup`, `daemon`, `mcpgateway`, `notify`, `power`, `router`, `runner`, `scheduler`, `service`, `session`, `terminal`, `tui`, `workspace` | — |
 | `internal/acpchat` | `acpclient`, `session` | `router` |
@@ -232,7 +235,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/channels/whatsapp/bridge` | — | `channels/whatsapp` |
 | `internal/channels/whatsapp/setup` | `channels`, `channels/whatsapp` | `cmd/orch` |
 | `internal/daemon` | `agent`, `audit`, `channels`, `gitsign`, `mcpgateway`, `notify`, `policy`, `power`, `project`, `prompts`, `runner`, `sbx`, `scheduler`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |
-| `internal/decision` | — | — |
+| `internal/decision` | — | `cmd/decision-tui` |
 | `internal/gitsign` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `runner` |
 | `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `cmd/orch`, `acpwrapper`, `daemon`, `runner` |
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
