@@ -419,9 +419,10 @@ func (d *Daemon) launchPlanningAgent(projectPath string, p *project.Project) {
 		Repos:       workspaceReposFor(p),
 		// Forwarded from disk so a re-plan survives a daemon restart between
 		// the cron firing that requested it and the launch.
-		Replan:         p.Replan,
-		IntakeFiles:    intake,
-		ProjectChanges: projectChanges,
+		Replan:           p.Replan,
+		IntakeFiles:      intake,
+		ProjectChanges:   projectChanges,
+		MaxParallelTasks: d.plannerParallelism(p),
 	}
 	if len(intake) > 0 {
 		d.audit.Log("planning_intake", "path", projectPath, "status", string(p.Status), "files", fmt.Sprintf("%d", len(intake)))
@@ -1233,6 +1234,8 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 		SaveSandbox: t.SaveSandbox,
 		Model:       t.Model,
 		Harness:     t.Harness,
+		Touches:     t.Touches,
+		Areas:       t.Areas,
 	}
 	key := taskSessionKey(projectPath, t.Name)
 	release := func(why string) {

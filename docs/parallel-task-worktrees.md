@@ -3232,6 +3232,63 @@ projects that set a limit.
   read by phase 4's simpler `Runnable`, which is still correct, just less
   clever.
 
+#### Phase 5 as built: planner hints
+
+Phase 5 ships in two tasks. The first, described here, covers the prompt
+side: the planner writes hints, the task agent sees its own, and the wolf
+may tighten them. `Runnable`'s priority order, conflict feedback, the `Load`
+repair warnings and the `touches_exceeded` audit follow in the second
+(`rollout-phase-5-scheduling`). The code forced or suggested these
+differences:
+
+- **The limit the planner sees is the effective one.** `launchPlanningAgent`
+  passes `plannerParallelism(p)` (`internal/daemon/worktree.go`):
+  `p.MaxParallel()`, lowered to the daemon's `--max-parallel-tasks` cap when
+  one is set, and 1 without git-backed workspaces, where `schedule` never runs
+  two tasks at once. A planner asked for hints that can't take effect would
+  only spend effort on them, and quoting "up to 3" under a global cap of 2
+  would be wrong.
+- **Everything new in `planning.tmpl` is behind `MaxParallelTasks > 1`,** not
+  only the hints block. That covers the extra result fields on the re-plan
+  branch (`succeeded_at`, `integration`, `touches_actual`, `base`,
+  `worktree`, `task_branch`, plus "keep or refresh its hints") and the
+  intake-branch rule, "declare hints with the running tasks' hints in mind;
+  never change the `touches`/`areas`/`depends_on` of a `running` or
+  `success` task". At limit 1 the planning prompt is byte-for-byte what it
+  was before phase 5. `internal/prompts/testdata/planning_*.golden`, captured
+  from the template before these edits, pins it for the first-plan, intake,
+  re-plan and project-changes branches (`go test ./internal/prompts -run
+  LimitOne -update` rewrites them). At limit 1 the daemon clears the extra
+  result fields itself (W6), so the shorter list is still correct there.
+- **The hints block** is as H4 has it, placed after the name rules and before
+  `static_mcps`. It also spells out the glob syntax from H1 and gives a short
+  example whose repo segment is the project's first repo.
+- **`prompts.Data.Repos`** is a new `[]prompts.Repo{DirName}`. `runner.Plan`
+  already carried `[]workspace.Repo`, but `prompts.Data` did not, and the
+  prompts package doesn't import `workspace`. The runner converts it.
+  `.orch/context.yaml` gains `max_parallel_tasks` and `repos` (dir names) for
+  the planner only. Other kinds have the repos on disk in front of them.
+- **The task's hints** travel on `runner.Plan.Touches`/`Areas` from
+  `launchTaskAgent`. `.orch/context.yaml` writes them as `touches`/`areas`,
+  with `touches` a `*[]string` as on `task.Task`, so an explicit
+  `touches: []` is written rather than dropped. `prompts.Data` carries a
+  plain `Touches` slice plus `HasTouches`, because a template `if` on a
+  non-nil pointer to an empty slice is always true. `task.tmpl`'s hint
+  paragraph lists the globs and areas (an explicit empty list reads "touches:
+  none"), and is left out for a task with no hints. It is in the worktree
+  branch only: a legacy task in the shared tree never runs beside another.
+- **`wolf.tmpl`**: the "re-run it" way out of an integration conflict says
+  the wolf may also tighten the task's `touches`/`areas`, or add the
+  conflicting files to its `touches`, beside the existing `depends_on`
+  advice. It is not gated on the limit, because the wolf template has no
+  limit field and the advice is harmless at 1.
+- **Tests.** `internal/prompts/hints_test.go` has the limit 0/1 goldens, the
+  limit-2 block and its placement, the re-plan fields, the task hint
+  paragraph (globs and areas, `touches: []`, areas only, none) and the wolf
+  sentence. `internal/setup` checks the context.yaml keys, `internal/runner`
+  the plumbing from `Plan` to prompt and context, and `internal/daemon`
+  `plannerParallelism`.
+
 ### Phase 6: restart recovery hardening and worktree GC
 
 Clean up what crashes, deleted tasks and long-lived projects leave behind.

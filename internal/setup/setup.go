@@ -37,6 +37,17 @@ type Context struct {
 	IntakeFiles    []string `yaml:"intake_files,omitempty"`
 	ProjectChanges []string `yaml:"project_changes,omitempty"`
 	Worktree       string   `yaml:"worktree,omitempty"`
+	// MaxParallelTasks and Repos tell the planner the project's effective
+	// task concurrency limit and the repo dir names its touches globs start
+	// with. See prompts.Data.
+	MaxParallelTasks int      `yaml:"max_parallel_tasks,omitempty"`
+	Repos            []string `yaml:"repos,omitempty"`
+
+	// Touches/Areas are a task's declared parallelism hints
+	// (docs/parallel-task-worktrees.md H1). Touches is a pointer, as on
+	// task.Task, so an explicit `touches: []` is written rather than dropped.
+	Touches *[]string `yaml:"touches,omitempty"`
+	Areas   []string  `yaml:"areas,omitempty"`
 
 	// TaskWorktree/TaskBranch/TaskBase/Attempt describe a task's own worktree
 	// for the task and commit agents. See prompts.Data for the meanings.

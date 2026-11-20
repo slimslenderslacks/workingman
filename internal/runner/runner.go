@@ -81,6 +81,14 @@ type Plan struct {
 	// workspace's .gomodcache when one is staged. Computed by the daemon,
 	// which owns the git calls. Ignored for every other Kind.
 	WorktreeMounts []string
+	// Touches and Areas are the task's declared parallelism hints (the task
+	// file's touches:/areas:, docs/parallel-task-worktrees.md H1). Only the
+	// task prompt and its .orch/context.yaml read them.
+	Touches *[]string
+	Areas   []string
+	// MaxParallelTasks is the project's effective task concurrency limit.
+	// Only the planning prompt reads it: above 1 it asks for the hints (H4).
+	MaxParallelTasks int
 
 	ProjectPath string
 	TasksDir    string
@@ -718,6 +726,11 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		IntakeFiles:             p.IntakeFiles,
 		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
+		MaxParallelTasks:        p.MaxParallelTasks,
+		Repos:                   promptRepos(p.Repos),
+		HasTouches:              p.Touches != nil,
+		Touches:                 derefTouches(p.Touches),
+		Areas:                   p.Areas,
 		TaskWorktree:            p.TaskWorktree,
 		TaskBranch:              p.TaskBranch,
 		TaskBase:                promptCommits(p.TaskBase),
@@ -758,6 +771,10 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		IntakeFiles:             p.IntakeFiles,
 		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
+		MaxParallelTasks:        p.MaxParallelTasks,
+		Repos:                   setupRepos(p.Kind, p.Repos),
+		Touches:                 p.Touches,
+		Areas:                   p.Areas,
 		TaskWorktree:            p.TaskWorktree,
 		TaskBranch:              p.TaskBranch,
 		TaskBase:                setupCommits(p.TaskBase),
@@ -1782,7 +1799,39 @@ func promptCommits(in []task.Commit) []prompts.RepoCommit {
 	return out
 }
 
-// setupCommits converts task commits into the .orch/context.yaml shape.
+// promptRepos gives the planning prompt each repo's workspace dir name.
+func promptRepos(in []workspace.Repo) []prompts.Repo {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]prompts.Repo, len(in))
+	for i, r := range in {
+		out[i] = prompts.Repo{DirName: r.DirName()}
+	}
+	return out
+}
+
+// setupRepos lists the repo dir names in the planner's .orch/context.yaml.
+// Other kinds have the repos on disk in front of them.
+func setupRepos(kind agent.Kind, in []workspace.Repo) []string {
+	if kind != agent.PlanningAgent || len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, r := range in {
+		out[i] = r.DirName()
+	}
+	return out
+}
+
+// derefTouches is a task's touches globs, nil when it declares none.
+func derefTouches(in *[]string) []string {
+	if in == nil {
+		return nil
+	}
+	return *in
+}
+
 func promptIntegration(in *task.Integration) *prompts.IntegrationReport {
 	if in == nil {
 		return nil
@@ -1808,6 +1857,7 @@ func setupInFlight(in []prompts.InFlightTask) []setup.InFlightTask {
 	return out
 }
 
+// setupCommits converts task commits into the .orch/context.yaml shape.
 func setupCommits(in []task.Commit) []setup.Commit {
 	if len(in) == 0 {
 		return nil

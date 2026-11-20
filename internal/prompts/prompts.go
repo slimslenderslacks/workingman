@@ -48,6 +48,21 @@ type Data struct {
 	IntakeFiles    []string // for PlanningAgent: absolute paths to pending intake/*.md files awaiting tasks
 	ProjectChanges []string // for PlanningAgent: human-readable project.yaml changes since the last successful plan
 	Worktree       string   // for PlanningAgent: absolute host path to the wsp worktree mounted as a second workspace (so source can be read without cloning); empty when no wsp is wired up
+	// MaxParallelTasks, for the PlanningAgent, is the project's effective task
+	// concurrency limit (project.MaxParallel). Above 1 the prompt asks for the
+	// touches/areas parallelism hints (docs/parallel-task-worktrees.md H4); at
+	// 1 hints have no effect and the prompt leaves them out.
+	MaxParallelTasks int
+	// Repos are the project's repos, for the PlanningAgent: a touches glob
+	// starts with a repo's DirName (H1).
+	Repos []Repo
+
+	// Touches and Areas, for the TaskAgent, are the task's declared
+	// parallelism hints (H1). HasTouches tells an explicit `touches: []`
+	// ("touches nothing") from no touches: at all.
+	HasTouches bool
+	Touches    []string
+	Areas      []string
 
 	// TaskWorktree, for the TaskAgent and CommitAgent, is the task's own
 	// worktree root (<shared>/.worktrees/<task>, docs/parallel-task-worktrees.md
@@ -131,6 +146,11 @@ type InFlightTask struct {
 	QueuePosition int
 	// Integrating is true for the task whose commit agent is running.
 	Integrating bool
+}
+
+// Repo is one of the project's repos as the planning prompt needs it.
+type Repo struct {
+	DirName string // workspace dir name (workspace.Repo.DirName)
 }
 
 // RepoCommit is one repo's commit, as in a task file's base: or commits:.

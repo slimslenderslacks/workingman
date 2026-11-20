@@ -21,7 +21,19 @@ uncommitted: the commit agent commits whatever you leave and integrates the
 branch onto `{{.Branch}}`. Do not check out, create, move, reset or delete
 any other branch or ref — in particular never touch `{{.Branch}}` — and do not
 push.
-{{with .Integration}}
+{{if or .HasTouches .Areas}}
+Your task declares the files and shared areas it expects to change:
+{{if .Touches}}
+  touches:{{range .Touches}}
+    - `{{.}}`{{end}}{{else if .HasTouches}}
+  touches: none (no files in any repo){{end}}{{with .Areas}}
+  areas:{{range .}}
+    - `{{.}}`{{end}}{{end}}
+
+Stay within them where you reasonably can. If you must change other files, do
+so, and say which ones in `failure_reason` or your summary. Other tasks may be
+running beside you on the assumption that you won't.
+{{end}}{{with .Integration}}
 This run is a re-run: the commit agent could not integrate this task's branch
 onto `{{$.Branch}}`, because `{{$.Branch}}` moved on while the task worked.
 {{if eq .Result "verify_failed"}}The branch rebased cleanly onto `{{$.Branch}}`, but the project's build check

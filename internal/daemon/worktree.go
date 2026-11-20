@@ -25,6 +25,23 @@ func (d *Daemon) worktreesEnabled() bool {
 	return d.runner != nil && d.runner.Workspaces != nil && workspace.IsGitBacked(d.runner.Workspaces)
 }
 
+// plannerParallelism is the task concurrency limit the planning prompt
+// quotes (prompts.Data.MaxParallelTasks): the project's max_parallel_tasks,
+// lowered to the daemon's global cap when one is set, and 1 without
+// git-backed workspaces, where schedule never runs two tasks at once. At 1
+// the prompt leaves the parallelism hints out (docs/parallel-task-worktrees.md
+// H4).
+func (d *Daemon) plannerParallelism(p *project.Project) int {
+	limit := p.MaxParallel()
+	if d.maxParallelTasks > 0 {
+		limit = min(limit, d.maxParallelTasks)
+	}
+	if limit > 1 && !d.worktreesEnabled() {
+		return 1
+	}
+	return limit
+}
+
 // repoDirNames are the workspace dir names of every repo in the project's
 // workspace: the repos a task worktree holds one git worktree for (W2).
 func repoDirNames(p *project.Project) []string {

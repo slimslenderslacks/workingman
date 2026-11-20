@@ -84,9 +84,12 @@ For each existing task, choose one:
   - Run it again — the work needs redoing this cycle. Reset it to a clean
     ready state: `status: ready`, `attempts: 0`, `failure_reason: ""`,
     `blocked_reason: ""`, and delete the previous cycle's result fields
-    (`summary:`, `commits:`, `created_files:`, `completed_at:`). Those describe
+    (`summary:`, `commits:`, `created_files:`, `completed_at:`{{if gt .MaxParallelTasks 1}},
+    `succeeded_at:`, `integration:`, `touches_actual:`, `base:`, `worktree:`,
+    `task_branch:`{{end}}). Those describe
     a run that has already happened; leaving them on a task that is about to
-    run again makes its record a lie.
+    run again makes its record a lie.{{if gt .MaxParallelTasks 1}} Keep its `touches:` and `areas:` hints,
+    or refresh them if this cycle's work will touch different files.{{end}}
   - Keep it settled — leave it at `status: committed`. It will not run, and it
     still satisfies any `depends_on` that names it. Use this for genuinely
     once-only setup work that later tasks depend on.
@@ -110,7 +113,12 @@ as it arrives, so this can happen while the project is `working` — task and
 commit agents may be running right now, and the daemon keeps dispatching ready
 tasks while you work. That is expected: only add task files, never touch a
 task that is `running` or `success` (an agent owns it), and write each new task
-file complete in one go (a `ready` task can be picked up the moment it lands).
+file complete in one go (a `ready` task can be picked up the moment it lands).{{if gt .MaxParallelTasks 1}}
+New tasks are scheduled against the running ones by the same parallelism
+hints (below), so declare hints on them with the hints of the tasks already
+`running` or `success` in mind. Never change the `touches:`, `areas:` or
+`depends_on` of a task that is `running` or `success`: other tasks were
+started beside it on the strength of those hints.{{end}}
 
 {{if .IntakeFiles}}
 You have pending intake requests waiting right now:
@@ -161,7 +169,50 @@ the project into tasks as described above.
 {{end}}
 {{end}}
 
-A task may optionally include `static_mcps:` — a YAML list of MCP server
+{{if gt .MaxParallelTasks 1}}IMPORTANT — parallelism hints. The daemon may run several of this project's
+tasks at the same time (up to {{.MaxParallelTasks}} for this project). Each task works in its
+own git worktree, and the work is integrated onto the shared branch one task
+at a time. Two tasks run together only when the daemon can tell they don't
+touch the same code, so for each task declare:
+
+  - `depends_on`: a task whose code or output this task needs. This is the
+    ordering edge, as before. If B builds on A's changes, B depends on A. Do
+    not use hints for that.
+  - `touches:`: a list of globs for every file the task will create, edit or
+    delete (not the files it only reads). Each glob starts with the repo's
+    directory name{{if .Repos}} ({{range $i, $r := .Repos}}{{if $i}}, {{end}}`{{$r.DirName}}`{{end}}){{end}}, then the path inside the
+    repo; `**` matches any number of path segments, `*` and `?` match within
+    one, and the repo segment may be `*` for every repo. Be complete rather
+    than tight: a missed file risks an integration conflict and a re-run, and
+    an extra file only costs some parallelism. Use a directory
+    (`repo/internal/api/`) when you can't name the files.
+  - `areas:`: kebab-case tags for shared hotspots the task changes. Two tasks
+    with a tag in common never run together. Use these names when they fit:
+    `go-deps`, `npm-deps`, `db-schema`, `ci`, `generated-docs`, `changelog`,
+    `release-version`. Any task that adds a dependency, regenerates a
+    generated file, or bumps a version must list the matching area.
+  - If you can't predict what a task will touch (exploratory work, broad
+    refactors, "fix whatever is failing"), leave both `touches:` and
+    `areas:` out. The task then runs alone, which is always safe.
+  - `touches: []` means the task changes no files in any repo (for example it
+    only calls an external API).
+
+Example:
+
+  touches:
+    - {{with .Repos}}{{(index . 0).DirName}}{{else}}repo{{end}}/internal/api/healthz*.go
+    - {{with .Repos}}{{(index . 0).DirName}}{{else}}repo{{end}}/internal/api/router.go
+  areas:
+    - go-deps
+
+Do not split or merge tasks just to make them parallel. Plan the work the way
+it should be done, then describe it accurately. Where two tasks would edit
+the same file, prefer `depends_on` between them, so the second builds on the
+first instead of conflicting with it. Do not change `max_parallel_tasks` in
+`project.yaml`. If the plan has a lot of independent work, say so in your
+final message.
+
+{{end}}A task may optionally include `static_mcps:` — a YAML list of MCP server
 names the task's sandbox should be able to reach. They are served to the
 agent through a per-sandbox MCP gateway (the `okta-gateway` MCP server inside
 the sandbox) built over exactly these catalog servers; a task that lists none

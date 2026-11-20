@@ -131,3 +131,62 @@ func TestWolfMountsStateDirReadOnly(t *testing.T) {
 		t.Errorf("planning sandboxWorkspaces = %v", got)
 	}
 }
+
+// A task's hints reach its prompt and .orch/context.yaml, and the planner
+// gets the limit and the repo dir names its touches globs start with
+// (docs/parallel-task-worktrees.md H4).
+func TestHintsReachPromptAndContext(t *testing.T) {
+	orch := t.TempDir()
+	projectPath := filepath.Join(orch, "project.yaml")
+	_ = os.WriteFile(projectPath, nil, 0o644)
+	stubRoot := t.TempDir()
+	wt := filepath.Join(stubRoot, "feat/x", ".worktrees", "api")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{
+		Workspaces: workspace.NewStub(stubRoot),
+		Launcher:   &fakeLauncher{},
+		Command:    func(agent.Kind, string) []string { return []string{"true"} },
+	}
+	repos := []workspace.Repo{{Identity: "github.com/docker/gateway"}, {Shortname: "docs"}}
+	touches := []string{"gateway/internal/api/**"}
+	if _, err := r.Start(context.Background(), Plan{
+		Kind: agent.TaskAgent, Branch: "feat/x", Repos: repos, ProjectPath: projectPath,
+		TaskPath: filepath.Join(orch, "tasks", "api.yaml"), TaskName: "api",
+		TaskWorktree: wt, TaskBranch: "wm/feat/x/api",
+		Touches: &touches, Areas: []string{"go-deps"},
+	}); err != nil {
+		t.Fatalf("Start task: %v", err)
+	}
+	instr, _ := os.ReadFile(filepath.Join(wt, ".orch", "instructions.md"))
+	if !strings.Contains(string(instr), "- `gateway/internal/api/**`") || !strings.Contains(string(instr), "- `go-deps`") {
+		t.Errorf("task instructions missing the hints:\n%s", instr)
+	}
+	ctxYAML, _ := os.ReadFile(filepath.Join(wt, ".orch", "context.yaml"))
+	for _, want := range []string{"touches:\n    - gateway/internal/api/**\n", "areas:\n    - go-deps\n"} {
+		if !strings.Contains(string(ctxYAML), want) {
+			t.Errorf("task context.yaml missing %q:\n%s", want, ctxYAML)
+		}
+	}
+	if strings.Contains(string(ctxYAML), "repos:") {
+		t.Errorf("only the planner's context lists the repos:\n%s", ctxYAML)
+	}
+
+	if _, err := r.Start(context.Background(), Plan{
+		Kind: agent.PlanningAgent, WorkingDir: orch, Branch: "feat/x", Repos: repos,
+		ProjectPath: projectPath, TasksDir: filepath.Join(orch, "tasks"), MaxParallelTasks: 2,
+	}); err != nil {
+		t.Fatalf("Start planning: %v", err)
+	}
+	instr, _ = os.ReadFile(filepath.Join(orch, ".orch", "instructions.md"))
+	if !strings.Contains(string(instr), "directory name (`gateway`, `docs`)") {
+		t.Errorf("planning instructions missing the repo dir names:\n%s", instr)
+	}
+	ctxYAML, _ = os.ReadFile(filepath.Join(orch, ".orch", "context.yaml"))
+	for _, want := range []string{"max_parallel_tasks: 2\n", "repos:\n    - gateway\n    - docs\n"} {
+		if !strings.Contains(string(ctxYAML), want) {
+			t.Errorf("planning context.yaml missing %q:\n%s", want, ctxYAML)
+		}
+	}
+}

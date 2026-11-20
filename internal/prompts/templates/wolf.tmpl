@@ -181,7 +181,9 @@ task did, `git log <base>..{{.Branch}}` what landed since. Three ways out:
      the worktree exactly as it is, so either leave it for the agent to rebase,
      or reset it first (`git -C <shared>/.worktrees/<task>/<repo> reset --hard
      {{.Branch}}`) for a clean start. You may also edit the task's description,
-     or add a `depends_on` on the task it conflicted with.
+     or add a `depends_on` on the task it conflicted with. You may also
+     tighten its `touches:`/`areas:` hints, or add the conflicting files to
+     its `touches:`, so the two never run side by side again.
   2. Resolve it by hand in the worktree (`git rebase {{.Branch}}`, resolve,
      `git rebase --continue`), then set the task to `success`; the commit
      agent integrates it, normally as a plain fast-forward.
