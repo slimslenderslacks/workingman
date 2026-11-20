@@ -287,10 +287,10 @@ type SandboxCreator func(ctx context.Context, spec SandboxSpec) error
 //  1. `sbx ls --json` to find the existing sandbox (if any).
 //  2. If it exists with the same set of workspaces → reuse it. We do NOT
 //     inspect policies on an existing sandbox because sbx ls doesn't surface
-//     those details; for per-task sandboxes the name uniquely encodes the
-//     task and its policy set, so a name collision implies a matching set.
-//     (A retry of the same task reuses the same sandbox.) Only the MCP
-//     gateway's allow rules are re-applied, best effort, as acp-wrapper does.
+//     those details. (A retry of the same task reuses the same sandbox.)
+//     spec.Policies and then the MCP gateway's allow rules are re-applied,
+//     best effort, as acp-wrapper does, so rules added to the task since the
+//     sandbox was created hold.
 //     Its MCP gateway, if any, is kept: the caller reuses it when still live,
 //     or mints a new one — MCP_URL is per-exec, so a gone gateway never
 //     forces a recreate.
@@ -320,10 +320,16 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 	}
 	if existing != nil {
 		if sameWorkspaceSet(existing, spec.Workspaces) {
-			// Best-effort, like acp-wrapper's reuse path: a sandbox created
-			// before the gateway was configured can still reach it.
-			if rules, err := spec.MCPGateway.PolicyRules(); err == nil {
-				for _, r := range rules {
+			// Best-effort, like acp-wrapper's reuse path: rules the task
+			// gained since the sandbox was created (Step-Up persists its
+			// changes to policies:) hold, and a sandbox created before the
+			// gateway was configured can still reach it.
+			rules := append([]policy.Rule(nil), spec.Policies...)
+			if gw, err := spec.MCPGateway.PolicyRules(); err == nil {
+				rules = append(rules, gw...)
+			}
+			for _, r := range rules {
+				if r.Validate() == nil {
 					_ = exec.CommandContext(ctx, "sbx", r.CLIArgs(spec.Name)...).Run()
 				}
 			}

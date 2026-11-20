@@ -8,7 +8,10 @@
 // daemon side passes each rule to acp-wrapper as a repeatable
 // `--policy <action>:<kind>:<resource>` flag ([Rule.Encode] / [Decode]), and
 // whichever process creates the sandbox applies the rules with
-// [Rule.CLIArgs] right after `sbx create` and before any `sbx exec`. Decode
+// [Rule.CLIArgs] right after `sbx create` and before any `sbx exec` (and
+// again, best-effort, when it reuses the sandbox). The daemon's Step-Up
+// executor also changes live sandboxes with [Rule.CLIArgs],
+// [Rule.RemoveCLIArgs] and [ListCLIArgs]. Decode
 // and [Rule.Validate] reject unknown actions and kinds, so a typo can't turn
 // into a different sbx command than intended.
 //

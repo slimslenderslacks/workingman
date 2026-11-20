@@ -243,6 +243,8 @@ func TestStepUpDriverPromptsOnNewMessages(t *testing.T) {
 
 	h.put(t)
 	eventually(t, "second prompt", func() bool { return h.conv.count() == 2 })
+	// The prompt is recorded before the turn runs; wait for the turn to take it.
+	eventually(t, "second message taken", func() bool { mu.Lock(); defer mu.Unlock(); return len(taken) == 2 })
 	mu.Lock()
 	if len(taken) != 2 || taken[0] != m1.ID {
 		t.Errorf("taken = %v", taken)

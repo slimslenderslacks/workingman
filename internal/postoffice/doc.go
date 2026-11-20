@@ -7,8 +7,10 @@
 //
 // A message is a durable file, not a tool call:
 //
-//	inbox/<id>.json        open messages; written only by post-office
-//	                       (write to inbox/.tmp, fsync, rename)
+//	inbox/<id>.json        open messages; written by post-office (write to
+//	                       inbox/.tmp, fsync, rename), apart from the orch
+//	                       daemon's Step-Up executor creating its
+//	                       notifications with Put
 //	outbox/<id>.json       the terminal claim; created by whoever closes the
 //	                       message first (TUI, Dispatcher, post-office)
 //	done/<day>/<id>.json   the inbox record plus its resolution; written only

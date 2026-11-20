@@ -1242,6 +1242,56 @@ The daemon executor (`internal/daemon/step_up_exec.go`) watches
 audit line with the request, the approval record, the exact `sbx` argv and its
 output. Step-Up polls `results/<op-id>.yaml` (its prompt says how).
 
+**As built (`step-up-executor`).** `internal/daemon/step_up_exec.go` and
+`step_up_rules.go`, started next to the driver whenever the Step-Up agent is.
+Where it differs from, or adds to, the plan above:
+
+- **`sbx` syntax.** The argv is `policy allow <kind> --sandbox <s>
+  <resource>`, `policy rm <kind> --sandbox <s> --resource <resource>` and
+  `policy ls --sandbox <s>` (`policy.Rule.CLIArgs`, `RemoveCLIArgs`,
+  `ListCLIArgs`). Filesystem rules use the same shape as network ones. These
+  could not be checked against a live sandbox: no `sbx` binary exists in the
+  sandbox this was built in. The first live run of the smoke test
+  (`messaging-docs-and-smoke-test`) must confirm them; any change is confined
+  to those three helpers.
+- **Request handling.** Requests are taken oldest name first, one at a time,
+  on fsnotify plus a 2 s poll. Names starting with `.` or not ending in
+  `.yaml` are staging files and are skipped. The file is removed once its
+  result is written. A bad file name is audited and dropped with no result.
+  An id that already has a result is dropped, so a result is never
+  overwritten. Requests are capped at 64 KiB, `reason` at 500 bytes.
+- **Target.** Besides the plan's checks, the live session must be a `task`
+  or `commit` agent with a task file whose name matches `from.task`. A
+  reused sandbox now running a different task is refused.
+- **Approval.** The `CHANGE:` line must be a whole line of the body
+  (surrounding spaces and backticks ignored). Its exact form is
+  `daemon.StepUpChangeLine`. Single use counts only *applied* ops, so a
+  failed `sbx` call does not use the approval up.
+- **Revoke** removes only a rule whose last applied Step-Up change was an
+  allow, according to `audit.jsonl`.
+- **Rate limits** count applied allows and revokes; `list_sandbox_policy`
+  and rejections do not count.
+- **Persisting.** The rule is added with `task.Update`, and nothing else in
+  the task file changes. If the update fails, the `sbx` change is undone, so
+  the live sandbox and `policies:` never disagree.
+- **Protected paths** also include `~/.gnupg`, `~/.docker`, `~/.kube`,
+  `~/.netrc`, `/private/etc`, the docker socket and the Step-Up scratch dir.
+  A glob is refused when it could overlap a protected path at any depth, so
+  `/Users/op/.*` and `/Users/op/**` are refused.
+- **Config.** `config.yaml` is strict (unknown keys, negative limits and empty
+  deny patterns are errors). While it is invalid, every request is rejected
+  rather than run without the operator's deny list.
+- **Notification.** The daemon `Put`s the notification into `inbox/` itself,
+  as sender `orch` (sandbox `orch-daemon`). This is the one exception to
+  post-office being the only writer of `inbox/`. It is safe because `Put` is
+  an exclusive create of a fresh id, and post-office expires and finalises
+  the record like any other.
+- **Reuse.** acp-wrapper (`reapplyPolicies`) and the legacy
+  `DefaultSandboxCreator` now re-apply all of a task's `policies:`, then the
+  gateway rules, best-effort, when they reuse a sandbox.
+- Step-Up's approval requests now use `options: ["approve", "deny"]`, and its
+  prompt describes the request and result formats (§8.6).
+
 Later, once post-office has proven Go MCP hosting, these ops can become typed
 tools on a `workingman-admin` MCP granted only to Step-Up
 (orch-integration.md §4.5, option c). The request schema becomes the tool

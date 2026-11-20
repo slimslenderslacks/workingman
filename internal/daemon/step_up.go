@@ -15,6 +15,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/postoffice"
 	"github.com/slimslenderslacks/work/internal/runner"
+	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
 )
 
@@ -38,9 +39,8 @@ import (
 //     request it holds but has not answered. Each turn drains the inbox and
 //     ends, so the agent never sits in one endless turn.
 //
-// The daemon executor that applies its requests (step_up_exec.go) is a later
-// step; until then the agent can receive, ask and reply, and its prompt says it
-// cannot apply changes.
+// The daemon executor (step_up_exec.go) applies the changes it asks for in its
+// request directory, after checking each one; it runs next to the driver.
 
 const (
 	// stepUpSessionKey is the session-map key of the Step-Up agent. Like the
@@ -86,7 +86,8 @@ const (
 const StepUpPrompt = "Read .orch/instructions.md and .orch/context.yaml if you have not yet in this conversation. " +
 	"Then serve your post-office inbox as they describe: take every waiting message with next_message " +
 	"(timeout_seconds: 0) until it returns status: empty, check your pending approval requests with " +
-	"check_response, reply where you can, and end your turn. You will be prompted again when there is more."
+	"check_response, read the results of your change requests, reply where you can, and end your turn. " +
+	"You will be prompted again when there is more."
 
 // StepUpAgentConfig tunes WithStepUpAgent. The zero value is the production
 // configuration.
@@ -119,6 +120,17 @@ type StepUpAgentConfig struct {
 	Reminder    time.Duration
 	MinGap      time.Duration
 	TurnTimeout time.Duration
+
+	// Executor settings (step_up_exec.go). Home is the operator's home
+	// directory, protected from filesystem rules (default os.UserHomeDir).
+	// SbxPath is the sbx binary (default the runner's, else "sbx"). Sbx runs
+	// it; nil means exec (a test seam, as are Now and ExecPoll, the fallback
+	// poll of requests/, default 2s).
+	Home     string
+	SbxPath  string
+	Sbx      sbx.RunFunc
+	Now      func() time.Time
+	ExecPoll time.Duration
 
 	// Attach joins the agent's session; nil means acpchat.Attach. Test seam.
 	Attach func(ctx context.Context, ref string, opts acpchat.Options) (StepUpConversation, error)
@@ -352,6 +364,11 @@ func (d *Daemon) beginStepUpAgent(ctx context.Context) {
 		return
 	}
 	d.audit.Log("step_up_agent_enabled", "dir", s.dir, "step_up_dir", s.stepUpDir, "post_office_dir", s.poDir)
+	if exec, err := d.newStepUpExecutor(); err != nil {
+		d.audit.Log("step_up_exec_unavailable", "err", err.Error())
+	} else {
+		go exec.loop(ctx, s.cfg.ExecPoll)
+	}
 	go d.superviseAgent(ctx, agentSupervision{
 		key:         stepUpSessionKey,
 		event:       "step_up_agent",

@@ -851,13 +851,66 @@ with `send_request` (to the operator, with `in_reply_to` set to the agent's
 request) when the ask is reasonable, and answers the agent with `reply`. It
 always replies, refusals included.
 
-**Not yet: applying changes.** At this step there is no executor. The prompt
-says Step-Up cannot apply any change; for an allow it asks the operator to run
-the `sbx policy …` command on the host (the approval request carries the
-canonical `CHANGE:` line and the exact command, options `done` / `deny`) and
-tells the agent the outcome. The request directory is already mounted, and the
-prompt says nothing processes it yet. The daemon executor (§8.3-§8.4 of the
-design, `step-up-executor`) adds the request format and the checks.
+**Applying changes: the executor.** Step-Up never changes a sandbox itself.
+It writes a change request, `requests/<op-id>.yaml`, into its request
+directory, and the daemon's executor (`internal/daemon/step_up_exec.go`)
+checks it, applies it and writes `results/<op-id>.yaml` (`status: applied |
+rejected | failed`, `detail`, and for `list_sandbox_policy` the `sbx policy
+ls` output). The request format:
+
+```yaml
+version: 1
+id: op_…                  # names the file; op_ + [A-Za-z0-9_-]{1,64}, unique
+op: sandbox_network_allow # or sandbox_network_revoke, sandbox_filesystem_allow,
+                          #    sandbox_filesystem_revoke, list_sandbox_policy
+for_request: msg_…        # the agent's post-office request (always)
+approval: msg_…           # Step-Up's approval request to the operator (allows only)
+args: {resource: proxy.golang.org}
+reason: "…"
+```
+
+Each op runs one `sbx` command on the **derived** sandbox — `policy allow
+<kind> --sandbox <s> <resource>`, `policy rm <kind> --sandbox <s> --resource
+<resource>`, or `policy ls --sandbox <s>` — and an allow or revoke is then
+added to (or removed from) the target task's `policies:`, so the rule
+survives a new sandbox and, because acp-wrapper re-applies a task's
+`policies:` on reuse, a reused one. If the task file cannot be updated, the
+`sbx` change is undone. The checks, all in the daemon (design §8.4):
+
+- strict YAML: unknown fields, a second document, a bad `version`, an `id`
+  that differs from the file name, an op outside the five, a missing
+  `for_request`, a missing or superfluous `approval` or `args` → `rejected`;
+- **target**: `from.sandbox` of `for_request`, which must be a request
+  addressed to `step-up`, open or closed less than an hour ago; the sandbox
+  must have a live `task` or `commit` session still running the task that
+  asked; never `step-up`, `workingman-agent`, `sleepy-head` or a daemon
+  gateway;
+- **approval** (allows only): a request from Step-Up to the operator with
+  `in_reply_to == for_request`, answered by the operator with option
+  `approve` less than 24 h ago, whose body has the line `CHANGE: <op>
+  <resource> → <sandbox>` exactly (`daemon.StepUpChangeLine`), and not used by
+  an earlier applied op;
+- **resources**: network — a lower-case hostname, or `*.` and a domain of two
+  or more labels, optional `:port`; no IPs, `localhost`, `*.docker.internal`,
+  local TLDs or config denylist matches. Filesystem — an absolute, cleaned
+  path glob (`*`, `**` only) that does not cover `/`, the home directory or
+  an ancestor of it, and does not overlap `~/.ssh`, `~/.aws`, `~/.config/gh`,
+  `~/.workingman`, `~/.gnupg`, `~/.docker`, `~/.kube`, `/etc`, the orch
+  roots, the request and post-office directories, or the config denylist;
+- a revoke only removes a rule whose last applied Step-Up change was an allow;
+- **rate limits**: at most `per_hour` (10) applied allows and revokes in any
+  hour, and `per_sandbox_per_hour` (3) per sandbox;
+- **kill switch**: `<step-up-dir>/disabled` rejects everything.
+
+Every request, rejections included, is appended to
+`<step-up-dir>/audit.jsonl` (the request as written, the target, the approval
+record, the `sbx` argv and output, the outcome) and logged as `step_up_op` in
+the daemon audit log. Each applied change sends the operator a post-office
+notification (`🔓 Step-Up allowed proxy.golang.org for task fix-ci (proj)
+(approved via slack)`; `🔒 … revoked …`). `<step-up-dir>/config.yaml`, read
+by the daemon only, holds `deny: {network: [...], filesystem: [...]}` and
+`limits: {per_hour, per_sandbox_per_hour}`; while it is invalid (an unknown
+key, say) every request is rejected. There is no auto-approve list.
 
 **Launch/identity.** `runner.Plan{Kind: StepUpAgent, WorkingDir: <scratch>,
 SessionName: "step-up-agent", Persistent: true, StaticMCPs: ["post-office"],
@@ -879,8 +932,8 @@ returns false for it whatever the flags say, so it has no `mcp-find` /
 capability check needs (see "Messaging capability" below). No GitHub and no
 other server.
 
-**Mounts.** No orch roots, read-only or read-write: every state change will go
-through the daemon's typed request interface, where it can be checked.
+**Mounts.** No orch roots, read-only or read-write: every state change goes
+through the daemon's typed request interface, where it is checked.
 
 - the scratch dir (cwd, `.orch/` handoff), default
   `<sessions-root>/../step-up-agent`;
@@ -917,17 +970,19 @@ rather than `wait_for_response`. Audit events: `step_up_driver_attached`,
 `step_up_prompted`, `step_up_turn_error`, `step_up_driver_detached`.
 
 **Prompt structure (`step-up.tmpl`).** Who it is (it never does the requesting
-agent's work); that it cannot apply changes yet and must never say a change
-was made unless the operator said so; the post-office tools it has
-(receiving, asking, replying) and how to use each without blocking; the turn
-loop (`list_inbox`, drain `next_message`, `check_response` its open
-requests, end the turn); always reply; how to decide (specific and justified
-by the task; the narrowest resource; outright refusals for wildcards, IPs,
-localhost, private ranges, other sandboxes and secret paths; anything that is
-not a sandbox rule goes back to the operator, with a notification); the five
-change kinds of v1; the approval request format with its `CHANGE:` line and
-the host command; and what to tell the agent for `done`, `deny`, free text or
-no answer. `prompts.Data.StepUpDir` (mirrored as `step_up_dir` in
+agent's work); that the daemon makes changes from its request files and it
+must never say a change was made unless the result says `applied`; the
+post-office tools it has (receiving, asking, replying) and how to use each
+without blocking; the turn loop (`list_inbox`, drain `next_message`,
+`check_response` its open requests, read its results, end the turn); always
+reply; how to decide (specific and justified by the task; the narrowest
+resource; outright refusals for wildcards, IPs, localhost, private ranges,
+other sandboxes and secret paths; anything that is not a sandbox rule goes
+back to the operator, with a notification); the five ops; the approval
+request (`options: ["approve", "deny"]`, the exact `CHANGE:` line, one change
+per approval); what to do for `approve`, `deny`, free text or no answer; the
+request-file format, written under a dot-name and renamed; the result
+statuses and what to reply for each; and the limits the daemon enforces. `prompts.Data.StepUpDir` (mirrored as `step_up_dir` in
 `.orch/context.yaml`), `SnapshotFile` and `SessionsRoot` fill the paths.
 
 **Supervision and lifecycle.** `daemon.WithStepUpAgent(StepUpAgentConfig{…})`

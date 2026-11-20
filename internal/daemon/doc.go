@@ -95,6 +95,14 @@
 //     (post-office as its only, static MCP server; no orch roots), its
 //     supervision, and the driver that prompts it whenever the post-office
 //     store holds work for it.
+//   - step_up_exec.go, step_up_rules.go: the Step-Up executor, which applies
+//     the agent's change requests (requests/<op-id>.yaml) as `sbx policy`
+//     commands after checking each against the limits of
+//     docs/messaging-design.md §8.4 (target derived from the agent's
+//     post-office request, operator approval with the exact CHANGE line,
+//     resource validation, rate limits, kill switch), persists them to the
+//     task's policies:, and writes results/, audit.jsonl and an operator
+//     notification.
 //   - channels_notify.go: wolf start and end messages on the `wolf` channel
 //     topic ([WithChannels]), with message IDs recorded so replies can find
 //     the wolf again.

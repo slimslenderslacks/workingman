@@ -676,8 +676,9 @@ func TestRenderWolfMCPGuidance(t *testing.T) {
 }
 
 // TestRenderStepUp: the Step-Up agent's instructions cover the receive → ask →
-// reply loop with the post-office tools, say that it cannot apply changes yet,
-// and never send it to a blocking wait.
+// apply → reply loop with the post-office tools and the request directory,
+// with the request format and the approve/deny approval, and never send it to
+// a blocking wait.
 func TestRenderStepUp(t *testing.T) {
 	out, err := Render(agent.StepUpAgent, Data{
 		Workspace:    "/home/.workingman/step-up-agent",
@@ -691,11 +692,15 @@ func TestRenderStepUp(t *testing.T) {
 	for _, want := range []string{
 		"Step-Up agent",
 		"next_message", "list_inbox", "reply", "send_request", "check_response", "in_reply_to",
-		"CANNOT apply any\nchange yourself",
 		"ALWAYS reply to every agent request",
-		"CHANGE: sandbox_network_allow",
+		"CHANGE: sandbox_network_allow proxy.golang.org → wm-workingman-messaging-fix-ci",
+		`options: ["approve", "deny"]`,
 		"END YOUR TURN",
 		"/home/.workingman/step-up/requests/",
+		"/home/.workingman/step-up/results/",
+		"version: 1", "for_request:", "approval:", "args:", "resource:",
+		"status: applied", "rejected", "failed",
+		"sandbox_filesystem_allow", "sandbox_network_revoke", "list_sandbox_policy",
 		"/home/.workingman/state/snapshot.json",
 		"/home/.workingman/sessions/<session-id>/session.json",
 		"never do the requesting\nagent's work",
@@ -704,7 +709,7 @@ func TestRenderStepUp(t *testing.T) {
 			t.Errorf("step-up prompt missing %q in:\n%s", want, out)
 		}
 	}
-	for _, bad := range []string{"<no value>", "{{"} {
+	for _, bad := range []string{"<no value>", "{{", "CANNOT apply", `"done"`, "run on the host"} {
 		if strings.Contains(out, bad) {
 			t.Errorf("step-up prompt has %q", bad)
 		}

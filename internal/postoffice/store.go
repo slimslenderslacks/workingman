@@ -169,7 +169,10 @@ func checkID(id string) error {
 // --- inbox (post-office only) -----------------------------------------------
 
 // Put writes a new inbox record. It fails with fs.ErrExist if a record,
-// claim or done record with that id already exists. post-office only.
+// claim or done record with that id already exists. post-office only, apart
+// from the orch daemon's Step-Up executor, which Puts its operator
+// notifications: a new id is an exclusive create that no post-office write
+// can race.
 func (s *Store) Put(m Message) error {
 	if err := m.Validate(); err != nil {
 		return err

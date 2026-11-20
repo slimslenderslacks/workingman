@@ -42,6 +42,17 @@ func TestCLIArgs(t *testing.T) {
 	}
 }
 
+func TestRemoveAndListCLIArgs(t *testing.T) {
+	got := Rule{ActionAllow, KindFilesystem, "/data/**"}.RemoveCLIArgs("t1-fetch")
+	want := []string{"policy", "rm", "filesystem", "--sandbox", "t1-fetch", "--resource", "/data/**"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("RemoveCLIArgs = %v, want %v", got, want)
+	}
+	if got, want := ListCLIArgs("t1-fetch"), []string{"policy", "ls", "--sandbox", "t1-fetch"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("ListCLIArgs = %v, want %v", got, want)
+	}
+}
+
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	// Resource with embedded colons (URL) must survive the round-trip.
 	r := Rule{ActionDeny, KindNetwork, "https://example.com:8443/path"}
