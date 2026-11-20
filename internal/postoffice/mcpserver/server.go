@@ -83,6 +83,10 @@ type Server struct {
 	cfg     Config
 	mcp     *mcp.Server
 	waiters postoffice.Waiters
+	// sendRequestPlain is send_request as callers that are not registered
+	// recipients see it: without in_reply_to (§4.5). The registered tool is
+	// the recipients' version.
+	sendRequestPlain *mcp.Tool
 	// finalized is called after each finalisation this server performs
 	// (tests use it to observe the background loop).
 	finalized func(postoffice.DoneRecord)
@@ -119,7 +123,8 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{cfg: cfg}
 	s.mcp = mcp.NewServer(&mcp.Implementation{Name: ServerName, Version: cfg.Version}, &mcp.ServerOptions{
 		Instructions: "Send notifications and requests to the human operator or to another agent. " +
-			"Requests are durable: if send_request returns status: pending, loop on wait_for_response with the request_id.",
+			"Requests are durable: if send_request returns status: pending, loop on wait_for_response with the request_id. " +
+			"Registered recipients (such as step-up) also receive messages with next_message and answer them with reply.",
 	})
 	s.mcp.AddReceivingMiddleware(s.authorize)
 	s.addTools()
@@ -186,13 +191,49 @@ func (s *Server) authorize(next mcp.MethodHandler) mcp.MethodHandler {
 			}
 			ctx = context.WithValue(ctx, callerKey{}, c)
 		case "tools/list":
-			if _, err := s.cfg.Resolver.Resolve(id); errors.Is(err, ErrNotEnabled) {
+			c, err := s.cfg.Resolver.Resolve(id)
+			if errors.Is(err, ErrNotEnabled) {
 				s.logf("post-office: reject %s from gateway %q: %v", method, id, err)
 				return nil, &jsonrpc.Error{Code: codeRejected, Message: err.Error()}
 			}
+			res, lerr := next(ctx, method, req)
+			if lr, ok := res.(*mcp.ListToolsResult); ok && lerr == nil && err == nil {
+				if _, recipient := s.recipientOf(c); !recipient {
+					s.senderTools(lr)
+				}
+			}
+			return res, lerr
 		}
 		return next(ctx, method, req)
 	}
+}
+
+// receiverTools are listed only for registered recipients (§4.5).
+var receiverTools = map[string]bool{"next_message": true, "reply": true, "list_inbox": true}
+
+// senderTools rewrites a tools/list result for an identified caller that is
+// not a registered recipient: the receiver tools are dropped and
+// send_request loses in_reply_to.
+//
+// A caller post-office cannot identify yet keeps the full list. That is
+// every caller while standalone-codemode attaches post-office during
+// POST /gateways — before workingman saves the gateway record — and the
+// gateway keeps the tool list it gets then. Filtering there would hide
+// next_message from Step-Up for good; listing reveals nothing, and every
+// call is checked (receiver), so unidentified callers see everything. See
+// docs/messaging-design.md §4.5.
+func (s *Server) senderTools(lr *mcp.ListToolsResult) {
+	tools := make([]*mcp.Tool, 0, len(lr.Tools))
+	for _, t := range lr.Tools {
+		switch {
+		case receiverTools[t.Name]:
+		case t.Name == "send_request":
+			tools = append(tools, s.sendRequestPlain)
+		default:
+			tools = append(tools, t)
+		}
+	}
+	lr.Tools = tools
 }
 
 // --- tools (§4.4) ------------------------------------------------------------
@@ -212,13 +253,21 @@ func (s *Server) addTools() {
 		s.mcp.AddTool(&mcp.Tool{Name: name, Description: desc, InputSchema: json.RawMessage(schema)}, h.handler(resolved))
 	}
 	add("send_notification", sendNotificationDesc, sendNotificationSchema, typed(s.sendNotification))
-	add("send_request", fmt.Sprintf(sendRequestDesc, maxWait, maxWait),
-		fmt.Sprintf(sendRequestSchema, maxWait, def), typed(s.sendRequest))
+	sendDesc := fmt.Sprintf(sendRequestDesc, maxWait, maxWait)
+	s.sendRequestPlain = &mcp.Tool{Name: "send_request", Description: sendDesc,
+		InputSchema: json.RawMessage(fmt.Sprintf(sendRequestSchema, maxWait, def, ""))}
+	add("send_request", sendDesc+sendRequestRecipientDesc,
+		fmt.Sprintf(sendRequestSchema, maxWait, def, inReplyToProperty), typed(s.sendRequest))
 	add("wait_for_response", fmt.Sprintf(waitDesc, maxWait),
 		fmt.Sprintf(waitSchema, maxWait, def), typed(s.waitForResponse))
 	add("check_response", checkDesc, checkSchema, typed(s.checkResponse))
 	add("cancel_request", cancelDesc, cancelSchema, typed(s.cancelRequest))
 	add("list_requests", listDesc, listSchema, typed(s.listRequests))
+	// Receiver tools (§4.5), listed only for registered recipients.
+	add("next_message", fmt.Sprintf(nextMessageDesc, maxWait),
+		fmt.Sprintf(nextMessageSchema, maxWait, def), typed(s.nextMessage))
+	add("reply", replyDesc, replySchema, typed(s.reply))
+	add("list_inbox", listInboxDesc, listInboxSchema, typed(s.listInbox))
 }
 
 // toolFunc is a tool handler on raw, schema-checked arguments.
@@ -290,6 +339,7 @@ type sendRequestIn struct {
 	Options          []string `json:"options"`
 	WaitSeconds      *int     `json:"wait_seconds"`
 	ExpiresInMinutes *int     `json:"expires_in_minutes"`
+	InReplyTo        string   `json:"in_reply_to"`
 }
 
 func (s *Server) sendRequest(ctx context.Context, req *mcp.CallToolRequest, c Caller, in sendRequestIn) *result {
@@ -308,14 +358,18 @@ func (s *Server) sendRequest(ctx context.Context, req *mcp.CallToolRequest, c Ca
 	if r != nil {
 		return r
 	}
+	inReplyTo, note, r := s.inReplyTo(c, in.InReplyTo)
+	if r != nil {
+		return r
+	}
 	m, r := s.put(c, postoffice.Draft{
 		Kind: postoffice.KindRequest, Recipient: in.Recipient, Subject: in.Subject, Body: in.Body,
-		Options: in.Options, ExpiresIn: expires,
+		Options: in.Options, ExpiresIn: expires, InReplyTo: inReplyTo,
 	})
 	if r != nil {
 		return r
 	}
-	return s.await(ctx, req, m.ID, wait)
+	return s.await(ctx, req, m.ID, wait).set("in_reply_to", inReplyTo).set("note", note)
 }
 
 // put validates the recipient, builds the record from d with the caller as
@@ -324,6 +378,9 @@ func (s *Server) put(c Caller, d postoffice.Draft) (postoffice.Message, *result)
 	rcpt := postoffice.NormalizeRecipient(d.Recipient)
 	if _, ok := s.cfg.Recipients[rcpt]; rcpt != postoffice.RecipientOperator && !ok {
 		return postoffice.Message{}, rejected(fmt.Sprintf("unknown recipient %q; known: %s", strings.TrimSpace(d.Recipient), s.knownRecipients()))
+	}
+	if self, ok := s.recipientOf(c); ok && self == rcpt {
+		return postoffice.Message{}, rejected(fmt.Sprintf("you are %q; you cannot send to yourself", rcpt))
 	}
 	d.From = c.Sender
 	m, err := postoffice.NewMessage(d, s.now())
@@ -335,6 +392,9 @@ func (s *Server) put(c Caller, d postoffice.Draft) (postoffice.Message, *result)
 		return postoffice.Message{}, rejected("could not store the message: " + err.Error())
 	}
 	s.logf("post-office: %s %s from %s (%s) to %s", m.Kind, m.ID, m.From.Display(), m.From.Sandbox, m.Recipient)
+	if !m.ToOperator() {
+		s.waiters.Wake(inboxKey(m.Recipient))
+	}
 	return m, nil
 }
 
@@ -530,6 +590,9 @@ func (s *Server) state(id string) (r *result, closed bool) {
 		} else if m.ToOperator() {
 			r.set("delivered_to", []string{"tui"})
 		}
+		if m.ReceivedAt != nil {
+			r.set("received_at", stamp(*m.ReceivedAt))
+		}
 		return r, false
 	}
 	r = newResult(string(res.Outcome)).
@@ -553,6 +616,17 @@ func (s *Server) state(id string) (r *result, closed bool) {
 // Heartbeat when the call carries a progress token, and returns pending when
 // the wait or the client's context ends; neither ever cancels the request.
 func (s *Server) await(ctx context.Context, req *mcp.CallToolRequest, id string, wait time.Duration) *result {
+	return s.block(ctx, req, id, wait, func(bool) (*result, bool) { return s.state(id) },
+		func() string { return s.heartbeat(id) })
+}
+
+// block calls check until it reports done, for up to wait, and returns its
+// last result. It re-checks whenever key is woken in s.waiters and on every
+// heartbeat, and sends heartbeat() as a progress notification each Heartbeat
+// when the call carries a progress token. When the wait or the client's
+// context ends it returns check(true)'s result, whatever it is.
+func (s *Server) block(ctx context.Context, req *mcp.CallToolRequest, key string, wait time.Duration,
+	check func(last bool) (*result, bool), heartbeat func() string) *result {
 	start := time.Now()
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
@@ -563,28 +637,27 @@ func (s *Server) await(ctx context.Context, req *mcp.CallToolRequest, id string,
 		token = req.Params.GetProgressToken()
 	}
 	for {
-		// Take the wake channel before reading, so a finalisation between
-		// the read and the select is not missed.
-		woke := s.waiters.Wait(id)
-		r, closed := s.state(id)
-		if closed || wait <= 0 {
+		// Take the wake channel before checking, so a wake between the
+		// check and the select is not missed.
+		woke := s.waiters.Wait(key)
+		r, done := check(wait <= 0)
+		if done || wait <= 0 {
 			return r
 		}
 		select {
 		case <-woke:
 		case <-deadline.C:
-			r, _ := s.state(id)
+			r, _ := check(true)
 			return r
 		case <-ctx.Done():
-			r, _ := s.state(id)
+			r, _ := check(true)
 			return r
 		case <-beat.C:
 			if token != nil && req.Session != nil {
-				msg := s.heartbeat(id)
 				_ = req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{
 					ProgressToken: token,
 					Progress:      time.Since(start).Seconds(),
-					Message:       msg,
+					Message:       heartbeat(),
 				})
 			}
 		}
@@ -641,6 +714,25 @@ func (s *Server) readMessage(ctx context.Context, req *mcp.ReadResourceRequest) 
 func (s *Server) isRecipient(m postoffice.Message, c Caller) bool {
 	sb, ok := s.cfg.Recipients[m.Recipient]
 	return ok && sb == c.Sender.Sandbox
+}
+
+// recipientOf returns the registered recipient name whose sandbox is the
+// caller's, if any (§2.4).
+func (s *Server) recipientOf(c Caller) (string, bool) {
+	if c.Sender.Sandbox == "" {
+		return "", false
+	}
+	var names []string
+	for name, sb := range s.cfg.Recipients {
+		if sb == c.Sender.Sandbox {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return "", false
+	}
+	sort.Strings(names)
+	return names[0], true
 }
 
 // --- background work (§2.5, §3.3, §3.4) --------------------------------------

@@ -887,3 +887,22 @@ such as `step-up`. Without it, those tools do not exist for the agent.
   `TestGatewayIDAndDynamicAddableE2E` covers the header and the `mcp-add`
   refusal on the real gateway, and `TestSampleCatalogLoads` pins the entry in
   both catalogs.
+- **Receiving (agent recipients).** `recipient` must be `operator` (the
+  default) or a **registered recipient**: a static map in post-office
+  (`mcpserver.DefaultRecipients`, v1 `step-up` → sandbox `step-up`), so a typo
+  is rejected rather than stored. A caller whose sandbox is a registered
+  recipient also gets `next_message` (the oldest open message addressed to it
+  that it has not received; sets `received_at`, waits up to the max wait,
+  `status: empty` otherwise; each message is returned once, even across
+  restarts), `reply` (answers with `responder: {kind: agent, via: step-up}`,
+  or `status: closed` with the outcome that won) and `list_inbox` (open
+  messages addressed to it, received or not). A notification is closed as
+  `dismissed` once received. On `send_request` it gets `in_reply_to`,
+  which links its own request (such as an approval request to the operator)
+  to the request it serves: set automatically when it holds exactly one
+  received, unanswered request, otherwise passed explicitly; the Step-Up
+  executor checks it (design §8.4). Other callers do not see these tools or
+  `in_reply_to` once post-office knows who they are, and are refused if they
+  call them. A gateway that lists tools before workingman saved its record
+  (standalone-codemode attaches post-office during `POST /gateways` and keeps
+  that list) sees them all; see design §4.5.

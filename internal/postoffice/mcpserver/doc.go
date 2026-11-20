@@ -1,5 +1,6 @@
 // Package mcpserver is the post-office MCP server: the sender tools agents
-// use to notify and ask the operator or another agent, over the shared
+// use to notify and ask the operator or another agent, and the receiver
+// tools agent recipients such as Step-Up answer them with, over the shared
 // postoffice.Store. cmd/post-office serves it; see docs/messaging-design.md
 // §4.
 //
@@ -25,6 +26,16 @@
 //     "status: <state>" followed by "key: value" lines, a multi-line
 //     response last; the same fields are the structuredContent.
 //
+// Registered recipients (Config.Recipients; v1 step-up → sandbox step-up)
+// also get the receiver tools (§4.5): next_message (the oldest unreceived
+// message addressed to them, marked received with a compare-and-set so it is
+// returned once; a notification is then dismissed), reply (an agent answer,
+// or status: closed with the outcome that won the claim) and list_inbox. On
+// send_request they get in_reply_to, linking their own request to the one it
+// serves; it is set automatically when they hold exactly one received,
+// unanswered request. Callers known not to be recipients do not see these in
+// tools/list and are refused if they call them.
+//
 // Requests are durable files, so waiting is a bounded loop (§4.6):
 // send_request and wait_for_response block for at most Config.MaxWait
 // (default 50 s), waking when post-office finalises the request, send a
@@ -35,7 +46,8 @@
 // 30 s, prunes done/, and does all three at startup.
 //
 // post-office://messages/<id> is a resource template returning a message's
-// inbox or done record, to its sender only (§4.7).
+// inbox or done record, to its sender, or the agent recipient it is
+// addressed to, only (§4.7).
 //
 // # Key types
 //

@@ -318,6 +318,10 @@ func TestMarkReceived(t *testing.T) {
 	if again, _ := s.Get(m.ID); again.ReceivedAt == nil {
 		t.Fatal("received_at not persisted")
 	}
+	// Received once: a second mark keeps the first time.
+	if again, err := s.MarkReceived(m.ID, at.Add(time.Minute)); !errors.Is(err, ErrAlreadyReceived) || !again.ReceivedAt.Equal(at) {
+		t.Fatalf("second MarkReceived = %+v, %v", again.ReceivedAt, err)
+	}
 	if _, err := s.Claim(answer(m.ID, "x", ViaStepUp)); err != nil {
 		t.Fatal(err)
 	}

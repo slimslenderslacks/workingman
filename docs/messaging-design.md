@@ -565,6 +565,39 @@ agent's id gives `status: rejected`, `reason: not your request`.
 These are listed by `tools/list` **only** for callers whose sandbox is a
 registered recipient (v1: Step-Up). Other callers do not see them.
 
+**As built** (`internal/postoffice/mcpserver/receiver.go`): the registry is
+`Config.Recipients` (`DefaultRecipients`: `step-up` → sandbox `step-up`).
+Every receiver call is checked against it, and a non-recipient gets `status:
+rejected`. `tools/list` hides the receiver tools and `send_request`'s
+`in_reply_to` from callers post-office has **identified** as non-recipients.
+A caller it cannot identify yet sees the full list. That covers every
+gateway while standalone-codemode attaches post-office during `POST
+/gateways`, before workingman saves the record (§4.2). The gateway keeps the
+tool list it gets at attach time and only re-lists on reconnect or on a
+`list_changed` notification, which a stateless server cannot send. Filtering
+unidentified callers would therefore hide `next_message` from Step-Up for
+good. In practice every gateway lists the receiver tools, each description
+says they are for recipients only, and the call-time check is the
+boundary. If that turns out to confuse task agents, there are two ways to
+hide them properly: the gateway re-lists a backend after `POST /gateways`
+returns, or workingman saves the record before it mints the gateway.
+
+A received notification needs no reply, so `next_message` closes it as
+`dismissed` (`responder: {agent, step-up}`) as soon as it hands it out.
+Otherwise it would stay in `list_inbox` and the TUI's "To agents" rows until
+it expired. `received_at` is set with a compare-and-set
+(`Store.MarkReceived` returns `ErrAlreadyReceived`), so concurrent
+`next_message` calls and a post-office restart never hand out a message
+twice. `wait_for_response` and `check_response` show `received_at` to the
+sender while the request is pending.
+
+`send_request` from a recipient takes `in_reply_to`. When the argument is
+omitted and the recipient holds exactly one received, unanswered request,
+post-office sets it to that request and says so in a `note:` line. With
+several held requests the call is rejected until it names one. An explicit
+value must name an open request addressed to the caller. Non-recipients
+that pass it are rejected. A recipient cannot send to itself.
+
 #### `next_message`
 
 ```json

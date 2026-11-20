@@ -52,6 +52,9 @@ var (
 	ErrAmbiguousShortID = errors.New("postoffice: ambiguous short id")
 	// ErrLocked means another process holds post-office.lock.
 	ErrLocked = errors.New("postoffice: store is locked by another post-office")
+	// ErrAlreadyReceived is returned by MarkReceived when an agent recipient
+	// has already taken the message.
+	ErrAlreadyReceived = errors.New("postoffice: already received")
 )
 
 // DefaultDir is the store root for a sessions root: $WORKINGMAN_POST_OFFICE_DIR
@@ -180,17 +183,26 @@ func (s *Store) Put(m Message) error {
 }
 
 // MarkReceived sets received_at on an open record (an agent recipient took
-// it via next_message) and returns the updated record. It returns
-// ErrAlreadyClosed when the message has a claim or is finalised.
+// it via next_message) and returns the updated record. It is a
+// compare-and-set, so each message is received once: it returns
+// ErrAlreadyReceived, with the stored record, when received_at is already
+// set, and ErrAlreadyClosed when the message has a claim or is finalised.
 // post-office only.
 func (s *Store) MarkReceived(id string, at time.Time) (Message, error) {
-	return s.update(id, func(m *Message) {
+	return s.update(id, func(m *Message) error {
+		if m.ReceivedAt != nil {
+			return fmt.Errorf("postoffice: receive %s: %w", id, ErrAlreadyReceived)
+		}
 		at := at.UTC()
 		m.ReceivedAt = &at
+		return nil
 	})
 }
 
-func (s *Store) update(id string, fn func(*Message)) (Message, error) {
+// update rewrites an open record with fn under the store lock. When fn
+// fails, nothing is written and the unchanged record is returned with fn's
+// error.
+func (s *Store) update(id string, fn func(*Message) error) (Message, error) {
 	if err := checkID(id); err != nil {
 		return Message{}, err
 	}
@@ -203,7 +215,9 @@ func (s *Store) update(id string, fn func(*Message)) (Message, error) {
 	if s.closedLocked(id) {
 		return Message{}, fmt.Errorf("postoffice: update %s: %w", id, ErrAlreadyClosed)
 	}
-	fn(&m)
+	if err := fn(&m); err != nil {
+		return m, err
+	}
 	data, err := marshal(m)
 	if err != nil {
 		return Message{}, err
