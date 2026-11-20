@@ -509,8 +509,9 @@ A message is handled by the first rule that applies.
 Agents with the `post-office` MCP send the operator **requests** (which
 expect an answer) and **notifications** (which do not). They are files under
 `~/.workingman/post-office/` (design: [messaging-design.md](messaging-design.md)
-§2–§5). The orch TUI inbox reads them directly; when channels are configured,
-the daemon's **Dispatcher** (`internal/postoffice/dispatch.go`, started by
+§2–§5; operator guide: [messaging.md](messaging.md)). The orch TUI inbox
+reads them directly; when channels are configured, the daemon's
+**Dispatcher** (`internal/postoffice/dispatch.go`, started by
 `daemonChannels.start`) also sends them to the phone.
 
 **Outbound.** Every operator message in `inbox/` without a

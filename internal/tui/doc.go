@@ -1,6 +1,7 @@
 // Package tui is the orch terminal UI: a bubbletea program that shows live
-// agent sessions, the work-stream (project) gallery and its tasks, and lets
-// the user steer work streams by writing their project.yaml files.
+// agent sessions, the work-stream (project) gallery and its tasks, and the
+// post-office inbox, and lets the user steer work streams by writing their
+// project.yaml files and answer agents' requests.
 //
 // Role: tui
 //
@@ -37,7 +38,7 @@
 // messages to other agents. A badge ("✉ 2 ?" while operator requests wait)
 // leads the footer and ends the ACP header and modal hints, and a new
 // operator request rings the terminal bell ($WORKINGMAN_TUI_BELL=0 turns it
-// off). See docs/messaging-design.md §7.
+// off). See docs/messaging-design.md §7; for users, docs/messaging.md.
 //
 // The mouse is not captured by default, so the terminal's native click-drag
 // selection can highlight and copy any text. "m" toggles mouse capture (click

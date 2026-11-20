@@ -1,5 +1,5 @@
-// Package router connects inbound channel messages (WhatsApp, Signal) to agent
-// conversations and sends the replies back.
+// Package router connects inbound channel messages (WhatsApp, Signal, Slack)
+// to agent conversations and post-office requests, and sends the replies back.
 //
 // Role: daemon
 //

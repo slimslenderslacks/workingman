@@ -839,7 +839,9 @@ again in a minute."* rather than a hang. Replies go back to the asking chat
 
 **Kind:** `agent.StepUpAgent` (`String()` = `"step-up"`, appended to the iota
 block). **Template:** `step-up.tmpl`. **Interactive:** no. *(Design:
-[docs/messaging-design.md](docs/messaging-design.md) §8.)*
+[docs/messaging-design.md](docs/messaging-design.md) §8. Operator guide —
+turning it on, approving, `config.yaml`, the kill switch and a smoke test:
+[docs/messaging.md § Step-Up](docs/messaging.md#step-up).)*
 
 **What it is.** An always-on agent that other agents ask for more than their
 sandbox gives them, most often a network route ("I need
@@ -1009,7 +1011,8 @@ The decision is audit-logged as `step_up_agent_flag`.
 
 Not a kind of agent but a capability any sandboxed agent can be given: the
 **post-office** MCP server (`cmd/post-office`, `internal/postoffice/mcpserver`,
-design in [docs/messaging-design.md](docs/messaging-design.md) §4). With it an
+design in [docs/messaging-design.md](docs/messaging-design.md) §4, operator
+guide in [docs/messaging.md](docs/messaging.md)). With it an
 agent can `send_notification` (one-way) or `send_request` (expects an answer,
 then `wait_for_response` / `check_response` / `cancel_request` /
 `list_requests`) to the human operator or, by `recipient`, to another agent
@@ -1078,3 +1081,9 @@ such as `step-up`. Without it, those tools do not exist for the agent.
   call them. A gateway that lists tools before workingman saved its record
   (standalone-codemode attaches post-office during `POST /gateways` and keeps
   that list) sees them all; see design §4.5.
+- **Where operator messages go.** Not to an agent: post-office writes them
+  under `~/.workingman/post-office/`, the TUI inbox (`I`) reads them, and the
+  daemon's Dispatcher sends them to every configured channel. The first answer
+  wins, wherever it comes from. The end-to-end smoke test (a task asks a
+  question answered in the TUI, one answered in Slack, then asks Step-Up for a
+  network route) is in [docs/messaging.md](docs/messaging.md#end-to-end-smoke-test).

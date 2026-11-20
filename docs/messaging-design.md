@@ -3,7 +3,9 @@
 **Status: approved 2026-11-20**, with the operator's decisions recorded in
 [§10.3](#103-decisions) and applied to the sections below. The tasks in
 [§9](#9-implementation-task-breakdown) are being implemented; "As built"
-notes in each section record where the code differs from the plan.
+notes in each section record where the code differs from the plan. The
+user-facing guide, with the end-to-end smoke test, is
+[messaging.md](messaging.md).
 
 This document turns the project brief and three research notes into one plan:
 
@@ -1273,8 +1275,8 @@ Where it differs from, or adds to, the plan above:
   `ListCLIArgs`). Filesystem rules use the same shape as network ones. These
   could not be checked against a live sandbox: no `sbx` binary exists in the
   sandbox this was built in. The first live run of the smoke test
-  (`messaging-docs-and-smoke-test`) must confirm them; any change is confined
-  to those three helpers.
+  ([messaging.md § End-to-end smoke test](messaging.md#end-to-end-smoke-test),
+  step 19) must confirm them; any change is confined to those three helpers.
 - **Request handling.** Requests are taken oldest name first, one at a time,
   on fsnotify plus a 2 s poll. Names starting with `.` or not ending in
   `.yaml` are staging files and are skipped. The file is removed once its

@@ -1,7 +1,8 @@
 // Package postoffice is the agent messaging store: the message model and the
 // file-backed Store under ~/.workingman/post-office/ that post-office, the
 // orch daemon and the TUI share. The directory tree is their only
-// integration point; there is no RPC. See docs/messaging-design.md §2-§3.
+// integration point; there is no RPC. See docs/messaging-design.md §2-§3,
+// and docs/messaging.md for the user guide.
 //
 // Role: shared (post-office, daemon and TUI)
 //
