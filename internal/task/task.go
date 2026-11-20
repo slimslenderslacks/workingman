@@ -3,6 +3,7 @@ package task
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -471,5 +472,33 @@ func Save(path string, t *Task) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return writeAtomic(path, data)
+}
+
+// writeAtomic replaces path with data through a temporary file in the same
+// directory and a rename, so a concurrent reader sees the old file or the new
+// one, never a half-written one. The daemon reads task files while it writes
+// others (its scheduling passes run beside the launches of the tasks they
+// admit), and a torn read would miscount the tasks in flight. The temporary
+// name does not end in .yaml, so task loaders and the watcher skip it.
+func writeAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp, 0o644)
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
 }

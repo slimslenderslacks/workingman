@@ -266,8 +266,8 @@ func TestHasPendingIntakeReArmsRestingProject(t *testing.T) {
 }
 
 // intakeWorkingHarness is a working project with one ready task whose task
-// agent is already running in the project's main slot — the situation the
-// original bug stranded intake in. The daemon is never Run: tests drive
+// agent is already running in its task slot — the situation the original bug
+// stranded intake in, when task agents shared the project's main slot. The daemon is never Run: tests drive
 // handleIntakeFile directly, and the recording launcher stands in for agents.
 type intakeWorkingHarness struct {
 	d           *Daemon
@@ -290,7 +290,7 @@ func newIntakeWorkingHarness(t *testing.T) *intakeWorkingHarness {
 	writeIntakeTestTask(t, dir, "follow-on", task.StatusReady)
 
 	taskSess := newStubSession("task-scaffold")
-	if !d.trackSession(projectPath, taskSess, agent.TaskAgent, "scaffold", nil) {
+	if !d.trackSession(taskSessionKey(projectPath, "scaffold"), taskSess, agent.TaskAgent, "scaffold", nil) {
 		t.Fatal("could not track the running task session")
 	}
 	return &intakeWorkingHarness{d: d, lch: lch, buf: buf, projectPath: projectPath, taskSess: taskSess}
@@ -345,8 +345,8 @@ func (h *intakeWorkingHarness) assertTaskSessionUntouched(t *testing.T) {
 		t.Error("the running task session was closed by intake/planning")
 	default:
 	}
-	if kind, ok := h.d.sessionKind(h.projectPath); !ok || kind != agent.TaskAgent {
-		t.Errorf("main slot = (%v, %v), want the running task agent", kind, ok)
+	if kind, ok := h.d.sessionKind(taskSessionKey(h.projectPath, "scaffold")); !ok || kind != agent.TaskAgent {
+		t.Errorf("task slot = (%v, %v), want the running task agent", kind, ok)
 	}
 }
 

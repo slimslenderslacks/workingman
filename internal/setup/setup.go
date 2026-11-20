@@ -22,6 +22,9 @@ type Context struct {
 	TaskName      string   `yaml:"task_name,omitempty"`
 	FailedTasks   []string `yaml:"failed_tasks,omitempty"`
 	BlockedReason string   `yaml:"blocked_reason,omitempty"`
+	// InFlightTasks are the tasks still in flight when a wolf launched. See
+	// prompts.Data.InFlightTasks.
+	InFlightTasks []InFlightTask `yaml:"in_flight_tasks,omitempty"`
 
 	// BlockedSessionPath/Summary/Attempted mirror project.BlockedSession, the
 	// durable record the wolf agent reads/writes for a blocked project. See
@@ -61,6 +64,14 @@ type Context struct {
 	SnapshotFile string   `yaml:"snapshot_file,omitempty"`
 	AuditLog     string   `yaml:"audit_log,omitempty"`
 	SessionsRoot string   `yaml:"sessions_root,omitempty"`
+}
+
+// InFlightTask is one entry of in_flight_tasks in .orch/context.yaml.
+type InFlightTask struct {
+	Name          string `yaml:"name"`
+	Status        string `yaml:"status"`
+	QueuePosition int    `yaml:"queue_position,omitempty"`
+	Integrating   bool   `yaml:"integrating,omitempty"`
 }
 
 // Commit is one repo's commit in .orch/context.yaml (same shape as a task

@@ -483,6 +483,7 @@ func (d *Daemon) projectLive(projectPath string, sessions []SessionSnapshot) *Pr
 	sort.Strings(live.Sessions)
 	sort.Strings(live.RunningTasks)
 	live.CommitReserved = d.commitReserved(projectPath)
+	live.Deferred = d.deferredInfo(projectPath)
 
 	d.planningMu.Lock()
 	live.PlanningFailures = d.planningFailures[projectPath]

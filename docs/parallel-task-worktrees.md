@@ -3089,6 +3089,122 @@ serially after the first. The code forced or suggested these differences:
   tasks never overlap. Load does not yet repair bad globs or tags (H1); that
   is phase 5. Until then a malformed glob is simply treated as overlapping.
 
+#### Phase 4 as built: the scheduler
+
+The second task wires the task graph into the daemon. It follows the list
+above. The code forced or suggested these differences:
+
+- **`schedule` lives in a new `internal/daemon/schedule.go`,** with the slot
+  keys (`taskSessionKey`, `commitSessionKey`), `projectBusy`, the tokens and
+  the deferral notes. `dispatchNextTask` and `dispatchPendingTasks` are now
+  thin calls to it; `dispatchReadyOrPending`, `dispatchReadyTask` and
+  `firstUncommittedSuccess` are gone, and so is the `resume_pending_commit`
+  event (a `success` task is simply the queue's head).
+- **What runs outside the scheduling lock.** The lock covers only the
+  decision and the reservations: the `running` mark, the global token and
+  the commit reservation. Everything that can launch an agent runs after it
+  is released, including the completion transition (which can start the
+  review agent) and the stuck-graph block (the wolf). The launches of one
+  pass run concurrently, and the pass waits for them. A second per-project
+  lock (`worktreeLock`) serializes their host-side git work: provisioning
+  the shared workspace, `git worktree add` and `prepareIntegration`. Two
+  first-time provisions of one workspace, or two `worktree add`s in one
+  repository, collide otherwise.
+- **The bare slot still excludes task work.** `schedule` starts nothing while
+  a project or review agent holds `<path>` (`schedule_wait_main_slot`), so
+  neither ever overlaps a task or commit agent; their session ends revisit
+  the project. `projectBusy` also counts the commit reservation and the
+  tasks a pass has admitted whose session is not tracked yet, so X1's
+  "`projectBusy || commitBusy`" is the one call.
+- **`commitBusy` stays a counter** (phase 3's `commitMu`, `beginCommit` /
+  `endCommit`), not a map of bools. `schedule` takes it under the scheduling
+  lock. `afterCommitSession` gets a `done` callback that releases it just
+  before its own scheduling pass, so that pass can start the next
+  integration. The caller releases it again after the routing, and the
+  release runs once (`sync.Once`), which also covers every early return. A
+  transient retry relaunches through `launchCommitAgent`, which takes its
+  own reservation.
+- **Tokens are per task, keyed by the task file** (`taskTokens` is a set,
+  not a counter), so a release is idempotent and a token can't be released
+  twice by the several paths that end a task's run. `releaseToken` revisits
+  the `capDeferred` projects one after another on one goroutine, oldest
+  first. `Runnable` is asked for `min(limit − in-flight, free tokens)` slots
+  as phase 4's first half planned. When the token count is what limits a
+  pass, the project goes on `capDeferred` under the same lock.
+- **The retry keeps its slot.** `handleTaskFailure` and `conflictReRun` no
+  longer call `launchTaskAgent` themselves. They reset the task and run a
+  pass that offers that task the first free slot (`passOpts.prefer`) when
+  it is runnable, so a failed task is relaunched straight away, as before,
+  rather than queueing behind ready tasks that sort before it. H3's
+  re-runs-first priority is still phase 5.
+- **A push task needs a free slot.** A ready push task is in flight from the
+  moment it joins the queue, so `schedule` starts it only when the project
+  has a free slot. Without one, the first queued task already at `success`
+  integrates first (`queueHead`), so a full project can't stall behind the
+  push task.
+- **The D7 legacy gate.** Concurrency needs every task in its own worktree.
+  The limit drops to 1 for the pass without git-backed workspaces, while a
+  task with no `task_branch` is in flight, or while the shared tree is dirty
+  with no integration running. No commit agent starts while a legacy task is
+  still `running` in the shared tree. Phase 1's `legacyInFlight` (in
+  `prepareTaskWorktree`) skips the tasks the same pass admitted, which are
+  `running` without a branch only until their own launch cuts one
+  (`admitting`). It also skips its dirty-tree check while an integration is
+  running, because the integration is what changes the shared tree.
+- **`transitionProjectBlocked` re-reads `project.yaml`** and writes the block
+  over what is on disk, not over the caller's copy. With tasks in flight,
+  the caller's copy is often a session's launch-time one, and writing it
+  back would undo a `cleanup: true` request or a human's edit. The append
+  (X3) is serialized by a `blockMu`. A block with an identical reason is not
+  appended twice. It still calls `launchWolfAgent`, which dedups on `#wolf`,
+  so a project blocked while no wolf runs still gets one.
+- **Drain, then archive.** `dispatchProject` runs a pass before
+  `launchArchiveAgent` when `cleanup: true` is set. The pass admits no task
+  but still starts the queue head, as long as no archive agent is running.
+  `launchArchiveAgent` logs `archive_waiting_in_flight` and releases its
+  reservation while anything is in flight. Every task and commit session end
+  finishes with `resumeDrainedCleanup`, which revisits the project when
+  cleanup is pending and nothing is left in flight, whatever the session
+  routed to. X6 step 4 (pre-archive worktree cleanup and the
+  unintegrated-work list) is phase 6, as that phase lists.
+- **`resumeOrphanedOutcomes`** (in `reconcile.go`, run by `startupScan`
+  between `releaseOrphanedTasks` and the revisit) implements X7's table. It
+  only acts on a project at `working` or `idle`, and it starts no agent; the
+  pass that follows does. The W7 sweep is not part of it (phase 6).
+- **Adopted sessions** (`afterAdoptedTaskSession`, `afterAdoptedCommitSession`)
+  release the `running` mark first. A task left at `ready` that way has no
+  outcome to judge, so its token is released and the project revisited, as
+  before. Anything else goes through `afterTaskSession` /
+  `afterCommitSession`. An adopted commit session's `integrationLaunch` is
+  rebuilt with no `onto`, so its build-check audit reads as the fast path.
+- **Power.** `deferForPower` is checked at the top of every pass, and the
+  transient-retry relaunch checks it too, since it does not go through a
+  pass.
+- **`live.deferred`** ships here (`DeferredInfo{overlap, cap, power}`), from
+  the notes `schedule` keeps per project. The same notes make
+  `task_deferred_overlap`, `task_deferred_cap` and `task_waiting_integration`
+  log once per situation rather than on every pass. The TUI's `deferred:`
+  row hint is still not shipped.
+- **The wolf's in-flight list** is `prompts.Data.InFlightTasks` /
+  `setup.Context.InFlightTasks` (`in_flight_tasks` in `.orch/context.yaml`):
+  running tasks by name, then the queue head first, with the task holding
+  `#commit` marked `integrating`.
+- **`--max-parallel-tasks`** is an `orch` flag (`cmd/orch/main.go`). The
+  `stop.go` change is `dropCapDeferred`; `killProjectSessions` already
+  matched every `path#…` key. The reaper needed no change.
+- **Task files are written atomically** (`task.Save` writes a temporary
+  file and renames it). A pass reads task files while launches of the tasks
+  it admitted write theirs. `os.WriteFile` truncates before it writes, so a
+  pass could read an empty file mid-write. `taskgraph.Load` repairs that into
+  a nameless task with no status, so the task dropped out of the in-flight
+  count and the pass admitted one task too many. The simultaneous-ends test
+  caught it.
+- **Tests.** `schedule_test.go` has the S8 list (the simultaneous-ends test
+  under `-race`) and the end-to-end three-task run with real git
+  (`TestParallelEndToEnd`). `restart_parallel_test.go` has the X7 list.
+  `stop_test.go`, `wolf_tandem_test.go` and `archive_dispatch_test.go` have the
+  X4, X3 and X6 extensions.
+
 ### Phase 5: planner hints and overlap-aware scheduling
 
 The planner starts writing hints, so parallelism becomes automatic for

@@ -197,7 +197,7 @@ func TestReleaseOrphanedTasks(t *testing.T) {
 	mustSaveTask(t, live, &task.Task{Name: "live", Status: task.StatusRunning})
 	mustSaveTask(t, done, &task.Task{Name: "done", Status: task.StatusSuccess})
 
-	d.sessions[projectPath] = sessionEntry{sess: newStubSession("x"), kind: agent.TaskAgent, taskName: "live"}
+	d.sessions[taskSessionKey(projectPath, "live")] = sessionEntry{sess: newStubSession("x"), kind: agent.TaskAgent, taskName: "live"}
 	d.releaseOrphanedTasks(projectPath)
 
 	if got := mustLoadTask(t, orphan); got.Status != task.StatusReady || got.Attempts != 1 {

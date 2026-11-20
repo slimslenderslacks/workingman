@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -140,8 +141,11 @@ func (d *Daemon) prepareTaskWorktree(projectPath string, p *project.Project, t *
 
 // legacyInFlight returns why t must still run in the shared tree, or "" when
 // it may get a worktree (D7). t itself is skipped in the task scan: the
-// caller has just marked it running.
+// caller has just marked it running. So are the tasks the same scheduling pass
+// admitted beside it, which are running without a task branch only until
+// their own launch cuts one.
 func (d *Daemon) legacyInFlight(projectPath string, t *task.Task, shared string, repos []string) string {
+	admitting := d.admittingNames(projectPath)
 	tasksDir := filepath.Join(filepath.Dir(projectPath), "tasks")
 	if entries, err := os.ReadDir(tasksDir); err == nil {
 		for _, e := range entries {
@@ -149,13 +153,19 @@ func (d *Daemon) legacyInFlight(projectPath string, t *task.Task, shared string,
 				continue
 			}
 			o, err := task.Load(filepath.Join(tasksDir, e.Name()))
-			if err != nil || o.Name == t.Name || o.HasTaskBranch() {
+			if err != nil || o.Name == t.Name || o.HasTaskBranch() || o.IsPushTask() || slices.Contains(admitting, o.Name) {
 				continue
 			}
 			if o.Status == task.StatusRunning || o.Status == task.StatusSuccess {
 				return fmt.Sprintf("legacy task %q is %s in the shared tree", o.Name, o.Status)
 			}
 		}
+	}
+	if d.commitReserved(projectPath) {
+		// An integration in flight changes the shared tree as it
+		// fast-forwards, so its state says nothing about leftover legacy
+		// work; a legacy task being integrated is caught by the scan above.
+		return ""
 	}
 	for _, repo := range repos {
 		dirty, err := d.worktrees.Dirty(d.ctx, filepath.Join(shared, repo))
@@ -168,6 +178,22 @@ func (d *Daemon) legacyInFlight(projectPath string, t *task.Task, shared string,
 		}
 	}
 	return ""
+}
+
+// sharedTreeDirty reports whether any repo of the project's shared workspace
+// has uncommitted changes, which only legacy work (or a broken rule) leaves
+// there (D7). A workspace that does not exist yet is clean.
+func (d *Daemon) sharedTreeDirty(p *project.Project) bool {
+	shared, err := d.runner.Workspaces.Path(p.Branch)
+	if err != nil {
+		return false
+	}
+	for _, repo := range repoDirNames(p) {
+		if dirty, err := d.worktrees.Dirty(d.ctx, filepath.Join(shared, repo)); err == nil && dirty {
+			return true
+		}
+	}
+	return false
 }
 
 // worktreeMounts are the extra sandbox mounts of a task agent in a worktree

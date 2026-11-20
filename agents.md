@@ -139,17 +139,17 @@ while a planner is already running gets a follow-up run once that one ends
 directory (no wsp workspace of its own) — sandbox name is the bare
 work-stream basename (`SandboxNameFor`, case `PlanningAgent`). It is tracked
 under a **dedicated planning slot**, `planningSessionKey = projectPath +
-"#planning"`, rather than the main slot task/commit agents hold, so a planner
-can run while a task/commit agent is mid-flight. Design choice: task and commit
+"#planning"`, beside the task (`#task:<name>`) and commit (`#commit`) slots,
+so a planner can run while task and commit agents are mid-flight. Design choice: task and commit
 agents work in the wsp workspace and only touch their own task file, while the
 planner only adds task files in the control dir, so they do not conflict;
 sharing one slot is what used to strand intake on a working project. The
 one-planner rule is enforced by an in-memory reservation (`beginPlanning` /
 `endPlanning`, `planningBusy`) taken before `runner.Start` and released in
 `afterPlanningSession`, re-taken by `reconcileSessions` for an adopted planner.
-Planning still waits for the main slot when it holds a project or review agent
-(both write the control dir), and a cron re-plan waits for it to be empty (a
-re-plan may delete tasks). While a planner is in flight, task dispatch defers
+Planning still waits for the bare slot when it holds a project or review agent
+(both write the control dir), and a cron re-plan waits for every task and
+commit slot and commit reservation to clear (a re-plan may delete tasks). While a planner is in flight, task dispatch defers
 project completion and graph-error/no-ready-task blocks to
 `afterPlanningSession`, and review dispatch stands aside. But unlike
 project/wolf, planning *also* provisions the project's wsp worktree
@@ -215,12 +215,15 @@ project comes to rest.
 
 **Kind:** `agent.TaskAgent`. **Template:** `task.tmpl`. **Interactive:** no.
 
-**Trigger.** `dispatchNextTask` → `dispatchReadyOrPending` →
-`dispatchReadyTask` → `launchTaskAgent`, whenever a project is `status:
-working` (or has pending manual tasks in `reviewing`/`done`) and has a task in
-`Ready()` state in the DAG built by `internal/taskgraph`. A push task
-(`t.IsPushTask()`) skips the task agent entirely and goes straight to the
-commit agent (see below).
+**Trigger.** A scheduling pass (`schedule`, `internal/daemon/schedule.go`)
+on a project that is `status: working` (or `idle` with pending manual tasks)
+admits tasks from `Ready()` in the DAG built by `internal/taskgraph` —
+`Graph.Runnable`, up to `max_parallel_tasks` (default 1) minus the tasks
+already in flight, within the global `--max-parallel-tasks` cap, skipping
+tasks whose hints overlap one in flight — marks each running, and calls
+`launchTaskAgent` for it. Every task agent has a session slot of its own,
+`<project.yaml>#task:<name>`. A push task (`t.IsPushTask()`) skips the task
+agent entirely and joins the commit queue (see below).
 
 **Workspace/session.** *No* `WorkingDir`. The daemon's `launchTaskAgent`
 first provisions/reuses the project's **shared workspace** with
@@ -296,12 +299,15 @@ violation, blocks the project.
 
 **Kind:** `agent.CommitAgent`. **Template:** `commit.tmpl`. **Interactive:** no.
 
-**Trigger.** Two paths: (1) `afterTaskSession` on `status: success`; (2) the
-"resume pending commit" recovery in `dispatchReadyOrPending` /
-`afterCommitSession` / `dispatchNextTask`, which re-launches a commit agent
-for any task stuck at `success` (covers a daemon restart between task-end and
-commit-start). A push task (`t.IsPushTask()`) is dispatched straight here from
-`dispatchReadyTask`, with `PushBranch: true`.
+**Trigger.** The commit queue (`taskgraph.Queued`: tasks at `success`, plus
+push tasks at `ready` whose dependencies are committed, FIFO by the
+daemon-stamped `succeeded_at`). Every scheduling pass starts the commit agent
+for the queue's head unless the project's commit reservation is held, so one
+integration runs per project at a time, in the `<project.yaml>#commit` slot.
+The queue is rebuilt from disk, so a daemon restart between task-end and
+commit-start resumes it with no special case. A push task runs here with
+`PushBranch: true`; a transient integration failure relaunches the commit
+agent for the same task (`launchCommitAgent`).
 
 **Workspace/session.** No `WorkingDir`, so it runs in the project's shared
 wsp workspace — where the shared branch is checked out, and under which the
@@ -385,8 +391,8 @@ kept), clears `integration:`, and removes the worktree and branch — the only p
 where they go (`worktree_removed`; a failed removal is only logged). On success it
 stamps `completed_at` (once), reloads the task graph, and either
 transitions the project to `done`/`reviewing` (`transitionProjectComplete`,
-all committed) or dispatches the next ready task (`firstUncommittedSuccess`
-first, then `g.Ready()`).
+all committed) or runs a scheduling pass, which starts the next integration
+and fills the task slots the committed task freed.
 
 ---
 

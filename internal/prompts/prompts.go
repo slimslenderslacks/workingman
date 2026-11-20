@@ -27,6 +27,11 @@ type Data struct {
 	TaskName      string   // for TaskAgent: name field of the task
 	FailedTasks   []string // for WolfAgent: paths to failed/blocked task yamls
 	BlockedReason string   // for WolfAgent: why the project was blocked
+	// InFlightTasks, for the WolfAgent, lists the tasks still in flight when
+	// it launched: running tasks, then the commit queue head first, with the
+	// one whose integration is running marked (docs/parallel-task-worktrees.md
+	// X3). They finish on their own; the wolf must not edit them.
+	InFlightTasks []InFlightTask
 
 	// BlockedSessionPath is the absolute path to the project's durable
 	// blocked-session record (project.BlockedSessionPath) — for WolfAgent,
@@ -115,6 +120,17 @@ type Data struct {
 	// launcher decides the mechanism and supplies the text; the template
 	// embeds it verbatim.
 	ReplanInstruction string
+}
+
+// InFlightTask is one task in flight for the wolf's prompt.
+type InFlightTask struct {
+	Name   string
+	Status string // running | success
+	// QueuePosition is the task's 1-based place in the commit queue, 0 when
+	// it is not queued (a running task).
+	QueuePosition int
+	// Integrating is true for the task whose commit agent is running.
+	Integrating bool
 }
 
 // RepoCommit is one repo's commit, as in a task file's base: or commits:.

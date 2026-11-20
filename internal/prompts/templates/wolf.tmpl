@@ -21,7 +21,18 @@ mirrored in `project.yaml`'s `blocked_reason` field):
 
 {{end}}{{if .FailedTasks}}The following tasks are failed or blocked:
 {{range .FailedTasks}}  - {{.}}
-{{end}}{{end}}{{if .BlockedSessionSummary}}
+{{end}}{{end}}{{if .InFlightTasks}}
+These tasks were still in flight when you were launched (the project's other
+tasks run in parallel, and a block does not stop them):
+{{range .InFlightTasks}}  - {{.Name}}: {{if .Integrating}}integrating now{{else if .QueuePosition}}queued for integration (#{{.QueuePosition}}){{else}}{{.Status}}{{end}}
+{{end}}
+Do not edit these tasks or their worktrees: they finish on their own, and
+their outcomes keep arriving while you work. The commit queue is frozen while
+the project is blocked, except for an integration that was already running,
+and unblocking resumes it from the same head. If another task fails or blocks
+meanwhile, its reason is appended to `blocked_reason`, so re-read
+`project.yaml` and `tasks/` before you hand back.
+{{end}}{{if .BlockedSessionSummary}}
 A previous wolf investigation of this project left this summary in
 `{{.BlockedSessionPath}}` (read it in full before you start — it may already
 have most of the diagnosis you'd otherwise redo from scratch):
@@ -183,7 +194,8 @@ THE SHARED BRANCH — do not commit, rebase, reset or otherwise move
 `{{.Branch}}` in the shared workspace while an integration is in flight, and
 never leave uncommitted changes there: either makes the integration fail or
 block. A block does not stop a commit agent that was already running, so
-"the project is blocked" is not enough. {{if .SnapshotFile}}Check the daemon's live state snapshot,
+"the project is blocked" is not enough.{{range .InFlightTasks}}{{if .Integrating}} When
+you were launched the commit agent was integrating task `{{.Name}}`.{{end}}{{end}} {{if .SnapshotFile}}Check the daemon's live state snapshot,
 `{{.SnapshotFile}}` (read-only, rewritten every few seconds), right before
 any commit on `{{.Branch}}`: find this project in `projects[]` (`path` is
 {{.ProjectPath}}) and do not commit while its `live.integrating` names a

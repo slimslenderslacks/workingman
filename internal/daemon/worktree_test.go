@@ -15,9 +15,11 @@ import (
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
+	"github.com/slimslenderslacks/work/internal/setup"
 	"github.com/slimslenderslacks/work/internal/task"
 	"github.com/slimslenderslacks/work/internal/workspace"
 	"github.com/slimslenderslacks/work/internal/worktree"
+	"gopkg.in/yaml.v3"
 )
 
 // The tests in this file run the per-task worktree path
@@ -44,6 +46,13 @@ type wtEnv struct {
 	// verify is its pre-integration build check. Set before provision/saveProject.
 	repos  []string
 	verify string
+	// limit is the project's max_parallel_tasks; opts are extra daemon
+	// options. Set before saveProject / start.
+	limit int
+	opts  []Option
+	// byTask, when set, replaces the per-kind script queues: it returns the
+	// script an agent of kind runs for the named task (see command).
+	byTask func(kind agent.Kind, taskName string) string
 
 	mu      sync.Mutex
 	scripts map[agent.Kind][]string // per-kind scripts, consumed in launch order
@@ -82,10 +91,25 @@ func (e *wtEnv) script(kind agent.Kind, sh string) {
 	e.scripts[kind] = append(e.scripts[kind], sh)
 }
 
-func (e *wtEnv) command(kind agent.Kind, _ string) []string {
+func (e *wtEnv) command(kind agent.Kind, dir string) []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.starts[kind]++
+	if e.byTask != nil && (kind == agent.TaskAgent || kind == agent.CommitAgent) {
+		// The runner writes .orch/context.yaml into the agent's working
+		// directory (the task's worktree, or the shared workspace for the
+		// commit agent) before it builds the command.
+		var ctx setup.Context
+		raw, err := os.ReadFile(filepath.Join(dir, ".orch", "context.yaml"))
+		if err == nil {
+			err = yaml.Unmarshal(raw, &ctx)
+		}
+		if err != nil || ctx.TaskName == "" {
+			e.t.Errorf("%s agent in %s: no task name in its context file: %v", kind, dir, err)
+			return []string{"false"}
+		}
+		return []string{"sh", "-ec", e.byTask(kind, ctx.TaskName)}
+	}
 	q := e.scripts[kind]
 	if len(q) == 0 {
 		return []string{"true"}
@@ -116,7 +140,7 @@ func (e *wtEnv) start() *Daemon {
 		Audit:      a,
 		Command:    e.command,
 	}
-	d, err := newDaemon(e.t, []string{e.root}, a, WithRunner(r))
+	d, err := newDaemon(e.t, []string{e.root}, a, append([]Option{WithRunner(r)}, e.opts...)...)
 	if err != nil {
 		e.t.Fatalf("New: %v", err)
 	}
@@ -138,11 +162,12 @@ func (e *wtEnv) saveProject() string {
 		repos = append(repos, project.Repo{Org: "docker", Name: r})
 	}
 	if err := project.SaveAs(path, &project.Project{
-		Description: "worktree test",
-		Branch:      wtBranch,
-		Status:      project.StatusWorking,
-		Repos:       repos,
-		Verify:      e.verify,
+		Description:      "worktree test",
+		Branch:           wtBranch,
+		Status:           project.StatusWorking,
+		Repos:            repos,
+		Verify:           e.verify,
+		MaxParallelTasks: e.limit,
 	}, project.WriterAgent); err != nil {
 		e.t.Fatalf("SaveAs: %v", err)
 	}

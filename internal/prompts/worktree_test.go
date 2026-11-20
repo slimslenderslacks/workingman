@@ -243,3 +243,42 @@ func TestRenderWolfSharedBranchCheckUsesSnapshot(t *testing.T) {
 		t.Errorf("wolf prompt without a snapshot should use the task files:\n%s", plain)
 	}
 }
+
+// The wolf is told which tasks are still in flight, which one is integrating,
+// and that a block neither stops them nor an integration already running
+// (docs/parallel-task-worktrees.md X3). With nothing in flight the list is
+// left out.
+func TestRenderWolfInFlightTasks(t *testing.T) {
+	base := Data{Workspace: "/orch/p", ProjectPath: "/orch/p/project.yaml", Branch: "feat/x"}
+	withTasks := base
+	withTasks.InFlightTasks = []InFlightTask{
+		{Name: "api", Status: "running"},
+		{Name: "docs", Status: "success", QueuePosition: 1, Integrating: true},
+		{Name: "ui", Status: "success", QueuePosition: 2},
+	}
+	out, err := Render(agent.WolfAgent, withTasks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"still in flight when you were launched",
+		"  - api: running\n",
+		"  - docs: integrating now\n",
+		"  - ui: queued for integration (#2)\n",
+		"Do not edit these tasks",
+		"except for an integration that was already running",
+		"appended to `blocked_reason`",
+		"the commit agent was integrating task `docs`",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wolf prompt missing %q:\n%s", want, out)
+		}
+	}
+	plain, err := Render(agent.WolfAgent, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "still in flight when you were launched") || strings.Contains(plain, "was integrating task") {
+		t.Errorf("wolf prompt with nothing in flight should not list tasks:\n%s", plain)
+	}
+}

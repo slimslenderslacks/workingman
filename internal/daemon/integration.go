@@ -64,8 +64,10 @@ func (il *integrationLaunch) fastPath(t *task.Task) bool {
 
 // prepareIntegration is the host-side step before every commit agent launch
 // for a worktree task (X7 part 4). It makes an interrupted integration safe to
-// run again from the top: a stale index.lock (no session can hold it; the main
-// slot is free) is removed, and a rebase left in progress in the task worktree
+// run again from the top: a stale index.lock (no session can hold it: the
+// commit slot is free, and launches of the project's task agents, which run
+// git in the same repositories, are serialized with it by worktreeLock) is
+// removed, and a rebase left in progress in the task worktree
 // is aborted, which restores the branch's pre-rebase tip. A dirty shared tree
 // is not touched: it may hold a human's edits, so the caller blocks on the
 // returned error. It returns each repo's shared tip.
@@ -173,7 +175,10 @@ func isDocPath(p string) bool {
 //   - otherwise (failed with result error or no report, still success, or a
 //     commit agent that could not start): transient. Relaunch the commit
 //     agent only, up to maxIntegrationAttempts, then block.
-func (d *Daemon) routeIntegrationFailure(projectPath string, p *project.Project, t *task.Task, startFailure string, il *integrationLaunch) {
+//
+// done releases the commit reservation; a conflict re-run calls it before its
+// scheduling pass, so the next queued task integrates straight away.
+func (d *Daemon) routeIntegrationFailure(projectPath string, p *project.Project, t *task.Task, startFailure string, il *integrationLaunch, done func()) {
 	result := ""
 	if t.Integration != nil {
 		result = t.Integration.Result
@@ -189,7 +194,7 @@ func (d *Daemon) routeIntegrationFailure(projectPath string, p *project.Project,
 			d.audit.Log("integration_verify_check_failed", "path", projectPath, "task", t.Name,
 				"repo", t.Integration.Repo, "onto", formatCommits(t.Integration.Onto), "attempts", strconv.Itoa(t.Attempts))
 		}
-		d.conflictReRun(projectPath, p, t)
+		d.conflictReRun(projectPath, p, t, done)
 	case t.Status == task.StatusFailed && result == integrationPartial:
 		d.audit.Log("integration_partial", "path", projectPath, "task", t.Name,
 			"published", strings.Join(t.Integration.Published, ","), "repo", t.Integration.Repo)
@@ -246,6 +251,12 @@ func (d *Daemon) retryIntegration(projectPath string, p *project.Project, t *tas
 	}
 	d.audit.Log("integration_retry", "path", projectPath, "task", t.Name,
 		"integration_attempts", strconv.Itoa(attempts), "err", why)
+	if d.deferForPower(projectPath) {
+		// On battery nothing new starts (S6). The task stays at the head of
+		// the queue, and the resume pass relaunches its commit agent.
+		d.audit.Log("power_deferred", "path", projectPath)
+		return
+	}
 	cur, err := task.Load(t.Path)
 	if err != nil {
 		d.transitionProjectBlocked(projectPath, p, "task load error: "+err.Error())
@@ -255,13 +266,28 @@ func (d *Daemon) retryIntegration(projectPath string, p *project.Project, t *tas
 }
 
 // conflictReRun handles a rebase conflict or a failed build check (I4): the
-// task re-runs in its worktree, which the commit agent's abort left at the
+// task leaves the commit queue and re-runs in its worktree, which the commit agent's abort left at the
 // pre-rebase tip, fully committed. The re-run's prompt (the integration block,
 // kept for it) tells the agent to rebase onto the shared branch and resolve
 // what is named. It costs an attempt, like any retry; once they are spent the
 // project blocks with a reason naming the tasks that landed in between (I6),
 // and the worktree is kept.
-func (d *Daemon) conflictReRun(projectPath string, p *project.Project, t *task.Task) {
+func (d *Daemon) conflictReRun(projectPath string, p *project.Project, t *task.Task, done func()) {
+	if !d.requeueConflict(projectPath, p, t) {
+		return
+	}
+	// The re-run competes for a task slot like any ready task (S5), first in
+	// line for the one it held; the next queued task integrates meanwhile.
+	if done != nil {
+		done()
+	}
+	d.schedulePass(projectPath, p, passOpts{prefer: t.Name})
+}
+
+// requeueConflict is conflictReRun without the scheduling pass: it moves the
+// task back to ready for its re-run and reports true, or blocks the project
+// and reports false.
+func (d *Daemon) requeueConflict(projectPath string, p *project.Project, t *task.Task) bool {
 	in := t.Integration
 	landed := d.landedSince(projectPath, p, t)
 	cause := "conflict"
@@ -287,7 +313,7 @@ func (d *Daemon) conflictReRun(projectPath string, p *project.Project, t *task.T
 		d.audit.Log("task_retry_exhausted", "path", projectPath, "task", t.Name, "attempts", strconv.Itoa(t.Attempts), "cause", cause)
 		d.retainSandbox(t.Path, t)
 		d.transitionProjectBlocked(projectPath, p, conflictBlockReason(p, t, landed))
-		return
+		return false
 	}
 
 	var updated *task.Task
@@ -306,10 +332,10 @@ func (d *Daemon) conflictReRun(projectPath string, p *project.Project, t *task.T
 	}); err != nil {
 		d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
 		d.transitionProjectBlocked(projectPath, p, "task save error: "+err.Error())
-		return
+		return false
 	}
 	d.audit.Log("task_retry", "path", projectPath, "task", updated.Name, "attempts", strconv.Itoa(updated.Attempts), "cause", cause)
-	d.launchTaskAgent(projectPath, p, updated)
+	return true
 }
 
 // conflictBlockReason is the I6 blocked_reason for a task whose conflict

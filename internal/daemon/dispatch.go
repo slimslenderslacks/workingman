@@ -50,7 +50,8 @@ func (d *Daemon) handle(ev fsnotify.Event) {
 //   - empty file       → project agent
 //   - cleanup: true    → archive agent (checked ahead of the status routing)
 //   - status: ready    → planning agent
-//   - status: working  → dispatch first ready task
+//   - status: working  → a scheduling pass (schedule): integrate the commit
+//     queue's head, fill the free task slots
 //   - status: blocked  → wolf agent
 //   - status: idle     → pending tasks if any, else (re-)arm the PR watch if
 //     the project is still watching one (Project.WatchingPR)
@@ -201,6 +202,10 @@ func (d *Daemon) dispatchProject(path string, p *project.Project) {
 	// afterArchiveSession, which revisits the project once the request flag has
 	// been cleared.
 	if p.Cleanup {
+		// Drain, then archive (docs/parallel-task-worktrees.md X6): the pass
+		// admits no task while the flag is set but still starts the commit
+		// queue's head, and the archive agent waits until nothing is in flight.
+		d.schedule(path, p)
 		d.launchArchiveAgent(path, p)
 		return
 	}
@@ -319,7 +324,7 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 	if d.runner == nil {
 		return
 	}
-	if d.hasSession(projectPath) {
+	if d.projectBusy(projectPath) {
 		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", kind.String())
 		return
 	}
@@ -374,19 +379,21 @@ func (d *Daemon) launchProjectRootAgent(projectPath string, kind agent.Kind, p *
 // that window is not lost: afterPlanningSession re-checks intake/ and the
 // follow-up run picks it up.
 //
-// Planning only shares the project with a task or commit agent in the main
-// slot (runsAlongsidePlanning). It still waits for a project agent (still
-// populating the file planning reads; its session end dispatches planning) or
-// a review agent (it writes project.yaml status and task files in the same
-// control dir; afterReviewSession re-dispatches if intake is pending), and a
-// cron re-plan always waits, since it may rewrite or delete existing tasks —
-// which must not happen under a live task agent.
+// Planning only shares the project with task and commit agents (their
+// #task:* and #commit slots, runsAlongsidePlanning). It still waits for a
+// project agent (still populating the file planning reads; its session end
+// dispatches planning) or a review agent (it writes project.yaml status and
+// task files in the same control dir; afterReviewSession re-dispatches if
+// intake is pending), both in the bare slot. A cron re-plan waits for every
+// task and commit slot and for an integration still holding the commit
+// reservation (X2), since it may rewrite or delete existing tasks — which
+// must not happen under a live task agent or an integration.
 func (d *Daemon) launchPlanningAgent(projectPath string, p *project.Project) {
 	if d.runner == nil {
 		return
 	}
-	if kind, busy := d.sessionKind(projectPath); busy && (!runsAlongsidePlanning(kind) || p.Replan) {
-		d.audit.Log("planning_wait_main_slot", "path", projectPath, "holder", kind.String(), "replan", fmt.Sprintf("%t", p.Replan))
+	if holder, busy := d.planningBlocker(projectPath, p.Replan); busy {
+		d.audit.Log("planning_wait_main_slot", "path", projectPath, "holder", holder, "replan", fmt.Sprintf("%t", p.Replan))
 		return
 	}
 	root := filepath.Dir(projectPath)
@@ -631,12 +638,27 @@ func planningSessionKey(projectPath string) string {
 	return projectPath + planningKeyMarker
 }
 
-// runsAlongsidePlanning reports whether a main-slot agent of kind may keep
-// running while a planner works on the same project: task and commit agents
-// work in the wsp workspace, not the control dir, and only ever touch their own
-// task file there, which the planner is told to leave alone.
-func runsAlongsidePlanning(kind agent.Kind) bool {
-	return kind == agent.TaskAgent || kind == agent.CommitAgent
+// planningBlocker reports what keeps a planner from starting beside the
+// project's other agents, if anything: the agent kind in the bare slot (a
+// project or review agent), or, for a re-plan, any task or commit session or
+// an integration still reserved.
+func (d *Daemon) planningBlocker(projectPath string, replan bool) (string, bool) {
+	d.sessionsMu.Lock()
+	for key, e := range d.sessions {
+		path, marker := splitSessionKey(key)
+		if path != projectPath {
+			continue
+		}
+		if marker == "" || (replan && runsAlongsidePlanning(marker)) {
+			d.sessionsMu.Unlock()
+			return e.kind.String(), true
+		}
+	}
+	d.sessionsMu.Unlock()
+	if replan && d.projectBusy(projectPath) {
+		return agent.CommitAgent.String(), true
+	}
+	return "", false
 }
 
 // beginPlanning reserves projectPath's planning slot, recording offered as the
@@ -1102,65 +1124,28 @@ func workspaceReposFor(p *project.Project) []workspace.Repo {
 	return out
 }
 
-// dispatchNextTask loads the task graph for projectPath and decides what to
-// run next. This is the single recovery point called from every angle —
-// status=working observation, startup_scan, cron firings — so it must be
-// idempotent and infer state purely from disk.
-//
-// Order of operations:
-//  1. All committed → transition to done.
-//  2. Any task stuck at status:success → resume its commit agent. This is
-//     the recovery for an interrupted task→commit handoff (daemon restart
-//     between task end and commit start, or a wolf-cycle that bypassed the
-//     normal afterTaskSession path).
-//  3. Any task in Ready() → launch task agent for the first.
-//  4. Nothing to do → log no_ready_tasks with the total count.
+// dispatchNextTask is the status:working routing's scheduling pass. It is
+// the recovery point called from every angle — the working observation, the
+// startup scan, cron firings — so it infers everything from disk: a fully
+// committed graph completes the project, the commit queue's head integrates,
+// and free task slots are filled (see schedule).
 func (d *Daemon) dispatchNextTask(projectPath string, p *project.Project) {
-	g, ok := d.loadTaskGraph(projectPath, p)
-	if !ok {
-		return
-	}
-	if g.AllCommitted() {
-		if d.deferToPlanner(projectPath, "complete") {
-			return
-		}
-		d.transitionProjectComplete(projectPath, p)
-		return
-	}
-	if !d.dispatchReadyOrPending(projectPath, p, g) {
-		d.audit.Log("no_ready_tasks",
-			"path", projectPath,
-			"total", fmt.Sprintf("%d", len(g.Tasks())),
-		)
-	}
+	d.schedule(projectPath, p)
 }
 
-// dispatchPendingTasks runs whatever uncommitted task work a project holds
-// WITHOUT touching its status — the counterpart to dispatchNextTask for the
-// statuses that are not `working`. A `reviewing` project has an open PR but can
-// still carry manual tasks a human queued alongside the PR watch, and a `done`
-// project can have work appended to it after the fact; either way those tasks
-// must run. It returns true when it dispatched an agent (a commit agent for a
-// finished-but-uncommitted task, or a task/commit agent for the first ready
-// task) and false when the graph has nothing to run — fully committed, empty, or
-// only failed/blocked tasks.
+// dispatchPendingTasks runs whatever uncommitted task work a resting project
+// holds WITHOUT touching its status — the counterpart to dispatchNextTask for
+// an `idle` project, which can still carry manual tasks a human queued
+// alongside the PR watch, or work appended after the fact. It returns true
+// when the pass handled the project (started an agent, or blocked it on a
+// broken graph) and false when there was nothing to start, so the caller goes
+// on with its PR-watch routing.
 //
-// Unlike dispatchNextTask it never transitions a fully-committed graph to
-// complete: re-running the completion transition on a `reviewing` project would
-// churn it, and on a `done` project with repos would wrongly re-open the PR
-// watch. The caller's status is preserved so the PR keeps being watched and a
-// done project stays done when there is no pending work to pick up.
+// Unlike dispatchNextTask it never completes a fully-committed graph:
+// re-running the completion transition on an idle project would churn it and
+// could wrongly re-open the PR watch. It never blocks a stuck graph either.
 func (d *Daemon) dispatchPendingTasks(projectPath string, p *project.Project) bool {
-	g, ok := d.loadTaskGraph(projectPath, p)
-	if !ok {
-		// A structural graph error blocked the project; report handled so the
-		// caller drops its normal (reviewing/done) routing for this observation.
-		return true
-	}
-	if g.AllCommitted() {
-		return false
-	}
-	return d.dispatchReadyOrPending(projectPath, p, g)
+	return d.schedule(projectPath, p)
 }
 
 // hasPendingSeed reports whether projectPath's tasks dir holds a pending
@@ -1221,53 +1206,15 @@ func (d *Daemon) deferToPlanner(projectPath, decision string) bool {
 	return true
 }
 
-// dispatchReadyOrPending launches the next agent for a graph that is NOT fully
-// committed: a commit agent for a task whose agent finished but hasn't committed
-// (the interrupted task→commit recovery), otherwise the first ready task (a push
-// task goes straight to the commit agent, every other task to a task agent — see
-// dispatchReadyTask). It returns false when the graph has no dispatchable work —
-// nothing awaiting commit and nothing ready — which each caller interprets for
-// its own status.
-func (d *Daemon) dispatchReadyOrPending(projectPath string, p *project.Project, g *taskgraph.Graph) bool {
-	if t := firstUncommittedSuccess(g); t != nil {
-		d.audit.Log("resume_pending_commit", "task", t.Name)
-		d.launchCommitAgent(projectPath, p, t)
-		return true
-	}
-	ready := g.Ready()
-	if len(ready) == 0 {
-		return false
-	}
-	d.dispatchReadyTask(projectPath, p, ready[0])
-	return true
-}
-
-// firstUncommittedSuccess returns the first task in deterministic order
-// whose status is success — i.e. the task agent finished but the commit
-// agent has not yet committed. nil if no such task exists.
-func firstUncommittedSuccess(g *taskgraph.Graph) *task.Task {
-	for _, t := range g.Tasks() {
-		if t.Status == task.StatusSuccess {
-			return t
-		}
-	}
-	return nil
-}
-
-// launchTaskAgent dispatches the first ready task to a task agent, marking it
-// running on disk first (markTaskRunning). When worktrees are enabled the
-// agent runs in the task's own worktree (prepareTaskWorktree), otherwise in
-// the shared workspace. On session end the daemon re-reads the task file and,
-// if the agent wrote status:success, launches the commit agent for the same
-// task.
+// launchTaskAgent starts the task agent for a task schedule admitted: the
+// pass has already marked it running on disk and taken its global token, and
+// listed it as admitting until this launch is done. When worktrees are
+// enabled the agent runs in the task's own worktree (prepareTaskWorktree),
+// otherwise in the shared workspace. It is tracked in its own #task:<name>
+// slot; on session end afterTaskSession re-reads the task file and routes the
+// outcome.
 func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task.Task) {
-	if d.runner == nil {
-		return
-	}
-	if d.hasSession(projectPath) {
-		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.TaskAgent.String())
-		return
-	}
+	defer d.endAdmitting(projectPath, t.Name)
 	root := filepath.Dir(projectPath)
 	plan := runner.Plan{
 		Kind: agent.TaskAgent,
@@ -1287,34 +1234,44 @@ func (d *Daemon) launchTaskAgent(projectPath string, p *project.Project, t *task
 		Model:       t.Model,
 		Harness:     t.Harness,
 	}
-	// Persist ready → running before the (possibly slow) launch, so the task
-	// file — and the TUI — say running while the workspace is provisioned and
-	// the agent works, and a concurrent dispatch's Ready() can't pick it again.
-	marked := d.markTaskRunning(t)
+	key := taskSessionKey(projectPath, t.Name)
+	release := func(why string) {
+		d.releaseRunningTask(plan.TaskPath, why)
+		d.releaseToken(plan.TaskPath)
+	}
+	if d.hasSession(key) {
+		// Its token is the live session's (tokens are per task), which gives
+		// it back when it ends.
+		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.TaskAgent.String(), "task", t.Name)
+		return
+	}
 	// Cut (or reuse) the task's own worktree and point the plan at it
 	// (docs/parallel-task-worktrees.md W4). A failure is a failed launch: the
 	// task goes back to ready and the project blocks for the wolf.
-	if err := d.prepareTaskWorktree(projectPath, p, t, &plan); err != nil {
+	wtMu := d.worktreeLock(projectPath)
+	wtMu.Lock()
+	err := d.prepareTaskWorktree(projectPath, p, t, &plan)
+	wtMu.Unlock()
+	if err != nil {
 		repo := ""
 		var wce *worktreeCreateError
 		if errors.As(err, &wce) {
 			repo = wce.repo
 		}
 		d.audit.Log("worktree_create_error", "path", projectPath, "task", t.Name, "repo", repo, "err", err.Error())
-		if marked {
-			d.releaseRunningTask(plan.TaskPath, "worktree_failed")
-		}
+		release("worktree_failed")
 		d.transitionProjectBlocked(projectPath, p,
 			fmt.Sprintf("could not prepare the worktree for task %q: %v", t.Name, err))
 		return
 	}
-	tracked, err := d.startSessionTracked(projectPath, plan, func(error) {
+	tracked, err := d.startSessionTracked(key, plan, func(error) {
 		d.afterTaskSession(projectPath, plan.TaskPath, p)
+		d.resumeDrainedCleanup(projectPath)
 	})
 	// No agent of ours is working the task (the launch failed, or a racing
-	// session for something else claimed the slot): undo the running write.
-	if marked && (err != nil || (!tracked && !d.taskSessionLive(projectPath, t.Name))) {
-		d.releaseRunningTask(plan.TaskPath, "launch_failed")
+	// session claimed its slot): undo the running write and the token.
+	if err != nil || (!tracked && !d.taskSessionLive(projectPath, t.Name)) {
+		release("launch_failed")
 	}
 	if err != nil {
 		d.transitionProjectBlocked(projectPath, p,

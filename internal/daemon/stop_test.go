@@ -15,6 +15,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/scheduler"
 	"github.com/slimslenderslacks/work/internal/task"
 	"github.com/slimslenderslacks/work/internal/workspace"
+	"github.com/slimslenderslacks/work/internal/worktree"
 )
 
 // TestDispatchStoppedUnregistersSchedules pins the routing-level half of
@@ -150,7 +151,7 @@ func TestStoppedGuardsSkipCommitSessionEnd(t *testing.T) {
 	}
 
 	stale := &project.Project{Description: "x", Branch: "b", Status: project.StatusWorking}
-	d.afterCommitSession(projectPath, taskPath, stale, "", nil)
+	d.afterCommitSession(projectPath, taskPath, stale, "", nil, nil)
 
 	if !strings.Contains(buf.String(), "session_end_skipped_stopped") {
 		t.Errorf("expected session_end_skipped_stopped in audit:\n%s", buf.String())
@@ -274,5 +275,66 @@ func TestStopKillsRunningTaskSession(t *testing.T) {
 	}
 	if got.Status != project.StatusStopped {
 		t.Errorf("status = %q, want stopped left untouched", got.Status)
+	}
+}
+
+// TestStopKillsParallelSlotsAndStartResumes is X4 with tasks in parallel:
+// `:stop` kills both task agents and the commit agent, each session end
+// releases what it held (the task to ready, its global token, the commit
+// reservation), and `:start` resumes the commit queue from its head and
+// re-dispatches the released tasks into their existing worktrees, dirty ones
+// included, without spending an attempt.
+func TestStopKillsParallelSlotsAndStartResumes(t *testing.T) {
+	e := newSchedEnv(t, 3, WithMaxParallelTasks(5))
+	for _, n := range []string{"a", "b", "c"} {
+		e.addTask(n, []string{"gateway/" + n + "/**"})
+	}
+	e.pass()
+	e.finishTask("a", task.StatusSuccess)
+	e.eventually("a integrating", func() bool { return e.integrating() == "a" })
+	// b's agent leaves an uncommitted edit behind when it is killed.
+	if err := os.WriteFile(filepath.Join(worktree.Path(e.shared, "b", "gateway"), "wip.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, _ := project.Load(e.projectPath)
+	stopped := *p
+	stopped.Status, stopped.StoppedFrom = project.StatusStopped, project.StatusWorking
+	if err := project.Save(e.projectPath, &stopped); err != nil {
+		t.Fatal(err)
+	}
+	e.d.dispatchProject(e.projectPath, &stopped)
+	e.eventually("every session ended", func() bool { return len(e.d.ListSessions()) == 0 })
+	e.eventually("reservations released", func() bool {
+		return e.d.tokensInUse() == 0 && !e.d.commitReserved(e.projectPath)
+	})
+	for _, n := range []string{"b", "c"} {
+		if tk := e.task(n); tk.Status != task.StatusReady || tk.Attempts != 0 {
+			t.Errorf("%s = %s attempts %d, want ready/0", n, tk.Status, tk.Attempts)
+		}
+	}
+	if tk := e.task("a"); tk.Status != task.StatusSuccess {
+		t.Errorf("a = %s, want success (still queued)", tk.Status)
+	}
+
+	started := *p
+	started.Status, started.StoppedFrom = project.StatusWorking, ""
+	if err := project.Save(e.projectPath, &started); err != nil {
+		t.Fatal(err)
+	}
+	e.buf.Reset()
+	e.pass()
+	if got := e.integrating(); got != "a" {
+		t.Errorf("integrating = %q after :start, want the queue head a", got)
+	}
+	if got := e.running(); !eqStrings(got, "b", "c") {
+		t.Fatalf("running = %v after :start, want b and c", got)
+	}
+	audit := e.buf.String()
+	if !strings.Contains(audit, "task=b worktree="+worktree.Root(e.shared, "b")+" attempt=0 dirty=true") {
+		t.Errorf("b not re-dispatched into its dirty worktree:\n%s", audit)
+	}
+	if strings.Contains(audit, "worktree_created") {
+		t.Errorf("a released task got a fresh worktree:\n%s", audit)
 	}
 }

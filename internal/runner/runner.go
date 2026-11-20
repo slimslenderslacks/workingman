@@ -87,6 +87,9 @@ type Plan struct {
 	TaskPath    string
 	TaskName    string
 	FailedTasks []string
+	// InFlightTasks is the wolf's list of tasks still in flight (X3); see
+	// prompts.Data.InFlightTasks.
+	InFlightTasks []prompts.InFlightTask
 
 	// StaticMCPs are the MCP server names this agent's sandbox should be able
 	// to reach. Forwarded by the daemon from the task's static_mcps field for
@@ -707,6 +710,7 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		TaskName:                p.TaskName,
 		FailedTasks:             p.FailedTasks,
 		BlockedReason:           p.BlockedReason,
+		InFlightTasks:           p.InFlightTasks,
 		BlockedSessionPath:      p.BlockedSessionPath,
 		BlockedSessionSummary:   p.BlockedSessionSummary,
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
@@ -746,6 +750,7 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		TaskName:                p.TaskName,
 		FailedTasks:             p.FailedTasks,
 		BlockedReason:           p.BlockedReason,
+		InFlightTasks:           setupInFlight(p.InFlightTasks),
 		BlockedSessionPath:      p.BlockedSessionPath,
 		BlockedSessionSummary:   p.BlockedSessionSummary,
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
@@ -1790,6 +1795,17 @@ func promptIntegration(in *task.Integration) *prompts.IntegrationReport {
 		Output: in.Output,
 		Landed: in.Landed,
 	}
+}
+
+func setupInFlight(in []prompts.InFlightTask) []setup.InFlightTask {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]setup.InFlightTask, len(in))
+	for i, t := range in {
+		out[i] = setup.InFlightTask{Name: t.Name, Status: t.Status, QueuePosition: t.QueuePosition, Integrating: t.Integrating}
+	}
+	return out
 }
 
 func setupCommits(in []task.Commit) []setup.Commit {

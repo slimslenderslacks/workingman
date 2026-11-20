@@ -257,6 +257,9 @@ type ProjectLive struct {
 	ReviewPoll *ReviewPollInfo `json:"review_poll,omitempty"`
 	// CronSchedule is the cron spec registered with the scheduler, if any.
 	CronSchedule string `json:"cron_schedule,omitempty"`
+	// Deferred says why ready tasks were not started on the project's last
+	// scheduling pass; absent when nothing was held back.
+	Deferred *DeferredInfo `json:"deferred,omitempty"`
 }
 
 // ReviewPollInfo is the state of a project's #review poll.

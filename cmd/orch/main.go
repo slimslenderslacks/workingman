@@ -123,6 +123,7 @@ func runDaemon(args []string) {
 	workingmanMCPDynamic := fs.Bool("workingman-agent-mcp-dynamic", os.Getenv("WORKINGMAN_AGENT_MCP_DYNAMIC") != "0", "give the workingman agent a dynamic gateway: --mcp-gateway-servers plus mcp-find and mcp-add over the whole catalog, so it can attach servers such as Slack mid-session (default true; false when $WORKINGMAN_AGENT_MCP_DYNAMIC=0). --mcp-gateway-static overrides it")
 	mcpGatewayServers := fs.String("mcp-gateway-servers", os.Getenv("WORKINGMAN_MCP_GATEWAY_SERVERS"), "comma-separated catalog server names requested for a sandbox's gateway when its task has no static_mcps (default $WORKINGMAN_MCP_GATEWAY_SERVERS). Empty means such sandboxes get no gateway")
 	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
+	maxParallelTasks := fs.Int("max-parallel-tasks", 0, "cap on task agents running at once across all projects (each is a sandbox plus a model session); a project still runs at most its own max_parallel_tasks. Commit, planning, review and wolf agents do not count. 0 means no cap")
 	requireAC := fs.Bool("require-ac", false, "pause dispatching new work and cron firings while the laptop is on battery (macOS, via pmset), resuming on AC; skipped cron ticks are recorded as missed. No-op off macOS. `orch service install` turns it on")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -251,6 +252,7 @@ func runDaemon(args []string) {
 		daemon.WithRunner(r),
 		daemon.WithScheduler(scheduler.New()),
 		daemon.WithCronState(filepath.Join(stateDir, "cron_state.json")),
+		daemon.WithMaxParallelTasks(*maxParallelTasks),
 	}
 	if *requireAC {
 		dopts = append(dopts, daemon.WithPowerSource(power.New(), 0))

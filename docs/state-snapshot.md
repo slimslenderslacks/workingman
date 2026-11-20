@@ -163,6 +163,7 @@ Optional fields are omitted when empty.
 | `review_fix_cycles`, `review_errors` | consecutive review fix cycles (cap 10) / review-agent crashes (cap 5) |
 | `review_poll` | `{schedule, backoff_index, has_baseline, baseline_source}` when a PR poll is armed. `backoff_index` is the rung on the 2m→4m→8m→16m→32m→1h ladder (0 = fastest): it steps up on every tick that shows no change — quiet ticks, and "unverified" ticks where the MCP fingerprint was unavailable (those still run the review agent) — and resets to 0 on a detected change or a `:review` kick. `has_baseline` is true once a fingerprint baseline exists (recorded after a clean reconcile, or seeded from the agent-recorded fingerprint in `project.yaml` after a restart); `baseline_source` is `mcp` (daemon GitHub MCP probe) or `agent` (agent-recorded fallback), omitted without a baseline |
 | `cron_schedule` | cron spec registered with the scheduler |
+| `deferred` | `{overlap, cap, power}`: why ready tasks were not started on the project's last scheduling pass. `overlap` names ready tasks held back because their hints overlap a task in flight, `cap` is true while the project waits for a global task token (`--max-parallel-tasks`), `power` while it waits for AC power. Absent when nothing is held back |
 
 ### `sessions[]`
 
@@ -183,19 +184,21 @@ Optional fields are omitted when empty.
 
 | key | agent |
 |---|---|
-| `<path>` | the project's main slot: the project, task, commit and review agents |
-| `<path>#planning` | the planning agent, which runs outside the main slot so intake can be planned while a task or commit agent works |
+| `<path>` | the project's main slot: the project and review agents |
+| `<path>#task:<name>` | the task agent working task `<name>`; one per task in flight |
+| `<path>#commit` | the commit agent (the head of the project's commit queue) |
+| `<path>#planning` | the planning agent, which runs outside the main slot so intake can be planned while task or commit agents work |
 | `<path>#wolf` | the wolf |
 | `<path>#archive` | the archive (cleanup) agent |
 | `workingman-agent` | the workingman agent (no project) |
 | `sleepy-head` | the sleepy-head agent (no project) |
 
-`<path>` is the absolute `project.yaml` path. When a project runs several
-tasks at once (`docs/parallel-task-worktrees.md` S2), task and commit agents
-move to `<path>#task:<name>` and `<path>#commit`. A reader looking for a
-project's sessions should match `project_path`, or `<path>` as a prefix of
-`key`, rather than the exact `key`. Task names never contain `#`, so the
-marker is always what follows the last `#`.
+`<path>` is the absolute `project.yaml` path. Task and commit agents have
+slots of their own (`docs/parallel-task-worktrees.md` S2), so a project can
+run several tasks at once. A reader looking for a project's sessions should
+match `project_path`, or `<path>` as a prefix of `key`, rather than the exact
+`key`. Task names never contain `#`, so the marker is always what follows the
+last `#` (`task:<name>` for a task agent).
 
 ### `audit_events[]`
 

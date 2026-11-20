@@ -178,8 +178,8 @@ below](#intake-requests-and-task-seeds) for the full contract.
 
 The planning agent is launched by `launchPlanningAgent` and tracked under a
 session key of its own, `planningSessionKey = projectPath + "#planning"`, not
-the project's main slot (the bare project path task/commit/project/review
-agents share). Two in-memory guards on `planningMu` go with it:
+the project's main slot (the bare project path the project and review agents
+share; task agents have `#task:<name>` slots and the commit agent `#commit`). Two in-memory guards on `planningMu` go with it:
 
 - `planningBusy` — the **one-planner-per-project** reservation. `beginPlanning`
   takes it *before* `runner.Start` (worktree provisioning can block for
@@ -196,8 +196,9 @@ The separate slot is what lets planning run while tasks are in flight (see
 [intake while working](#intake-while-the-project-is-working)). Planning still
 waits for the main slot when it is held by a **project** agent (still
 populating the file) or a **review** agent (writes the same control dir), and
-a **cron re-plan** (`replan: true`) always waits for it to be empty — a re-plan
-may delete or rewrite tasks, which must not happen under a live task agent.
+a **cron re-plan** (`replan: true`) always waits for every task and commit
+slot, and the commit reservation, to be free — a re-plan may delete or rewrite
+tasks, which must not happen under a live task agent or an integration.
 Those waits log `planning_wait_main_slot`; the holder's own session end
 re-dispatches the project.
 
@@ -634,16 +635,21 @@ whose `status == ready` **and** every dependency (`depends_on`) is
 `committed`; a task already running or finished is never re-included
 regardless of its dependency state.
 
-`dispatchReadyOrPending` (`internal/daemon/dispatch.go`) picks the first
-`Ready()` task (deterministic name order) and hands it to
-`dispatchReadyTask`, which special-cases **push tasks**
-(`task.IsPushTask()`, `Source.Kind == "pr-push"`): a push task carries no code
-work of its own — it exists only to publish the commit-only fix commits a
-batch of review-agent tasks left in the worktree — so it is routed straight
-to the **commit agent** in push mode, skipping the (work-less) task-agent
-phase entirely. Every other ready task goes to `launchTaskAgent`, which
-starts a task agent in a fresh (or existing, if `SaveSandbox` shared it)
-workspace.
+A scheduling pass, `schedule` (`internal/daemon/schedule.go`), decides what
+starts. First the **commit queue** (`taskgraph.Queued`: tasks at `success`,
+FIFO by `succeeded_at`) gets its head integrated, unless an integration is
+already in flight for the project. **Push tasks** (`task.IsPushTask()`,
+`Source.Kind == "pr-push"`) carry no code work of their own — they exist only
+to publish the commit-only fix commits a batch of review-agent tasks
+integrated — so a ready push task with its dependencies committed joins that
+queue directly and runs on the **commit agent** in push mode, skipping the
+task-agent phase. Then `Graph.Runnable` admits ready tasks, in name order, up
+to the project's `max_parallel_tasks` (default 1) minus the tasks in flight
+(`running` or `success`), within the daemon's global `--max-parallel-tasks`,
+and never two whose independence hints overlap (a task with no hints overlaps
+everything). Each goes to `launchTaskAgent`, which starts a task agent in the
+task's own worktree, in a session slot of its own. With the default limit of
+1 this is the old one-task-at-a-time pipeline.
 
 **The daemon writes `status: running` itself**, at dispatch
 (`markTaskRunning`, `internal/daemon/dispatch_lifecycle.go`), before the agent
