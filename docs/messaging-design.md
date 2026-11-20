@@ -1,8 +1,9 @@
 # Agent messaging: design and implementation plan
 
-**Status: draft for human review.** Nothing here is implemented yet. Approve
-or edit this document, then queue the tasks in
-[§9](#9-implementation-task-breakdown) through intake.
+**Status: approved 2026-11-20**, with the operator's decisions recorded in
+[§10.3](#103-decisions) and applied to the sections below. Nothing here is
+implemented yet; the tasks in [§9](#9-implementation-task-breakdown) are
+queued.
 
 This document turns the project brief and three research notes into one plan:
 
@@ -929,6 +930,11 @@ changes how useful Slack is.
 6. **Personal setup:** `mcp-servers-personal.json` has no Slack entry. Is the
    Slack channel needed outside the work setup?
 
+**Decided (§10.3):** accept no push notification for now (Q1); use the
+DM-to-self (Q2); keep serialized calls, with gateway fixes left as follow-ups
+(Q3, Q4); start polling at 20 s (Q5); Slack is **work setup only**, so
+`mcp-servers-personal.json` gets no Slack entry (Q6).
+
 ## 7. TUI inbox
 
 ### 7.1 Feed
@@ -1102,7 +1108,7 @@ version: 1
 id: op_01JD…                # Step-Up chooses; must be unique
 op: sandbox_network_allow   # see the table below
 for_request: msg_A          # the post-office request from the agent being helped (required)
-approval: msg_B             # the operator-approval request (required unless auto-approved)
+approval: msg_B             # the operator-approval request (required for every allow)
 args:
   resource: proxy.golang.org
 reason: "go mod download for task fix-ci"
@@ -1121,13 +1127,16 @@ at: 2026-11-20T10:45:00Z
 
 | `op` | Effect | Approval |
 |---|---|---|
-| `sandbox_network_allow` | `sbx policy allow network --sandbox <target> <resource>` on the live sandbox, **and** appends the rule to the target task's `policies:` so a recreated sandbox keeps it. | Operator approval, unless `resource` matches the auto-approve list (§8.5). |
+| `sandbox_network_allow` | `sbx policy allow network --sandbox <target> <resource>` on the live sandbox, **and** appends the rule to the target task's `policies:` so a recreated sandbox keeps it. | Operator approval, **always** (every new host asks). |
 | `sandbox_network_revoke` | `sbx policy rm network --sandbox <target> --resource <resource>` and removes the rule from `policies:`. Only rules previously added through Step-Up. | None (narrows access). |
-| `task_retry` | Sets a `failed` task in the target's project back to `ready` (`attempts` unchanged). | Operator approval. |
+| `sandbox_filesystem_allow` | `sbx policy allow filesystem --sandbox <target> <path-glob>` on the live sandbox, and appends the rule (`type: filesystem`, see `internal/policy/policy.go`) to the target task's `policies:`. | Operator approval, always. |
+| `sandbox_filesystem_revoke` | `sbx policy rm filesystem --sandbox <target> --resource <path-glob>` and removes the rule from `policies:`. Only rules previously added through Step-Up. | None (narrows access). |
 | `list_sandbox_policy` | Writes `sbx policy ls --sandbox <target>` output to the result. | None (read-only). |
 
-Filesystem policy changes, `deny` removal, project-level state changes and
-anything touching a sandbox other than the requester's are **not** in v1.
+Task state changes (such as retrying a task), `deny` removal, project-level
+state changes and anything touching a sandbox other than the requester's are
+**not** in v1. The `step-up-executor` task must first confirm the exact `sbx`
+syntax for filesystem rules on a live sandbox and adjust the argv above.
 Adding an operation is a code change in the executor, reviewed like any other.
 
 The **target sandbox is never an argument**. The daemon derives it from
@@ -1170,6 +1179,11 @@ Enforced by the daemon executor, not by the prompt:
    a domain with at least two labels; optional `:port`. Rejected: `**`, `*`,
    bare TLDs, IP ranges, `localhost`, `host.docker.internal`, `127.*`,
    `169.254.*` and private ranges, and anything on a configurable denylist.
+   For filesystem rules: an absolute, cleaned path glob (no `..`). Rejected:
+   `/`, `/**`, `**`, the home directory itself, and anything under `~/.ssh`,
+   `~/.aws`, `~/.config/gh`, `~/.workingman` (including the step-up and
+   post-office directories), `/etc`, the orch roots, and the configurable
+   filesystem denylist.
 5. **Only live task sandboxes.** The target must have a live session. Never
    `step-up`, `workingman-agent`, or a daemon gateway.
 6. **Rate limit:** at most 10 applied ops per hour and 3 per target sandbox
@@ -1184,22 +1198,19 @@ Enforced by the daemon executor, not by the prompt:
 
 ```yaml
 # ~/.workingman/step-up/config.yaml (read by the daemon, not mounted into the sandbox)
-auto_approve:
-  network:                 # applied without asking the operator
-    - proxy.golang.org
-    - sum.golang.org
-    - registry.npmjs.org
-    - "*.githubusercontent.com"
 deny:
   network:
     - "*.internal.example.com"
+  filesystem:
+    - "/Users/*/Library/Keychains/**"
 limits:
   per_hour: 10
   per_sandbox_per_hour: 3
 ```
 
-Step-Up receives a copy of the auto-approve list in its prompt so it knows
-when it can skip asking, but the daemon makes the decision.
+There is no auto-approve list in v1: every allow (network or filesystem)
+asks the operator. An auto-approve list can be added later if asking proves
+too noisy.
 
 ### 8.6 Prompt outline (`step-up.tmpl`)
 
@@ -1210,7 +1221,7 @@ when it can skip asking, but the daemon makes the decision.
    narrowest resource. Requests you cannot satisfy with a v1 op get a reply
    explaining that the operator has to do it, plus a notification to the
    operator.
-4. Approval: when the resource is not auto-approved, `send_request` to the
+4. Approval: for every allow, `send_request` to the
    operator with `options: ["approve", "deny"]`, the canonical `CHANGE:` line,
    the requesting task and its justification. While waiting, keep serving
    other messages: use `check_response`, not a blocking wait.
@@ -1351,13 +1362,19 @@ daemon-mcp-gateway-generalize ────────────────�
 
 13. **`step-up-executor`** — depends on: `step-up-agent`,
     `postoffice-store`. Add the daemon executor for
-    `~/.workingman/step-up/requests/` (§8.3) with the v1 ops, the
+    `~/.workingman/step-up/requests/` (§8.3) with the v1 ops (network
+    and filesystem allow/revoke, list policy; no task retry, no auto-approve),
+    the
     `config.yaml` loader, and every safety limit in §8.4: target derivation
     from `for_request`, approval verification including the canonical change
     line and single use, resource validation, rate limits, kill switch,
     persisting rules to the task's `policies:`, `audit.jsonl`, and the
     operator notification. Then update `step-up.tmpl` with the request
-    format. Unit tests for every rejection path, with a fake `sbx` runner.
+    format. Also make acp-wrapper re-apply all of a task's `policies:` when a
+    sandbox is reused (today only gateway rules are re-applied,
+    `internal/acpwrapper/acpwrapper.go:694-706`), so Step-Up's persisted rules
+    survive reuse. Unit tests for every rejection path, with a fake `sbx`
+    runner.
 
 14. **`messaging-docs-and-smoke-test`** — depends on:
     `codemode-post-office-catalog`, `tui-inbox`, `orch-slack-setup-cli`,
@@ -1416,3 +1433,26 @@ daemon-mcp-gateway-generalize ────────────────�
    today (`internal/acpwrapper/acpwrapper.go:694-706`). Should acp-wrapper
    re-apply all task policies on reuse? That would be a small extra task.
 10. **Default expiry** of 24 h for requests and 7 days for notifications: OK?
+
+### 10.3 Decisions
+
+Recorded 2026-11-20 from the operator's review:
+
+1. Overall shape **approved**: a standalone post-office process, the shared
+   store under `~/.workingman/post-office/`, and the bounded-wait loop now
+   with Tasks later.
+2. Hotkey **`I`** approved.
+3. Slack: accept no push for now; the **DM-to-self** is the conversation;
+   Slack is **work setup only** (no entry in `mcp-servers-personal.json`).
+   Gateway fixes (header script, JSON mode) are follow-ups, not v1.
+4. Step-Up v1 ops: **network allow/revoke, filesystem allow/revoke, list
+   policy**. `task_retry` is dropped. No read-only orch-root mount.
+5. **No auto-approve list**: Step-Up asks the operator for every new host
+   (and every filesystem allow).
+6. Requests to Step-Up **show in the TUI inbox** as read-only rows.
+7. Operator notifications go to **every channel** (with the `notify: false`
+   route opt-out).
+8. "Newest live session" is fine for attribution for now.
+9. Re-applying all task policies on sandbox reuse: accepted, folded into
+   `step-up-executor`, because Step-Up's persisted rules depend on it.
+10. Default expiry 24 h for requests and 7 days for notifications: accepted.
