@@ -693,3 +693,118 @@ func CheckGitVersion(version string) error {
 	}
 	return nil
 }
+
+// RefNamespace is the namespace, besides the task branches under
+// refs/heads/<BranchPrefix>, that :archive clears for a project (X6). Nothing
+// writes refs there today; deleting them anyway keeps a future use from
+// outliving the project.
+const RefNamespace = "refs/wm/"
+
+// ProjectRefs lists the project's task refs in the repo at dir:
+// refs/heads/wm/<projectBranch>/<name> and refs/wm/<projectBranch>/<name>, as
+// full ref names. A name with a further "/" belongs to another project whose
+// branch nests under this one's (W3), and is left out.
+func (m Manager) ProjectRefs(ctx context.Context, dir, projectBranch string) ([]string, error) {
+	prefixes := []string{
+		"refs/heads/" + BranchPrefix + projectBranch + "/",
+		RefNamespace + projectBranch + "/",
+	}
+	out, err := m.git(ctx, dir, append([]string{"for-each-ref", "--format=%(refname)"}, prefixes...)...)
+	if err != nil {
+		return nil, err
+	}
+	var refs []string
+	for _, l := range strings.Split(out, "\n") {
+		for _, prefix := range prefixes {
+			if name, ok := strings.CutPrefix(l, prefix); ok && name != "" && !strings.Contains(name, "/") {
+				refs = append(refs, l)
+			}
+		}
+	}
+	sort.Strings(refs)
+	return refs, nil
+}
+
+// RemoveProject deletes everything the project's task worktrees left in the
+// shared workspace, for :archive (X6): per repo, every registered worktree
+// under .worktrees/ (.stale/ included) with `git worktree remove --force`,
+// then `git worktree prune`, then the project's task refs (ProjectRefs); and
+// finally the .worktrees/ directory itself. It deletes work that is not on
+// the shared branch: callers run it only once the archive agent has reported
+// that work (archive: true).
+//
+// A repo directory without a .git is skipped, so a non-git workspace is a
+// no-op. Like Remove it keeps going after a failure and returns every failure
+// joined; .worktrees/ is only removed when every repo succeeded.
+func (m Manager) RemoveProject(ctx context.Context, shared, projectBranch string, repos []string) error {
+	if shared == "" || projectBranch == "" {
+		return fmt.Errorf("worktree: shared workspace and project branch are required")
+	}
+	dir := filepath.Join(shared, DirName)
+	under := realPath(dir) + string(filepath.Separator)
+	var errs []error
+	for _, repo := range repos {
+		repoDir := filepath.Join(shared, repo)
+		if _, err := os.Lstat(filepath.Join(repoDir, ".git")); err != nil {
+			continue
+		}
+		if err := m.removeProjectRepo(ctx, repoDir, projectBranch, under); err != nil {
+			errs = append(errs, &RepoError{Repo: repo, Err: err})
+		}
+	}
+	if len(errs) == 0 {
+		if err := os.RemoveAll(dir); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (m Manager) removeProjectRepo(ctx context.Context, repoDir, projectBranch, under string) error {
+	wts, err := m.list(ctx, repoDir)
+	if err != nil {
+		return err
+	}
+	for _, wt := range wts {
+		if !strings.HasPrefix(realPath(wt.path), under) {
+			continue
+		}
+		if _, err := m.git(ctx, repoDir, "worktree", "remove", "--force", wt.path); err != nil {
+			return err
+		}
+	}
+	if _, err := m.git(ctx, repoDir, "worktree", "prune"); err != nil {
+		return err
+	}
+	refs, err := m.ProjectRefs(ctx, repoDir, projectBranch)
+	if err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		if _, err := m.git(ctx, repoDir, "update-ref", "-d", ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GitRepos lists the repo dirs at the root of the shared workspace: its
+// direct children holding a .git (DirName and dot-dirs excluded). :archive
+// uses it, having no project-to-dir-name mapping of its own, and it also
+// catches a repo dropped from project.yaml after it was cloned.
+func GitRepos(shared string) ([]string, error) {
+	entries, err := os.ReadDir(shared)
+	if err != nil {
+		return nil, err
+	}
+	var repos []string
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(shared, e.Name(), ".git")); err == nil {
+			repos = append(repos, e.Name())
+		}
+	}
+	return repos, nil
+}

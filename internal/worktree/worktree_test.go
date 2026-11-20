@@ -475,3 +475,67 @@ func TestGitVersionCheck(t *testing.T) {
 		t.Errorf("host git %q: %v / %v", v, err, CheckGitVersion(v))
 	}
 }
+
+// RemoveProject is :archive's teardown (X6): every task worktree, the stale
+// ones included, and the project's refs under refs/heads/wm/<pb>/ and
+// refs/wm/<pb>/ go, unintegrated work and all. Another project's refs, and a
+// nested project's, stay.
+func TestRemoveProjectDeletesWorktreesAndRefs(t *testing.T) {
+	shared := newShared(t, "feat/x", "a", "b")
+	ctx := context.Background()
+	m := Manager{}
+	if _, err := m.Ensure(ctx, spec(shared, "api", "a", "b")); err != nil {
+		t.Fatal(err)
+	}
+	// Unintegrated, uncommitted work in one, committed work in the other.
+	writeT(t, filepath.Join(Path(shared, "api", "a"), "wip"), "x\n")
+	writeT(t, filepath.Join(Path(shared, "api", "b"), "done"), "x\n")
+	gitT(t, Path(shared, "api", "b"), "add", "-A")
+	gitT(t, Path(shared, "api", "b"), "commit", "-q", "-m", "work")
+	// A worktree moved aside to .stale/ is still registered.
+	if _, err := m.Ensure(ctx, spec(shared, "old", "a")); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(shared, DirName, StaleDirName, "old-1", "a")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repoA := filepath.Join(shared, "a")
+	gitT(t, repoA, "worktree", "move", Path(shared, "old", "a"), stale)
+	gitT(t, repoA, "branch", "wm/feat/x/branchless")
+	gitT(t, repoA, "update-ref", "refs/wm/feat/x/attempt", "HEAD")
+	gitT(t, repoA, "branch", "wm/feat/x-other/keep")
+	gitT(t, repoA, "update-ref", "refs/wm/feat/x-other/keep", "HEAD")
+
+	refs, err := m.ProjectRefs(ctx, repoA, "feat/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "refs/heads/wm/feat/x/api,refs/heads/wm/feat/x/branchless,refs/heads/wm/feat/x/old,refs/wm/feat/x/attempt"
+	if strings.Join(refs, ",") != want {
+		t.Errorf("ProjectRefs = %v, want %s", refs, want)
+	}
+
+	if err := m.RemoveProject(ctx, shared, "feat/x", []string{"a", "b", "missing"}); err != nil {
+		t.Fatalf("RemoveProject: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(shared, DirName)); !os.IsNotExist(err) {
+		t.Errorf(".worktrees/ still there: %v", err)
+	}
+	for _, repo := range []string{"a", "b"} {
+		dir := filepath.Join(shared, repo)
+		if refs, err := m.ProjectRefs(ctx, dir, "feat/x"); err != nil || len(refs) != 0 {
+			t.Errorf("%s: refs left = %v %v", repo, refs, err)
+		}
+		if wts, err := m.List(ctx, dir); err != nil || len(wts) != 1 {
+			t.Errorf("%s: worktrees left = %+v %v", repo, wts, err)
+		}
+	}
+	if got := gitT(t, repoA, "for-each-ref", "--format=%(refname)", "refs/heads/wm/", "refs/wm/"); got != "refs/heads/wm/feat/x-other/keep\nrefs/wm/feat/x-other/keep" {
+		t.Errorf("other projects' refs = %q", got)
+	}
+	// The shared branch and its tree are untouched.
+	if got := gitT(t, repoA, "rev-parse", "--abbrev-ref", "HEAD"); got != "feat/x" {
+		t.Errorf("shared HEAD = %q", got)
+	}
+}

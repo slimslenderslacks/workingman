@@ -14,7 +14,26 @@ never read, edit, or copy from another project's `project.yaml`, and never use
 one as a template. The only project file you may modify is {{.ProjectPath}}.
 
 The workspace is a wsp workspace and may hold several repos — one directory per
-repo at its root. Do the following in EVERY repo it contains.
+repo at its root. Do the following in EVERY repo it contains. The `.worktrees/`
+directory at its root is the daemon's, not a repo: it holds per-task git
+worktrees. Never commit, push, merge or delete anything under it.
+{{- if .UnintegratedTasks}}
+
+WORK NOT CARRIED INTO THE BRANCH. These task worktrees and branches hold work
+that is not on the project's branch. They are deleted with the workspace when
+the project is archived, so that work will be lost. Do not try to integrate,
+merge, cherry-pick or push any of it — that is not your job, and it bypasses
+the commit queue. Just list every one of them in your final message as work not
+carried into the branch, with its task, status, branch and worktree, so a human
+can decide whether to rescue it before running `:archive`. (They are also in
+`.orch/context.yaml` under `unintegrated_tasks`.)
+{{range .UnintegratedTasks}}
+  - {{.Name}} ({{.Status}}){{if .Branch}} branch {{.Branch}}{{end}}{{if .Worktree}} worktree {{.Worktree}}{{end}}{{if .Why}}: {{.Why}}{{end}}
+{{- end}}
+
+This list alone does not stop you from setting `archive: true`: report it, and
+judge the repos below on their own.
+{{- end}}
 
 1. Inspect the repo for uncommitted work — run `git status` in it:
 
@@ -22,6 +41,12 @@ repo at its root. Do the following in EVERY repo it contains.
 
    If the output is empty there is nothing to commit: skip steps 2 and 3 and go
    straight to step 4, which decides whether anything still needs pushing.
+
+   Every task commits in its own worktree and the daemon integrates it, so the
+   shared repos should already be clean here. Uncommitted changes in them mean
+   someone (a human, or another agent) edited the shared tree directly, which
+   is against the rules: say so in your final message, naming the repo and the
+   paths, whatever you then do with them below.
 
 2. Classify what is uncommitted. Some paths plainly do not belong in the repo:
 

@@ -89,8 +89,11 @@
 //   - reconcile.go: at startup, adopts ACP sessions left on disk by a
 //     previous orch process so they are not dispatched twice.
 //   - interactive.go: [Daemon.OpenInteractiveSession],
-//     [Daemon.OpenOrchDirTab] and [Daemon.OpenWorkspaceDirTab], which back the
-//     TUI's :session, :orch and :workspace commands.
+//     [Daemon.OpenTaskSession], [Daemon.OpenOrchDirTab],
+//     [Daemon.OpenWorkspaceDirTab] and [Daemon.OpenTaskWorktreeDirTab], which
+//     back the TUI's :session, :orch and :workspace commands.
+//   - archive_worktrees.go: the archive agent's pre-launch worktree cleanup
+//     and its list of unintegrated task work.
 //   - workingman_agent.go: supervises the always-on workingman agent
 //     ([WithWorkingmanAgent]), restarting it with backoff.
 //   - channels_notify.go: wolf start and end messages on the `wolf` channel

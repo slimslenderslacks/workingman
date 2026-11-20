@@ -225,3 +225,40 @@ func TestWorkspaceCommandOpensTaskWorktree(t *testing.T) {
 		t.Errorf("legacy task: launched = %+v, workspace calls = %v", msg, fake.wsCalls)
 	}
 }
+
+// :session from the Tasks pane opens the interactive session in the selected
+// task's worktree when it has one (docs/parallel-task-worktrees.md X3); for a
+// task without one, or from the work-streams pane, it opens the shared
+// workspace's session.
+func TestSessionCommandOpensTaskSession(t *testing.T) {
+	m, projPath := selectProject(t, t.TempDir(), "widget")
+	fake := &fakeInteractive{target: "session-widget-stuck"}
+	m.interactive = fake
+	_, views, _ := tasksFor(writePipelineTasks(t, filepath.Dir(projPath)))
+	m.projects[0].Tasks = views
+	stuck := viewsByName(views)["stuck"]
+	m.taskSel = stuck.Path
+	m.focus = paneTasks
+
+	m.mode = modeCommandPicker
+	m.cmdPickerIdx = projectCommandIndex("session")
+	step, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = step.(model)
+	if cmd == nil {
+		t.Fatal("no launch command")
+	}
+	if msg, ok := cmd().(interactiveLaunchedMsg); !ok || msg.kind != "task session" {
+		t.Fatalf("launched = %+v", msg)
+	}
+	if len(fake.tsCalls) != 1 || fake.tsCalls[0] != projPath+"|"+stuck.Path || len(fake.sessionCalls) != 0 {
+		t.Errorf("task session calls = %v, session calls = %v", fake.tsCalls, fake.sessionCalls)
+	}
+
+	m.taskSel = viewsByName(views)["legacy"].Path
+	m.mode = modeCommandPicker
+	m.cmdPickerIdx = projectCommandIndex("session")
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if msg, ok := cmd().(interactiveLaunchedMsg); !ok || msg.kind != "session" || len(fake.sessionCalls) != 1 {
+		t.Errorf("legacy task: launched = %+v, session calls = %v", msg, fake.sessionCalls)
+	}
+}

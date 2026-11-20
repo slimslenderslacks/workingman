@@ -1703,6 +1703,7 @@ here and in `docs/state-snapshot.md`. All of them carry `path` (the
 | `task_worktree_orphaned` | `worktree`, `branch` | The sweep found unintegrated work for a task whose file is gone, and kept it (W7). |
 | `task_worktree_kept` | `worktree` or `repo`, `branch`, `reason=unintegrated`, `why` | The sweep found a `committed` task whose branch is not on the shared branch, and kept it (phase 6 as built). |
 | `task_worktree_gc_error` | `repo` or `worktree`, `err` | A sweep step failed; it is retried on the next sweep. |
+| `archive_unintegrated` | `count`, `tasks` | Before the archive agent launches: the task worktrees and branches still holding work not on the shared branch, listed in its context (X6, phase 6 as built). |
 | `git_preflight` / `git_preflight_failed` | `version`, `err` | The startup git-version check (R8). A failure stops the daemon. |
 
 **Integration** (`afterCommitSession`, `schedule`):
@@ -2994,7 +2995,7 @@ differences:
   `worktree-<work-stream>-<task>`. From any other pane, or for a task with no
   worktree, `:workspace` opens the shared workspace as before. `:session`
   still mounts the shared workspace. X3's worktree-as-cwd variant is left for
-  later.
+  later (it shipped in phase 6, `OpenTaskSession`).
 - **Tests.** The golden file is
   `internal/daemon/testdata/snapshot_pipeline.golden.json` (in
   `snapshot_pipeline_test.go`; regenerate with `go test ./internal/daemon
@@ -3452,6 +3453,84 @@ differences:
   (`task_released` before `task_worktree_gc` before `worktree_reused`), the
   half-created worktree after a restart, the reaper's interval, and the
   preflight. `internal/worktree` tests the new helpers.
+
+#### Phase 6 as built: archive cleanup and the interactive session
+
+The second phase 6 task (`rollout-phase-6-archive-session`) covers X6's
+pre-archive cleanup and ref deletion and X3's `:session` changes. The code
+forced or suggested these differences:
+
+- **Pre-archive cleanup is the W7 sweep, run inline.** `launchArchiveAgent`
+  calls `prepareArchive` (`internal/daemon/archive_worktrees.go`) once the
+  drain wait has passed. It runs `sweepWorktrees`, which already prunes and
+  removes the worktrees and branches of `committed` tasks whose work is on
+  the shared branch (and of deleted tasks that hold nothing). A second, ad hoc
+  removal would only disagree with it. Nothing is in flight at that point,
+  so the sweep's `busy` guards don't hold anything back, except on a blocked
+  project, where it keeps a `committed` task's leftovers as it always does.
+- **"Unintegrated" uses the sweep's test, and dirty trees count.** Every
+  `.worktrees/<task>/` root and every `wm/<pb>/<task>` branch left after the
+  sweep is judged with `sweep.unintegrated`. Where a root is on disk the strict
+  form is used whatever the task's status, so uncommitted edits and stray
+  files count as well as unmerged commits: `:archive` deletes them all. A
+  clean worktree whose branch is still at its base (a `ready` task that
+  never ran) is not listed. Each `.worktrees/.stale/<dir>` is listed as
+  `stale`, and a worktree or branch whose task file is gone as `orphaned`.
+  The list goes to `prompts.Data`/`setup.Context` as `UnintegratedTasks`
+  (`unintegrated_tasks:` in `.orch/context.yaml`, with `name`, `status`,
+  `task_branch`, `worktree`, `why`), and is audited as
+  `archive_unintegrated`.
+- **`archive.tmpl`** says `.worktrees/` is the daemon's and is never touched,
+  lists the unintegrated work under "WORK NOT CARRIED INTO THE BRANCH" with
+  an instruction to report it, not rescue it, and says a dirty shared repo
+  means a rule was broken and must be reported. The list does not by itself
+  stop the agent setting `archive: true`. The human reads the report and
+  decides before running `:archive`.
+- **`:archive` uses `worktree.Manager.RemoveProject`.** `archiveProject` calls
+  `removeTaskWorktrees` before `removeWorkspaceOrch` and `wsp rm`. Per repo,
+  it force-removes every worktree registered under `.worktrees/` (`.stale/`
+  included), prunes, and then deletes `refs/heads/wm/<pb>/*` and
+  `refs/wm/<pb>/*` (`ProjectRefs`; names with a further `/` belong to a
+  nested project and stay) with `update-ref -d`. Finally it removes
+  `.worktrees/`. A failure aborts the archive with the project left in place,
+  like a failed `wsp rm`. The TUI has no `project.Repo` → dir-name mapping of
+  its own, so it takes the repos from the workspace (`worktree.GitRepos`: the
+  top-level dirs holding a `.git`). That also catches a repo that was dropped
+  from `project.yaml` after it was cloned. The TUI does not re-run the
+  committed-task removal separately: `RemoveProject` is a superset of it.
+- **The `:session` banner is printed in the tab, not written to
+  `instructions.md`.** `:session` injects no prompt and writes no `.orch/`,
+  so there is no `instructions.md` to extend. `runner.InteractiveSpec` gains
+  `Banner`, which `LaunchInteractive` prints with a `sh -c 'printf …; exec
+  "$@"'` wrapper before `sbx run`. The `exec` keeps the tab's tracked pid the
+  command's own. The shared-workspace banner (`sharedSessionBanner`) says:
+  don't leave the tree dirty, don't commit on the shared branch while an
+  integration is in flight, and use the Tasks pane for task work. It also
+  names the integrating task when one is running at launch. Without
+  git-backed workspaces there is no queue, and no banner.
+- **A task's worktree as cwd is a separate session.** `:session` with the
+  Tasks pane focused on a task that has a `worktree:` goes through
+  `InteractiveLauncher.OpenTaskSession` → `Daemon.OpenTaskSession`, matching
+  phase 3's `:workspace`. It gets a sandbox, tab and claude conversation of
+  its own (`session-<work-stream>-<task>`), so switching between the shared
+  and task sessions never recreates a sandbox over a changed mount set. Its
+  mounts are the task agent's (W5): the worktree (cwd), each repo's git common
+  dir (`worktreeMounts`), and the control dir. The shared tree is not mounted,
+  so this session cannot dirty it. Its banner names the task branch and says
+  to commit only there.
+- **Tests.** `internal/worktree`: `TestRemoveProjectDeletesWorktreesAndRefs`.
+  `internal/tui`: `TestArchiveRemovesTaskWorktreesAndRefsBeforeWorkspace`
+  (real git; the refs are gone by the time `wsp rm` runs, and another
+  project's refs stay) and `TestSessionCommandOpensTaskSession`.
+  `internal/daemon`: `TestArchiveAgentPrepCleansCommittedAndListsUnintegrated`
+  (committed removed; failed, dirty-blocked and orphaned listed in
+  `context.yaml` and the prompt; a clean `ready` worktree not listed),
+  `TestInteractiveSessionBannerWarnsAboutSharedTree`,
+  `TestInteractiveSessionNoBannerWithoutWorktrees`,
+  `TestOpenTaskSessionUsesWorktreeAsCwd` and
+  `TestOpenTaskSessionWithoutWorktree`. `internal/prompts`:
+  `TestRenderArchiveUnintegratedWork`. `internal/runner`:
+  `TestLaunchInteractiveBanner`.
 
 ### After phase 6
 

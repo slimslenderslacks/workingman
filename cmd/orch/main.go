@@ -509,6 +509,10 @@ func (l interactiveLauncher) OpenTaskWorktreeDir(ctx context.Context, projectPat
 	return l.d.OpenTaskWorktreeDirTab(ctx, projectPath, taskPath)
 }
 
+func (l interactiveLauncher) OpenTaskSession(ctx context.Context, projectPath, taskPath string) (string, error) {
+	return l.d.OpenTaskSession(ctx, projectPath, taskPath)
+}
+
 // sshAgentUnusable reports whether current is an SSH_AUTH_SOCK that cannot
 // hold the signing key: unset, or the macOS system (launchd) agent a GUI/login
 // shell inherits. Any other value is assumed to be the private agent.

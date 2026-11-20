@@ -27,12 +27,16 @@ type InteractiveLauncher interface {
 	// OpenTaskWorktreeDir backs `:workspace` from the Tasks pane when the
 	// selected task has its own worktree: a shell in that worktree instead.
 	OpenTaskWorktreeDir(ctx context.Context, projectPath, taskPath string) (string, error)
+	// OpenTaskSession backs `:session` from the Tasks pane when the selected
+	// task has its own worktree: the interactive claude session runs there
+	// instead of in the shared workspace (docs/parallel-task-worktrees.md X3).
+	OpenTaskSession(ctx context.Context, projectPath, taskPath string) (string, error)
 }
 
 // interactiveLaunchedMsg carries the result of an InteractiveLauncher call back
 // into Update so the model can report the new tab or surface an error.
 type interactiveLaunchedMsg struct {
-	kind   string // "session", "orch", "workspace" or "worktree" — for the status message
+	kind   string // "session", "task session", "orch", "workspace" or "worktree" — for the status message
 	target string
 	err    error
 }
@@ -53,13 +57,18 @@ func (m model) openInteractive(kind string) (tea.Model, tea.Cmd) {
 	}
 	projectPath := m.projSel
 	launcher := m.interactive
-	// From the Tasks pane, `:workspace` opens the selected task's own
-	// worktree when it has one (docs/parallel-task-worktrees.md D5): that is
-	// where a failed or blocked task's work is.
+	// From the Tasks pane, `:workspace` and `:session` open the selected
+	// task's own worktree when it has one (docs/parallel-task-worktrees.md D5,
+	// X3): that is where a failed or blocked task's work is.
 	taskPath := ""
-	if kind == "workspace" && m.focus == paneTasks {
+	if (kind == "workspace" || kind == "session") && m.focus == paneTasks {
 		if t, ok := m.selectedTask(); ok && t.Worktree != "" {
-			kind, taskPath = "worktree", t.Path
+			taskPath = t.Path
+			if kind == "workspace" {
+				kind = "worktree"
+			} else {
+				kind = "task session"
+			}
 		}
 	}
 	m.statusMsg = "opening " + kind + "…"
@@ -78,6 +87,8 @@ func (m model) openInteractive(kind string) (tea.Model, tea.Cmd) {
 			target, err = launcher.OpenWorkspaceDir(ctx, projectPath)
 		case "worktree":
 			target, err = launcher.OpenTaskWorktreeDir(ctx, projectPath, taskPath)
+		case "task session":
+			target, err = launcher.OpenTaskSession(ctx, projectPath, taskPath)
 		default:
 			err = errors.New("unknown interactive kind " + kind)
 		}

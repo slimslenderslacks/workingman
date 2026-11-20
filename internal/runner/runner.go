@@ -98,6 +98,9 @@ type Plan struct {
 	// InFlightTasks is the wolf's list of tasks still in flight (X3); see
 	// prompts.Data.InFlightTasks.
 	InFlightTasks []prompts.InFlightTask
+	// UnintegratedTasks is the archive agent's list of task work not on the
+	// shared branch (X6); see prompts.Data.UnintegratedTasks.
+	UnintegratedTasks []prompts.UnintegratedTask
 
 	// StaticMCPs are the MCP server names this agent's sandbox should be able
 	// to reach. Forwarded by the daemon from the task's static_mcps field for
@@ -719,6 +722,7 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		FailedTasks:             p.FailedTasks,
 		BlockedReason:           p.BlockedReason,
 		InFlightTasks:           p.InFlightTasks,
+		UnintegratedTasks:       p.UnintegratedTasks,
 		BlockedSessionPath:      p.BlockedSessionPath,
 		BlockedSessionSummary:   p.BlockedSessionSummary,
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
@@ -764,6 +768,7 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		FailedTasks:             p.FailedTasks,
 		BlockedReason:           p.BlockedReason,
 		InFlightTasks:           setupInFlight(p.InFlightTasks),
+		UnintegratedTasks:       setupUnintegrated(p.UnintegratedTasks),
 		BlockedSessionPath:      p.BlockedSessionPath,
 		BlockedSessionSummary:   p.BlockedSessionSummary,
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
@@ -924,6 +929,10 @@ type InteractiveSpec struct {
 	// makes commits SSH-sign — mirroring the ACP commit agent so a `:session`
 	// user's commits are signed too. Ignored for a host command.
 	SigningKey string
+	// Banner, when set, is printed in the tab before the command starts:
+	// the warnings a human working in the session needs
+	// (docs/parallel-task-worktrees.md X3). Empty runs the command as is.
+	Banner string
 }
 
 // LaunchInteractive opens an interactive session in a new terminal tab and
@@ -996,6 +1005,9 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 			runArgs = append(append(runArgs, "--"), agentArgs...)
 		}
 		command = append([]string{sbxBin}, runArgs...)
+	}
+	if spec.Banner != "" {
+		command = withBanner(spec.Banner, command)
 	}
 
 	launch := agent.Spec{
@@ -1853,6 +1865,25 @@ func setupInFlight(in []prompts.InFlightTask) []setup.InFlightTask {
 	out := make([]setup.InFlightTask, len(in))
 	for i, t := range in {
 		out[i] = setup.InFlightTask{Name: t.Name, Status: t.Status, QueuePosition: t.QueuePosition, Integrating: t.Integrating}
+	}
+	return out
+}
+
+// withBanner wraps command so the tab prints banner first, then exec's the
+// command in its place.
+func withBanner(banner string, command []string) []string {
+	return append([]string{"sh", "-c", `printf '%s\n\n' "$0"; exec "$@"`, banner}, command...)
+}
+
+// setupUnintegrated converts the archive agent's unintegrated-work list into
+// the .orch/context.yaml shape.
+func setupUnintegrated(in []prompts.UnintegratedTask) []setup.UnintegratedTask {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]setup.UnintegratedTask, len(in))
+	for i, t := range in {
+		out[i] = setup.UnintegratedTask{Name: t.Name, Status: t.Status, Branch: t.Branch, Worktree: t.Worktree, Why: t.Why}
 	}
 	return out
 }

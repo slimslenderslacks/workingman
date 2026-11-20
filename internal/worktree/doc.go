@@ -2,7 +2,7 @@
 // project's task agents work in, each on its own task branch cut from the
 // project's shared branch.
 //
-// Role: shared (daemon, and later the TUI's :archive)
+// Role: shared (daemon, and the TUI's :archive)
 //
 // A task worktree is a directory, <shared>/.worktrees/<task>/, holding one
 // `git worktree` per project repo ([Root], [Path]). Every repo's worktree is
@@ -24,7 +24,10 @@
 // [Manager.Prune], [Manager.List], [Manager.CheckedOut], [Manager.Branches]
 // and [Manager.DeleteBranch] are what the daemon's worktree sweep (W7) is
 // built from, and [Manager.GitVersion] / [CheckGitVersion] its startup
-// preflight against [MinGitVersion] (R8).
+// preflight against [MinGitVersion] (R8). [Manager.RemoveProject] (with
+// [Manager.ProjectRefs] and [GitRepos]) is the TUI's :archive teardown: every
+// task worktree and the project's refs/heads/wm/<pb>/* and refs/wm/<pb>/*
+// (X6).
 //
 // Every git invocation goes through [Manager.Run] ([RunFunc]), so tests can
 // substitute a fake; the zero Manager runs the real `git` binary.

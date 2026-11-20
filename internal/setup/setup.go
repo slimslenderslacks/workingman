@@ -25,6 +25,10 @@ type Context struct {
 	// InFlightTasks are the tasks still in flight when a wolf launched. See
 	// prompts.Data.InFlightTasks.
 	InFlightTasks []InFlightTask `yaml:"in_flight_tasks,omitempty"`
+	// UnintegratedTasks are the task worktrees and branches holding work that
+	// is not on the shared branch when the archive agent launched. See
+	// prompts.Data.UnintegratedTasks.
+	UnintegratedTasks []UnintegratedTask `yaml:"unintegrated_tasks,omitempty"`
 
 	// BlockedSessionPath/Summary/Attempted mirror project.BlockedSession, the
 	// durable record the wolf agent reads/writes for a blocked project. See
@@ -83,6 +87,15 @@ type InFlightTask struct {
 	Status        string `yaml:"status"`
 	QueuePosition int    `yaml:"queue_position,omitempty"`
 	Integrating   bool   `yaml:"integrating,omitempty"`
+}
+
+// UnintegratedTask is one entry of unintegrated_tasks in .orch/context.yaml.
+type UnintegratedTask struct {
+	Name     string `yaml:"name"`
+	Status   string `yaml:"status"`
+	Branch   string `yaml:"task_branch,omitempty"`
+	Worktree string `yaml:"worktree,omitempty"`
+	Why      string `yaml:"why,omitempty"`
 }
 
 // Commit is one repo's commit in .orch/context.yaml (same shape as a task

@@ -770,6 +770,9 @@ func (d *Daemon) launchArchiveAgent(projectPath string, p *project.Project) {
 		d.endCleanup(projectPath)
 		return
 	}
+	// Before launch (W6, X6 step 4): drop the committed tasks' worktrees and
+	// collect what still holds unintegrated work, which the agent reports.
+	unintegrated := d.prepareArchive(projectPath, p)
 	root := filepath.Dir(projectPath)
 	plan := runner.Plan{
 		Kind: agent.ArchiveAgent,
@@ -780,7 +783,8 @@ func (d *Daemon) launchArchiveAgent(projectPath string, p *project.Project) {
 		TasksDir:    filepath.Join(root, "tasks"),
 		// It runs sandboxed under ACP and has to push, so it needs the egress a
 		// task would have declared for itself.
-		Policies: archivePolicies(),
+		Policies:          archivePolicies(),
+		UnintegratedTasks: unintegrated,
 	}
 	d.audit.Log("archive_dispatch", "path", projectPath, "branch", p.Branch)
 	if err := d.startSession(archiveSessionKey(projectPath), plan, func(waitErr error) {

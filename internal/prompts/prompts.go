@@ -32,6 +32,12 @@ type Data struct {
 	// one whose integration is running marked (docs/parallel-task-worktrees.md
 	// X3). They finish on their own; the wolf must not edit them.
 	InFlightTasks []InFlightTask
+	// UnintegratedTasks, for the ArchiveAgent, lists the task worktrees and
+	// branches still holding work that is not on Branch when it launched
+	// (docs/parallel-task-worktrees.md X6): failed, blocked or stuck-success
+	// tasks, and worktrees whose task file is gone. `:archive` deletes them,
+	// so the agent reports them as work not carried into the branch.
+	UnintegratedTasks []UnintegratedTask
 
 	// BlockedSessionPath is the absolute path to the project's durable
 	// blocked-session record (project.BlockedSessionPath) — for WolfAgent,
@@ -146,6 +152,16 @@ type InFlightTask struct {
 	QueuePosition int
 	// Integrating is true for the task whose commit agent is running.
 	Integrating bool
+}
+
+// UnintegratedTask is one task worktree or branch the archive agent reports
+// as work that is not on the shared branch.
+type UnintegratedTask struct {
+	Name     string
+	Status   string // the task's status; "orphaned" when its task file is gone
+	Branch   string // the task branch, wm/<Branch>/<task>
+	Worktree string // the task worktree root; "" when only the branch is left
+	Why      string // what is unintegrated, e.g. "wm/b/t in gateway is not on b"
 }
 
 // Repo is one of the project's repos as the planning prompt needs it.
