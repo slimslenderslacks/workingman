@@ -414,3 +414,64 @@ func TestRebaseRecoveryAndChangedPaths(t *testing.T) {
 		t.Errorf("DiffNames = %v, want [README]", got)
 	}
 }
+
+// Branches lists one namespace only, List/CheckedOut see registered
+// worktrees, Prune drops a removed directory's entry, and DeleteBranch
+// removes the ref.
+func TestBranchesListPruneDelete(t *testing.T) {
+	shared := newShared(t, "feat/x", "a")
+	ctx := context.Background()
+	m := Manager{}
+	repo := filepath.Join(shared, "a")
+	if _, err := m.Ensure(ctx, spec(shared, "api", "a")); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, repo, "branch", "wm/feat/x-other/z")
+	gitT(t, repo, "branch", "wm/feat/x/loose")
+
+	got, err := m.Branches(ctx, repo, BranchPrefix+"feat/x/")
+	if err != nil || strings.Join(got, ",") != "wm/feat/x/api,wm/feat/x/loose" {
+		t.Errorf("Branches = %v %v", got, err)
+	}
+	path := Path(shared, "api", "a")
+	if b, ok, err := m.CheckedOut(ctx, repo, path); err != nil || !ok || b != "refs/heads/wm/feat/x/api" {
+		t.Errorf("CheckedOut = %q %v %v", b, ok, err)
+	}
+	if err := os.RemoveAll(Root(shared, "api")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Prune(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	wts, err := m.List(ctx, repo)
+	if err != nil || len(wts) != 1 {
+		t.Errorf("List after prune = %+v %v, want the main tree only", wts, err)
+	}
+	if err := m.DeleteBranch(ctx, repo, "wm/feat/x/api"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := m.BranchExists(ctx, repo, "wm/feat/x/api"); ok {
+		t.Error("branch still exists")
+	}
+}
+
+func TestGitVersionCheck(t *testing.T) {
+	m := Manager{Run: func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("git version 2.39.3 (Apple Git-146)\n"), nil
+	}}
+	if v, err := m.GitVersion(context.Background()); err != nil || v != "2.39.3" {
+		t.Errorf("GitVersion = %q %v", v, err)
+	}
+	for v, ok := range map[string]bool{
+		"2.39.3": true, "2.31.0": true, "3.0": true, "2.45.windows.1": true, "2.31.0.rc1": true,
+		"2.30.9": false, "1.9.5": false, "": false, "garbage": false,
+	} {
+		if err := CheckGitVersion(v); (err == nil) != ok {
+			t.Errorf("CheckGitVersion(%q) = %v, want ok=%v", v, err, ok)
+		}
+	}
+	// The git running these tests is new enough.
+	if v, err := (Manager{}).GitVersion(context.Background()); err != nil || CheckGitVersion(v) != nil {
+		t.Errorf("host git %q: %v / %v", v, err, CheckGitVersion(v))
+	}
+}

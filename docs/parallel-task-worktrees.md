@@ -1701,6 +1701,9 @@ here and in `docs/state-snapshot.md`. All of them carry `path` (the
 | `task_worktree_remove_error` | `repo`, `err` | Best-effort cleanup failed and was left for the sweep (W6). |
 | `task_worktree_gc` | `worktree`, `reason` | Reaper sweep removal (W7). |
 | `task_worktree_orphaned` | `worktree`, `branch` | The sweep found unintegrated work for a task whose file is gone, and kept it (W7). |
+| `task_worktree_kept` | `worktree` or `repo`, `branch`, `reason=unintegrated`, `why` | The sweep found a `committed` task whose branch is not on the shared branch, and kept it (phase 6 as built). |
+| `task_worktree_gc_error` | `repo` or `worktree`, `err` | A sweep step failed; it is retried on the next sweep. |
+| `git_preflight` / `git_preflight_failed` | `version`, `err` | The startup git-version check (R8). A failure stops the daemon. |
 
 **Integration** (`afterCommitSession`, `schedule`):
 
@@ -3372,6 +3375,83 @@ Clean up what crashes, deleted tasks and long-lived projects leave behind.
 - **Rollback:** revert. Without the sweep, worktrees of committed tasks
   are still removed by phase 1's inline cleanup. Only crash leftovers
   accumulate, until `:archive` removes the whole workspace.
+
+#### Phase 6 as built: worktree GC, startup order and git preflight
+
+Phase 6 ships in two tasks. The first, described here, covers the sweep,
+its place in the startup order and the git preflight. Archive cleanup (X6),
+the TUI's ref deletion and the `:session` changes (X3) follow in the second
+(`rollout-phase-6-archive-session`). The code forced or suggested these
+differences:
+
+- **The sweep is `sweepWorktrees`** (`internal/daemon/reaper.go`), one
+  project at a time. `reapLoop` runs it for every project under the roots
+  (`sweepAllWorktrees`) on a second ticker, every 5 minutes by default
+  (`WithWorktreeSweepInterval`; there is no `orch` flag). `startupScan` runs
+  it per project after `releaseOrphanedTasks` and `resumeOrphanedOutcomes`
+  and before `revisitProject`. It does nothing without git-backed
+  workspaces, for an archived project, or for a project whose shared
+  workspace was never provisioned (it never creates one).
+- **It holds the project's `worktreeLock`,** the lock launches hold while
+  they cut or reuse a worktree and run `prepareIntegration`, and it reads
+  the task files only after taking it. A dispatch therefore never races the
+  sweep over the same directory.
+- **"Unintegrated" is "not an ancestor of the shared branch".** W7 says a
+  deleted task's worktree may go when its branch equals `base`, but with the
+  task file gone there is no `base` to compare with. The sweep asks instead
+  whether the task branch, in every repo where it exists, is an ancestor of
+  `refs/heads/<pb>`. That covers "nothing beyond its base" and also a branch
+  that was integrated before its file was deleted. For a deleted task it also
+  requires every repo's worktree to be clean, registered and on the task
+  branch, and the root to hold nothing but the repo dirs and `.orch/`.
+  Anything else is kept and logged `task_worktree_orphaned` (with `why`).
+- **A `committed` task's leftovers are checked too.** W7 says "remove", but
+  a `committed` task whose branch is not on the shared branch is a broken
+  record, not a leftover, and removing it would lose the work. The sweep
+  keeps it and logs `task_worktree_kept reason=unintegrated`. It also leaves
+  a `committed` task alone while an integration is in flight (its
+  `afterCommitSession` may be finishing it, W6) and while the project is
+  blocked (the wolf may be looking). A removal clears the task's
+  `worktree:`. `resumeOrphanedOutcomes` still finishes a `committed` task
+  that has `worktree:` set (X7). The sweep is what collects the rest: a
+  partly failed `Remove`, a worktree whose `worktree:` was already cleared,
+  and branches without a worktree.
+- **An unreadable task file is not a deleted task.** When any `.yaml` in
+  `tasks/` fails to parse, a worktree with no matching task is kept, not
+  judged.
+- **Step 3** deletes `wm/<pb>/<task>` only when no worktree has it checked
+  out, the task is `committed` (and records that branch), and the branch is
+  an ancestor of the shared branch. Names with a further `/` belong to a
+  project whose branch nests under this one (W3) and are skipped.
+- **Removals log `task_worktree_gc`** with `task`, `reason`
+  (`committed`, `committed_ref`, `task_missing`) and `worktree`, or `repo`
+  and `branch` for a ref. Keep decisions are logged once per task until they
+  change, not on every sweep. A failed step logs `task_worktree_gc_error`
+  and is retried by the next sweep.
+- **A half-created worktree needed no new code.** `Ensure` already reuses
+  the repos that are there, re-attaches a branch whose directory is gone,
+  and cuts the repos it never reached. The sweep's prune clears the gone
+  directory's admin entry first. `TestRestartCompletesHalfCreatedWorktree`
+  pins it.
+- **The git preflight requires git 2.31, not 2.17.**
+  `worktree.Manager.GitCommonDir` and `GitPath` use `rev-parse
+  --path-format=absolute`, which arrived in 2.31
+  (`worktree.MinGitVersion`). `Run` checks it first, before anything is
+  watched, and only when worktrees are enabled. A git that is missing or too
+  old makes `Run` return an error (`git_preflight_failed`). Falling back to
+  the shared tree would strand any task an earlier daemon gave a worktree
+  (D7), so this is a fix-your-git error, not a degraded mode. The git inside
+  sandbox templates is not checked: the daemon can't reach it before a
+  sandbox exists, and task agents only commit there.
+- **`internal/worktree`** gains `Prune`, `List`, `CheckedOut`, `Branches`,
+  `DeleteBranch`, `GitVersion` and `CheckGitVersion`.
+- **Tests.** `internal/daemon/worktree_gc_test.go` has one test per W7 case
+  (deleted task clean, with committed work, with uncommitted edits, and with
+  an unreadable file; `committed` integrated and not; every other status;
+  a live session; prune; branchless refs; `.stale/`), the startup order
+  (`task_released` before `task_worktree_gc` before `worktree_reused`), the
+  half-created worktree after a restart, the reaper's interval, and the
+  preflight. `internal/worktree` tests the new helpers.
 
 ### After phase 6
 

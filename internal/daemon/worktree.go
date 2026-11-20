@@ -459,3 +459,27 @@ func (d *Daemon) commitWorktree(projectPath string, p *project.Project, t *task.
 func (d *Daemon) projectPathOf(t *task.Task) string {
 	return filepath.Join(filepath.Dir(filepath.Dir(t.Path)), project.FileName)
 }
+
+// gitPreflight is the startup check of docs/parallel-task-worktrees.md R8:
+// with per-task worktrees enabled, the host's git must exist and be at least
+// worktree.MinGitVersion, or Run refuses to start. Falling back to the shared
+// tree instead would strand any task an earlier daemon already gave a
+// worktree (D7), so a too-old git is an error to fix, not a mode to run in.
+// Without git-backed workspaces nothing here runs git, and nothing is
+// checked.
+func (d *Daemon) gitPreflight() error {
+	if !d.worktreesEnabled() {
+		return nil
+	}
+	v, err := d.worktrees.GitVersion(d.ctx)
+	if err != nil {
+		d.audit.Log("git_preflight_failed", "err", err.Error())
+		return fmt.Errorf("daemon: git preflight: %w", err)
+	}
+	if err := worktree.CheckGitVersion(v); err != nil {
+		d.audit.Log("git_preflight_failed", "version", v, "err", err.Error())
+		return fmt.Errorf("daemon: git preflight: %w", err)
+	}
+	d.audit.Log("git_preflight", "version", v)
+	return nil
+}

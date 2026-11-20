@@ -582,3 +582,114 @@ func realPath(p string) string {
 	}
 	return filepath.Clean(p)
 }
+
+// Worktree is one entry of `git worktree list --porcelain`.
+type Worktree struct {
+	Path string
+	// Branch is the checked-out branch's full ref, "" when detached.
+	Branch string
+}
+
+// List returns the worktrees registered in the repo at repoDir, the main
+// working tree included.
+func (m Manager) List(ctx context.Context, repoDir string) ([]Worktree, error) {
+	wts, err := m.list(ctx, repoDir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Worktree, len(wts))
+	for i, wt := range wts {
+		out[i] = Worktree{Path: wt.path, Branch: wt.branch}
+	}
+	return out, nil
+}
+
+// CheckedOut returns the branch (full ref) of the worktree registered at
+// path in the repo at repoDir, and whether one is registered there at all.
+func (m Manager) CheckedOut(ctx context.Context, repoDir, path string) (string, bool, error) {
+	wts, err := m.list(ctx, repoDir)
+	if err != nil {
+		return "", false, err
+	}
+	wt, ok := findWorktree(wts, path)
+	return wt.branch, ok, nil
+}
+
+// Prune runs `git worktree prune` in the repo at repoDir, dropping the admin
+// entries of worktrees whose directory is gone (W7 step 1).
+func (m Manager) Prune(ctx context.Context, repoDir string) error {
+	_, err := m.git(ctx, repoDir, "worktree", "prune")
+	return err
+}
+
+// Branches lists the branches under refs/heads/<prefix> in the repo at dir,
+// as names without refs/heads/. A prefix ending in "/" matches a namespace
+// (BranchPrefix + project branch + "/").
+func (m Manager) Branches(ctx context.Context, dir, prefix string) ([]string, error) {
+	out, err := m.git(ctx, dir, "for-each-ref", "--format=%(refname)", "refs/heads/"+prefix)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, l := range strings.Split(out, "\n") {
+		if name, ok := strings.CutPrefix(l, "refs/heads/"); ok && strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// DeleteBranch force-deletes refs/heads/<branch> in the repo at dir.
+func (m Manager) DeleteBranch(ctx context.Context, dir, branch string) error {
+	_, err := m.git(ctx, dir, "branch", "-D", branch)
+	return err
+}
+
+// MinGitVersion is the oldest git the worktree code works with: `rev-parse
+// --path-format=absolute` (GitCommonDir, GitPath) arrived in 2.31, after
+// everything else used here (`worktree add/list --porcelain/prune/remove`,
+// `--git-common-dir`).
+var MinGitVersion = [2]int{2, 31}
+
+// GitVersion returns the version `git version` reports, e.g. "2.39.3" from
+// "git version 2.39.3 (Apple Git-146)".
+func (m Manager) GitVersion(ctx context.Context) (string, error) {
+	out, err := m.git(ctx, "", "version")
+	if err != nil {
+		return "", err
+	}
+	v, ok := strings.CutPrefix(out, "git version ")
+	if !ok {
+		return "", fmt.Errorf("unrecognised git version output %q", out)
+	}
+	if f := strings.Fields(v); len(f) > 0 {
+		v = f[0]
+	}
+	return v, nil
+}
+
+// CheckGitVersion reports an error when version (as GitVersion returns it)
+// is older than MinGitVersion or cannot be parsed.
+func CheckGitVersion(version string) error {
+	parts := strings.SplitN(version, ".", 3)
+	if len(parts) < 2 {
+		return fmt.Errorf("cannot parse git version %q", version)
+	}
+	var v [2]int
+	for i := range v {
+		digits := parts[i]
+		if j := strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }); j >= 0 {
+			digits = digits[:j]
+		}
+		n, err := strconv.Atoi(digits)
+		if err != nil {
+			return fmt.Errorf("cannot parse git version %q", version)
+		}
+		v[i] = n
+	}
+	if v[0] < MinGitVersion[0] || (v[0] == MinGitVersion[0] && v[1] < MinGitVersion[1]) {
+		return fmt.Errorf("git %s is too old: per-task worktrees need git %d.%d or later", version, MinGitVersion[0], MinGitVersion[1])
+	}
+	return nil
+}

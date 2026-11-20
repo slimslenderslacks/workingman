@@ -21,13 +21,19 @@
 // [Manager.GitCommonDir] resolves the git dir a task sandbox has to mount so
 // commits made in the worktree land in the shared repo (W5).
 //
+// [Manager.Prune], [Manager.List], [Manager.CheckedOut], [Manager.Branches]
+// and [Manager.DeleteBranch] are what the daemon's worktree sweep (W7) is
+// built from, and [Manager.GitVersion] / [CheckGitVersion] its startup
+// preflight against [MinGitVersion] (R8).
+//
 // Every git invocation goes through [Manager.Run] ([RunFunc]), so tests can
 // substitute a fake; the zero Manager runs the real `git` binary.
 //
 // # Key types
 //
 //   - [Manager] — Ensure, Remove, GitCommonDir, IsAncestor, MergeBase,
-//     BranchExists, Dirty.
+//     BranchExists, Dirty, and the sweep's Prune, List, CheckedOut,
+//     Branches, DeleteBranch.
 //   - [Spec] — which task worktree: shared workspace, task name, task branch,
 //     shared branch, repo dir names.
 //   - [Result] / [RepoResult] — what Ensure did per repo (created, reused,

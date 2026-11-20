@@ -86,6 +86,10 @@ func (d *Daemon) startupScan() {
 				defer func() { <-sem }()
 				d.releaseOrphanedTasks(path)
 				d.resumeOrphanedOutcomes(path)
+				// After the release, so a task that lost its session is
+				// judged at ready (kept), and before the first pass, so its
+				// re-dispatch never trips over a stale worktree (S6, X7).
+				d.sweepWorktrees(path)
 				d.revisitProject(path)
 			}(p)
 			return nil

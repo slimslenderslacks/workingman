@@ -136,6 +136,13 @@ type Daemon struct {
 	// worktrees runs the git operations on per-task worktrees (see
 	// worktree.go). The zero value runs the real git binary.
 	worktrees worktree.Manager
+	// worktreeSweepEvery is how often the reaper runs the worktree sweep
+	// (reaper.go, W7); <= 0 means defaultWorktreeSweepInterval. sweepMu
+	// guards sweepKept, the last keep decision logged per project and task,
+	// so a kept worktree is reported once rather than on every sweep.
+	worktreeSweepEvery time.Duration
+	sweepMu            sync.Mutex
+	sweepKept          map[string]string
 
 	// commitMu guards commitBusy and verifyChecks. commitBusy counts, per
 	// project, the commit agents between launchCommitAgent and the end of
@@ -283,6 +290,17 @@ func WithSessionIdleTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithWorktreeSweepInterval overrides how often the reaper runs the worktree
+// sweep (docs/parallel-task-worktrees.md W7). A non-positive value leaves the
+// default (defaultWorktreeSweepInterval).
+func WithWorktreeSweepInterval(every time.Duration) Option {
+	return func(d *Daemon) {
+		if every > 0 {
+			d.worktreeSweepEvery = every
+		}
+	}
+}
+
 // WithMaxParallelTasks caps the task agents running at once across every
 // project (`orch --max-parallel-tasks`, docs/parallel-task-worktrees.md S3).
 // Commit, planning, review and wolf agents do not count. n <= 0 means no cap,
@@ -333,6 +351,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		taskTokens:         map[string]bool{},
 		schedNotes:         map[string]*schedNote{},
 		verifyChecks:       map[string]*VerifyChecks{},
+		sweepKept:          map[string]string{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 		clock:              time.Now,
 		sleepCheckEvery:    cronSleepCheckEvery,
@@ -377,6 +396,9 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 func (d *Daemon) Run(ctx context.Context) error {
 	d.ctx = ctx
 	defer d.shutdown()
+	if err := d.gitPreflight(); err != nil {
+		return err
+	}
 	if d.power != nil {
 		// Synchronously first, so a daemon started on battery never dispatches.
 		d.checkPower(ctx)

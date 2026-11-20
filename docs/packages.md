@@ -49,7 +49,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/terminal` | shared | Package terminal opens sessions in new tabs of the user's terminal emulator (Ghostty, WezTerm or kitty) and tracks those tabs across orch restarts. | `Launcher` | `AlreadyOpenError`, `Ghostty`, `Kitty`, `Runner`, `Settings`, `Tab`, `TabLauncher`, `TabRef`, `TabSession`, `WezTerm` |
 | `internal/tui` | tui | Package tui is the orch terminal UI: a bubbletea program that shows live agent sessions, the work-stream (project) gallery and its tasks, and lets the user steer work streams by writing their project.yaml files. | `InteractiveLauncher`, `TabFocuser` | `ProjectView`, `SessionView`, `TaskIntegration`, `TaskView` |
 | `internal/workspace` | shared | Package workspace provisions and tears down the multi-repo directory each agent runs in, with the wsp CLI behind a small Manager interface. | `GitBacked`, `Manager` | `Repo`, `StubManager`, `WspManager` |
-| `internal/worktree` | shared | Package worktree creates, reuses and removes the per-task git worktrees a project's task agents work in, each on its own task branch cut from the project's shared branch. | — | `Action`, `Manager`, `RepoError`, `RepoResult`, `Result`, `RunFunc`, `Spec` |
+| `internal/worktree` | shared | Package worktree creates, reuses and removes the per-task git worktrees a project's task agents work in, each on its own task branch cut from the project's shared branch. | — | `Action`, `Manager`, `RepoError`, `RepoResult`, `Result`, `RunFunc`, `Spec`, `Worktree` |
 
 ## Dependency graph
 
