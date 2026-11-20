@@ -19,6 +19,7 @@ func TestKindString(t *testing.T) {
 		{ReviewAgent, "review"},
 		{WorkingmanAgent, "workingman"},
 		{SleepyHeadAgent, "sleepy-head"},
+		{StepUpAgent, "step-up"},
 		{Kind(99), "unknown"},
 	}
 	for _, tc := range cases {
@@ -45,6 +46,7 @@ func TestKindOrdinals(t *testing.T) {
 		{ReviewAgent, 6},
 		{WorkingmanAgent, 7},
 		{SleepyHeadAgent, 8},
+		{StepUpAgent, 9},
 	}
 	for _, tc := range cases {
 		if int(tc.kind) != tc.want {
@@ -57,7 +59,7 @@ func TestKindOrdinals(t *testing.T) {
 // the daemon recovers a session's Kind from the on-disk string it wrote, so a
 // missing case would silently drop that agent kind on restart reconciliation.
 func TestParseKindRoundTrip(t *testing.T) {
-	for _, k := range []Kind{ProjectAgent, PlanningAgent, TaskAgent, WolfAgent, CommitAgent, ArchiveAgent, ReviewAgent, WorkingmanAgent, SleepyHeadAgent} {
+	for _, k := range []Kind{ProjectAgent, PlanningAgent, TaskAgent, WolfAgent, CommitAgent, ArchiveAgent, ReviewAgent, WorkingmanAgent, SleepyHeadAgent, StepUpAgent} {
 		got, ok := ParseKind(k.String())
 		if !ok || got != k {
 			t.Errorf("ParseKind(%q) = (%v, %v), want (%v, true)", k.String(), got, ok, k)
@@ -93,6 +95,9 @@ func TestKindInteractive(t *testing.T) {
 		{WorkingmanAgent, false},
 		// The sleepy-head agent asks the user which behind projects to catch up.
 		{SleepyHeadAgent, true},
+		// The Step-Up agent serves other agents' requests; the daemon, not a
+		// human, gives it its turns.
+		{StepUpAgent, false},
 	}
 	for _, tc := range cases {
 		if got := tc.kind.Interactive(); got != tc.want {

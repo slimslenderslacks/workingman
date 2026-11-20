@@ -49,6 +49,10 @@ type Context struct {
 	SnapshotFile string   `yaml:"snapshot_file,omitempty"`
 	AuditLog     string   `yaml:"audit_log,omitempty"`
 	SessionsRoot string   `yaml:"sessions_root,omitempty"`
+
+	// StepUpDir is the Step-Up agent's request directory. See
+	// prompts.Data.StepUpDir.
+	StepUpDir string `yaml:"step_up_dir,omitempty"`
 }
 
 // Skill is a directory of files copied verbatim into the workspace's

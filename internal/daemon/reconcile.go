@@ -81,6 +81,19 @@ func (d *Daemon) reconcileSessions() {
 			}
 			continue
 		}
+		if kind == agent.StepUpAgent {
+			// Like the workingman agent: adopted only by a daemon that supervises
+			// one, under its fixed key, with the supervisor told when it ends.
+			if d.stepUp == nil {
+				continue
+			}
+			sess := newReconciledSession(rec.ID, store, nil)
+			if d.trackConfiguredSession(stepUpSessionKey, sess, kind, "", d.reconciledConfig(rec, kind), func(error) { d.stepUp.signalEnded() }) {
+				d.audit.Log("session_reconciled", "key", stepUpSessionKey, "kind", rec.Kind, "id", rec.ID)
+				poke(d.stepUp.started)
+			}
+			continue
+		}
 		if kind == agent.SleepyHeadAgent {
 			// Project-independent and not detachable, so a live one is a leftover
 			// from a daemon that died without closing it. Adopt it under its key

@@ -14,14 +14,15 @@
 // stay in order while unrelated projects proceed in parallel.
 //
 // The transitions themselves are documented in state-machine.md and the
-// eight agent kinds (project, planning, task, commit, wolf, archive, review,
-// workingman) in agents.md; this comment is a map of where each lives.
+// agent kinds (project, planning, task, commit, wolf, archive, review,
+// workingman, sleepy-head, step-up) in agents.md; this comment is a map of
+// where each lives.
 //
 // Each project has one shared session slot, keyed by its project.yaml path,
 // used in turn by its project, task, commit and review agents. Planning,
 // wolf and archive agents run in slots of their own ("<path>#planning",
-// "#wolf", "#archive"), and the workingman agent, which belongs to no
-// project, has a fixed key. The daemon writes project.yaml and task files
+// "#wolf", "#archive"), and the workingman and Step-Up agents, which belong
+// to no project, have fixed keys. The daemon writes project.yaml and task files
 // itself (status transitions) and ignores the fsnotify events its own writes
 // cause.
 //
@@ -88,7 +89,12 @@
 //     [Daemon.OpenOrchDirTab] and [Daemon.OpenWorkspaceDirTab], which back the
 //     TUI's :session, :orch and :workspace commands.
 //   - workingman_agent.go: supervises the always-on workingman agent
-//     ([WithWorkingmanAgent]), restarting it with backoff.
+//     ([WithWorkingmanAgent]), restarting it with backoff (superviseAgent,
+//     shared with the Step-Up agent).
+//   - step_up.go: the always-on Step-Up agent ([WithStepUpAgent]): its plan
+//     (post-office as its only, static MCP server; no orch roots), its
+//     supervision, and the driver that prompts it whenever the post-office
+//     store holds work for it.
 //   - channels_notify.go: wolf start and end messages on the `wolf` channel
 //     topic ([WithChannels]), with message IDs recorded so replies can find
 //     the wolf again.
@@ -109,7 +115,8 @@
 //     only instance.
 //   - [Option] — functional options for [New]: [WithRunner], [WithScheduler],
 //     [WithNotifier], [WithChannels], [WithStateFile], [WithRuntimeInfo],
-//     [WithWorkingmanAgent], [WithSessionIdleTimeout], [WithReviewGateway].
+//     [WithWorkingmanAgent], [WithStepUpAgent], [WithSessionIdleTimeout],
+//     [WithReviewGateway].
 //   - [ReviewGatewayConfig] — the standalone-codemode root and record
 //     directory ([ReviewGatewayStateDir]) for the daemon's github-only
 //     gateway, given to [WithReviewGateway].
@@ -120,6 +127,8 @@
 //   - [WolfSession], [WorkingmanAgentSession], [SleepyHeadSession] — live
 //     sessions the router can
 //     attach to; cmd/orch adapts them to router.Session.
+//     [StepUpAgentSession] is the Step-Up agent's, which only the daemon's
+//     own driver attaches to.
 //   - [Snapshot] — the JSON state document ([ProjectSnapshot],
 //     [SessionSnapshot], [AuditEvent], ...) behind --state-file and
 //     `orch status`. Built live by [Daemon.Snapshot], from disk alone by
@@ -145,6 +154,7 @@
 // through [github.com/slimslenderslacks/work/internal/workspace]. It also
 // uses internal/audit (event log), internal/notify and internal/channels
 // (wolf alerts), internal/policy (sandbox rules), internal/sbx (sandbox
-// liveness), internal/gitsign (push identity) and internal/terminal (host
-// tabs).
+// liveness), internal/gitsign (push identity), internal/terminal (host
+// tabs), and internal/postoffice and internal/acpchat (the Step-Up driver
+// reads the message store and prompts the agent's session).
 package daemon

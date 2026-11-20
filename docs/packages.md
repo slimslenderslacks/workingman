@@ -31,7 +31,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/channels/whatsapp/bridge` | daemon | Package bridge runs and talks to the vendored Baileys WhatsApp bridge: the "personal number, QR pairing, no public webhook" WhatsApp backend. | `Process` | `APIError`, `Backoff`, `Client`, `Event`, `Health`, `Launch`, `ReadKey`, `SendResult`, `Starter`, `Supervisor`, `SupervisorStatus` |
 | `internal/channels/whatsapp/setup` | daemon | Package setup holds the non-interactive core of `orch whatsapp setup`, `status` and `test`. | — | `Cred`, `Current`, `Guide`, `SaveResult`, `Store`, `Update`, `WebhookSettings` |
 | `internal/channels/yamledit` | daemon | Package yamledit edits channels.yaml as a yaml.Node tree, so the `orch signal` and `orch slack` setup commands can rewrite their own section while comments and everything else in the file survive. | — | — |
-| `internal/daemon` | daemon | Package daemon is the orch control loop: it watches the orch roots, drives each project and task through its state machine, and launches the agent sessions that do the work. | `ChannelSender` | `ACPInfo`, `AuditEvent`, `ChannelOption`, `Daemon`, `DaemonInfo`, `MissedSchedule`, `OfflineOptions`, `Option`, `ProjectLive`, `ProjectSnapshot`, `PullRequestSummary`, `ReviewGatewayConfig`, `ReviewPollInfo`, `RuntimeInfo`, `SessionInfo`, `SessionSnapshot`, `SessionStatus`, `SleepyHeadSession`, `Snapshot`, `TaskSnapshot`, `WolfSession`, `WorkingmanAgentConfig`, `WorkingmanAgentSession` |
+| `internal/daemon` | daemon | Package daemon is the orch control loop: it watches the orch roots, drives each project and task through its state machine, and launches the agent sessions that do the work. | `ChannelSender`, `StepUpConversation` | `ACPInfo`, `AuditEvent`, `ChannelOption`, `Daemon`, `DaemonInfo`, `MissedSchedule`, `OfflineOptions`, `Option`, `ProjectLive`, `ProjectSnapshot`, `PullRequestSummary`, `ReviewGatewayConfig`, `ReviewPollInfo`, `RuntimeInfo`, `SessionInfo`, `SessionSnapshot`, `SessionStatus`, `SleepyHeadSession`, `Snapshot`, `StepUpAgentConfig`, `StepUpAgentSession`, `TaskSnapshot`, `WolfSession`, `WorkingmanAgentConfig`, `WorkingmanAgentSession` |
 | `internal/gitsign` | shared | Package gitsign makes a sandboxed agent commit as the host user, SSH-sign those commits, and check that the SSH agent forwarded into the sandbox can sign and push. | — | `Config`, `PushResult`, `RunFunc` |
 | `internal/mcpgateway` | shared | Package mcpgateway gives every sandbox workingman creates its own MCP gateway: a sub-gateway of the host's standalone-codemode gateway, minted with POST /gateways and torn down with DELETE /gateways/{id}. | `GatewayAPI`, `GatewaySource`, `SessionConn`, `ToolCaller`, `ToolLister` | `Client`, `Content`, `DaemonGateway`, `DaemonSession`, `Gateway`, `Manager`, `RPCError`, `Record`, `ServerState`, `Session`, `SessionOptions`, `Store`, `Tool`, `ToolError`, `ToolResult`, `UnknownServersError` |
 | `internal/notify` | daemon | Package notify is the daemon's user-notification interface: how an agent that needs human attention reaches a person. | `Sender`, `TopicSender` | `Async`, `Call`, `Multi`, `Noop`, `Osascript`, `Recorder` |
@@ -173,6 +173,7 @@ graph LR
   internal_channels_whatsapp_setup --> internal_channels
   internal_channels_whatsapp_setup --> internal_channels_whatsapp
   internal_channels_yamledit --> internal_channels
+  internal_daemon --> internal_acpchat
   internal_daemon --> internal_agent
   internal_daemon --> internal_audit
   internal_daemon --> internal_channels
@@ -180,6 +181,7 @@ graph LR
   internal_daemon --> internal_mcpgateway
   internal_daemon --> internal_notify
   internal_daemon --> internal_policy
+  internal_daemon --> internal_postoffice
   internal_daemon --> internal_power
   internal_daemon --> internal_project
   internal_daemon --> internal_prompts
@@ -251,7 +253,7 @@ The same graph as text: each package's internal imports and importers.
 | `cmd/op-read` | `onepassword` | — |
 | `cmd/orch` | `agent`, `audit`, `channels`, `channels/signal`, `channels/signal/setup`, `channels/slack`, `channels/slack/setup`, `channels/whatsapp`, `channels/whatsapp/setup`, `daemon`, `mcpgateway`, `notify`, `postoffice`, `power`, `router`, `runner`, `scheduler`, `service`, `session`, `terminal`, `tui`, `workspace` | — |
 | `cmd/post-office` | `mcpgateway`, `postoffice`, `postoffice/mcpserver`, `session` | — |
-| `internal/acpchat` | `acpclient`, `session` | `router` |
+| `internal/acpchat` | `acpclient`, `session` | `daemon`, `router` |
 | `internal/acpclient` | — | `acpchat`, `tui` |
 | `internal/acpwrapper` | `gitsign`, `mcpgateway`, `policy`, `project`, `sbx`, `session`, `task` | `cmd/acp-wrapper` |
 | `internal/agent` | — | `cmd/orch`, `daemon`, `prompts`, `runner`, `terminal` |
@@ -266,13 +268,13 @@ The same graph as text: each package's internal imports and importers.
 | `internal/channels/whatsapp/bridge` | — | `channels/whatsapp` |
 | `internal/channels/whatsapp/setup` | `channels`, `channels/whatsapp` | `cmd/orch` |
 | `internal/channels/yamledit` | `channels` | `channels/signal/setup`, `channels/slack/setup` |
-| `internal/daemon` | `agent`, `audit`, `channels`, `gitsign`, `mcpgateway`, `notify`, `policy`, `power`, `project`, `prompts`, `runner`, `sbx`, `scheduler`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |
+| `internal/daemon` | `acpchat`, `agent`, `audit`, `channels`, `gitsign`, `mcpgateway`, `notify`, `policy`, `postoffice`, `power`, `project`, `prompts`, `runner`, `sbx`, `scheduler`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |
 | `internal/gitsign` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `runner` |
 | `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `cmd/orch`, `cmd/post-office`, `acpwrapper`, `channels/slack`, `daemon`, `postoffice/mcpserver`, `runner` |
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
 | `internal/onepassword` | — | `cmd/op-read` |
 | `internal/policy` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `mcpgateway`, `runner`, `task`, `tui` |
-| `internal/postoffice` | `audit`, `channels` | `cmd/orch`, `cmd/post-office`, `postoffice/mcpserver`, `router` |
+| `internal/postoffice` | `audit`, `channels` | `cmd/orch`, `cmd/post-office`, `daemon`, `postoffice/mcpserver`, `router` |
 | `internal/postoffice/mcpserver` | `mcpgateway`, `postoffice`, `session`, `task` | `cmd/post-office` |
 | `internal/power` | — | `cmd/orch`, `daemon` |
 | `internal/project` | — | `acpwrapper`, `daemon`, `tui` |

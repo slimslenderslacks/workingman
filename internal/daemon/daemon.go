@@ -137,6 +137,10 @@ type Daemon struct {
 	// WithWorkingmanAgent. See workingman_agent.go.
 	workingman *workingmanAgent
 
+	// stepUp is the Step-Up agent supervision state; nil unless
+	// WithStepUpAgent. See step_up.go.
+	stepUp *stepUpAgent
+
 	// reviewGW is the daemon's own github-only MCP gateway for the PR
 	// fingerprint check; nil unless WithReviewGateway. See review_gateway.go.
 	// reviewGatewaySrc, when set, replaces it as what reviewGateway() returns
@@ -276,6 +280,10 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		w.Close()
 		return nil, fmt.Errorf("daemon: %w", err)
 	}
+	if err := d.resolveStepUp(); err != nil {
+		w.Close()
+		return nil, fmt.Errorf("daemon: %w", err)
+	}
 	if d.cronStatePath != "" {
 		if err := validateStateFile(d.cronStatePath, roots); err != nil {
 			w.Close()
@@ -341,6 +349,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// rather than duplicated, and before the scan so a slow project dispatch
 	// can't delay it (nor it them).
 	d.beginWorkingmanAgent(ctx)
+	d.beginStepUpAgent(ctx)
 	// Off the startup path: minting can take a while (or fail and back off),
 	// and nothing but the PR fingerprint check needs it.
 	d.startReviewGateway(ctx)
@@ -455,13 +464,14 @@ func (d *Daemon) shutdown() {
 // --wolf-host wolf and the legacy terminal-tab path (no AcpLauncher configured) are
 // unaffected — those sessions are still closed on shutdown as before.
 //
-// The workingman and sleepy-head agents are the exceptions among the ACP kinds:
-// they are owned by the daemon (mounts derived from this run's state) rather
-// than by any project, and reconcileSessions does not re-adopt them, so they
-// stop with the daemon and the next boot starts a fresh one — for sleepy-head,
-// only if something is still behind.
+// The workingman, Step-Up and sleepy-head agents are the exceptions among the
+// ACP kinds: they are owned by the daemon (mounts derived from this run's
+// state) rather than by any project, so they stop with the daemon and the next
+// boot starts a fresh one — for sleepy-head, only if something is still behind.
+// (reconcileSessions still adopts a live one a daemon that died without
+// closing it left behind, so no second wrapper starts beside it.)
 func (d *Daemon) detachable(kind agent.Kind) bool {
-	if kind == agent.WorkingmanAgent || kind == agent.SleepyHeadAgent {
+	if kind == agent.WorkingmanAgent || kind == agent.SleepyHeadAgent || kind == agent.StepUpAgent {
 		return false
 	}
 	return d.runner != nil && d.runner.UsesACP(kind)

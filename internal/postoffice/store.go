@@ -57,6 +57,10 @@ var (
 	ErrAlreadyReceived = errors.New("postoffice: already received")
 )
 
+// DefaultAddr is where post-office serves /mcp (§4.1). The orch daemon dials
+// it to tell whether post-office is running (orch --step-up-agent=auto).
+const DefaultAddr = "127.0.0.1:7077"
+
 // DefaultDir is the store root for a sessions root: $WORKINGMAN_POST_OFFICE_DIR
 // when set, else a "post-office" directory beside the sessions root
 // (<sessions-root>/../post-office), the way mcpgateway.StateDir places

@@ -38,7 +38,7 @@ import (
 )
 
 // DefaultListen is the post-office address (§4.1).
-const DefaultListen = "127.0.0.1:7077"
+const DefaultListen = postoffice.DefaultAddr
 
 func main() {
 	args := os.Args[1:]

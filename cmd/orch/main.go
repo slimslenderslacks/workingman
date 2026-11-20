@@ -17,6 +17,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/daemon"
 	"github.com/slimslenderslacks/work/internal/mcpgateway"
+	"github.com/slimslenderslacks/work/internal/postoffice"
 	"github.com/slimslenderslacks/work/internal/power"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
@@ -126,6 +127,8 @@ func runDaemon(args []string) {
 	channelsConfig := fs.String("channels-config", "", "messaging-channels config (default ~/.workingman/channels.yaml, or $WORKINGMAN_CHANNELS_CONFIG). A missing file disables channels and the daemon behaves exactly as without them")
 	var workingmanMode workingmanFlag
 	fs.Var(&workingmanMode, "workingman-agent", `run the workingman agent: a persistent assistant in its own sandbox that answers questions about the orch state and, on request, edits the orch roots (projects, tasks, intake). "auto" (default) turns it on whenever --acp-kit is set, with or without channels; --workingman-agent / =on forces it on (requires --acp-kit); =off disables it`)
+	var stepUpMode workingmanFlag
+	fs.Var(&stepUpMode, "step-up-agent", `run the Step-Up agent: a persistent agent in its own sandbox that takes other agents' requests for more sandbox capability (such as a network route) through post-office, asks the operator and replies. "auto" (default) turns it on when --acp-kit is set and post-office answers on `+postoffice.DefaultAddr+`; --step-up-agent / =on forces it on (requires --acp-kit); =off disables it`)
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	mcpGatewayURL := fs.String("mcp-gateway-url", os.Getenv("WORKINGMAN_MCP_GATEWAY_URL"), "base URL of the host's standalone-codemode gateway, e.g. http://localhost:3333 (default $WORKINGMAN_MCP_GATEWAY_URL). When set, every sandbox gets its own sub-gateway (POST /gateways) over the task's static_mcps — or --mcp-gateway-servers when a task names none — exposed inside it as MCP_URL (localhost rewritten to host.docker.internal), with the gateway's port allowed in its network policy; the gateway is DELETEd when the sandbox is removed. Empty disables the gateway (and MCP_URL)")
 	mcpGatewayStatic := fs.Bool("mcp-gateway-static", os.Getenv("WORKINGMAN_MCP_GATEWAY_STATIC") == "1", "give no sandbox a dynamic gateway (default false, or true when $WORKINGMAN_MCP_GATEWAY_STATIC=1). By default the wolf and task agents' gateways are dynamic: they also serve mcp-find and mcp-add over the whole catalog")
@@ -310,6 +313,17 @@ func runDaemon(args []string) {
 			log.Fatalf("%s", why) // asked for explicitly: don't silently run without it
 		}
 		a.Log("workingman_agent_flag", "enabled", "false", "why", why)
+	}
+	if on, why := stepUpAgentEnabled(stepUpMode, *acpKit, postOfficeReachable); on {
+		dopts = append(dopts, daemon.WithStepUpAgent(daemon.StepUpAgentConfig{
+			AuditLog: absPath(*auditPath),
+		}))
+		a.Log("step_up_agent_flag", "enabled", "true", "why", why)
+	} else {
+		if stepUpMode == workingmanOn {
+			log.Fatalf("%s", why)
+		}
+		a.Log("step_up_agent_flag", "enabled", "false", "why", why)
 	}
 	d, err := daemon.New(roots, a, dopts...)
 	if err != nil {

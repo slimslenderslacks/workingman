@@ -1,9 +1,9 @@
 # Agent messaging: design and implementation plan
 
 **Status: approved 2026-11-20**, with the operator's decisions recorded in
-[§10.3](#103-decisions) and applied to the sections below. Nothing here is
-implemented yet; the tasks in [§9](#9-implementation-task-breakdown) are
-queued.
+[§10.3](#103-decisions) and applied to the sections below. The tasks in
+[§9](#9-implementation-task-breakdown) are being implemented; "As built"
+notes in each section record where the code differs from the plan.
 
 This document turns the project brief and three research notes into one plan:
 
@@ -1150,6 +1150,33 @@ Modelled on the workingman agent (orch-integration.md §4.2, §4.6):
   cases in `detachable`, `sessions.go` and `snapshot_live.go`, exactly where
   the workingman agent has them.
 - Prompt: `internal/prompts/templates/step-up.tmpl` (§8.6).
+
+**As built (`step-up-agent`).** Everything above, in
+`internal/daemon/step_up.go`, with these details:
+
+- The session-map key and ACP session id are `step-up-agent`; the sandbox is
+  `step-up` (the name post-office's recipient registry uses). The scratch dir
+  is `<sessions-root>/../step-up-agent`.
+- Of the request directory, `requests/` is mounted read-write and `results/`
+  read-only, so the agent cannot forge a result. The audit log's directory is
+  mounted read-only (`audit.jsonl` will live in `~/.workingman/step-up/`,
+  which is not mounted as a whole).
+- `auto` probes `127.0.0.1:7077` once at startup. The agent also needs
+  `--mcp-gateway-url`; without one it is skipped with
+  `step_up_agent_unavailable`.
+- **The daemon drives its turns.** Nobody types into Step-Up, and a turn
+  that loops on `next_message` forever would never end. So a driver attaches
+  to the session (`acpchat`, creating the ACP session when no TUI does) and
+  sends a short "serve your inbox, then end your turn" prompt when post-office
+  holds a message for `step-up` that it has not taken, when one of its own
+  requests closes, and every 10 minutes while it holds an unanswered request.
+  It never prompts during another client's turn. The prompt tells the agent
+  never to block: `next_message` with `timeout_seconds: 0`, and
+  `check_response`, not `wait_for_response`.
+- With no executor yet, the approval request uses `options: ["done",
+  "deny"]` and gives the operator the `sbx policy …` command to run on the
+  host. `step-up-executor` switches it to `["approve", "deny"]` (§8.4) when
+  the daemon starts applying changes.
 
 ### 8.3 The workingman interface: the step-up request directory
 

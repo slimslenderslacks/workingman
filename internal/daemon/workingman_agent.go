@@ -261,19 +261,46 @@ func workingmanBackoff(failures int, lo, hi time.Duration) time.Duration {
 }
 
 // superviseWorkingmanAgent keeps the workingman agent running until ctx is
-// cancelled. It runs on its own goroutine (started from Run), so nothing it
-// does — a slow Start, a launch that keeps failing, a crash loop — can delay
-// project dispatch.
+// cancelled; see superviseAgent.
+func (d *Daemon) superviseWorkingmanAgent(ctx context.Context) {
+	w := d.workingman
+	d.superviseAgent(ctx, agentSupervision{
+		key:         workingmanSessionKey,
+		event:       "workingman_agent",
+		start:       d.startWorkingmanAgent,
+		ended:       w.ended,
+		minBackoff:  w.cfg.MinBackoff,
+		maxBackoff:  w.cfg.MaxBackoff,
+		stableAfter: w.cfg.StableAfter,
+	})
+}
+
+// agentSupervision describes one daemon-owned, always-on agent for
+// superviseAgent: the workingman agent or the Step-Up agent.
+type agentSupervision struct {
+	key   string       // session-map key
+	event string       // audit event prefix: <event>_start_error, <event>_restart_scheduled
+	start func() error // launch and track one session
+	// ended is poked whenever the tracked session ends.
+	ended <-chan struct{}
+	// minBackoff / maxBackoff / stableAfter tune the restart backoff;
+	// non-positive values keep the defaults.
+	minBackoff, maxBackoff, stableAfter time.Duration
+}
+
+// superviseAgent keeps one always-on agent running until ctx is cancelled. It
+// runs on its own goroutine (started from Run), so nothing it does — a slow
+// Start, a launch that keeps failing, a crash loop — can delay project
+// dispatch.
 //
 // Each pass: if no session is tracked under the agent's key (a daemon restart
 // that adopted a still-live one skips this), start one; then wait for it to end;
-// then back off exponentially (cfg.MinBackoff doubling to cfg.MaxBackoff) before
-// the next pass. A launch that survived cfg.StableAfter resets the backoff, so a
+// then back off exponentially (minBackoff doubling to maxBackoff) before the
+// next pass. A launch that survived stableAfter resets the backoff, so a
 // healthy agent that dies once a day is relaunched promptly while a crash loop
-// is throttled to one attempt per MaxBackoff.
-func (d *Daemon) superviseWorkingmanAgent(ctx context.Context) {
-	w := d.workingman
-	lo, hi, stable := w.cfg.MinBackoff, w.cfg.MaxBackoff, w.cfg.StableAfter
+// is throttled to one attempt per maxBackoff.
+func (d *Daemon) superviseAgent(ctx context.Context, s agentSupervision) {
+	lo, hi, stable := s.minBackoff, s.maxBackoff, s.stableAfter
 	if lo <= 0 {
 		lo = defaultWorkingmanMinBackoff
 	}
@@ -293,12 +320,12 @@ func (d *Daemon) superviseWorkingmanAgent(ctx context.Context) {
 			return
 		}
 		launchedAt := time.Now()
-		if !d.hasSession(workingmanSessionKey) {
-			if err := d.startWorkingmanAgent(); err != nil {
-				d.audit.Log("workingman_agent_start_error", "err", err.Error())
+		if !d.hasSession(s.key) {
+			if err := s.start(); err != nil {
+				d.audit.Log(s.event+"_start_error", "err", err.Error())
 				// A failed launch is the same failure class as an early exit.
 				failures++
-				if !d.sleepCtx(ctx, d.workingmanRetryDelay(failures, lo, hi)) {
+				if !d.sleepCtx(ctx, d.agentRetryDelay(s.event, failures, lo, hi)) {
 					return
 				}
 				continue
@@ -308,25 +335,25 @@ func (d *Daemon) superviseWorkingmanAgent(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-w.ended:
+		case <-s.ended:
 		}
-		if d.hasSession(workingmanSessionKey) {
+		if d.hasSession(s.key) {
 			continue // spurious wake-up: a stale poke while the session is live
 		}
 		if time.Since(launchedAt) >= stable {
 			failures = 0
 		}
 		failures++
-		if !d.sleepCtx(ctx, d.workingmanRetryDelay(failures, lo, hi)) {
+		if !d.sleepCtx(ctx, d.agentRetryDelay(s.event, failures, lo, hi)) {
 			return
 		}
 	}
 }
 
-// workingmanRetryDelay logs and returns the backoff before the next launch.
-func (d *Daemon) workingmanRetryDelay(failures int, lo, hi time.Duration) time.Duration {
+// agentRetryDelay logs and returns the backoff before the next launch.
+func (d *Daemon) agentRetryDelay(event string, failures int, lo, hi time.Duration) time.Duration {
 	delay := workingmanBackoff(failures, lo, hi)
-	d.audit.Log("workingman_agent_restart_scheduled",
+	d.audit.Log(event+"_restart_scheduled",
 		"failures", fmt.Sprintf("%d", failures),
 		"delay", delay.String(),
 	)

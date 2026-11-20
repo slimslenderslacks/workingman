@@ -134,11 +134,12 @@ func (d *Daemon) strandedVerdict(key string, e sessionEntry) reapVerdict {
 	if e.kind.Interactive() {
 		return reapVerdict{}
 	}
-	// The workingman agent is always-on: it is idle by design between questions
-	// (hours, overnight), has no stage that can complete, and is supervised and
-	// restarted by the daemon itself. Reaping it as stale would just make the
-	// supervisor relaunch it, dropping the conversation for nothing.
-	if e.kind == agent.WorkingmanAgent {
+	// The workingman and Step-Up agents are always-on: they are idle by design
+	// between questions or requests (hours, overnight), have no stage that can
+	// complete, and are supervised and restarted by the daemon itself. Reaping
+	// one as stale would just make the supervisor relaunch it, dropping the
+	// conversation for nothing.
+	if e.kind == agent.WorkingmanAgent || e.kind == agent.StepUpAgent {
 		return reapVerdict{}
 	}
 	idle := d.sessionIdle(e)
