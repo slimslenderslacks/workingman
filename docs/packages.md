@@ -34,6 +34,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/notify` | daemon | Package notify is the daemon's user-notification interface: how an agent that needs human attention reaches a person. | `Sender`, `TopicSender` | `Async`, `Call`, `Multi`, `Noop`, `Osascript`, `Recorder` |
 | `internal/onepassword` | daemon | Package onepassword reads secrets from 1Password through the 1Password Go SDK (github.com/1password/onepassword-sdk-go), authenticated as a service account, so nothing in workingman needs the `op` CLI, `op signin` or a biometric unlock. | `Resolver` | `KeychainItem`, `KeychainLookup`, `TokenSource` |
 | `internal/policy` | shared | Package policy defines the per-task sandbox policy rules (allow or deny one network or filesystem resource pattern) and turns them into `sbx policy` commands. | — | `Action`, `Kind`, `Rule` |
+| `internal/postoffice` | shared | Package postoffice is the agent messaging store: the message model and the file-backed Store under ~/.workingman/post-office/ that post-office, the orch daemon and the TUI share. | — | `DoneRecord`, `Draft`, `Kind`, `Lock`, `Message`, `Outcome`, `Resolution`, `Responder`, `Sender`, `Store`, `Waiters` |
 | `internal/power` | daemon | Package power reports whether the host is running on AC power or battery, so the daemon can stand down while a laptop is unplugged. | `Source` | `ACSource`, `Pmset` |
 | `internal/project` | shared | Package project is the data model and on-disk format of a work stream's project.yaml, plus the two sidecar records the daemon and the wolf agent keep next to it. | — | `BlockedSession`, `CheckState`, `PRFingerprint`, `PlannedSnapshot`, `Project`, `PullRequest`, `Repo`, `Status`, `Writer` |
 | `internal/prompts` | daemon | Package prompts renders the per-kind instruction text that orch writes to .orch/instructions.md for a newly launched agent. | — | `BehindProject`, `Data` |
@@ -93,6 +94,7 @@ graph LR
     internal_gitsign["gitsign"]
     internal_mcpgateway["mcpgateway"]
     internal_policy["policy"]
+    internal_postoffice["postoffice"]
     internal_project["project"]
     internal_sbx["sbx"]
     internal_session["session"]
@@ -203,7 +205,7 @@ graph LR
   classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
   class internal_tui tui
   classDef shared fill:#fff1cc,stroke:#c99a06,color:#000
-  class internal_acpclient,internal_gitsign,internal_mcpgateway,internal_policy,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace shared
+  class internal_acpclient,internal_gitsign,internal_mcpgateway,internal_policy,internal_postoffice,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace shared
   classDef wrapper fill:#f3e2fb,stroke:#8e44ad,color:#000
   class internal_acpwrapper wrapper
 ```
@@ -235,6 +237,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
 | `internal/onepassword` | — | `cmd/op-read` |
 | `internal/policy` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `mcpgateway`, `runner`, `task`, `tui` |
+| `internal/postoffice` | — | — |
 | `internal/power` | — | `cmd/orch`, `daemon` |
 | `internal/project` | — | `acpwrapper`, `daemon`, `tui` |
 | `internal/prompts` | `agent`, `sbx` | `daemon`, `runner` |
