@@ -16,7 +16,7 @@ func TestParseOptionsDefaults(t *testing.T) {
 	if cfg.GatewayURL != DefaultGatewayURL || cfg.PollInterval != DefaultPollInterval || cfg.WatchTTL != DefaultWatchTTL || len(cfg.AllowFrom) != 0 {
 		t.Errorf("cfg = %+v", cfg)
 	}
-	if cfg.allowed("U0CC1K1MFNX") {
+	if cfg.Allowed("U0CC1K1MFNX") {
 		t.Error("empty allow_from admitted someone")
 	}
 }
@@ -35,7 +35,7 @@ func TestParseOptionsFull(t *testing.T) {
 	if cfg.GatewayURL != "http://localhost:3333" || cfg.Channel != "C0123ABCD" || cfg.PollInterval != 30*time.Second || cfg.WatchTTL != 48*time.Hour {
 		t.Errorf("cfg = %+v", cfg)
 	}
-	if !cfg.allowed("U0CC1K1MFNX") || cfg.allowed("U0OTHER") {
+	if !cfg.Allowed("U0CC1K1MFNX") || cfg.Allowed("U0OTHER") {
 		t.Error("allow_from not applied")
 	}
 }

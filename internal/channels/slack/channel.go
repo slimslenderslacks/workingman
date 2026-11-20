@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -518,7 +519,7 @@ func (c *Channel) tool(ctx context.Context, suffix string) (string, error) {
 			return "", fmt.Errorf("slack: tools/list: %w", err)
 		}
 		m := map[string]string{}
-		for _, s := range []string{toolSend, toolReaction, toolChannel, toolThread} {
+		for _, s := range []string{toolSend, toolReaction, toolChannel, toolThread, toolProfile, toolChannels} {
 			for _, t := range tools {
 				if t.Name == s || strings.HasSuffix(t.Name, "-"+s) || strings.HasSuffix(t.Name, "_"+s) {
 					m[s] = t.Name
@@ -536,10 +537,19 @@ func (c *Channel) tool(ctx context.Context, suffix string) (string, error) {
 			c.log.Warn("slack: the gateway serves no Slack tools; replacing it")
 			r.ResetGateway(ctx)
 		}
-		return "", fmt.Errorf("slack: the gateway serves no %s tool (is the slack server attached?)", suffix)
+		return "", &noToolError{suffix}
 	}
 	return name, nil
 }
+
+// noToolError is a tool the gateway does not serve.
+type noToolError struct{ suffix string }
+
+func (e *noToolError) Error() string {
+	return fmt.Sprintf("slack: the gateway serves no %s tool (is the slack server attached?)", e.suffix)
+}
+
+func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // post sends text to chat (in thread when set), records it as ours, and
 // returns its message ID. A send whose outcome is unknown (the response was

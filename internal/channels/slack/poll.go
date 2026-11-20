@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/slimslenderslacks/work/internal/channels"
 )
@@ -145,6 +146,9 @@ func (c *Channel) readChannel(ctx context.Context) (map[*Watch]int, error) {
 		if c.st.isSent(id) || c.isEcho(m, "", id) {
 			continue // ours
 		}
+		if m.ViaMCP && strings.HasPrefix(m.Text, TestPrefix) {
+			continue // `orch slack test`'s, not the operator's
+		}
 		c.emit(m, c.cfg.Channel, id, "")
 	}
 	c.st.watch.TopCursor = top
@@ -212,7 +216,7 @@ func (c *Channel) readThread(ctx context.Context, w *Watch) error {
 			continue // ours
 		}
 		if w.Closed != nil {
-			if !c.cfg.allowed(r.UserID) {
+			if !c.cfg.Allowed(r.UserID) {
 				c.drop(r)
 				continue
 			}
@@ -257,7 +261,7 @@ func (c *Channel) isEcho(m Message, thread, id string) bool {
 
 // emit hands a human message to the handler, if its author is allowed.
 func (c *Channel) emit(m Message, chat, id, replyTo string) {
-	if !c.cfg.allowed(m.UserID) {
+	if !c.cfg.Allowed(m.UserID) {
 		c.drop(m)
 		return
 	}

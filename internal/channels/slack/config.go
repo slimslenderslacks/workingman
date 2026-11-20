@@ -139,9 +139,9 @@ func ParseOptions(options map[string]any, creds channels.Credentials) (Config, e
 	return cfg, nil
 }
 
-// allowed reports whether user may talk to the daemon. The zero list admits
+// Allowed reports whether user may talk to the daemon. The zero list admits
 // no one.
-func (c Config) allowed(user string) bool {
+func (c Config) Allowed(user string) bool {
 	for _, id := range c.AllowFrom {
 		if id == user {
 			return true

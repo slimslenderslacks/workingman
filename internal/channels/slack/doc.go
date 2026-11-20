@@ -54,6 +54,11 @@
 // (the watched requests and the top-level cursor), both written
 // write-then-rename at 0600.
 //
+// `orch slack setup|status|test` use a [Client] over a temporary gateway of
+// their own ([Dial]): the same tool resolution and header-script retry, one
+// call at a time, without the worker. A top-level Slack MCP post starting
+// with [TestPrefix] is `orch slack test`'s, and the poll skips it.
+//
 // # Key types
 //
 //   - [Channel] — the Slack transport; built by [Factory] (registered under
@@ -65,7 +70,13 @@
 //   - [Message] / [ChannelPage] / [ThreadPage] — the "detailed" text format of
 //     slack_read_channel and slack_read_thread, parsed by [ParseChannel] and
 //     [ParseThread].
-//   - [Watch] / [Closed] — a watched request in watch.json.
+//   - [Watch] / [Closed] — a watched request in watch.json; [State] and
+//     [ReadState] are the read-only view `orch slack status` prints.
+//   - [Client] — the setup CLI's one-shot client ([Dial], [NewClient]):
+//     profile, conversation list, post, thread replies, reaction.
+//   - [Profile] / [Conversation] / [ListPage] — slack_read_user_profile and
+//     slack_list_user_channels text, parsed by [ParseProfile] and
+//     [ParseConversations].
 //
 // # Collaborators
 //

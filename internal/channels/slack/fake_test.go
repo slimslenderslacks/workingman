@@ -35,6 +35,7 @@ type fakeSlack struct {
 	loseResponses int
 	hideLost      bool
 	calls         []fakeCall
+	listArgs      []map[string]any
 	// inflight detects concurrent calls.
 	inflight, maxInflight int
 }
@@ -129,7 +130,7 @@ func (f *fakeSlack) ListTools(context.Context) ([]mcpgateway.Tool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []mcpgateway.Tool
-	for _, s := range []string{toolSend, toolReaction, toolChannel, toolThread, "slack_search_users"} {
+	for _, s := range []string{toolSend, toolReaction, toolChannel, toolThread, toolProfile, toolChannels, "slack_search_users"} {
 		out = append(out, mcpgateway.Tool{Name: f.prefix + s})
 	}
 	return out, nil
@@ -181,6 +182,11 @@ func (f *fakeSlack) CallTool(_ context.Context, name string, args map[string]any
 		return textResult(f.renderChannel(conv, str("oldest"))), nil
 	case toolThread:
 		return textResult(f.renderThread(conv, str("message_ts"), str("oldest"))), nil
+	case toolProfile:
+		return textResult(`{"result":"User ID: U0CC1K1MFNX\nUsername: jim.clark\nDisplay Name: jim.clark\nReal Name: Jim Clark\nBot: No\n"}`), nil
+	case toolChannels:
+		f.listArgs = append(f.listArgs, args)
+		return textResult(`{"result":"## My Channels (showing 2, more results available)\n\n### #wm-jim\n- **ID:** G0WMJIM01\n- **Type:** Private Channel\n- **Archived:** No\n\n### DM with Jon May\n- **ID:** D0CJVBFKL23\n- **Type:** Direct Message\n- **User ID:** U01F5258FDF\n- **Archived:** No\n\n---\nPagination: More results available. Use cursor: \"aW1f\"\n"}`), nil
 	}
 	return mcpgateway.ToolResult{}, &mcpgateway.RPCError{Code: -32602, Message: "unknown tool " + name}
 }

@@ -341,3 +341,38 @@ func tsBefore(ts string) string {
 	}
 	return formatTS(sec, usec-1)
 }
+
+// State is a read-only view of the channel's state files, for `orch slack
+// status`.
+type State struct {
+	// ChannelID is the resolved conversation id ("" until the first send or
+	// read); TopCursor the newest top-level ts the poll has seen.
+	ChannelID string
+	TopCursor string
+	// Watches are the watched requests, oldest first.
+	Watches []Watch
+	// Sent is how many posted message ids are remembered; Unconfirmed how
+	// many sends of unknown outcome still await their echo.
+	Sent        int
+	Unconfirmed int
+}
+
+// ReadState reads the state files in dir (~/.workingman/slack). Missing
+// files are an empty state; a corrupt one is an error.
+func ReadState(dir string) (State, error) {
+	var sent sentState
+	var watch watchState
+	if err := errors.Join(
+		readJSON(filepath.Join(dir, SentFile), &sent),
+		readJSON(filepath.Join(dir, WatchFile), &watch),
+	); err != nil {
+		return State{}, err
+	}
+	st := State{ChannelID: watch.ChannelID, TopCursor: watch.TopCursor, Sent: len(sent.Sent), Unconfirmed: len(watch.Unconfirmed)}
+	for _, w := range watch.Watches {
+		if w != nil && w.ID != "" {
+			st.Watches = append(st.Watches, *w)
+		}
+	}
+	return st, nil
+}

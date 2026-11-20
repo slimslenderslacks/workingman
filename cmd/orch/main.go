@@ -47,6 +47,7 @@ const usageHeader = `usage: orch --root <dir> [flags]        run the daemon, wit
        orch catchup <project-path>      fire a behind project's schedule once, now (used by sleepy-head)
        orch whatsapp <subcommand>       set up and check the WhatsApp channel (see docs/channels.md)
        orch signal <subcommand>         set up and check the Signal channel (see docs/channels.md)
+       orch slack <subcommand>          set up and check the Slack channel (see docs/channels.md)
        orch service install|uninstall|status   run the daemon in the background via launchd (macOS)
 
 whatsapp subcommands:
@@ -59,6 +60,11 @@ signal subcommands:
   setup    configure signal-cli URL, account, owner allowlist, optional groups and routes
   status   show the (masked) config and whether signal-cli is reachable and registered
   test     send a test message and print its timestamp or the error
+
+slack subcommands:
+  setup    configure the gateway URL, conversation (default: your DM-to-self), allow_from and the post-office route
+  status   show the config, whether the gateway serves the slack tools, and the watch list and cursors
+  test     post a test message and wait for a reply in its thread
 
 Run "orch <subcommand> -h" for a subcommand's flags. Daemon flags:
 
@@ -88,6 +94,9 @@ func main() {
 	}
 	if len(args) > 0 && args[0] == "signal" {
 		os.Exit(runSignal(args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	if len(args) > 0 && args[0] == "slack" {
+		os.Exit(runSlack(args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	runDaemon(args)
 }

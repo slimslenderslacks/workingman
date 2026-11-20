@@ -1,17 +1,12 @@
 package setup
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/slimslenderslacks/work/internal/channels"
 	"github.com/slimslenderslacks/work/internal/channels/signal"
+	"github.com/slimslenderslacks/work/internal/channels/yamledit"
 )
 
 // DefaultChannel is the channel instance name `orch signal` manages.
@@ -125,64 +120,50 @@ type SaveResult struct {
 // preserved, and nothing is written if the result is not a valid config.
 func (s *Store) Save(u Update) (SaveResult, error) {
 	var res SaveResult
-	doc, created, err := readConfigNode(s.ConfigPath)
+	doc, created, err := yamledit.Read(s.ConfigPath)
 	if err != nil {
 		return res, err
 	}
 	res.CreatedConfig = created
 
 	root := doc.Content[0]
-	ch := ensureMap(ensureMap(root, "channels"), s.Channel)
-	setValue(ch, "type", signal.Type)
-	opts := ensureMap(ch, "options")
+	ch := yamledit.EnsureMap(yamledit.EnsureMap(root, "channels"), s.Channel)
+	yamledit.SetValue(ch, "type", signal.Type)
+	opts := yamledit.EnsureMap(ch, "options")
 	if u.HTTPURL != "" {
-		setValue(opts, "http_url", u.HTTPURL)
+		yamledit.SetValue(opts, "http_url", u.HTTPURL)
 	}
 	if u.Account != "" {
-		setValue(opts, "account", u.Account)
+		yamledit.SetValue(opts, "account", u.Account)
 	}
-	access := ensureMap(opts, "access")
+	access := yamledit.EnsureMap(opts, "access")
 	if u.AllowFrom != nil {
-		setValue(access, "allow_from", u.AllowFrom)
+		yamledit.SetValue(access, "allow_from", u.AllowFrom)
 	}
 	if u.Groups != nil {
-		setValue(access, "groups", *u.Groups)
+		yamledit.SetValue(access, "groups", *u.Groups)
 		if !*u.Groups {
-			mapDelete(access, "group_allow_from")
+			yamledit.MapDelete(access, "group_allow_from")
 		}
 	}
 	if u.GroupAllowFrom != nil {
-		setValue(access, "group_allow_from", u.GroupAllowFrom)
+		yamledit.SetValue(access, "group_allow_from", u.GroupAllowFrom)
 	}
 	if u.NoteToSelf != nil {
-		setValue(access, "note_to_self", *u.NoteToSelf)
+		yamledit.SetValue(access, "note_to_self", *u.NoteToSelf)
 	}
 
 	if u.RouteChat != "" {
-		routes := ensureSeq(root, "routes")
-		have := map[channels.Route]bool{}
-		for _, n := range routes.Content {
-			var r channels.Route
-			if n.Decode(&r) == nil {
-				have[r.Key()] = true
-			}
-		}
+		var want []channels.Route
 		for _, topic := range u.RouteTopics {
-			r := channels.Route{Topic: topic, Channel: s.Channel, Chat: u.RouteChat}
-			if have[r] {
-				continue
-			}
-			n := &yaml.Node{}
-			if err := n.Encode(r); err != nil {
-				return res, err
-			}
-			n.Style = yaml.FlowStyle
-			routes.Content = append(routes.Content, n)
-			res.RoutesAdded = append(res.RoutesAdded, r)
+			want = append(want, channels.Route{Topic: topic, Channel: s.Channel, Chat: u.RouteChat})
+		}
+		if res.RoutesAdded, err = yamledit.AddRoutes(root, want); err != nil {
+			return res, err
 		}
 	}
 
-	out, err := encodeNode(doc)
+	out, err := yamledit.Encode(doc)
 	if err != nil {
 		return res, err
 	}
@@ -199,142 +180,10 @@ func (s *Store) Save(u Update) (SaveResult, error) {
 		}
 	}
 
-	mode := fs.FileMode(0o644)
-	if info, err := os.Stat(s.ConfigPath); err == nil {
-		mode = info.Mode().Perm()
-	}
-	if err := writeFileAtomic(s.ConfigPath, out, mode, 0o755); err != nil {
+	if err := yamledit.WriteFileAtomic(s.ConfigPath, out, yamledit.FileMode(s.ConfigPath, 0o644), 0o755); err != nil {
 		return res, fmt.Errorf("write config: %w", err)
 	}
 	return res, nil
-}
-
-// readConfigNode parses the config as a yaml.Node tree (so comments and
-// unrelated content survive a rewrite). A missing or empty file yields an
-// empty mapping document.
-func readConfigNode(path string) (doc *yaml.Node, created bool, err error) {
-	data, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, false, fmt.Errorf("read config: %w", err)
-	}
-	created = errors.Is(err, fs.ErrNotExist)
-	doc = &yaml.Node{}
-	if len(bytes.TrimSpace(data)) > 0 {
-		if err := yaml.Unmarshal(data, doc); err != nil {
-			return nil, false, fmt.Errorf("parse %s: %w", path, err)
-		}
-	}
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
-		doc = &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}}
-	}
-	if doc.Content[0].Kind != yaml.MappingNode {
-		return nil, false, fmt.Errorf("%s: top level is not a mapping", path)
-	}
-	return doc, created, nil
-}
-
-func encodeNode(doc *yaml.Node) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(doc); err != nil {
-		return nil, fmt.Errorf("encode config: %w", err)
-	}
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("encode config: %w", err)
-	}
-	return buf.Bytes(), nil
-}
-
-// writeFileAtomic writes data to a temp file beside path (creating the
-// directory with dirMode) and renames it into place with the given mode.
-func writeFileAtomic(path string, data []byte, mode, dirMode fs.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name()) // no-op after a successful rename
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
-}
-
-// --- yaml.Node helpers
-
-func mapGet(m *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			return m.Content[i+1]
-		}
-	}
-	return nil
-}
-
-func mapDelete(m *yaml.Node, key string) {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-			return
-		}
-	}
-}
-
-// mapSet replaces the value for key (keeping its comments), or appends the pair.
-func mapSet(m *yaml.Node, key string, val *yaml.Node) {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			old := m.Content[i+1]
-			val.HeadComment, val.LineComment, val.FootComment = old.HeadComment, old.LineComment, old.FootComment
-			m.Content[i+1] = val
-			return
-		}
-	}
-	m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, val)
-}
-
-// ensureMap returns the mapping under key, creating it if the key is absent
-// or holds a null or non-mapping value (a bare `options:`).
-func ensureMap(m *yaml.Node, key string) *yaml.Node {
-	if v := mapGet(m, key); v != nil && v.Kind == yaml.MappingNode {
-		return v
-	}
-	v := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-	mapSet(m, key, v)
-	return v
-}
-
-// ensureSeq is ensureMap for a sequence.
-func ensureSeq(m *yaml.Node, key string) *yaml.Node {
-	if v := mapGet(m, key); v != nil && v.Kind == yaml.SequenceNode {
-		return v
-	}
-	v := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-	mapSet(m, key, v)
-	return v
-}
-
-// setValue encodes v (so numeric-looking strings come out quoted) under key.
-func setValue(m *yaml.Node, key string, v any) {
-	n := &yaml.Node{}
-	_ = n.Encode(v)
-	mapSet(m, key, n)
 }
 
 // MaskID masks a number, UUID or group id for display.

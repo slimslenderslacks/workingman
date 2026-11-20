@@ -30,7 +30,8 @@ Contents: [Architecture](#architecture) · [Quick start](#quick-start) ·
 [Post-office messages](#post-office-messages) · [Security model](#security-model) ·
 [Tunnel setup](#exposing-the-webhook-tunnel-setup) · [Troubleshooting](#troubleshooting) ·
 [Manual smoke test](#manual-smoke-test-real-meta-test-number) ·
-[Signal smoke test](signal.md#manual-smoke-test)
+[Signal smoke test](signal.md#manual-smoke-test) ·
+[Slack smoke test](#slack-smoke-test)
 
 ## Architecture
 
@@ -116,7 +117,9 @@ orch --root ~/orch --acp-kit <kit> --headless
 use `orch whatsapp pair` instead ([whatsapp-bridge.md](whatsapp-bridge.md)).
 For Signal use `orch signal setup` / `status` / `test` instead (no tunnel, no
 console, no secrets file; it needs a running signal-cli daemon): see
-[Signal](#signal) and [signal.md](signal.md).
+[Signal](#signal) and [signal.md](signal.md). For Slack use `orch slack setup` /
+`status` / `test` (no token at all; it needs the host's standalone-codemode
+gateway with the `slack` server): see [Slack](#slack).
 
 Running with the TUI (no `--headless`) works the same way; the difference is who
 starts a conversation in a new agent session: the TUI's watcher normally sends a
@@ -339,6 +342,96 @@ Unknown options are rejected, and so is any `credentials:` block.
 - `allow_from` is checked before the router sees a message. In the DM-to-self
   only you can write; in a shared channel everyone else is dropped and logged
   (without their text).
+
+### Setting it up: `orch slack`
+
+```sh
+orch slack setup     # gateway URL, conversation (default: your DM-to-self), allow_from; writes the slack section and the post-office route
+orch slack status    # config, gateway serves the slack tools, daemon gateway record, watch list and cursors   (--offline skips the gateway)
+orch slack test [--to <id>] [--wait 3m] [--no-wait] [message]   # post a test message, wait for your reply in its thread
+```
+
+All three reach Slack the way the daemon does, but on a **temporary**
+sub-gateway of their own (`POST /gateways` over `slack`, deleted on exit), so
+they work whether or not the daemon is running and never touch the daemon's
+`orch-slack` gateway. A gateway that comes up serving the slack backend with
+"0 tools" is replaced, up to three times.
+
+- **`setup`** mints the gateway, reads your profile
+  (`slack_read_user_profile`, which is who every post is made as) and lists
+  your conversations (`slack_list_user_channels`, public and private
+  channels and DMs). Pick one by number, type an id, or type text to filter
+  by name; Enter keeps the current value or, for a new channel, takes the
+  **DM-to-self** (your own user id). `allow_from` defaults to you. It then
+  writes `channels.slack` and a `{topic: post-office, channel: slack, chat:
+  <conversation>}` route with the same `yaml.Node` editor as `orch signal
+  setup` (`internal/channels/yamledit`): comments, other channels and routes,
+  and the options it does not manage (`watch_ttl`) are kept, a route that
+  already exists is not added twice, and nothing is written if the result
+  does not validate. Flags: `--gateway-url` (`$WORKINGMAN_MCP_GATEWAY_URL`),
+  `--conversation` (`$SLACK_CHANNEL`), `--allow-from` (`$SLACK_ALLOW_FROM`),
+  `--poll-interval`, `--route-topics` (default `post-office`), `--no-routes`,
+  `--non-interactive`, `--skip-validate` (no gateway; then `--conversation` is
+  required), and `--list`, which only prints the conversations and their ids.
+  `--channel <name>` manages another instance (its daemon gateway is then
+  `orch-slack-<name>`).
+- **`status`** prints the config and warns about an empty `allow_from` or a
+  missing post-office route (a `*` route counts when there is no post-office
+  route at all). Online, it checks the gateway mints with `slack` serving and
+  serves every tool the channel calls (`slack_send_message`,
+  `slack_add_reaction`, `slack_read_channel`, `slack_read_thread`), shows the
+  daemon's own gateway record (`~/.workingman/gateways/daemon/orch-slack.json`)
+  and whether that gateway is still registered, and then the channel state in
+  `~/.workingman/slack/`: the resolved conversation id, the top-level cursor,
+  the size of the sent set, and each watched request with its reply count,
+  thread cursor and open/closed state. It exits 1 when something needs
+  attention. `--sessions-root` locates `~/.workingman` the way the daemon does.
+- **`test`** posts `[orch slack test] …` to the configured conversation (or
+  `--to`) and polls its thread until you reply (default 3 minutes), then adds
+  ✅ to it and checks your reply's author is in `allow_from`. That is the
+  whole round trip the channel depends on: post, read a thread reply, react.
+  The daemon's poll ignores top-level Slack MCP posts starting with
+  `[orch slack test]`, so a running daemon neither forwards the test message
+  to the workingman agent nor watches its thread.
+
+### Slack smoke test
+
+Run once against the real Slack MCP, on the work setup (the gateway's catalog
+must have `slack`). Everything goes to your DM-to-self unless you pick
+another conversation.
+
+1. [ ] `curl http://localhost:3333/healthz` answers 200.
+2. [ ] `orch slack setup --list` prints `U… DM-to-self (you)` and your
+   channels with their ids, and writes nothing.
+3. [ ] `orch slack setup`, pressing Enter at every prompt: it reports
+   `signed in to Slack as <you> (U…)` and saves `channels.slack` with
+   `channel` and `allow_from` set to your user id, and a post-office route.
+   Run it again: nothing changes and no route is added.
+4. [ ] `orch slack status` exits 0: the gateway serves every tool the
+   channel uses, no daemon gateway is recorded yet, and the watch list is
+   empty.
+5. [ ] `orch slack test`. The `[orch slack test]` message appears in Slack;
+   reply to it **in its thread**, from the phone if you can (and note whether
+   the phone notified you about the test post: §6.7 Q1 of
+   messaging-design.md). The command prints your reply and `round trip
+   works`, and the post gets a ✅.
+6. [ ] Start the daemon (`orch --root <dir> --acp-kit <kit>`). `orch slack
+   status` now shows the daemon gateway as still registered, and the
+   conversation id resolved to your `D…` DM.
+7. [ ] Run `orch slack test --no-wait` with the daemon running: the
+   workingman agent does **not** answer the test message.
+8. [ ] Write a top-level message such as `/inbox` in the conversation: within
+   one poll interval (20 s) the router answers it in Slack.
+9. [ ] Have a task with `static_mcps: [post-office]` call `send_request` (or
+   use the TUI-inbox steps in [Post-office messages](#post-office-messages)):
+   the `❓ [req …]` post appears; `orch slack status` lists it as an open
+   watched request. Reply in its thread: the agent gets the answer, the
+   thread gets `✅ Sent to <sender>`, and status shows it closed.
+10. [ ] Answer a second request from the TUI instead: the Slack post gets
+   `✅ Answered via tui: …` in its thread and a ✅ reaction. A later reply in
+   that thread gets `This request is already closed (answered via tui).`
+11. [ ] Stop the daemon: `~/.workingman/gateways/daemon/orch-slack.json` is
+   gone, and `orch slack status` says no daemon gateway is recorded.
 
 ## Routes and topics
 
@@ -646,6 +739,8 @@ Free tunnels change their URL on restart; re-register the callback when it does.
 | Wolf never starts working under `--headless` | nobody sends a wolf its opening prompt headless; run the TUI |
 | Reply says "I cancelled it" | the turn exceeded `router.turn_timeout` |
 | Signal: `orch signal status` / `test` fails, or no messages arrive | signal-cli daemon not running, `http_url` mismatch, account not registered, sender not on `allow_from`: see [signal.md troubleshooting](signal.md#troubleshooting) |
+| Slack: `orch slack setup` / `status` cannot mint a gateway, or the slack server has 0 tools | standalone-codemode not running at `gateway_url`, the catalog has no `slack` (work setup only), or its backend failed to attach (re-run after a minute) |
+| Slack: requests are posted but answers are ignored | the answer was not a **thread** reply, its author is not in `allow_from` (`channels.log`: `dropped message from a sender not in allow_from`), or the request is older than `watch_ttl`; `orch slack status` shows the watch list |
 | A bridge-mode channel stopped after "logged out" | WhatsApp unlinked the device (exit 78); run `orch whatsapp pair --reset` |
 
 Signal has no tunnel, webhook or 24-hour window to go wrong; its failures are
@@ -653,7 +748,8 @@ signal-cli being down or unregistered and the allowlist.
 
 Logs: the audit log (`router_*`, `wolf_*`, `channel_*` events), `channels.log`
 beside it (webhook and send details, ids masked), `whatsapp-bridge.log` for the
-bridge backend. `orch whatsapp status` is the quickest health check.
+bridge backend. `orch whatsapp status` (or `orch signal status`, `orch slack
+status`) is the quickest health check.
 
 ## Limits
 

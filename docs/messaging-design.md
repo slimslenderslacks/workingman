@@ -944,6 +944,14 @@ Unknown option and credential names are rejected, as Signal does
   watch list and cursors;
 - `test` posts a test message and waits for a thread reply.
 
+**Implemented (`orch-slack-setup-cli`).** The three commands run on a
+temporary sub-gateway of their own, so they work with or without the daemon;
+the daemon's poll skips the test post (`[orch slack test]` prefix). The
+`yaml.Node` editor moved to `internal/channels/yamledit`, shared with `orch
+signal setup`. Run live on the DM-to-self: `setup --list`, `setup`, `status`
+and a `test` round trip (post, thread reply, ✅) all passed. Usage and the
+smoke test: [channels.md § Slack](channels.md#slack).
+
 ### 6.7 Slack decisions for the human
 
 These come from slack-mcp.md §6. The plan works with the defaults; each one
