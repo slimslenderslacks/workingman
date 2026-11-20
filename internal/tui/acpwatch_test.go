@@ -1037,7 +1037,7 @@ func TestWatchOneShotSessionRejectsInput(t *testing.T) {
 }
 
 func TestACPInputRouter(t *testing.T) {
-	r := &acpInputRouter{boxes: map[string]chan string{}}
+	r := &acpInputRouter{pendingInput: map[string]chan string{}}
 	if err := r.Send("nobody", "x"); err == nil {
 		t.Error("Send to an unregistered session should fail")
 	}
@@ -1050,11 +1050,11 @@ func TestACPInputRouter(t *testing.T) {
 	if err := r.Send("s", "overflow"); err == nil {
 		t.Error("Send past the queue bound should fail rather than block")
 	}
-	// A recycled id's new inbox must survive the old watcher's late unregister.
+	// A recycled id's new queue must survive the old watcher's late unregister.
 	newCh := r.register("s")
 	r.unregister("s", ch)
 	if err := r.Send("s", "x"); err != nil {
-		t.Errorf("stale unregister removed the replacement inbox: %v", err)
+		t.Errorf("stale unregister removed the replacement queue: %v", err)
 	}
 	r.unregister("s", newCh)
 	if err := r.Send("s", "x"); err == nil {

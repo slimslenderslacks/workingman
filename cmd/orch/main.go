@@ -394,7 +394,7 @@ func runDaemon(args []string) {
 		}
 	}
 
-	tuiErr := tui.Run(ctx, roots, sessCh, acpSessionsRoot, interactiveLauncher{d}, tabs)
+	tuiErr := tui.Run(ctx, roots, sessCh, acpSessionsRoot, postOfficeDir, interactiveLauncher{d}, tabs)
 
 	// TUI exited — either the user quit or ctx was already cancelled. Cancel
 	// to be sure, then wait for the daemon to wind down so its shutdown
@@ -495,8 +495,15 @@ func runTUI(args []string) {
 	// The TUI no longer shows an audit pane (tail -f the daemon's --audit-log
 	// instead); the flag is still accepted so existing invocations don't break.
 	_ = fs.String("audit-log", "", "deprecated and ignored: the TUI no longer shows the audit log; tail -f it instead")
+	sessionsRoot := fs.String("sessions-root", "", "sessions root the post-office store sits beside, for the inbox (default ~/.workingman/sessions; $WORKINGMAN_POST_OFFICE_DIR overrides the store)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
+	}
+	// The inbox reads the post-office store directly, so it works here too,
+	// with no daemon.
+	postOfficeDir, err := postOfficeDirFor(*sessionsRoot)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -508,7 +515,7 @@ func runTUI(args []string) {
 	// mode wires the daemon's WatchSessions into the TUI).
 	// Standalone tui has no daemon/runner, so :session, :orch and :workspace are unavailable
 	// (nil launcher). Run `orch --root=...` for the integrated experience.
-	if err := tui.Run(ctx, roots, nil, "", nil, nil); err != nil {
+	if err := tui.Run(ctx, roots, nil, "", postOfficeDir, nil, nil); err != nil {
 		log.Fatal(err)
 	}
 }

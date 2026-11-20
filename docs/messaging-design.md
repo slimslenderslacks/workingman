@@ -1104,6 +1104,27 @@ answer is saved but not yet delivered.
 The store is behind a small interface so tests can fake it, as `acpSend` is
 faked today.
 
+**As built (`tui-inbox`).** `internal/tui/inbox.go` and `lineinput.go`, with
+these details:
+
+- The store interface is `tui.InboxStore` (`ListOpen`, `Deliveries`,
+  `Claimed`, `Claim`). `WatchInbox` also reads each message's pending claim,
+  so a message answered on a channel greys out (`answered via slack`) before
+  post-office finalises it, and a claim older than 10 s shows `answered —
+  waiting for post-office`. A reply being typed when the message closes
+  elsewhere stops, with the reason on the reply line.
+- `tui.Run` takes the store root after the sessions root. The daemon passes
+  the directory the Dispatcher uses; standalone `orch tui` derives it the
+  same way, from a new `--sessions-root` flag (default
+  `~/.workingman/sessions`) or `$WORKINGMAN_POST_OFFICE_DIR`. If the store
+  cannot be opened the TUI runs without the inbox and says why.
+- Rows are ordered operator requests, then operator notifications, then the
+  "To agents" rows, oldest first in each group. Answers, option keys and `d`
+  are refused on agent rows, and on expired or already-claimed messages.
+- The bell is on by default; `WORKINGMAN_TUI_BELL=0` turns it off. It rings
+  only for a request that was not in the previous snapshot, never for the
+  first one.
+
 ## 8. Step-Up agent
 
 ### 8.1 What it is

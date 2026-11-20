@@ -52,7 +52,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/task` | shared | Package task is the data model and on-disk format of one tasks/*.yaml file, including the task-name rules that keep a task's sandbox name legal. | — | `Commit`, `Source`, `Status`, `Task` |
 | `internal/taskgraph` | daemon | Package taskgraph loads a project's tasks/*.yaml files into an immutable, validated dependency graph that the daemon queries to decide what to dispatch next. | — | `Graph` |
 | `internal/terminal` | shared | Package terminal opens sessions in new tabs of the user's terminal emulator (Ghostty, WezTerm or kitty) and tracks those tabs across orch restarts. | `Launcher` | `AlreadyOpenError`, `Ghostty`, `Kitty`, `Runner`, `Settings`, `Tab`, `TabLauncher`, `TabRef`, `TabSession`, `WezTerm` |
-| `internal/tui` | tui | Package tui is the orch terminal UI: a bubbletea program that shows live agent sessions, the work-stream (project) gallery and its tasks, and lets the user steer work streams by writing their project.yaml files. | `InteractiveLauncher`, `TabFocuser` | `ProjectView`, `SessionView`, `TaskView` |
+| `internal/tui` | tui | Package tui is the orch terminal UI: a bubbletea program that shows live agent sessions, the work-stream (project) gallery and its tasks, and lets the user steer work streams by writing their project.yaml files. | `InboxStore`, `InteractiveLauncher`, `TabFocuser` | `InboxItem`, `ProjectView`, `SessionView`, `TaskView` |
 | `internal/workspace` | shared | Package workspace provisions and tears down the multi-repo directory each agent runs in, with the wsp CLI behind a small Manager interface. | `Manager` | `Repo`, `StubManager`, `WspManager` |
 
 ## Dependency graph
@@ -224,6 +224,7 @@ graph LR
   internal_terminal --> internal_agent
   internal_tui --> internal_acpclient
   internal_tui --> internal_policy
+  internal_tui --> internal_postoffice
   internal_tui --> internal_project
   internal_tui --> internal_sbx
   internal_tui --> internal_session
@@ -274,7 +275,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
 | `internal/onepassword` | — | `cmd/op-read` |
 | `internal/policy` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `mcpgateway`, `runner`, `task`, `tui` |
-| `internal/postoffice` | `audit`, `channels` | `cmd/orch`, `cmd/post-office`, `daemon`, `postoffice/mcpserver`, `router` |
+| `internal/postoffice` | `audit`, `channels` | `cmd/orch`, `cmd/post-office`, `daemon`, `postoffice/mcpserver`, `router`, `tui` |
 | `internal/postoffice/mcpserver` | `mcpgateway`, `postoffice`, `session`, `task` | `cmd/post-office` |
 | `internal/power` | — | `cmd/orch`, `daemon` |
 | `internal/project` | — | `acpwrapper`, `daemon`, `tui` |
@@ -289,5 +290,5 @@ The same graph as text: each package's internal imports and importers.
 | `internal/task` | `policy`, `sbx` | `acpwrapper`, `daemon`, `postoffice/mcpserver`, `runner`, `taskgraph`, `tui` |
 | `internal/taskgraph` | `task` | `daemon` |
 | `internal/terminal` | `agent` | `cmd/orch`, `daemon`, `runner`, `tui` |
-| `internal/tui` | `acpclient`, `policy`, `project`, `sbx`, `session`, `task`, `terminal`, `workspace` | `cmd/orch` |
+| `internal/tui` | `acpclient`, `policy`, `postoffice`, `project`, `sbx`, `session`, `task`, `terminal`, `workspace` | `cmd/orch` |
 | `internal/workspace` | — | `cmd/orch`, `daemon`, `runner`, `tui` |

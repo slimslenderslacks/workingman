@@ -114,10 +114,10 @@ type acpTab struct {
 	// yet. upsert (called once the session is actually watched) clears this.
 	placeholder bool
 	// interactive marks a persistent (conversational) session — the wolf — that
-	// accepts typed messages. draft is the message being composed in this tab; it
-	// is per-tab so switching tabs doesn't lose or leak a half-typed message.
+	// accepts typed messages. input holds the message being composed in this tab;
+	// it is per-tab so switching tabs doesn't lose or leak a half-typed message.
 	interactive bool
-	draft       string
+	input       lineInput
 
 	// Scrollback accounting: lineCount is the sum of the entries' weights, kept
 	// at or under acpScrollbackLimit by trim; dropped is how many source lines
@@ -930,7 +930,11 @@ func (m model) renderACPView() string {
 		return "starting acp view…"
 	}
 
+	// The inbox badge goes at the end of the header line, so it adds no rows.
 	header := titleStyle.Render("ACP Sessions")
+	if b := m.inboxBadge(); b != "" {
+		header = lipgloss.NewStyle().MaxWidth(width).Render(header + "  " + b)
+	}
 	toolHint := "z: expand tools"
 	if m.acpToolsExpanded {
 		toolHint = "z: collapse tools"
@@ -1064,10 +1068,8 @@ func (m model) acpPage() int {
 }
 
 // renderACPInputLine draws the message line under a conversational tab: the
-// draft with a cursor while composing, a prompt to start otherwise, and any
-// send error from the last attempt. Truncated to width so a long draft can't
-// wrap onto a phantom row (see the altscreen overflow notes in renderACPView);
-// when it overflows, the tail (where the cursor is) is what stays visible.
+// draft with a cursor while composing (lineInput.view), a prompt to start
+// otherwise, and any send error from the last attempt.
 func (m model) renderACPInputLine(t *acpTab, width int) string {
 	if m.acpInputErr != "" {
 		return statusErrStyle.Render(truncate(m.acpInputErr, width))
@@ -1075,9 +1077,5 @@ func (m model) renderACPInputLine(t *acpTab, width int) string {
 	if !m.acpComposing {
 		return dimStyle.Render(truncate("(enter to message this session)", width))
 	}
-	line := "› " + t.draft
-	if r := []rune(line); width > 2 && len(r) > width-1 {
-		line = "…" + string(r[len(r)-(width-2):])
-	}
-	return line + "▏"
+	return t.input.view(width)
 }

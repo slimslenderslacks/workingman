@@ -63,8 +63,8 @@ func TestWolfTabComposeAndSend(t *testing.T) {
 	if m.acpToolsExpanded {
 		t.Error("`z` toggled tool expansion while composing")
 	}
-	if got, _ := m.acp.selected(); got.draft != "quiz me" {
-		t.Fatalf("draft = %q, want %q", got.draft, "quiz me")
+	if got, _ := m.acp.selected(); got.input.draft != "quiz me" {
+		t.Fatalf("draft = %q, want %q", got.input.draft, "quiz me")
 	}
 	if out := m.View(); !strings.Contains(out, "› quiz me") {
 		t.Errorf("draft not rendered; got:\n%s", out)
@@ -76,8 +76,8 @@ func TestWolfTabComposeAndSend(t *testing.T) {
 	if len(*sent) != 1 || (*sent)[0] != "wolf-a:quiz m" {
 		t.Fatalf("sent = %v, want [wolf-a:quiz m]", *sent)
 	}
-	if got, _ := m.acp.selected(); got.draft != "" {
-		t.Errorf("draft after send = %q, want empty", got.draft)
+	if got, _ := m.acp.selected(); got.input.draft != "" {
+		t.Errorf("draft after send = %q, want empty", got.input.draft)
 	}
 	if m.acpComposing {
 		t.Error("a send should return to normal mode")
@@ -122,8 +122,8 @@ func TestWolfTabSendFailureKeepsDraftAndShowsError(t *testing.T) {
 	m = typeText(m, "hello")
 	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
 
-	if got, _ := m.acp.selected(); got.draft != "hello" {
-		t.Errorf("a failed send must not lose the draft; got %q", got.draft)
+	if got, _ := m.acp.selected(); got.input.draft != "hello" {
+		t.Errorf("a failed send must not lose the draft; got %q", got.input.draft)
 	}
 	if out := m.View(); !strings.Contains(out, "not accepting input") {
 		t.Errorf("send error not shown; got:\n%s", out)
@@ -139,12 +139,12 @@ func TestWolfTabCtrlUClearsAndPasteIsSingleLine(t *testing.T) {
 	m, _ := wolfModel(t)
 	m = key(m, tea.KeyMsg{Type: tea.KeyEnter})
 	m = key(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("line one\nline two"), Paste: true})
-	if got, _ := m.acp.selected(); got.draft != "line one line two" {
-		t.Errorf("pasted draft = %q, want newlines folded to spaces", got.draft)
+	if got, _ := m.acp.selected(); got.input.draft != "line one line two" {
+		t.Errorf("pasted draft = %q, want newlines folded to spaces", got.input.draft)
 	}
 	m = key(m, tea.KeyMsg{Type: tea.KeyCtrlU})
-	if got, _ := m.acp.selected(); got.draft != "" {
-		t.Errorf("ctrl+u left draft %q", got.draft)
+	if got, _ := m.acp.selected(); got.input.draft != "" {
+		t.Errorf("ctrl+u left draft %q", got.input.draft)
 	}
 }
 
@@ -184,10 +184,10 @@ func TestWolfTabSwitchingStopsComposingAndKeepsDrafts(t *testing.T) {
 	if cur, _ := m.acp.selected(); cur.id != "wolf-b" {
 		t.Fatalf("selected = %q, want wolf-b", cur.id)
 	}
-	if got := m.acp.tabs[0].draft; got != "for a" {
+	if got := m.acp.tabs[0].input.draft; got != "for a" {
 		t.Errorf("tab a's draft = %q, want it kept", got)
 	}
-	if got := m.acp.tabs[1].draft; got != "" {
+	if got := m.acp.tabs[1].input.draft; got != "" {
 		t.Errorf("tab b's draft = %q, want empty (drafts are per tab)", got)
 	}
 }

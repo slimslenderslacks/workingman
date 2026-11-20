@@ -144,41 +144,45 @@ const acpStartingGracePeriod = acpHandshakeTimeout
 const acpTurnIdleTimeout = 20 * time.Minute
 
 // acpInputQueue bounds how many typed-but-not-yet-sent messages a session's
-// inbox holds. Messages queue while a turn is streaming and are sent in order
-// once it ends; a full inbox rejects the keystroke with an error rather than
-// blocking the UI.
+// pending-input queue holds. Messages queue while a turn is streaming and are
+// sent in order once it ends; a full queue rejects the keystroke with an error
+// rather than blocking the UI.
 const acpInputQueue = 8
 
 // acpInputRouter carries messages a human types in the TUI to the watcher
 // goroutine that owns that session's ACP connection. Only persistent
-// (conversational) sessions register an inbox; one-shot agents have none, so
-// sending to them fails. It is the TUI→agent half of "type into the wolf": the
-// connection (and its ACP session) belongs to the watcher, so typed text must
-// be handed to it rather than written to the socket from the UI goroutine.
+// (conversational) sessions register a pendingInput queue; one-shot agents
+// have none, so sending to them fails. It is the TUI→agent half of "type into
+// the wolf": the connection (and its ACP session) belongs to the watcher, so
+// typed text must be handed to it rather than written to the socket from the
+// UI goroutine.
+//
+// (The queue is not the post-office inbox, inbox.go: it holds what the human
+// typed for an agent, not messages agents sent to the human.)
 type acpInputRouter struct {
-	mu    sync.Mutex
-	boxes map[string]chan string
+	mu           sync.Mutex
+	pendingInput map[string]chan string
 }
 
-// acpInputs is the process-wide router: the watcher registers inboxes here and
+// acpInputs is the process-wide router: the watcher registers queues here and
 // the model sends through it (model.acpSend). Keys are session ids.
-var acpInputs = &acpInputRouter{boxes: map[string]chan string{}}
+var acpInputs = &acpInputRouter{pendingInput: map[string]chan string{}}
 
-// register creates (replacing any stale one) the inbox for session id.
+// register creates (replacing any stale one) the pendingInput queue for session id.
 func (r *acpInputRouter) register(id string) chan string {
 	ch := make(chan string, acpInputQueue)
 	r.mu.Lock()
-	r.boxes[id] = ch
+	r.pendingInput[id] = ch
 	r.mu.Unlock()
 	return ch
 }
 
-// unregister drops the inbox for id, but only if it is still ch — a recycled
+// unregister drops the pendingInput queue for id, but only if it is still ch — a recycled
 // session id's new watcher may already have replaced it.
 func (r *acpInputRouter) unregister(id string, ch chan string) {
 	r.mu.Lock()
-	if r.boxes[id] == ch {
-		delete(r.boxes, id)
+	if r.pendingInput[id] == ch {
+		delete(r.pendingInput, id)
 	}
 	r.mu.Unlock()
 }
@@ -186,7 +190,7 @@ func (r *acpInputRouter) unregister(id string, ch chan string) {
 // Send queues text for session id's watcher. It never blocks.
 func (r *acpInputRouter) Send(id, text string) error {
 	r.mu.Lock()
-	ch := r.boxes[id]
+	ch := r.pendingInput[id]
 	r.mu.Unlock()
 	if ch == nil {
 		return fmt.Errorf("session %s is not accepting input (not connected, or not a conversational session)", id)
@@ -478,10 +482,10 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 	// A persistent (conversational) session — the wolf — is typed into, so accept
 	// input from the moment the handshake is done: anything typed during the
 	// opening turn queues and goes out in order after it.
-	var inbox chan string
+	var pendingInput chan string
 	if s.Persistent {
-		inbox = acpInputs.register(s.ID)
-		defer acpInputs.unregister(s.ID, inbox)
+		pendingInput = acpInputs.register(s.ID)
+		defer acpInputs.unregister(s.ID, pendingInput)
 	}
 
 	// Drive the opening prompt only for a brand-new session. A reconnected session
@@ -516,7 +520,7 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 	}
 
 	if s.Persistent {
-		servePersistentInput(ctx, out, conn, activity, pumpDone, s.ID, inbox, turnIdleTimeout)
+		servePersistentInput(ctx, out, conn, activity, pumpDone, s.ID, pendingInput, turnIdleTimeout)
 		return
 	}
 
@@ -568,14 +572,14 @@ func promptWithIdleWatchdog(ctx context.Context, conn acpConn, activity <-chan s
 // message is echoed into the tab as a prompt block before its turn starts. A
 // turn that merely goes idle is aborted but does not end the loop — the
 // conversation is still usable.
-func servePersistentInput(ctx context.Context, out chan<- acpTabEvent, conn acpConn, activity <-chan struct{}, pumpDone <-chan struct{}, id string, inbox <-chan string, idle time.Duration) {
+func servePersistentInput(ctx context.Context, out chan<- acpTabEvent, conn acpConn, activity <-chan struct{}, pumpDone <-chan struct{}, id string, pendingInput <-chan string, idle time.Duration) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-pumpDone:
 			return
-		case text := <-inbox:
+		case text := <-pendingInput:
 			emitACP(ctx, out, acpTabEvent{kind: acpTabPrompt, id: id, text: text})
 			if err := promptWithIdleWatchdog(ctx, conn, activity, text, idle); err != nil && errors.Is(err, acpclient.ErrConnectionClosed) {
 				return
