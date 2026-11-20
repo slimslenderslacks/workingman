@@ -1,0 +1,25 @@
+{
+  "parent": {
+    "ts": "1795200000.000100",
+    "user_id": "U0CC1K1MFNX",
+    "user_name": "Jim Clark",
+    "text": "❓ [req r1t8w] task fix-ci (workingman-messaging)\nWhich bucket?\n\nOptions: 1) staging  2) prod",
+    "via_mcp": true
+  },
+  "replies": [
+    {
+      "ts": "1795200060.000200",
+      "user_id": "U0CC1K1MFNX",
+      "user_name": "Jim Clark",
+      "text": "staging, please\n\nand keep the \u003cprefix\u003e \u0026 date"
+    },
+    {
+      "ts": "1795200120.000300",
+      "user_id": "U0OTHER0001",
+      "user_name": "Someone Else",
+      "text": "prod!",
+      "reactions": "eyes (2)"
+    }
+  ],
+  "cursor": "bmV4dDoxNzk1"
+}

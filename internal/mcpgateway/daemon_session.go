@@ -322,3 +322,40 @@ func connID(s SessionConn) string {
 	}
 	return ""
 }
+
+// ToolLister is implemented by sessions that can list their tools (*Session
+// does). A consumer that resolves tool names from tools/list depends on it.
+type ToolLister interface {
+	ListTools(ctx context.Context) ([]Tool, error)
+}
+
+// ListTools implements ToolLister on the session, opening it if needed. A lost
+// session is dropped, as for CallTool, and the list retried once on a new one.
+// The session's connection must implement ToolLister (the default Open's
+// *Session does).
+func (m *DaemonSession) ListTools(ctx context.Context) ([]Tool, error) {
+	var err error
+	for try := 0; try < 2; try++ {
+		var s SessionConn
+		s, err = m.session(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("mcp session: %w", err)
+		}
+		l, ok := s.(ToolLister)
+		if !ok {
+			return nil, fmt.Errorf("%s MCP session: tools/list not supported", m.Name)
+		}
+		cctx, cancel := context.WithTimeout(ctx, orDefault(m.CallTimeout, daemonSessionCallTimeout))
+		var tools []Tool
+		tools, err = l.ListTools(cctx)
+		cancel()
+		if err == nil {
+			return tools, nil
+		}
+		if !errors.Is(err, ErrSessionLost) {
+			return nil, err
+		}
+		m.dropSession(s, err)
+	}
+	return nil, err
+}

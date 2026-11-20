@@ -976,6 +976,22 @@ DM-to-self (Q2); keep serialized calls, with gateway fixes left as follow-ups
 (Q3, Q4); start polling at 20 s (Q5); Slack is **work setup only**, so
 `mcp-servers-personal.json` gets no Slack entry (Q6).
 
+**Tested (`slack-channel`, 2026-11-20).** The channel ran live against the
+DM-to-self through a daemon-style sub-gateway. It posted two requests
+(`[req live01]`, `[req live02]`), picked up a thread reply as an answer
+(`ReplyToID` = the request) and a top-level message as fresh inbound text,
+and resolved each request with a thread note and a ✅ reaction. A later reply
+in the closed thread got `This request is already closed (answered via
+slack).` and was not forwarded. Two gateway behaviours the research missed are
+now handled: the gateway sometimes drops a call's response stream
+(`unexpected EOF`) after the post went through, so a send of unknown outcome
+is looked up in Slack before anything is retried; and a freshly minted
+gateway sometimes serves the slack backend with "0 tools", so the channel
+replaces a gateway that serves no Slack tools. **Q1 (phone notification) is
+not yet verified.** The test ran from a sandbox with no access to the phone.
+Check whether the `live01` / `live02` posts in the DM-to-self raised a
+notification, and record the answer here.
+
 ## 7. TUI inbox
 
 ### 7.1 Feed

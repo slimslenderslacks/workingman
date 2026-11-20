@@ -10,8 +10,10 @@ import (
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/channels"
 	"github.com/slimslenderslacks/work/internal/channels/signal"
+	"github.com/slimslenderslacks/work/internal/channels/slack"
 	"github.com/slimslenderslacks/work/internal/channels/whatsapp"
 	"github.com/slimslenderslacks/work/internal/daemon"
+	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/notify"
 	"github.com/slimslenderslacks/work/internal/postoffice"
 	"github.com/slimslenderslacks/work/internal/router"
@@ -74,6 +76,7 @@ func setupChannels(configPath, logDir, stateDir, postOfficeDir string, a *audit.
 			Cloud:  whatsapp.CloudFactory(logger),
 		}),
 		signal.Type: signal.Factory(logger),
+		slack.Type:  slack.Factory(slackDeps(stateDir, logger, a)),
 	}
 	reg, err := channels.Build(cfg, filepath.Dir(resolved), factories)
 	if err != nil {
@@ -103,6 +106,20 @@ func setupChannels(configPath, logDir, stateDir, postOfficeDir string, a *audit.
 	}
 	a.Log("channels_configured", "config", resolved, "channels", fmt.Sprint(reg.Names()))
 	return c, nil
+}
+
+// slackDeps places the Slack channel's state beside the daemon's state dir
+// (~/.workingman/slack) and its sub-gateway record with the daemon's other
+// gateway records (~/.workingman/gateways/daemon), where acp-wrapper's sweep
+// never looks.
+func slackDeps(stateDir string, logger *slog.Logger, a *audit.Logger) slack.FactoryDeps {
+	home := filepath.Dir(stateDir)
+	return slack.FactoryDeps{
+		Logger:       logger,
+		StateDir:     filepath.Join(home, "slack"),
+		GatewayStore: mcpgateway.Store{Dir: daemon.ReviewGatewayStateDir(filepath.Join(home, "gateways"))},
+		Audit:        a.Log,
+	}
 }
 
 // options returns the daemon options that wire channels in: the notifier

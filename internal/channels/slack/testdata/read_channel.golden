@@ -1,0 +1,26 @@
+{
+  "channel_id": "D0CBT6QV8NT",
+  "messages": [
+    {
+      "ts": "1795141398.745179",
+      "user_id": "U0CC1K1MFNX",
+      "user_name": "Jim Clark",
+      "text": "[workingman research-slack-mcp] test post to self-DM — please ignore. Checking send_message return value.",
+      "replies": 1,
+      "reactions": "white_check_mark (1)",
+      "via_mcp": true
+    },
+    {
+      "ts": "1793223558.213529",
+      "user_id": "U0CC1K1MFNX",
+      "user_name": "Jim Clark",
+      "text": "\u003chttps://getyarn.io/yarn-clip/5694ad65-2b42-4044-94d1-027ad9f66fb3/gif#yYqtKbVC.copy|getyarn.io/yarn-clip/…/gif#…\u003e"
+    },
+    {
+      "ts": "1793223496.084419",
+      "user_id": "U0CC1K1MFNX",
+      "user_name": "Jim Clark",
+      "text": "\u003chttps://makeagif.com/gif/village-people-in-the-navy-official-music-video-1978-Jz7-id|makeagif.com/gif/village-people-in-the-navy-official-music-video-1978-Jz7-id\u003e"
+    }
+  ]
+}

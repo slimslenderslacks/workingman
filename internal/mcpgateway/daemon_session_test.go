@@ -93,3 +93,53 @@ func TestDaemonSessionToolCaller(t *testing.T) {
 		t.Error("CallTool succeeded after Close")
 	}
 }
+
+type listConn struct {
+	echoConn
+	lists int
+}
+
+func (c *listConn) ListTools(context.Context) ([]Tool, error) {
+	c.lists++
+	if c.lost {
+		return nil, fmt.Errorf("tools/list: %w", ErrSessionLost)
+	}
+	return []Tool{{Name: "x-" + c.id}}, nil
+}
+
+// TestDaemonSessionListTools checks tools/list goes through the shared
+// session, recreating a lost one, and fails cleanly on a connection that
+// cannot list.
+func TestDaemonSessionListTools(t *testing.T) {
+	var conns []*listConn
+	m := &DaemonSession{
+		Gateway: &staticGateway{},
+		Name:    "slack",
+		Logf:    func(string, ...any) {},
+		Open: func(context.Context, string) (SessionConn, error) {
+			c := &listConn{echoConn: echoConn{id: fmt.Sprintf("s%d", len(conns)+1)}}
+			conns = append(conns, c)
+			return c, nil
+		},
+	}
+	var l ToolLister = m
+	tools, err := l.ListTools(context.Background())
+	if err != nil || len(tools) != 1 || tools[0].Name != "x-s1" {
+		t.Fatalf("ListTools = %v, %v", tools, err)
+	}
+	conns[0].lost = true
+	tools, err = l.ListTools(context.Background())
+	if err != nil || len(tools) != 1 || tools[0].Name != "x-s2" {
+		t.Fatalf("ListTools after loss = %v, %v", tools, err)
+	}
+
+	plain := &DaemonSession{
+		Gateway: &staticGateway{},
+		Name:    "slack",
+		Logf:    func(string, ...any) {},
+		Open:    func(context.Context, string) (SessionConn, error) { return &echoConn{id: "p"}, nil },
+	}
+	if _, err := plain.ListTools(context.Background()); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("ListTools on a non-lister = %v, want not supported", err)
+	}
+}

@@ -1,4 +1,4 @@
-# Messaging channels (WhatsApp and Signal)
+# Messaging channels (WhatsApp, Signal and Slack)
 
 With a channel configured, the daemon talks to a human on their phone in both
 directions:
@@ -24,6 +24,7 @@ This mirrors hermes-agent's WhatsApp gateway (`gateway/platforms/whatsapp_cloud.
 
 Contents: [Architecture](#architecture) · [Quick start](#quick-start) ·
 [Configuration reference](#configuration-reference) · [Signal](#signal) ·
+[Slack](#slack) ·
 [Routes and topics](#routes-and-topics) ·
 [Routing rules](#routing-rules) ·
 [Post-office messages](#post-office-messages) · [Security model](#security-model) ·
@@ -280,6 +281,65 @@ conversation index maps a swipe-reply to a `🐺 wolf is running…` message bac
 that wolf, exactly as WhatsApp's `context.message_id` does. Outbound, the first
 chunk of a reply quotes the message it answers in direct chats (not in groups).
 
+## Slack
+
+Slack is a third transport behind the same registry, routes and router. It
+has no Slack app or token of its own: it talks to the **Slack MCP** behind the
+host's standalone-codemode gateway (`internal/channels/slack`, design:
+[messaging-design.md §6](messaging-design.md#6-slack-channel), research:
+[research/slack-mcp.md](research/slack-mcp.md)). The channel mints its own
+static sub-gateway over the `slack` catalog server (record
+`~/.workingman/gateways/daemon/orch-slack.json`, deleted on shutdown) and the
+gateway's host header script is the authentication. Slack is a **work setup
+only** channel: `mcp-servers-personal.json` has no Slack entry.
+
+```yaml
+# ~/.workingman/channels.yaml
+channels:
+  slack:
+    type: slack
+    options:
+      gateway_url: http://localhost:3333   # default
+      channel: U0CC1K1MFNX                 # a channel id, or your own user id for the DM-to-self
+      allow_from: [U0CC1K1MFNX]            # Slack user ids; empty = nobody
+      poll_interval: 20s                   # default; min 5s
+      watch_ttl: 168h                      # how long a request's thread is watched (default 7 days)
+routes:
+  - {topic: post-office, channel: slack, chat: U0CC1K1MFNX}
+```
+
+Unknown options are rejected, and so is any `credentials:` block.
+
+**What is different about Slack:**
+
+- **Posts are made as you.** The MCP uses your own user token, so every post
+  the daemon makes has your name on it, and Slack will most likely **not
+  push-notify you** about it. Treat Slack as a place to answer, not a place
+  that pings you: keep Signal, WhatsApp or the TUI for alerts. Because the
+  author cannot tell our posts from yours, the channel records the ts of
+  everything it posts (`~/.workingman/slack/sent.json`, 30 days) and treats
+  every other message as yours.
+- **No push: replies are polled.** Every `poll_interval` the channel reads the
+  conversation (`slack_read_channel`). A new top-level message from you goes
+  to the router like any chat message (so `/inbox`, `#r1t8w staging` and
+  questions for the workingman agent all work). A sent post-office request is
+  *watched* (`~/.workingman/slack/watch.json`); when its thread's reply count
+  rises, the thread is read (`slack_read_thread`) and each reply answers the
+  request. If the read text format ever stops parsing, `channels.log` says so
+  loudly and the channel falls back to reading each watched thread.
+- **One call at a time.** The host header script fails under concurrent
+  calls, so every Slack call runs on one worker, and a `header script failed`
+  error is retried (1 s, 2 s, 4 s, 4 s). A send whose response is lost is
+  looked up in Slack rather than posted twice.
+- **"Answered elsewhere"** cannot edit the original message. The channel
+  implements `channels.Resolver`: a thread reply with the closing note, and a
+  reaction on the request — ✅ answered, ⌛ expired, 🚫 cancelled. A later
+  reply in a closed thread gets `This request is already closed (answered via
+  tui).` and goes nowhere.
+- `allow_from` is checked before the router sees a message. In the DM-to-self
+  only you can write; in a shared channel everyone else is dropped and logged
+  (without their text).
+
 ## Routes and topics
 
 A *topic* is a free-form tag on an outbound message. A route says "messages with
@@ -401,7 +461,7 @@ still open.
 - `⌛ [req r1t8w] Expired — the agent stopped waiting`
 
 The chat that answered gets no note. A channel that implements the optional
-`channels.Resolver` interface (Slack: a thread reply plus a reaction) is
+`channels.Resolver` interface ([Slack](#slack): a thread reply plus a reaction) is
 resolved through it instead of a plain reply. Notifications get no closing
 note. Once every note is sent, the record is marked `closed_notified`, and it
 is removed 30 days later.
