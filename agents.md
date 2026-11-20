@@ -184,7 +184,11 @@ nothing else. Finishes by setting `status: working` with `updated_by: agent`.
    per-sandbox MCP gateway — see "MCP gateway" in README.md; no longer sbx
    `--static-mcp` flags) and `policies:`
    (sbx policy rules, `action`/`type`/`resource`, applied in declaration order
-   right after `sbx create`) fields, plus the fixed status enums for both
+   right after `sbx create`) fields. Two paragraphs say when a task must name
+   a server: `logseq` whenever the request mentions Logseq, and
+   `post-office` when the agent may need to ask the operator or another agent
+   something (see [Messaging capability](#messaging-capability-post-office)).
+   The template also carries the fixed status enums for both
    project and task, and `model: default` on every new task. An optional
    per-task `harness:` picks the agent harness; empty (the norm) means the
    daemon's default `claude-acp` (the `--acp-kit` kit on `--acp-image`), the
@@ -228,7 +232,9 @@ somewhere that exists inside the sandbox).
 Does the actual code work in the workspace. Writes only `status:
 success|failed` (+ `failure_reason` on failure) back to its task file — it
 must NOT commit, push, or touch `project.yaml`; that's the commit agent's and
-daemon's job.
+daemon's job. A task whose `static_mcps` includes `post-office` can also
+message the operator or another agent while it works (see
+[Messaging capability](#messaging-capability-post-office)).
 The agent's `acp-wrapper` also annotates the task file (via `task.Update`,
 `internal/acpwrapper/record.go`): `resolved_harness:` (the sbx template the
 sandbox was created from) once the sandbox exists, and `resolved_model:` (the
@@ -824,3 +830,60 @@ follow the instructions.") and discards the reply, so the agent has read
 while the agent is still booting gets *"The workingman agent is starting up, try
 again in a minute."* rather than a hang. Replies go back to the asking chat
 (a `workingman` topic route is optional); every reply passes `audit.Redact`.
+
+---
+
+## Messaging capability (`post-office`)
+
+Not a kind of agent but a capability any sandboxed agent can be given: the
+**post-office** MCP server (`cmd/post-office`, `internal/postoffice/mcpserver`,
+design in [docs/messaging-design.md](docs/messaging-design.md) §4). With it an
+agent can `send_notification` (one-way) or `send_request` (expects an answer,
+then `wait_for_response` / `check_response` / `cancel_request` /
+`list_requests`) to the human operator or, by `recipient`, to another agent
+such as `step-up`. Without it, those tools do not exist for the agent.
+
+**The capability is the gateway being minted with `post-office`.**
+
+- **Granting it.** A task lists `post-office` in its `static_mcps`. The
+  planning agent adds it when the task description says the agent may need to
+  ask the operator or another agent something, or keep the operator informed
+  (the paragraph in `planning.tmpl`). Because `static_mcps` replaces the
+  default set (`MCPServersFor`), such a task lists every other server it needs
+  too. Agents whose plan the daemon builds itself get it by hard-coding it, as
+  review hard-codes `github`; that is how the Step-Up agent will get it.
+  `post-office` is **never** in `--mcp-gateway-servers`, so no agent has it by
+  default.
+- **The catalog entry** (standalone-codemode `mcp-servers.json` and
+  `mcp-servers-personal.json`): `url: http://127.0.0.1:7077/mcp`,
+  `Authorization: Bearer ${post_office_token}` (the secret
+  `mcp/post-office/post_office_token`, from `post-office setup --print`) and
+  `dynamic_addable: false`.
+- **`mcp-add` cannot grant it.** Task, wolf and workingman gateways are
+  dynamic (`MCPGatewayDynamic`), so their agents can `mcp-add` catalog
+  servers. Two independent checks stop that adding post-office:
+  1. the catalog's `dynamic_addable: false` makes the gateway refuse
+     `mcp-add post-office` (and hides it from `mcp-find`). This is defence in
+     depth;
+  2. the actual check, in post-office: every request carries the calling
+     sub-gateway's id (`X-Codemode-Gateway-Id`, injected by
+     standalone-codemode), and post-office looks it up in
+     `~/.workingman/gateways/<sandbox>.json`. `Record.Servers` is what the
+     gateway was **minted** with, which `mcp-add` never changes. A record
+     without `post-office` gets `post-office is not enabled for this sandbox
+     (add static_mcps: [post-office] to the task)` on `tools/list`,
+     `tools/call` and `resources/read`.
+- **Identity.** The sender (`from`) is never a tool argument: post-office
+  derives it from the gateway record's sandbox and that sandbox's newest live
+  `session.json` (kind, project, task), or from the fixed sandbox name for
+  `workingman-agent`, `sleepy-head` and `step-up`. A sandbox with no live
+  session is refused.
+- **Tested** end to end by `TestStaticMCPsCapabilityEndToEnd`
+  (`internal/postoffice/mcpserver/capability_e2e_test.go`): a task with
+  `static_mcps: [post-office]` calls `send_notification` through its gateway
+  and is attributed correctly; a task without it gets nothing through its
+  gateway, and is refused even after post-office is attached to its dynamic
+  gateway as `mcp-add` would. standalone-codemode's
+  `TestGatewayIDAndDynamicAddableE2E` covers the header and the `mcp-add`
+  refusal on the real gateway, and `TestSampleCatalogLoads` pins the entry in
+  both catalogs.
