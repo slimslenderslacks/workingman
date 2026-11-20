@@ -404,4 +404,13 @@ func TestRebaseRecoveryAndChangedPaths(t *testing.T) {
 	if strings.Join(got, ",") != "README,docs/a.md,new.txt" {
 		t.Errorf("ChangedPaths = %v", got)
 	}
+
+	// DiffNames sees committed changes only.
+	got, err = m.DiffNames(ctx, wt, base, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "README" {
+		t.Errorf("DiffNames = %v, want [README]", got)
+	}
 }

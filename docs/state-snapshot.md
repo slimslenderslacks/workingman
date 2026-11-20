@@ -230,6 +230,8 @@ The full contract, including events of later phases, is D3 in
 | `integration_retry` | `integration_attempts`, `err` |
 | `integration_verify_failed` | `repo`, `hash`, `why`; followed by `project_blocked` |
 | `integration_partial` | `published`, `repo`; followed by `project_blocked` |
+| `touches_exceeded` | `paths`: changed paths outside the task's `touches`/`areas`, also written to its `touches_actual` |
+| `touches_audit_error` | `repo`, `err`: the hint audit could not diff a repo |
 | `task_retry`, `task_retry_exhausted` | `attempts`, `cause` (`failure`, `conflict`, `verify`; absent means `failure`) |
 | `task_released` | `task_path`, `why` (`launch_failed`, `stopped`, `orphaned`, `adopted_session_ended`, `worktree_failed`) |
 

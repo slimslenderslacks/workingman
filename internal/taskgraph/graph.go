@@ -24,6 +24,12 @@ type Graph struct {
 	deps     map[string][]string   // adjacency: name → names it depends on
 	warnings []string              // loud, non-fatal repairs made during Load
 	seeds    int                   // pending seeds (blank name + description) awaiting planning
+
+	// effective holds, by name, the copies of tasks whose hints for overlap
+	// purposes differ from their files' (effectiveHints); dependents counts
+	// each task's transitive dependents (countDependents).
+	effective  map[string]*task.Task
+	dependents map[string]int
 }
 
 // Dir returns the directory the Graph was loaded from.
@@ -51,6 +57,10 @@ func (g *Graph) Warnings() []string { return g.warnings }
 // span the whole graph (an unknown dependency, a cycle, or two files
 // genuinely claiming the same valid name) remain fatal: there's no safe
 // single-file repair for those.
+//
+// Independence hints are repaired the same way (docs/parallel-task-worktrees.md
+// H1): a task with an invalid touches glob or areas tag is scheduled as
+// exclusive, and the repair is recorded in Warnings(). The file is not changed.
 //
 // A blank name paired with a non-blank description is treated as a pending
 // seed (see the tui package's queueTaskForPlanning) rather than a malformed
@@ -151,6 +161,8 @@ func Load(dir string) (*Graph, error) {
 	if err := g.validate(); err != nil {
 		return nil, err
 	}
+	g.effectiveHints()
+	g.countDependents()
 	return g, nil
 }
 
@@ -361,22 +373,28 @@ type Admission struct {
 // min(limit − len(inflight), free global tokens); slots <= 0 admits nothing.
 //
 // Candidates are Ready() minus push tasks, which join the commit queue
-// directly (Queued) instead of taking a task slot. They are walked in name
-// order. A candidate is admitted if it overlaps (Overlap) no task in inflight,
-// none admitted earlier in this pass and none deferred earlier in this pass.
-// Otherwise it is deferred, and joins the barrier: a later candidate that
-// overlaps a deferred one is deferred too, so a stream of later tasks cannot
-// overtake an earlier one forever. An exclusive task (no hints) is therefore a
-// full barrier: once it is deferred nothing behind it is admitted until it can
-// start alone. The walk stops as soon as slots is used up; candidates after
-// that point are neither admitted nor deferred.
+// directly (Queued) instead of taking a task slot. They are walked in priority
+// order: re-runs (attempts > 0) first, since a waiting re-run's base only gets
+// staler; then the tasks with the most transitive dependents, which unblock
+// the most work once they land; then name. A candidate is admitted if it
+// overlaps (Graph.Overlap, so with a re-run's conflicting files added to its
+// touches) no task in inflight, none admitted earlier in this pass and none
+// deferred earlier in this pass. Otherwise it is deferred, and joins the
+// barrier: a later candidate that overlaps a deferred one is deferred too, so
+// a stream of later tasks cannot overtake an earlier one forever. An exclusive
+// task (no hints) is therefore a full barrier: once it is deferred nothing
+// behind it is admitted until it can start alone. The walk stops as soon as
+// slots is used up; candidates after that point are neither admitted nor
+// deferred.
 //
-// With one slot and nothing in flight this is ready[0], today's serial
-// dispatch, whatever the hints say.
+// With one slot and nothing in flight this is the first candidate in priority
+// order, whatever the hints say.
 func (g *Graph) Runnable(inflight []*task.Task, slots int) Admission {
 	var adm Admission
 	var barrier []*task.Task
-	for _, t := range g.Ready() {
+	cands := g.Ready()
+	g.byPriority(cands)
+	for _, t := range cands {
 		if len(adm.Admit) >= slots {
 			break
 		}
@@ -384,9 +402,9 @@ func (g *Graph) Runnable(inflight []*task.Task, slots int) Admission {
 			continue
 		}
 		var over []string
-		over = append(over, overlapping(t, inflight)...)
-		over = append(over, overlapping(t, adm.Admit)...)
-		over = append(over, overlapping(t, barrier)...)
+		over = append(over, g.overlapping(t, inflight)...)
+		over = append(over, g.overlapping(t, adm.Admit)...)
+		over = append(over, g.overlapping(t, barrier)...)
 		if len(over) > 0 {
 			adm.Deferred = append(adm.Deferred, Deferred{Task: t, Overlaps: over})
 			barrier = append(barrier, t)

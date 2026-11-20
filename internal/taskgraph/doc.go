@@ -13,14 +13,20 @@
 // For parallel dispatch (docs/parallel-task-worktrees.md S3-S5, H2-H3) the
 // package also answers which tasks hold a slot ([InFlight]), which wait for
 // the commit agent and in what order ([Queued], [WaitingOnIntegration]), and
-// which Ready tasks a scheduling pass may start ([Graph.Runnable]), using the
-// tasks' independence hints ([Overlap]).
+// which Ready tasks a scheduling pass may start ([Graph.Runnable]), in
+// priority order (re-runs, then most transitive dependents, then name), using
+// the tasks' independence hints ([Overlap]). [Graph.Overlap] compares the
+// effective hints: a task with an invalid glob or tag is exclusive, and a
+// re-run after an integration conflict also touches the files it conflicted
+// in. [Uncovered] is the hint audit the daemon runs after an integration.
 //
 // Load repairs per-file mistakes and rejects whole-graph ones. A blank or
 // malformed task name, or one too long for the project's sandbox-name budget,
 // is rewritten to a slug, depends_on edges are rewritten to match, and the
 // repair is reported through [Graph.Warnings]. An unknown dependency, a cycle
-// or a duplicate valid name makes Load return an error. A file with a blank
+// or a duplicate valid name makes Load return an error. An invalid touches glob
+// or areas tag is repaired by scheduling the task as exclusive, also reported
+// through [Graph.Warnings]. A file with a blank
 // name and a non-blank description is a pending seed waiting for the planning
 // agent: it is left out of the graph and counted by [Graph.HasPendingSeed].
 //
@@ -32,7 +38,9 @@
 //   - [InFlight], [Queued], [WaitingOnIntegration] — slot, commit-queue and
 //     waiting views over a plain task slice, shared with lenient readers.
 //   - [Graph.Runnable] / [Admission] — greedy admission with barriers.
-//   - [Overlap] / [GlobsOverlap] — the H2 overlap test.
+//   - [Overlap] / [GlobsOverlap] — the H2 overlap test; [Graph.Overlap] over
+//     the effective hints.
+//   - [Uncovered] / [PathCovered] — which changed paths a task's hints miss.
 //
 // # Collaborators
 //

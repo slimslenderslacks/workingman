@@ -257,6 +257,7 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		d.auditVerifyCheck(projectPath, t, il)
 		d.audit.Log("integration_succeeded", "path", projectPath, "task", t.Name,
 			"commits", formatCommits(t.Commits), "fast_forward", strconv.FormatBool(il.fastPath(t)))
+		d.auditTouches(projectPath, p, t, il)
 	}
 
 	// Stamp the completion time the first time we observe the task committed,

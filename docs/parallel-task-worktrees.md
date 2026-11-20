@@ -3289,6 +3289,66 @@ differences:
   the plumbing from `Plan` to prompt and context, and `internal/daemon`
   `plannerParallelism`.
 
+#### Phase 5 as built: overlap-aware scheduling
+
+The second task (`rollout-phase-5-scheduling`) covers the `taskgraph` side
+and the hint audit. The code forced or suggested these differences:
+
+- **Effective hints live in the `Graph`.** `Load` works out, once per load,
+  the hints each task is scheduled by, and `Graph.Overlap(a, b)` compares
+  those. `Runnable` uses it, and so does `schedule`'s `prefer` check (the
+  retry that takes its own slot back), so a re-run is held back by the same
+  rule either way. Task files are never rewritten. The package-level
+  `Overlap` still compares declared hints only.
+- **Conflict feedback** applies to every task that carries an
+  `integration:` block with `files`, not only to one at `attempts > 0`. The
+  block is kept from the conflict until the task is `committed` (I5), which
+  is exactly the window in which the re-run is waiting or running. Each file
+  is added to `touches` as `<integration.repo>/<file>` (repo `*` when the
+  report names none), literally, so it overlaps any glob that could match it.
+  It works in both directions: a ready task declaring the file waits for a
+  running re-run, and a ready re-run waits for a running task declaring it.
+  An exclusive task stays exclusive.
+- **Priority.** `Runnable` sorts `Ready()` into H3's order (attempts > 0,
+  then transitive dependents from `Graph.Dependents`, then name) and walks
+  it with the phase 4 barriers unchanged, so an exclusive task that reaches
+  the front still holds everything behind it until in-flight work drains.
+  `Ready()` stays name-sorted. `passOpts.prefer` stays: it still gives a
+  task whose run just ended the slot that run freed, which priority alone
+  would not guarantee when a higher-priority re-run is also waiting.
+- **`Load` repair** treats a task as exclusive, and adds a `Warnings()` entry
+  (logged as `taskgraph_repair`, like name repairs), when a `touches` glob is
+  blank, absolute, has a `..` segment or a segment `path.Match` rejects, or
+  an `areas` tag is not kebab-case. Overlap already treated a malformed glob
+  as overlapping everything; the repair makes that explicit and loud.
+- **The hint audit diffs `onto..commits[].hash`, not `base..tip`.** After a
+  rebase, `base` is the worktree's old cut point, and `base..tip` on the
+  shared branch would include every task that landed since. The commit
+  agent's starting tip (`integrationLaunch.onto`) to the published hash is
+  this task's change alone. A repo with no `onto` (a commit session adopted
+  across a restart) is skipped. Paths are `<repo>/<path>`, checked against
+  `touches` with `taskgraph.PathCovered` (the H1 glob rules, with a
+  directory-looking last segment read as `dir/**`) and against the standard
+  area tags of H4 through a fixed file map (`go-deps` is `go.mod`, `go.sum`,
+  `go.work*`; `npm-deps` the package manifests and lock files; `ci`
+  `.github/`, `.circleci/`, `.gitlab-ci.yml`, `Jenkinsfile`; `db-schema`
+  `*.sql` and `migrations/`; `generated-docs` `docs/packages.md`;
+  `changelog` `CHANGELOG*`; `release-version` `VERSION`, `version.txt`).
+  Any other tag covers nothing in the audit. An exclusive task is not
+  audited, since it declared nothing and ran alone. `touches_actual` is
+  replaced, not appended to, and is written only when something is outside
+  the hints. A diff failure is logged as `touches_audit_error` and never
+  blocks.
+- **`worktree.Manager.DiffNames`** is new (`git diff --name-only a..b`).
+  `ChangedPaths` also lists uncommitted files in a checkout, which the shared
+  tree after a fast-forward does not have.
+- **Tests.** `internal/taskgraph/hints_test.go` covers priority, the barrier
+  under priority, no starvation of an exclusive task, conflict feedback in
+  both directions, the `Load` repairs, `PathCovered` and `Uncovered`.
+  `schedule_test.go` has `TestScheduleConflictReRunSerializedAgainstConflictingFile`,
+  and `touches_audit_test.go` the `touches_exceeded`/`touches_actual` runs
+  through a real integration. `internal/worktree` tests `DiffNames`.
+
 ### Phase 6: restart recovery hardening and worktree GC
 
 Clean up what crashes, deleted tasks and long-lived projects leave behind.

@@ -818,3 +818,45 @@ func TestQueueHeadPassesOverPushTaskWithoutSlot(t *testing.T) {
 		t.Errorf("a lone push task without a slot = %v, want none", got)
 	}
 }
+
+// Conflict feedback (H3): a re-run after an integration conflict also touches
+// the files it conflicted in, so schedule holds it back while a task declaring
+// one of them runs, though their declared hints are disjoint. It starts once
+// that task has landed, ahead of a ready task sorting before it (re-runs
+// first), which then waits on the re-run in turn.
+func TestScheduleConflictReRunSerializedAgainstConflictingFile(t *testing.T) {
+	e := newSchedEnv(t, 2)
+	e.addTask("router", []string{"gateway/internal/router.go"})
+	e.pass()
+	if got := e.running(); !eqStrings(got, "router") {
+		t.Fatalf("running = %v, want [router]", got)
+	}
+	e.addTask("api", []string{"gateway/internal/api/**"})
+	e.setTask("api", func(t *task.Task) {
+		t.Attempts = 1
+		t.Integration = &task.Integration{Result: "conflict", Repo: "gateway", Files: []string{"internal/router.go"}}
+	})
+	e.addTask("aaa", []string{"gateway/internal/router.go"})
+	e.pass()
+	if got := e.running(); !eqStrings(got, "router") {
+		t.Fatalf("running = %v, want only router: the re-run conflicted in its file", got)
+	}
+	if info := e.d.deferredInfo(e.projectPath); info == nil || !eqStrings(info.Overlap, "aaa", "api") {
+		t.Errorf("live.deferred = %+v, want overlap [aaa api]", info)
+	}
+	if !strings.Contains(e.buf.String(), "task=api overlaps=router\n") {
+		t.Errorf("no deferral naming router:\n%s", e.buf.String())
+	}
+
+	// router stays in flight (and api waits) until it has landed.
+	e.finishTask("router", task.StatusSuccess)
+	e.eventually("router integrating", func() bool { return e.integrating() == "router" })
+	if got := e.running(); len(got) != 0 {
+		t.Fatalf("running = %v while router integrates, want none", got)
+	}
+	e.finishCommit("router")
+	e.eventually("api running", func() bool { return eqStrings(e.running(), "api") })
+	if tk := e.task("aaa"); tk.Status != task.StatusReady {
+		t.Errorf("aaa = %s, want ready behind the re-run", tk.Status)
+	}
+}

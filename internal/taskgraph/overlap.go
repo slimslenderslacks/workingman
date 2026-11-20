@@ -112,12 +112,12 @@ func namesDir(last string) bool {
 	return !hasWildcard(last) && path.Ext(last) == ""
 }
 
-// overlapping returns the names of the tasks in set that overlap t, in set
-// order, skipping t itself.
-func overlapping(t *task.Task, set []*task.Task) []string {
+// overlapping returns the names of the tasks in set that overlap t
+// (Graph.Overlap), in set order, skipping t itself.
+func (g *Graph) overlapping(t *task.Task, set []*task.Task) []string {
 	var out []string
 	for _, o := range set {
-		if o.Name != t.Name && Overlap(t, o) {
+		if o.Name != t.Name && g.Overlap(t, o) {
 			out = append(out, o.Name)
 		}
 	}

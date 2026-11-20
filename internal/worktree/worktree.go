@@ -491,6 +491,24 @@ func (m Manager) ChangedPaths(ctx context.Context, dir, base string) ([]string, 
 	return out, nil
 }
 
+// DiffNames lists the repo-relative paths that differ between two commits in
+// the repo at dir (`git diff --name-only from..to`). Sorted, as git prints
+// them.
+func (m Manager) DiffNames(ctx context.Context, dir, from, to string) ([]string, error) {
+	out, err := m.git(ctx, dir, "diff", "--name-only", from+".."+to)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, l := range strings.Split(out, "\n") {
+		if l != "" {
+			paths = append(paths, l)
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
 // qualify turns a bare branch name into its full ref so it cannot be confused
 // with a tag or a SHA prefix. Full refs, SHAs and rev expressions pass through.
 func qualify(rev string) string {

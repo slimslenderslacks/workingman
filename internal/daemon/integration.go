@@ -434,6 +434,53 @@ func (d *Daemon) auditVerifyCheck(projectPath string, t *task.Task, il *integrat
 	}
 }
 
+// auditTouches is the hint audit after a worktree task lands
+// (docs/parallel-task-worktrees.md H3): the paths the integration changed on
+// the shared branch that the task's touches and areas do not cover are logged
+// as touches_exceeded and recorded in the task's touches_actual. Nothing
+// blocks on it. Each repo's change is diffed from the shared tip the commit
+// agent started from (onto) to the tip it published, not from base: base is
+// where the worktree was cut, and the work of tasks that landed since would
+// show up as this task's. A repo whose onto is unknown (an integration adopted
+// across a restart) is left out. An exclusive task declared nothing and ran
+// alone, so it is not audited.
+func (d *Daemon) auditTouches(projectPath string, p *project.Project, t *task.Task, il *integrationLaunch) {
+	if t.Exclusive() || len(t.Commits) == 0 {
+		return
+	}
+	shared, err := d.runner.Workspaces.Path(p.Branch)
+	if err != nil {
+		return
+	}
+	var changed []string
+	for _, c := range t.Commits {
+		from := il.onto[c.Repo]
+		if from == "" || from == c.Hash {
+			continue
+		}
+		paths, err := d.worktrees.DiffNames(d.ctx, filepath.Join(shared, c.Repo), from, c.Hash)
+		if err != nil {
+			d.audit.Log("touches_audit_error", "path", projectPath, "task", t.Name, "repo", c.Repo, "err", err.Error())
+			continue
+		}
+		for _, f := range paths {
+			changed = append(changed, c.Repo+"/"+f)
+		}
+	}
+	outside := taskgraph.Uncovered(t, changed)
+	if len(outside) == 0 {
+		return
+	}
+	d.audit.Log("touches_exceeded", "path", projectPath, "task", t.Name, "paths", strings.Join(outside, ","))
+	t.TouchesActual = outside
+	if err := task.Update(t.Path, func(cur *task.Task) bool {
+		cur.TouchesActual = outside
+		return true
+	}); err != nil {
+		d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
+	}
+}
+
 func formatOnto(onto map[string]string) string {
 	var cs []task.Commit
 	for repo, hash := range onto {

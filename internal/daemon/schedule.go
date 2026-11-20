@@ -423,7 +423,7 @@ func (d *Daemon) decidePass(projectPath string, fallback *project.Project, o pas
 		free := d.freeTokensLocked()
 		var first []*task.Task
 		if o.prefer != "" && slots > 0 && free > 0 {
-			if t := g.Task(o.prefer); t != nil && !t.IsPushTask() && isReady(g, t.Name) && !overlapsAny(t, inflight) {
+			if t := g.Task(o.prefer); t != nil && !t.IsPushTask() && isReady(g, t.Name) && !overlapsAny(g, t, inflight) {
 				first = []*task.Task{t}
 			}
 		}
@@ -527,10 +527,11 @@ func isReady(g *taskgraph.Graph, name string) bool {
 	return false
 }
 
-// overlapsAny reports whether t overlaps any task in set (H2).
-func overlapsAny(t *task.Task, set []*task.Task) bool {
+// overlapsAny reports whether t overlaps any task in set, by the graph's
+// effective hints (H2, H3).
+func overlapsAny(g *taskgraph.Graph, t *task.Task, set []*task.Task) bool {
 	for _, o := range set {
-		if o.Name != t.Name && taskgraph.Overlap(t, o) {
+		if o.Name != t.Name && g.Overlap(t, o) {
 			return true
 		}
 	}
