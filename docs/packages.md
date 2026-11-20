@@ -35,6 +35,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/onepassword` | daemon | Package onepassword reads secrets from 1Password through the 1Password Go SDK (github.com/1password/onepassword-sdk-go), authenticated as a service account, so nothing in workingman needs the `op` CLI, `op signin` or a biometric unlock. | `Resolver` | `KeychainItem`, `KeychainLookup`, `TokenSource` |
 | `internal/policy` | shared | Package policy defines the per-task sandbox policy rules (allow or deny one network or filesystem resource pattern) and turns them into `sbx policy` commands. | — | `Action`, `Kind`, `Rule` |
 | `internal/postoffice` | shared | Package postoffice is the agent messaging store: the message model and the file-backed Store under ~/.workingman/post-office/ that post-office, the orch daemon and the TUI share. | `Auditor`, `Outbound` | `Delivery`, `DeliveryRecord`, `Dispatcher`, `DispatcherConfig`, `DoneRecord`, `Draft`, `Kind`, `Lock`, `Message`, `Outcome`, `Resolution`, `Responder`, `Sender`, `Store`, `Waiters` |
+| `internal/postoffice/mcpserver` | daemon | Package mcpserver is the post-office MCP server: the sender tools agents use to notify and ask the operator or another agent, over the shared postoffice.Store. | — | `Caller`, `Config`, `Resolver`, `Server` |
 | `internal/power` | daemon | Package power reports whether the host is running on AC power or battery, so the daemon can stand down while a laptop is unplugged. | `Source` | `ACSource`, `Pmset` |
 | `internal/project` | shared | Package project is the data model and on-disk format of a work stream's project.yaml, plus the two sidecar records the daemon and the wolf agent keep next to it. | — | `BlockedSession`, `CheckState`, `PRFingerprint`, `PlannedSnapshot`, `Project`, `PullRequest`, `Repo`, `Status`, `Writer` |
 | `internal/prompts` | daemon | Package prompts renders the per-kind instruction text that orch writes to .orch/instructions.md for a newly launched agent. | — | `BehindProject`, `Data` |
@@ -62,6 +63,7 @@ graph LR
     cmd_acp_wrapper["cmd/acp-wrapper"]
     cmd_op_read["cmd/op-read"]
     cmd_orch["cmd/orch"]
+    cmd_post_office["cmd/post-office"]
   end
   subgraph grp_daemon["daemon"]
     internal_acpchat["acpchat"]
@@ -77,6 +79,7 @@ graph LR
     internal_daemon["daemon"]
     internal_notify["notify"]
     internal_onepassword["onepassword"]
+    internal_postoffice_mcpserver["postoffice/mcpserver"]
     internal_power["power"]
     internal_prompts["prompts"]
     internal_router["router"]
@@ -131,6 +134,10 @@ graph LR
   cmd_orch --> internal_terminal
   cmd_orch --> internal_tui
   cmd_orch --> internal_workspace
+  cmd_post_office --> internal_mcpgateway
+  cmd_post_office --> internal_postoffice
+  cmd_post_office --> internal_postoffice_mcpserver
+  cmd_post_office --> internal_session
   internal_acpchat --> internal_acpclient
   internal_acpchat --> internal_session
   internal_acpwrapper --> internal_gitsign
@@ -171,6 +178,10 @@ graph LR
   internal_mcpgateway --> internal_policy
   internal_postoffice --> internal_audit
   internal_postoffice --> internal_channels
+  internal_postoffice_mcpserver --> internal_mcpgateway
+  internal_postoffice_mcpserver --> internal_postoffice
+  internal_postoffice_mcpserver --> internal_session
+  internal_postoffice_mcpserver --> internal_task
   internal_prompts --> internal_agent
   internal_prompts --> internal_sbx
   internal_router --> internal_acpchat
@@ -203,9 +214,9 @@ graph LR
   internal_tui --> internal_workspace
 
   classDef entry fill:#e8e8e8,stroke:#555,stroke-width:2px,color:#000
-  class cmd_acp_wrapper,cmd_op_read,cmd_orch entry
+  class cmd_acp_wrapper,cmd_op_read,cmd_orch,cmd_post_office entry
   classDef daemon fill:#dbe9ff,stroke:#2f6fd6,color:#000
-  class internal_acpchat,internal_agent,internal_audit,internal_channels,internal_channels_channeltest,internal_channels_signal,internal_channels_signal_setup,internal_channels_whatsapp,internal_channels_whatsapp_bridge,internal_channels_whatsapp_setup,internal_daemon,internal_notify,internal_onepassword,internal_power,internal_prompts,internal_router,internal_runner,internal_scheduler,internal_service,internal_setup,internal_taskgraph daemon
+  class internal_acpchat,internal_agent,internal_audit,internal_channels,internal_channels_channeltest,internal_channels_signal,internal_channels_signal_setup,internal_channels_whatsapp,internal_channels_whatsapp_bridge,internal_channels_whatsapp_setup,internal_daemon,internal_notify,internal_onepassword,internal_postoffice_mcpserver,internal_power,internal_prompts,internal_router,internal_runner,internal_scheduler,internal_service,internal_setup,internal_taskgraph daemon
   classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
   class internal_tui tui
   classDef shared fill:#fff1cc,stroke:#c99a06,color:#000
@@ -223,6 +234,7 @@ The same graph as text: each package's internal imports and importers.
 | `cmd/acp-wrapper` | `acpwrapper`, `gitsign`, `mcpgateway`, `policy` | — |
 | `cmd/op-read` | `onepassword` | — |
 | `cmd/orch` | `agent`, `audit`, `channels`, `channels/signal`, `channels/signal/setup`, `channels/whatsapp`, `channels/whatsapp/setup`, `daemon`, `mcpgateway`, `notify`, `postoffice`, `power`, `router`, `runner`, `scheduler`, `service`, `session`, `terminal`, `tui`, `workspace` | — |
+| `cmd/post-office` | `mcpgateway`, `postoffice`, `postoffice/mcpserver`, `session` | — |
 | `internal/acpchat` | `acpclient`, `session` | `router` |
 | `internal/acpclient` | — | `acpchat`, `tui` |
 | `internal/acpwrapper` | `gitsign`, `mcpgateway`, `policy`, `project`, `sbx`, `session`, `task` | `cmd/acp-wrapper` |
@@ -237,11 +249,12 @@ The same graph as text: each package's internal imports and importers.
 | `internal/channels/whatsapp/setup` | `channels`, `channels/whatsapp` | `cmd/orch` |
 | `internal/daemon` | `agent`, `audit`, `channels`, `gitsign`, `mcpgateway`, `notify`, `policy`, `power`, `project`, `prompts`, `runner`, `sbx`, `scheduler`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |
 | `internal/gitsign` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `runner` |
-| `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `cmd/orch`, `acpwrapper`, `daemon`, `runner` |
+| `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `cmd/orch`, `cmd/post-office`, `acpwrapper`, `daemon`, `postoffice/mcpserver`, `runner` |
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
 | `internal/onepassword` | — | `cmd/op-read` |
 | `internal/policy` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `mcpgateway`, `runner`, `task`, `tui` |
-| `internal/postoffice` | `audit`, `channels` | `cmd/orch`, `router` |
+| `internal/postoffice` | `audit`, `channels` | `cmd/orch`, `cmd/post-office`, `postoffice/mcpserver`, `router` |
+| `internal/postoffice/mcpserver` | `mcpgateway`, `postoffice`, `session`, `task` | `cmd/post-office` |
 | `internal/power` | — | `cmd/orch`, `daemon` |
 | `internal/project` | — | `acpwrapper`, `daemon`, `tui` |
 | `internal/prompts` | `agent`, `sbx` | `daemon`, `runner` |
@@ -250,9 +263,9 @@ The same graph as text: each package's internal imports and importers.
 | `internal/sbx` | — | `acpwrapper`, `daemon`, `prompts`, `runner`, `task`, `tui` |
 | `internal/scheduler` | — | `cmd/orch`, `daemon` |
 | `internal/service` | — | `cmd/orch` |
-| `internal/session` | — | `cmd/orch`, `acpchat`, `acpwrapper`, `daemon`, `runner`, `tui` |
+| `internal/session` | — | `cmd/orch`, `cmd/post-office`, `acpchat`, `acpwrapper`, `daemon`, `postoffice/mcpserver`, `runner`, `tui` |
 | `internal/setup` | — | `runner` |
-| `internal/task` | `policy`, `sbx` | `acpwrapper`, `daemon`, `runner`, `taskgraph`, `tui` |
+| `internal/task` | `policy`, `sbx` | `acpwrapper`, `daemon`, `postoffice/mcpserver`, `runner`, `taskgraph`, `tui` |
 | `internal/taskgraph` | `task` | `daemon` |
 | `internal/terminal` | `agent` | `cmd/orch`, `daemon`, `runner`, `tui` |
 | `internal/tui` | `acpclient`, `policy`, `project`, `sbx`, `session`, `task`, `terminal`, `workspace` | `cmd/orch` |

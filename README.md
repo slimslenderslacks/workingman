@@ -154,14 +154,32 @@ unattended runs would hang.
 ## Build
 
 ```sh
-task build    # orch, acp-wrapper and op-read
+task build    # orch, acp-wrapper, op-read and post-office
 # or by hand:
 go build -o orch ./cmd/orch
 go build -o acp-wrapper ./cmd/acp-wrapper
 go build -o op-read ./cmd/op-read
+go build -o post-office ./cmd/post-office
 ```
 
-start.sh rebuilds all three on every start.
+start.sh rebuilds the first three on every start.
+
+`post-office` is the agent messaging MCP server
+([docs/messaging-design.md](docs/messaging-design.md) §4). It runs on its own,
+not inside orch, so it keeps serving while orch restarts:
+
+```sh
+post-office setup              # once: writes ~/.workingman/post-office/token
+task post-office:install       # macOS: ~/.local/bin + launchd agent com.workingman.post-office
+# or in the foreground:
+post-office serve              # http://127.0.0.1:7077/mcp, bearer token required
+```
+
+Store the token (`post-office setup --print`) as the standalone-codemode
+secret `mcp/post-office/post_office_token`, which the catalog entry sends as
+`Authorization: Bearer ${post_office_token}`. Agents reach post-office only
+through their sandbox's sub-gateway, and only when the gateway was minted with
+it (`static_mcps: [post-office]`).
 
 ## Start the daemon
 

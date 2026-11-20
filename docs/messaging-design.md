@@ -309,9 +309,11 @@ to `done/` as an orphan and logged.
 
 ### 4.1 Hosting
 
-- **Code:** `internal/postoffice` holds the store, the model, the identity
-  resolver and the tool handlers. It has a `doc.go` for `task docs`, with
-  role `shared`. `cmd/post-office/main.go` is a thin `main`.
+- **Code:** `internal/postoffice` holds the store and the model, with role
+  `shared`. The identity resolver, the capability check and the tool handlers
+  are in `internal/postoffice/mcpserver` (role `daemon`), so that the TUI and
+  the daemon, which link `internal/postoffice`, do not pull in the MCP SDK.
+  `cmd/post-office/main.go` is a thin `main`.
 - **SDK:** `github.com/modelcontextprotocol/go-sdk`, at the version
   standalone-codemode pins. This is a new dependency for workingman, whose
   only MCP code today is the hand-rolled client in `internal/mcpgateway`.
@@ -352,9 +354,15 @@ The **capability is the gateway being minted with `post-office`**:
    `post-office` to a task's `static_mcps`: when the task description says the
    agent may need to ask the operator or another agent something.
 
-A rejected caller gets a JSON-RPC error on `tools/list` and `tools/call`:
-`post-office is not enabled for this sandbox (add static_mcps: [post-office]
-to the task)`.
+A rejected caller gets a JSON-RPC error on `tools/call` (and on
+`resources/read`): `post-office is not enabled for this sandbox (add
+static_mcps: [post-office] to the task)`. `tools/list` is refused only when
+the caller's gateway record exists and lacks `post-office`, which is the
+`mcp-add` case. A sub-gateway attaches its backends, and so lists their tools,
+while `POST /gateways` is still running. That is before workingman saves the
+record (after `sbx create`) and before any session exists, so refusing an
+unknown id there would remove post-office from every sandbox. Listing tools
+reveals nothing; every call is checked in full.
 
 ### 4.3 Caller identity
 

@@ -5,8 +5,8 @@ tasks:
     deps: [build]
 
   build:
-    desc: Build orch, acp-wrapper and op-read into the repo root
-    deps: [orch, acp-wrapper, op-read]
+    desc: Build orch, acp-wrapper, op-read and post-office into the repo root
+    deps: [orch, acp-wrapper, op-read, post-office]
 
   orch:
     desc: Build the orch daemon
@@ -44,6 +44,28 @@ tasks:
     generates:
       - op-read
 
+  post-office:
+    desc: Build post-office, the agent messaging MCP server (docs/messaging-design.md §4)
+    cmds:
+      - go build -o post-office ./cmd/post-office
+    sources:
+      - cmd/post-office/**/*.go
+      - internal/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - post-office
+
+  post-office:install:
+    desc: Install post-office to ~/.local/bin and its launchd agent (macOS); run `post-office setup` first
+    deps: [post-office]
+    cmds:
+      - mkdir -p "$HOME/.local/bin" "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/workingman"
+      - install -m 0755 post-office "$HOME/.local/bin/post-office"
+      - sed "s|__HOME__|$HOME|g" launchd/com.workingman.post-office.plist > "$HOME/Library/LaunchAgents/com.workingman.post-office.plist"
+      - launchctl bootout "gui/$(id -u)/com.workingman.post-office" 2>/dev/null || true
+      - launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.workingman.post-office.plist"
+
   test:
     desc: Run go vet and the Go test suite (mirrors ci.yml)
     cmds:
@@ -64,4 +86,4 @@ tasks:
   clean:
     desc: Remove built binaries
     cmds:
-      - rm -f orch acp-wrapper op-read
+      - rm -f orch acp-wrapper op-read post-office
