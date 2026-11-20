@@ -66,12 +66,14 @@
 //     fingerprints and runs the review agent on change, with fix-cycle and
 //     crash limits; merged PRs move the project to merged.
 //   - review_gateway.go: the daemon's own github-only MCP gateway
-//     ([WithReviewGateway]) for the PR fingerprint check: minted at Run (a
-//     stale one a crashed run recorded is deleted first), retried with
-//     backoff on failure, deleted at shutdown.
+//     ([WithReviewGateway]) for the PR fingerprint check, an
+//     mcpgateway.DaemonGateway: minted at Run (a stale one a crashed run
+//     recorded is deleted first), retried with backoff on failure, deleted at
+//     shutdown.
 //   - review_mcp.go: the PR fingerprint probe — github MCP pull_request_read
-//     calls on one lazily opened MCP session over that gateway, recreated
-//     with backoff when lost and closed at shutdown before the gateway.
+//     calls on one lazily opened mcpgateway.DaemonSession over that gateway,
+//     recreated with backoff when lost and closed at shutdown before the
+//     gateway.
 //     The daemon needs no gh CLI or local GitHub auth. The lifecycle, the
 //     fingerprint signals, the agent-recorded fallback, the poll backoff and
 //     the review_gateway_* / review_mcp_* / review_fingerprint_error audit

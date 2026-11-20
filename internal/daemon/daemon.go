@@ -11,6 +11,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/audit"
+	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/notify"
 	"github.com/slimslenderslacks/work/internal/power"
 	"github.com/slimslenderslacks/work/internal/project"
@@ -140,8 +141,8 @@ type Daemon struct {
 	// fingerprint check; nil unless WithReviewGateway. See review_gateway.go.
 	// reviewGatewaySrc, when set, replaces it as what reviewGateway() returns
 	// (test seam).
-	reviewGW         *reviewGateway
-	reviewGatewaySrc reviewGatewaySource
+	reviewGW         *mcpgateway.DaemonGateway
+	reviewGatewaySrc mcpgateway.GatewaySource
 	// reviewMCPc is the daemon's one MCP session (over reviewGateway()) used
 	// by the PR fingerprint probe, created on first use; guarded by
 	// reviewMCPMu. See review_mcp.go.
@@ -424,7 +425,7 @@ func (d *Daemon) shutdown() {
 	// The MCP session lives on the review gateway: end it first.
 	d.closeReviewMCP()
 	if d.reviewGW != nil {
-		d.reviewGW.close()
+		d.reviewGW.Close()
 	}
 	if d.scheduler != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

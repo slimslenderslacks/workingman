@@ -437,8 +437,8 @@ func TestShutdownClosesMCPSessionBeforeGateway(t *testing.T) {
 	}
 	api := &fakeGatewayAPI{}
 	g := newReviewGateway("http://localhost:3333", mcpgateway.Store{Dir: t.TempDir()}, d.audit)
-	g.clientFor = func(string) gatewayAPI { return api }
-	g.logf = func(string, ...any) {}
+	g.ClientFor = func(string) mcpgateway.GatewayAPI { return api }
+	g.Logf = func(string, ...any) {}
 	d.reviewGW = g
 
 	m := d.reviewMCPClient()
