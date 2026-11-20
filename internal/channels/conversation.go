@@ -20,6 +20,11 @@ const ConversationKindWolf = "wolf"
 // sleepy-head agent session.
 const ConversationKindSleepyHead = "sleepy-head"
 
+// ConversationKindPostOffice marks a ConversationTarget that points at a
+// post-office message; SessionKey is the message id ("msg_…"), and a reply is
+// an answer to that request rather than a prompt for an agent.
+const ConversationKindPostOffice = "post-office"
+
 // ConversationTarget is what an outbound notification is a conversation
 // with: the agent session a reply to that notification should be routed to.
 type ConversationTarget struct {

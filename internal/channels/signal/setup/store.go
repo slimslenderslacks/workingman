@@ -164,7 +164,7 @@ func (s *Store) Save(u Update) (SaveResult, error) {
 		for _, n := range routes.Content {
 			var r channels.Route
 			if n.Decode(&r) == nil {
-				have[r] = true
+				have[r.Key()] = true
 			}
 		}
 		for _, topic := range u.RouteTopics {

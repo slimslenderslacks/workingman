@@ -241,7 +241,11 @@ func runDaemon(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ch, err := setupChannels(*channelsConfig, filepath.Dir(*auditPath), stateDir, a)
+	postOfficeDir, err := postOfficeDirFor(*sessionsRoot)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ch, err := setupChannels(*channelsConfig, filepath.Dir(*auditPath), stateDir, postOfficeDir, a)
 	if err != nil {
 		log.Fatalf("channels: %v", err)
 	}

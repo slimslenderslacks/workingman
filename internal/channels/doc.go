@@ -9,7 +9,7 @@
 // channel type. The package provides:
 //
 //   - the [Channel] interface and its message types, plus the optional
-//     [Chunker] and [Typer] capabilities;
+//     [Chunker], [Typer] and [Resolver] capabilities;
 //   - a YAML config loader for ~/.workingman/channels.yaml (or
 //     $WORKINGMAN_CHANNELS_CONFIG): channel instances, topic [Route]s, notify
 //     and router settings. Credentials are never inlined; they are references
@@ -41,7 +41,10 @@
 //     the point of use.
 //   - [Notifier] — notify.Sender and notify.TopicSender over a Registry.
 //   - [ConversationIndex] / [FileConversationIndex] / [ConversationTarget] —
-//     maps a channel message ID to the wolf session it came from.
+//     maps a channel message ID to the wolf session it came from, or (kind
+//     [ConversationKindPostOffice]) to the post-office request it carried.
+//   - [Resolver] / [Resolution] — optional: mark a sent post-office request
+//     closed in a channel-specific way instead of a plain reply.
 //
 // # Collaborators
 //

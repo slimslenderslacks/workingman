@@ -270,6 +270,9 @@ type Responder struct {
 	Kind string `json:"kind"`           // operator | agent
 	Via  string `json:"via"`            // tui | slack | signal | whatsapp | step-up
 	Name string `json:"name,omitempty"` // display name, when the channel knows it
+	// Chat is the channel chat the answer came from, so the Dispatcher can
+	// skip that delivery when it sends closing notes (§5.2).
+	Chat string `json:"chat,omitempty"`
 }
 
 // Resolution is the terminal claim, outbox/<id>.json (§2.7), and the

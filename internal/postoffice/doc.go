@@ -13,8 +13,8 @@
 //	                       message first (TUI, Dispatcher, post-office)
 //	done/<day>/<id>.json   the inbox record plus its resolution; written only
 //	                       by post-office; <day> is the UTC date in the id
-//	deliveries/<id>.json   the Dispatcher's per-channel send records (the
-//	                       Dispatcher owns the format; the Store only names it)
+//	deliveries/<id>.json   the Dispatcher's per-channel send records
+//	                       ([DeliveryRecord]); written only by the Dispatcher
 //	post-office.lock       flock held by the running post-office
 //
 // Every terminal transition (answered, cancelled, expired, dismissed) goes
@@ -51,10 +51,25 @@
 //     Claim, Finalize, Recover, Expire, Prune, TryLock, and [Store.Watch], a
 //     coalescing change notifier (fsnotify plus a poll fallback).
 //   - [Waiters] — wakes in-process goroutines blocked on one message id.
+//   - [Dispatcher] — runs in the orch daemon (§5.2): sends each operator
+//     message to every channel route for [Topic] ("post-office", else the
+//     wildcard routes), registers sent requests in the channels conversation
+//     index, retries failed sends with backoff, and, once a request is in
+//     done/, sends a [ClosingNote] to every delivery except the one that
+//     answered (through channels.Resolver when the channel has it).
+//     [RenderMessage] is the outbound text.
+//   - [DeliveryRecord] / [Delivery] — deliveries/<id>.json; [Store.Deliveries]
+//     reads it.
 //
 // # Collaborators
 //
-// No internal imports. cmd/post-office writes the inbox, finalises, expires
-// and prunes; the daemon's Dispatcher and the TUI read the inbox and call
-// Claim. Who may call what is in each method's comment.
+// The store and model have no internal imports. The Dispatcher uses
+// [github.com/slimslenderslacks/work/internal/channels] (the Registry, as
+// [Outbound], and the ConversationIndex) and
+// [github.com/slimslenderslacks/work/internal/audit] for redaction.
+// cmd/post-office writes the inbox, finalises, expires and prunes; the
+// daemon's Dispatcher and the TUI read the inbox and call Claim; the router
+// (internal/router) calls Claim for answers from a channel. cmd/orch starts
+// the Dispatcher with the channels. Who may call what is in each method's
+// comment.
 package postoffice

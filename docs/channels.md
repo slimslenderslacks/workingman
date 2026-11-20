@@ -6,10 +6,15 @@ directions:
 - **Outbound** — a `🐺 wolf is running for <project>` message the moment a wolf
   agent has actually started, and a `🐺 wolf finished` message when it ends
   (see [wolf-notify.md](wolf-notify.md)).
+- **Post-office** — questions and notifications that agents send the operator
+  through the post-office MCP (`❓ [req r1t8w] …`, `📣 [note …] …`), fanned out
+  to every channel by the daemon's **Dispatcher**; see
+  [Post-office messages](#post-office-messages).
 - **Inbound** — everything the owner sends back is handed to the **router**
-  (`internal/router`): a *reply* to a wolf message goes to that wolf, anything
-  else goes to the always-on **workingman agent**, which answers questions about
-  the orch state ([agents.md §8](../agents.md#8-workingman-agent)).
+  (`internal/router`): a *reply* to a wolf message goes to that wolf, a reply
+  to a post-office request answers it, anything else goes to the always-on
+  **workingman agent**, which answers questions about the orch state
+  ([agents.md §8](../agents.md#8-workingman-agent)).
 
 This mirrors hermes-agent's WhatsApp gateway (`gateway/platforms/whatsapp_cloud.py`,
 `whatsapp_common.py`, `scripts/whatsapp-bridge/`) and Signal adapter
@@ -20,7 +25,8 @@ This mirrors hermes-agent's WhatsApp gateway (`gateway/platforms/whatsapp_cloud.
 Contents: [Architecture](#architecture) · [Quick start](#quick-start) ·
 [Configuration reference](#configuration-reference) · [Signal](#signal) ·
 [Routes and topics](#routes-and-topics) ·
-[Routing rules](#routing-rules) · [Security model](#security-model) ·
+[Routing rules](#routing-rules) ·
+[Post-office messages](#post-office-messages) · [Security model](#security-model) ·
 [Tunnel setup](#exposing-the-webhook-tunnel-setup) · [Troubleshooting](#troubleshooting) ·
 [Manual smoke test](#manual-smoke-test-real-meta-test-number) ·
 [Signal smoke test](signal.md#manual-smoke-test)
@@ -195,7 +201,7 @@ whatsapp_verify_token: a-long-random-string
 | `…options.access.self_ids`, `reply_prefix`, `forward_owner_messages` | self-chat / owner-message handling (bridge) |
 | `…options.bridge.*` | Baileys bridge supervision: see [whatsapp-bridge.md](whatsapp-bridge.md) |
 | Signal: `…options.http_url`, `account`, `plain_text`, `access.allow_from` / `note_to_self` / `groups` / `group_allow_from` / `allow_all`; `credentials.account` | see [signal.md](signal.md#configuration) |
-| `routes[]` | `{topic, channel, chat}`; see below |
+| `routes[]` | `{topic, channel, chat}`, plus `notify: false` on a `post-office` route to keep notifications off it; see below |
 | `notify.wolf_start_interval` | rate limit for wolf-start messages |
 | `router.*` | inbound router timeouts and queue |
 
@@ -283,6 +289,11 @@ this topic go to this chat on this channel":
   answer (shown as `[wolf <work-stream>]`).
 - `workingman` — reserved for the workingman agent's own messages. Replies to a
   question go back to the chat that asked it, so a route is optional.
+- `post-office` — operator requests and notifications from agents
+  ([Post-office messages](#post-office-messages)). With no `post-office`
+  route they go to the `*` routes, which is what "send to every channel"
+  means in practice. A `post-office` route may set `notify: false` to receive
+  requests but not notifications.
 - `*` — wildcard: receives a message only when its topic has **no** exact route.
   Plain notifications (e.g. "Project blocked", sent alongside the macOS pop-up)
   have no topic and so reach only wildcard routes.
@@ -308,13 +319,20 @@ A message is handled by the first rule that applies.
    | `/sleepy` | bind this chat to the sleepy-head agent while it is catching up missed schedules (ACP only) |
    | `/agent` | bind the chat back to the workingman agent |
    | `/who` | show what the chat is bound to |
+   | `/inbox` | list the open operator requests from agents, oldest first, with their short ids |
 
    Paths such as `/etc/hosts` are not commands; they are ordinary text.
 
-2. **A pending permission request.** If an agent asked this chat for
-   permission (rule 5), the message is the answer.
+2. **An answer to a post-office request.** A reply-to of a request's message
+   (`❓ [req r1t8w] …`, found in the conversation index), or a top-level
+   message starting with `#<short id>` (`#r1t8w staging`), answers that
+   request; see [Post-office messages](#post-office-messages). A `#word` that
+   is not an open request's id is ordinary text.
 
-3. **A reply to a wolf notification.** When the message is a reply-to
+3. **A pending permission request.** If an agent asked this chat for
+   permission ([observe mode](#observe-mode-and-permissions-chat-bound-to-a-wolf)), the message is the answer.
+
+4. **A reply to a wolf notification.** When the message is a reply-to
    (`InboundMessage.ReplyToID`) of a message in the conversation index — the
    "🐺 wolf is running for …" start message, or an answer the router relayed
    from a wolf — the text goes to **that wolf session** as a prompt and the
@@ -325,13 +343,68 @@ A message is handled by the first rule that applies.
    answer relayed from it) goes to the sleepy-head session the same way,
    labelled `[sleepy-head]`.
 
-4. **The chat's binding.** By default the chat is bound to the **workingman
+5. **The chat's binding.** By default the chat is bound to the **workingman
    agent**: the text is sent to it with `Ask` and its reply is sent back. After
    `/wolf` the chat is bound to a wolf and its messages go there (replies are
    labelled `[wolf <work-stream>]`) until `/agent` — or until the wolf session
    ends, at which point the chat falls back to the workingman agent and is told
    so. The message that discovered the ended wolf is *not* forwarded to a
    different agent; resend it.
+
+## Post-office messages
+
+Agents with the `post-office` MCP send the operator **requests** (which
+expect an answer) and **notifications** (which do not). They are files under
+`~/.workingman/post-office/` (design: [messaging-design.md](messaging-design.md)
+§2–§5). The orch TUI inbox reads them directly; when channels are configured,
+the daemon's **Dispatcher** (`internal/postoffice/dispatch.go`, started by
+`daemonChannels.start`) also sends them to the phone.
+
+**Outbound.** Every operator message in `inbox/` without a
+`deliveries/<id>.json` is rendered and sent on topic `post-office`:
+
+```
+❓ [req r1t8w] task fix-ci (workingman-messaging)
+Which bucket for the export?
+
+…body…
+
+Options: 1) staging  2) prod
+Reply to this message, or send #r1t8w <answer>. Expires in 24h.
+```
+
+Notifications start with `📣 [note …]` and have no last two lines. Messages
+to agents (Step-Up) are never sent to channels. Each route's outcome is
+recorded in `deliveries/<id>.json` (which the TUI shows as "sent to signal,
+whatsapp"), and each sent request's message ids are registered in the
+conversation index as kind `post-office`. A failed send is retried after 30 s,
+2 m and 10 m, then recorded as failed; the other routes are not held up. A
+daemon restart mid-send can cause at most one duplicate post per channel. The
+Dispatcher passes over the whole store on startup, and on every change (with
+a 5 s poll as fallback), so nothing sent or closed while it was down is
+missed.
+
+**Answering.** Reply to the request's message, or send `#<short id> <answer>`
+from anywhere in the chat. The router claims the request (`Store.Claim`,
+first answer wins) and replies `✅ Sent to <sender>`. If the request had
+options, `1`, `2` … or the option's text select it; any other text is still a
+valid answer. If someone answered first (in the TUI, or another channel), or
+the request was cancelled or has expired, the reply says so (`Already
+answered via tui.`) and nothing is sent to the agent. `/inbox` lists what is
+still open.
+
+**Closing notes.** When post-office finalises a request (it appears in
+`done/`), every *other* delivery gets a reply to its original message:
+
+- `✅ [req r1t8w] Answered via <tui|signal|…>: <first 200 characters>`
+- `⌛ [req r1t8w] No longer needed — <the sender's reason>`
+- `⌛ [req r1t8w] Expired — the agent stopped waiting`
+
+The chat that answered gets no note. A channel that implements the optional
+`channels.Resolver` interface (Slack: a thread reply plus a reaction) is
+resolved through it instead of a plain reply. Notifications get no closing
+note. Once every note is sent, the record is marked `closed_notified`, and it
+is removed 30 days later.
 
 ## Observe mode and permissions (chat bound to a wolf)
 
@@ -402,7 +475,15 @@ sessions through `acpchat.Attach`.
 `router_permission_answered`, `router_permission_timeout`,
 `router_permission_rejected`, `router_reply_unroutable`, `router_send_error`,
 `router_index_error`, `router_attach_error`, `router_primed`,
-`router_prime_error`.
+`router_prime_error`, `router_postoffice_answered`,
+`router_postoffice_already_closed`, `router_postoffice_not_found`,
+`router_postoffice_ambiguous`, `router_postoffice_unavailable`,
+`router_postoffice_error`.
+
+The Dispatcher logs `postoffice_dispatcher_start`, `postoffice_delivered`,
+`postoffice_delivery_error`, `postoffice_closed_notified`,
+`postoffice_close_error`, `postoffice_index_error` and
+`postoffice_dispatch_error` (ids and channel names only, never text).
 
 Each line identifies the chat as `<channel>:<first 8 hex digits of the SHA-256
 of the chat id>` and carries message *lengths*, never the message text or the

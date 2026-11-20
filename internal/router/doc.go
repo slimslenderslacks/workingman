@@ -13,7 +13,10 @@
 //  1. A reply-to a known notification goes to THAT wolf session as a prompt;
 //     the wolf's answer comes back labelled "[wolf <work-stream>]".
 //  2. Slash commands are answered by the router itself, with no LLM:
-//     /help, /status, /wolf [work-stream], /sleepy, /agent, /who.
+//     /help, /status, /wolf [work-stream], /sleepy, /agent, /who, /inbox.
+//     A reply-to of a post-office request, or a "#<short id> answer"
+//     message, claims that request in the post-office store ("✅ Sent to …",
+//     or "Already answered via …" when another answer won).
 //  3. Otherwise the chat is bound to the workingman agent (the default), to
 //     the wolf chosen with /wolf, or to sleepy-head (/sleepy), until /agent or
 //     that session ends. A reply to sleepy-head's announcement reaches it as
@@ -49,12 +52,16 @@
 //     [AttachACP] (*acpchat.Conversation) is the production attacher, tests
 //     substitute fakes.
 //   - [Auditor] — audit-event sink; *audit.Logger implements it.
+//   - [PostOffice] — the agent-messaging store, for answers and /inbox;
+//     *postoffice.Store implements it.
 //
 // # Collaborators
 //
 // Uses [github.com/slimslenderslacks/work/internal/channels] for the message
 // types, the ConversationIndex and the Chunker / Typer capabilities, and
-// [github.com/slimslenderslacks/work/internal/acpchat] to join agent sessions.
+// [github.com/slimslenderslacks/work/internal/acpchat] to join agent sessions,
+// and [github.com/slimslenderslacks/work/internal/postoffice] for the message
+// model and claims.
 // [github.com/slimslenderslacks/work/internal/audit] is imported only for
 // redaction helpers; the Auditor interface stands in for its Logger. Used by
 // cmd/orch, which builds the Router when channels are configured. See
