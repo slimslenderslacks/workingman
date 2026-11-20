@@ -14,7 +14,7 @@ Contents: [TL;DR](#tldr) ·
 [The gateway in the middle](#4-the-gateway-in-the-middle) ·
 [Recommended tool surface](#5-recommended-tool-surface) ·
 [Hosting and caller identity](#6-hosting-and-caller-identity) ·
-[Open questions](#7-open-questions--things-to-verify-before-implementing) ·
+[Verified behaviour](#7-verified-behaviour-gateway-and-harness) ·
 [Sources](#sources)
 
 Research date: 2026-11-20. Spec pages were read from the spec's GitHub source
@@ -39,8 +39,10 @@ URLs below are the rendered versions of the same pages.
   task support at all. `mark3labs/mcp-go` has only the legacy 2025-11-25
   model, which Claude Code does not use.
 - **Every call goes through the standalone-codemode gateway**
-  (`/gateways/<id>`, built on `codemode/mcpruntime`). We have not verified
-  whether it forwards progress, cancellation, elicitation or task results.
+  (`/gateways/<id>`, built on `codemode/mcpruntime`). Measured since (§7):
+  it drops `_meta.progressToken`, so no progress reaches the agent; it
+  imposes no per-call timeout; and through it a call may block up to
+  Claude Code's 300 s tool idle timeout. Recommended `max_wait`: 240 s.
 - **So build the practical fallback now: a pending handle plus a bounded-wait
   tool.**
   - `send_request` waits a short, bounded time and returns either the answer
@@ -217,8 +219,8 @@ Claude Code v2.1.329 (2026-11-19). Sources:
 | Mechanism | Behaviour | Effect on post-office |
 |---|---|---|
 | `MCP_TOOL_TIMEOUT` / per-server `timeout` | Hard wall-clock cap per tool call. The default is 100,000,000 ms (about 28 h). Progress does **not** extend it. | The default is generous. A per-server `timeout` would override it. |
-| HTTP first-byte timer | **60 s** per request until the server's first response byte. Raised only if `MCP_TOOL_TIMEOUT` or the per-server `timeout` is above 60000. | **This is the binding constraint for an HTTP server.** Keep each blocking call under about 55 s unless we know the timer has been raised, or unless an early progress event counts as the first byte (not verified through the gateway). |
-| `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` | Aborts the call if there is no response *and no progress* within 5 min (network) or 30 min (stdio). `0` disables it. | Progress heartbeats every 30–60 s keep a long call alive past this. |
+| HTTP first-byte timer | **60 s** per request until the server's first response byte. Raised only if `MCP_TOOL_TIMEOUT` or the per-server `timeout` is above 60000. | **Binding for a go-sdk HTTP server reached directly.** Through the gateway it is not: the gateway's SSE `prime` event is the first byte, so the 5 min idle timeout below binds instead (§7). |
+| `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` | Aborts the call if there is no response *and no progress* within 5 min (network) or 30 min (stdio). `0` disables it. | Progress heartbeats every 30–60 s would keep a long call alive past this, but the gateway drops the progress token, so through it this is the binding limit (§7). |
 | Auto-backgrounding | A main-conversation MCP call still running after 2 min moves to `/tasks`, and the model gets the result later (`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`). | A long `wait_for_response` may be backgrounded. This is harmless, but the agent may move on in the meantime. |
 | Progress notifications | Rendered in the tool view and in background tasks. | Useful for heartbeats. |
 | **MCP Tasks** | Public beta, v2.1.304+. Supports **only the 2026-07-28 extension**, for HTTP, stdio or connector servers on that revision, in terminal, Agent SDK or GitHub Actions runs, for main-conversation calls. `pollIntervalMs` is clamped to 250 ms–30 s. Supports `input_required`. In headless mode a task that asks for input is cancelled. Disabled by `CLAUDE_CODE_DISABLE_MCP_TASKS`. | This is the eventual "right" answer, but every link in the chain (go-sdk, gateway, harness version) has to support it first. |
@@ -237,9 +239,9 @@ build of `agentclientprotocol/claude-agent-acp`, which was formerly
 - In our setup, acp-kit registers a single server, `okta-gateway`, so any
   timeout tuning applies to **every** tool behind the gateway.
 
-**Which Claude Code version runs in the harness:** not checked. If it is older
-than 2.1.304 there are no Tasks at all, and some of the timeout variables
-above may be named differently.
+**Which Claude Code version runs in the harness:** 2.1.293 (measured, §7),
+older than 2.1.304, so there are no Tasks. The timeout variables above
+behave as described there.
 
 ## 3. Go SDKs
 
@@ -282,22 +284,17 @@ claude (sandbox) ──HTTP──▶ standalone-codemode /gateways/<id>  ──H
 - **The client is the gateway, not Claude.** Claude Code never talks to
   post-office directly. It sees `okta-gateway`, and the gateway re-exposes
   post-office's tools. Every async feature has to survive this proxy.
-- **Not verified:**
-  - whether `mcpruntime` forwards `_meta.progressToken` and relays
-    `notifications/progress` back to the client;
-  - whether a client cancel propagates to the backend call;
-  - what per-call timeout it applies itself;
-  - whether it passes `CreateTaskResult` and `tasks/*` through. It almost
-    certainly does not today.
-
-  The code is in `github.com/slimslenderslacks/codemode`, which could not be
-  fetched during this research.
+- **Measured in §7:** `mcpruntime` drops `_meta.progressToken` (so no
+  `notifications/progress` reaches the client), propagates a client cancel
+  to a stateful backend but not to a stateless one, and applies no per-call
+  timeout of its own. Whether it passes `CreateTaskResult` and `tasks/*`
+  through was not tested; it rebuilds `CallToolParams` from name and
+  arguments only, so it almost certainly does not.
 - **Gateway-side timeouts we found:**
   - backend attach, 60 s (`aggregategw.DefaultAttachTimeout`);
   - catalog resolve, 30 s.
-- **Code mode:** if the sub-gateway exposes servers through code mode (agents
-  write a script that calls tools) rather than as plain tools, then progress
-  and Tasks are even less likely to reach Claude.
+- **Code mode:** not in play on sub-gateways (§7). Backend tools are listed
+  as plain tools with their own names, schemas and content.
 
 **This is why the design must be correct with no protocol support at all:**
 short bounded calls, plain-text results, and state held server-side behind a
@@ -316,9 +313,9 @@ handle. Everything else is an optimisation.
      call never loses or withdraws it.
 2. **Every blocking call is bounded below about 55 s by default**, to stay
    under the 60 s HTTP first-byte timer and the gateway's own limits. A
-   server flag `--max-wait` lets us raise it once we have verified that the
-   first-byte timer is raised (`MCP_TOOL_TIMEOUT>60000`) and that progress
-   passes through the gateway.
+   server flag `--max-wait` raises it. §7 measured that, through the
+   gateway, calls survive up to Claude Code's 300 s idle timeout, and
+   recommends `--max-wait 240s`.
 3. **Send heartbeats while blocked.** When a call blocks and the request
    carried a `progressToken`, send `notifications/progress` every 15 s with a
    human-readable message. If the gateway drops them, nothing breaks.
@@ -557,30 +554,115 @@ Every stored request records `from: {sandbox, project, task, agent}`, so a
 reply can be routed back. Notifications to the operator render that
 attribution in the TUI and channels.
 
-## 7. Open questions / things to verify before implementing
+## 7. Verified behaviour: gateway and harness
 
-1. **Gateway pass-through.**
-   - Does `codemode/mcpruntime` forward `progressToken` and relay
-     `notifications/progress`?
-   - Does a client cancel propagate to the backend?
-   - What is its per-call timeout?
+Measured 2026-11-20 by task `verify-gateway-async-passthrough`
+(messaging-design §9 step 1). This section replaces the earlier list of open
+questions; each answer below is a measurement, not an inference.
 
-   This decides whether `max_wait` can be raised above 50 s.
-2. **Code mode.** Is post-office exposed as a plain tool or through code mode
-   on sub-gateways? This affects the text-first result format and whether
-   progress is visible at all.
-3. **Harness Claude Code version** in `slimslenderslacks/claude-code-acp:0.90.0`.
-   - Is it 2.1.304 or later (Tasks)?
-   - What are its effective `MCP_TOOL_TIMEOUT` and first-byte timer behind
-     ACP?
-   - Should acp-kit set `MCP_TOOL_TIMEOUT` and
-     `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` in the sandbox's `settings.json`?
-4. **Headless backgrounding.** When a `wait_for_response` call is
-   auto-backgrounded after 2 min in an ACP session, does the result get
-   delivered to the model before the turn ends? If not, cap waits below
-   `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`, which the 50 s cap already does.
-5. **go-sdk SEP-2663 timing** (go-sdk issue #942/#626). Track it for the
-   Tasks upgrade.
+### Setup
+
+- **Backend:** a throwaway go-sdk server (same pinned go-sdk as
+  standalone-codemode) with one tool, `block(seconds, progress_every)`. It
+  blocks for `seconds`, optionally sends `notifications/progress` every
+  `progress_every` seconds when the call carries a `progressToken`, and logs
+  the token it received, the `X-Codemode-Gateway-Id` header, progress sends
+  and context cancellation. Run both stateful (the go-sdk default) and
+  stateless (`Stateless: true`, as post-office runs).
+- **Gateway:** standalone-codemode at `c18d384b` (`gatewayapp.Build`, the
+  real `/gateways` handler, in-memory secrets), with the test server as its
+  only catalog entry, and one static and one dynamic sub-gateway minted
+  through `POST /gateways`.
+- **Clients:** a go-sdk probe client (sends a progress token, can cancel);
+  `curl` for the raw SSE stream; the harness's own Claude Code binary in
+  `-p` mode with `--mcp-config` pointing at the sub-gateway; and
+  `claude-agent-acp` driven over stdio by a minimal ACP client, which is the
+  path orch uses.
+- **Sandbox proxy:** a raw socket held open and silent through the sbx HTTP
+  proxy (`gateway.docker.internal:3128`) to the real host gateway on `:3333`.
+
+The spike code is not committed (no production code in this step).
+
+### Results
+
+| Question | Answer |
+|---|---|
+| Harness Claude Code version | **2.1.293** (`claude-agent-sdk` 0.3.293, `@agentclientprotocol/claude-agent-acp` 0.88.0 inside image `slimslenderslacks/claude-code-acp:0.90.0`). Older than 2.1.304, so **no MCP Tasks**. |
+| Protocol negotiated | Claude Code → gateway: `2025-11-25`. Gateway → backend: `2025-11-25` (pinned, `backendProtocolVersion` in `codemode`). |
+| `_meta.progressToken` forwarding | **Dropped.** Claude Code sends a token (a direct call arrives with `progressToken=2`), the go-sdk probe sends `probe-tok-1`, but through the gateway the backend always sees no token. `codemode` builds a fresh `CallToolParams{Name, Arguments}` for the backend (`gateway.go` per-tool handler, `mcp_exec.go`), so `_meta` is lost. |
+| `notifications/progress` relay | **None.** With no token the backend cannot send progress. Direct to the backend, progress reaches both the probe and Claude Code. post-office's 15 s heartbeats are therefore never sent in production; this is harmless (§4.6 already treats them as best effort). |
+| Client cancel propagation | **Reaches a stateful backend, not a stateless one.** A go-sdk client cancel, a Claude Code `MCP_TOOL_TIMEOUT`, and an ACP `session/cancel` all cancel the backend handler's context within milliseconds when the backend is stateful. With a **stateless** backend (post-office), the handler runs to completion: go-sdk's stateless handler only ties the handler to the HTTP request on protocol ≥ 2026-07-28 (`PropagateRequestCancellation` docs), and the gateway speaks 2025-11-25. So a cancelled `wait_for_response` keeps blocking in post-office until `max_wait` and its result is discarded. The request itself is unaffected (it is durable and only `cancel_request` cancels it). |
+| Gateway per-call timeout | **None found, none observed.** Calls of 300 s and 420 s pass through unchanged. The only gateway timeouts are backend attach (60 s) and catalog resolve (30 s); the backend HTTP transport has dial and keep-alive timeouts but no response timeout. |
+| First-byte limit (60 s) | **Not binding through the gateway.** On a 2025-11-25 session the gateway's go-sdk handler (which has an `EventStore`) writes an SSE `event: prime` frame the moment the POST arrives, before the backend answers, and that frame counts as Claude Code's first byte. go-sdk writes it only when the handler has an event store and the session's protocol is ≥ 2025-11-25 and < 2026-07-28 (`mcp/streamable.go`, SEP-1699). Direct to a go-sdk backend with no event store, a silent 92 s call fails at 60 s (`The operation timed out`), and the same call with progress every 15 s succeeds. |
+| Code mode on sub-gateways | **Not in play.** A static sub-gateway lists the backend's tool under its own name (`block`) with its schema unchanged, and returns its content unchanged. A dynamic sub-gateway adds `mcp-find` and `mcp-add`; there is no `mcp-exec` or code-mode tool. Text-first results reach the model verbatim. |
+| `X-Codemode-Gateway-Id` | Arrives on every backend call through a sub-gateway; absent on direct calls. |
+| Auto-backgrounding (ACP) | **Not triggered.** 150 s and 240 s calls through `claude-agent-acp` returned inline in the same turn (`stopReason: end_turn`). While a call runs, the adapter emits a `tool_call_update` with `elapsedTimeSeconds` every 30 s, which counts as ACP activity for orch's 20 min stream-idle reaper (`internal/daemon/reaper.go`). |
+| sbx proxy idle | A request held silent for 130 s and 330 s through the sbx proxy to the host gateway was not dropped; the response arrived as soon as the request completed. |
+
+**Blocking calls through the gateway, by duration** (`p` = backend asked to
+send progress every 15 s, which the gateway drops anyway):
+
+| Call | Path | Result |
+|---|---|---|
+| 50 s | gateway, Claude Code `-p` | ok (54 s wall) |
+| 90 s, 91 s p, 120 s | gateway, Claude Code `-p` | ok |
+| 150 s, 240 s | gateway, `claude-agent-acp` | ok, inline |
+| 300 s p | gateway, Claude Code `-p` | ok, at the limit (result at 300.0 s) |
+| 330 s, 330 s p | gateway, Claude Code `-p` | **fail at 300 s**: `sent no response or progress for 300s; aborting` |
+| 330 s, 420 s | gateway, `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` | ok |
+| 90 s | gateway, `MCP_TOOL_TIMEOUT=20000` | fail at 20 s; backend cancelled (stateful) |
+| 92 s | direct, no progress | **fail at 60 s** (first-byte timer) |
+| 93 s p, 301 s p | direct, progress | ok |
+
+**The binding limit is Claude Code's 300 s tool idle timeout**
+(`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`). Progress would reset it, but the
+gateway drops the progress token, so nothing post-office can do extends it.
+The 60 s first-byte timer is satisfied by the gateway's `prime` event, and
+neither the gateway nor the sbx proxy imposes a shorter limit.
+
+### Recommendation: `max_wait` = 240 s
+
+Run post-office with **`--max-wait 240s`**, leaving 60 s of margin under the
+300 s idle timeout for gateway and scheduling latency. Compared with 50 s it
+cuts an agent's `wait_for_response` loop, and the model turns it costs, by
+about 5×, and nothing in the measured chain breaks.
+
+Follow-ups for whoever changes the default (this step changes no code):
+
+1. `DefaultMaxWait` and the `defaultWait` schema default (45 s) in
+   `internal/postoffice/mcpserver/server.go`; the tool descriptions take the
+   value from `Config.MaxWait` already. The defaults should be close to
+   `max_wait` (for example `max_wait − 10 s`), or agents will keep looping
+   at 45 s.
+2. Shutdown: `post-office serve` gives in-flight calls `max_wait + 5 s`, but
+   the launchd plist's `ExitTimeOut` is 60 s, so launchd kills it first.
+   That is safe (the requests are durable and the agent's next call picks
+   up) but `ExitTimeOut` should be raised, or the grace capped, so the log
+   is not misleading.
+3. Do **not** set `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` in the sandbox to go
+   higher. acp-kit registers one server for the whole gateway, so it would
+   remove the hang guard from every tool.
+
+**What would invalidate this**, so re-measure when any of these change:
+
+- The gateway stops sending the `prime` event (moves agents to protocol
+  2026-07-28, or drops its `EventStore`). The 60 s first-byte timer then
+  applies again, and `max_wait` must go back to 50 s unless progress is
+  forwarded.
+- The gateway starts forwarding `_meta.progressToken`. post-office's
+  heartbeats would then reset the idle timer, and `max_wait` could go well
+  past 300 s.
+- The harness moves to Claude Code 2.1.304 or later. Tasks become possible
+  (once go-sdk and the gateway support them), and auto-backgrounding may
+  apply to long calls.
+
+### Still open
+
+- **go-sdk SEP-2663 timing** (go-sdk issue #942/#626), for the Tasks upgrade.
+- **Gateway fixes worth asking for:** forward `_meta` (at least
+  `progressToken`) and relay `notifications/progress` to the calling agent
+  session; forward cancellation to stateless backends, or have post-office
+  run stateful.
 
 ## Sources
 

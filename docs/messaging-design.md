@@ -683,6 +683,14 @@ The 50 s cap keeps each call under Claude Code's 60 s HTTP first-byte timer
 and the gateway's own timeouts. `--max-wait` raises it once task
 `verify-gateway-async-passthrough` (§9) shows that larger values survive.
 
+**As measured** (mcp-async-requests.md §7): through the sub-gateway the
+first-byte timer does not bind, because the gateway sends an SSE `prime`
+event at once, and the gateway has no per-call timeout. The limit is Claude
+Code's 300 s tool idle timeout, which progress cannot reset because the
+gateway drops `_meta.progressToken`. The recommended `max_wait` is
+**240 s**. The harness runs Claude Code 2.1.293 (no Tasks), and code mode is
+not in play on sub-gateways.
+
 **Heartbeats.** When a call blocks and carries `_meta.progressToken`,
 post-office sends `notifications/progress` every 15 s with a message such as
 `waiting for operator (12m since request)`. If the gateway drops them,
