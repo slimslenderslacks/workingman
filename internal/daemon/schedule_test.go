@@ -497,32 +497,43 @@ func TestScheduleSimultaneousSessionEndsRespectLimit(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}()
-	for round := 0; round < 12; round++ {
-		names := e.running()
-		if len(names) == 0 {
-			break
-		}
-		for _, name := range names {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				e.setTask(name, func(t *task.Task) { t.Status = task.StatusSuccess })
-				e.lch.close("task-" + name)
-			}()
-		}
-		wg.Wait()
-		// Integrate whatever is queued, one at a time.
-		for {
-			time.Sleep(20 * time.Millisecond)
-			head := e.integrating()
-			if head == "" {
-				break
+	// Drive until the project is idle. Sessions start and end asynchronously
+	// after each close, so "nothing running" or "nothing integrating" at one
+	// instant is not "done": keep going until every task is committed, and
+	// wait for each closed session to leave before acting on the next state.
+	e.eventually("all committed", func() bool {
+		if names := e.running(); len(names) > 0 {
+			for _, name := range names {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					e.setTask(name, func(t *task.Task) { t.Status = task.StatusSuccess })
+					e.lch.close("task-" + name)
+				}()
 			}
-			e.finishCommit(head)
+			wg.Wait()
+			e.eventually("task sessions ended", func() bool {
+				left := e.running()
+				for _, name := range names {
+					for _, l := range left {
+						if l == name {
+							return false
+						}
+					}
+				}
+				return true
+			})
+			return false
 		}
-	}
+		// Integrate whatever is queued, one at a time.
+		if head := e.integrating(); head != "" {
+			e.finishCommit(head)
+			e.eventually("commit session ended", func() bool { return e.integrating() != head })
+			return false
+		}
+		return e.status() == project.StatusIdle
+	})
 	close(stop)
-	e.eventually("all committed", func() bool { return e.status() == project.StatusIdle })
 	if maxSeen > 2 {
 		t.Errorf("in-flight tasks peaked at %d, above the limit of 2", maxSeen)
 	}
