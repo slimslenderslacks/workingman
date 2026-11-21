@@ -36,14 +36,14 @@ no doc.go or no valid `Role:` line yet.
 | `internal/policy` | shared | Package policy defines the per-task sandbox policy rules (allow or deny one network or filesystem resource pattern) and turns them into `sbx policy` commands. | — | `Action`, `Kind`, `Rule` |
 | `internal/power` | daemon | Package power reports whether the host is running on AC power or battery, so the daemon can stand down while a laptop is unplugged. | `Source` | `ACSource`, `Pmset` |
 | `internal/project` | shared | Package project is the data model and on-disk format of a work stream's project.yaml, plus the two sidecar records the daemon and the wolf agent keep next to it. | — | `BlockedSession`, `CheckState`, `PRFingerprint`, `PlannedSnapshot`, `Project`, `PullRequest`, `Repo`, `Status`, `Writer` |
-| `internal/prompts` | daemon | Package prompts renders the per-kind instruction text that orch writes to .orch/instructions.md for a newly launched agent. | — | `BehindProject`, `Data`, `InFlightTask`, `IntegrationReport`, `Repo`, `RepoCommit` |
+| `internal/prompts` | daemon | Package prompts renders the per-kind instruction text that orch writes to .orch/instructions.md for a newly launched agent. | — | `BehindProject`, `Data`, `InFlightTask`, `IntegrationReport`, `Repo`, `RepoCommit`, `UnintegratedTask` |
 | `internal/router` | daemon | Package router connects inbound channel messages (WhatsApp, Signal) to agent conversations and sends the replies back. | `Agent`, `Auditor`, `Outbound`, `Source` | `Attacher`, `Config`, `Router`, `Session` |
 | `internal/runner` | daemon | Package runner turns the daemon's request to launch an agent (a Plan) into a running session: it prepares the workspace, writes the .orch handoff, and starts the agent over ACP or in a terminal tab. | — | `CommandBuilder`, `Harness`, `InteractiveSpec`, `Observe`, `Plan`, `Runner`, `SandboxCreator`, `SandboxSpec`, `SessionConfig` |
 | `internal/sbx` | shared | Package sbx holds the shared helpers for the sbx sandbox CLI: sandbox-name rules and the `sbx ls --json` existence check. | — | `RunFunc`, `Sandbox` |
 | `internal/scheduler` | daemon | Package scheduler runs the daemon's timed callbacks (project cron schedules and PR review polls) on robfig/cron, keyed by a caller-chosen string. | — | `Scheduler` |
 | `internal/service` | daemon | Package service builds the macOS launchd LaunchAgent that keeps the orch daemon running in the background. | — | `Config` |
 | `internal/session` | shared | Package session defines the on-disk record (session.json and agent.sock under ~/.workingman/sessions/<id>/) that lets ACP agent sessions outlive the TUI and the daemon that started them. | — | `Session`, `Status`, `Store` |
-| `internal/setup` | daemon | Package setup writes the .orch handoff files and installs skills in an agent's working directory before the agent is launched. | — | `Commit`, `Context`, `InFlightTask`, `Skill` |
+| `internal/setup` | daemon | Package setup writes the .orch handoff files and installs skills in an agent's working directory before the agent is launched. | — | `Commit`, `Context`, `InFlightTask`, `Skill`, `UnintegratedTask` |
 | `internal/task` | shared | Package task is the data model and on-disk format of one tasks/*.yaml file, including the task-name rules that keep a task's sandbox name legal. | — | `Commit`, `Integration`, `Source`, `Status`, `Task` |
 | `internal/taskgraph` | daemon | Package taskgraph loads a project's tasks/*.yaml files into an immutable, validated dependency graph that the daemon queries to decide what to dispatch next. | — | `Admission`, `Deferred`, `Graph` |
 | `internal/terminal` | shared | Package terminal opens sessions in new tabs of the user's terminal emulator (Ghostty, WezTerm or kitty) and tracks those tabs across orch restarts. | `Launcher` | `AlreadyOpenError`, `Ghostty`, `Kitty`, `Runner`, `Settings`, `Tab`, `TabLauncher`, `TabRef`, `TabSession`, `WezTerm` |
@@ -199,6 +199,7 @@ graph LR
   internal_tui --> internal_taskgraph
   internal_tui --> internal_terminal
   internal_tui --> internal_workspace
+  internal_tui --> internal_worktree
 
   classDef entry fill:#e8e8e8,stroke:#555,stroke-width:2px,color:#000
   class cmd_acp_wrapper,cmd_op_read,cmd_orch entry
@@ -252,6 +253,6 @@ The same graph as text: each package's internal imports and importers.
 | `internal/task` | `policy`, `sbx` | `acpwrapper`, `daemon`, `runner`, `taskgraph`, `tui` |
 | `internal/taskgraph` | `task` | `daemon`, `tui` |
 | `internal/terminal` | `agent` | `cmd/orch`, `daemon`, `runner`, `tui` |
-| `internal/tui` | `acpclient`, `policy`, `project`, `sbx`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |
+| `internal/tui` | `acpclient`, `policy`, `project`, `sbx`, `session`, `task`, `taskgraph`, `terminal`, `workspace`, `worktree` | `cmd/orch` |
 | `internal/workspace` | — | `cmd/orch`, `daemon`, `runner`, `tui` |
-| `internal/worktree` | — | `daemon` |
+| `internal/worktree` | — | `daemon`, `tui` |
