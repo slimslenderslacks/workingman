@@ -280,7 +280,63 @@ type Project struct {
 	// Written by requestStop, cleared by requestStart. `omitempty` keeps it out
 	// of files that have never been stopped.
 	StoppedFrom Status `yaml:"stopped_from,omitempty"`
-	UpdatedBy   Writer `yaml:"updated_by"`
+	// MaxParallelTasks is the per-project concurrency limit: how many tasks
+	// may be in flight (running, or at success waiting to integrate) at once
+	// (docs/parallel-task-worktrees.md S3). Absent, 0 or 1 all mean 1, which
+	// is today's one-at-a-time pipeline; read it through MaxParallel. Written
+	// by a human (or the TUI/workingman agent on request), never by the daemon
+	// or the planner.
+	MaxParallelTasks int `yaml:"max_parallel_tasks,omitempty"`
+	// Verify is an optional pre-integration build check command the commit
+	// agent runs in the task worktree after a rebase (I3, R1). Empty means no
+	// check.
+	Verify string `yaml:"verify,omitempty"`
+	// ConflictResolution selects how an integration conflict is handled (I4).
+	// Empty or "rerun" is the v1 behavior (re-run the task on the new tip);
+	// "agent" is reserved for a later opt-in mode. An unknown value falls back
+	// to rerun and is reported by Warnings. Read it through
+	// EffectiveConflictResolution.
+	ConflictResolution string `yaml:"conflict_resolution,omitempty"`
+	UpdatedBy          Writer `yaml:"updated_by"`
+}
+
+// Conflict resolution modes for Project.ConflictResolution.
+const (
+	ConflictResolutionRerun = "rerun"
+	ConflictResolutionAgent = "agent"
+)
+
+// MaxParallel returns the effective per-project task concurrency limit: the
+// configured MaxParallelTasks, with anything below 1 (absent, 0, negative)
+// clamped to 1. Every reader of the limit goes through here so the "0 means
+// 1" rule lives in one place.
+func (p *Project) MaxParallel() int {
+	if p.MaxParallelTasks < 1 {
+		return 1
+	}
+	return p.MaxParallelTasks
+}
+
+// EffectiveConflictResolution returns the conflict resolution mode to apply:
+// ConflictResolution when it names a known mode, otherwise
+// ConflictResolutionRerun.
+func (p *Project) EffectiveConflictResolution() string {
+	switch p.ConflictResolution {
+	case ConflictResolutionRerun, ConflictResolutionAgent:
+		return p.ConflictResolution
+	}
+	return ConflictResolutionRerun
+}
+
+// Warnings reports settings that loaded but were not understood and so fell
+// back to a default. A warning never fails the load: the daemon logs each one
+// (project_config_warning) and carries on with the fallback.
+func (p *Project) Warnings() []string {
+	var out []string
+	if c := p.ConflictResolution; c != "" && c != ConflictResolutionRerun && c != ConflictResolutionAgent {
+		out = append(out, fmt.Sprintf("unknown conflict_resolution %q, using %q", c, ConflictResolutionRerun))
+	}
+	return out
 }
 
 // PullRequest is the review agent's record of one GitHub pull request that backs

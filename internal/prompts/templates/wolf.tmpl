@@ -21,7 +21,18 @@ mirrored in `project.yaml`'s `blocked_reason` field):
 
 {{end}}{{if .FailedTasks}}The following tasks are failed or blocked:
 {{range .FailedTasks}}  - {{.}}
-{{end}}{{end}}{{if .BlockedSessionSummary}}
+{{end}}{{end}}{{if .InFlightTasks}}
+These tasks were still in flight when you were launched (the project's other
+tasks run in parallel, and a block does not stop them):
+{{range .InFlightTasks}}  - {{.Name}}: {{if .Integrating}}integrating now{{else if .QueuePosition}}queued for integration (#{{.QueuePosition}}){{else}}{{.Status}}{{end}}
+{{end}}
+Do not edit these tasks or their worktrees: they finish on their own, and
+their outcomes keep arriving while you work. The commit queue is frozen while
+the project is blocked, except for an integration that was already running,
+and unblocking resumes it from the same head. If another task fails or blocks
+meanwhile, its reason is appended to `blocked_reason`, so re-read
+`project.yaml` and `tasks/` before you hand back.
+{{end}}{{if .BlockedSessionSummary}}
 A previous wolf investigation of this project left this summary in
 `{{.BlockedSessionPath}}` (read it in full before you start — it may already
 have most of the diagnosis you'd otherwise redo from scratch):
@@ -154,7 +165,55 @@ and dispatch them now, and only clear `review` / leave every
 and no further watching is wanted (in which case `status: idle` alone settles
 it — there's nothing left for the data to say "keep watching" about).
 
-When you have a resolution, update the relevant task and/or project files to
+{{if .Branch}}Integration conflicts. Each task works in its own worktree on its own branch
+(`wm/{{.Branch}}/<task>`), under `<shared>/.worktrees/<task>/`, where `<shared>`
+is the project's shared workspace{{if .Worktree}} (`{{.Worktree}}`){{end}}, and a commit agent integrates it onto `{{.Branch}}` by rebasing the task branch
+onto the shared tip and fast-forwarding `{{.Branch}}`. When that keeps failing,
+the project blocks with a reason naming the task, the repo and files, and the
+tasks that landed in between. The task file has the details: `attempts`,
+`failure_reason`, the `integration:` block (`result`, `repo`, `files`, `onto`,
+`landed`, and `published` for a partial publish), `base:` and `worktree:`. The
+task's worktree is kept, holding its latest attempt: `git -C
+<shared>/.worktrees/<task>/<repo> log <base>..HEAD` and `git diff <base>` show what the
+task did, `git log <base>..{{.Branch}}` what landed since. Three ways out:
+
+  1. Re-run it: set the task to `ready` with `attempts: 0`. The next run reuses
+     the worktree exactly as it is, so either leave it for the agent to rebase,
+     or reset it first (`git -C <shared>/.worktrees/<task>/<repo> reset --hard
+     {{.Branch}}`) for a clean start. You may also edit the task's description,
+     or add a `depends_on` on the task it conflicted with. You may also
+     tighten its `touches:`/`areas:` hints, or add the conflicting files to
+     its `touches:`, so the two never run side by side again.
+  2. Resolve it by hand in the worktree (`git rebase {{.Branch}}`, resolve,
+     `git rebase --continue`), then set the task to `success`; the commit
+     agent integrates it, normally as a plain fast-forward.
+  3. For a partial publish (`integration.result: partial`), finish the repos
+     not yet published from the task's worktree, then set the task to
+     `committed` with the right `commits:` (each repo's tip of `{{.Branch}}`).
+     The daemon checks that every commit really is on `{{.Branch}}`.
+
+THE SHARED BRANCH — do not commit, rebase, reset or otherwise move
+`{{.Branch}}` in the shared workspace while an integration is in flight, and
+never leave uncommitted changes there: either makes the integration fail or
+block. A block does not stop a commit agent that was already running, so
+"the project is blocked" is not enough.{{range .InFlightTasks}}{{if .Integrating}} When
+you were launched the commit agent was integrating task `{{.Name}}`.{{end}}{{end}} {{if .SnapshotFile}}Check the daemon's live state snapshot,
+`{{.SnapshotFile}}` (read-only, rewritten every few seconds), right before
+any commit on `{{.Branch}}`: find this project in `projects[]` (`path` is
+{{.ProjectPath}}) and do not commit while its `live.integrating` names a
+task or `live.commit_reserved` is true. If `generated_at` is more than about a
+minute old the daemon is down and the snapshot cannot tell you; fall back to
+the task files. `commit_queue` lists the tasks waiting to integrate, head
+first, and a queued task's `integration` says why its last attempt failed.
+Tasks at `success` are queued and will integrate once the project is
+unblocked, so changes you commit on `{{.Branch}}` meanwhile become what they
+rebase onto.{{else}}An integration is in flight while any
+task is at `success` (it is queued for, or in, integration); re-read the task
+files right before any commit on `{{.Branch}}`, since that can change while
+you work.{{end}} Instead of committing on `{{.Branch}}`, make the change in a task's
+worktree and set that task to `success`, so it goes through the commit queue.
+
+{{end}}When you have a resolution, update the relevant task and/or project files to
 move them out of the blocked/failed state (e.g. reset a task to `ready`
 after fixing its precondition, return a review-loop project to `idle` with
 its watch data intact, or clear `review` if the work is no longer needed).

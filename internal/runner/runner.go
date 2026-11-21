@@ -42,15 +42,70 @@ type Plan struct {
 	Branch     string
 	Repos      []workspace.Repo
 
+	// TaskWorktree is the task's worktree root
+	// (<shared>/.worktrees/<task>, docs/parallel-task-worktrees.md W2), set by
+	// the daemon for a task that has one. For a TaskAgent it is the working
+	// directory: the shared workspace is still provisioned (the daemon cut the
+	// worktree from it), but the agent runs in, and mounts, only its own
+	// worktree. For a CommitAgent it selects the worktree branch of the commit
+	// prompt; the commit agent itself still runs in the shared workspace,
+	// where the shared branch is checked out. Empty means the legacy path:
+	// both agents work in the shared tree.
+	TaskWorktree string
+	// TaskBranch is the task's branch (wm/<project-branch>/<task>) when
+	// TaskWorktree is set. Only the prompts read it.
+	TaskBranch string
+	// TaskBase is the per-repo commit the task branch started from (the task
+	// file's base:). Only the prompts read it.
+	TaskBase []task.Commit
+	// Attempt is the task's attempts count: 0 on the first run, n on the nth
+	// automatic retry. Only the task prompt reads it.
+	Attempt int
+	// Resumed is true when the daemon reused an existing task worktree for
+	// this launch rather than cutting a new one, so it may hold an earlier
+	// run's changes. Only the task prompt reads it.
+	Resumed bool
+	// Integration is the task's latest integration report (the task file's
+	// integration:), set for a TaskAgent re-run after an integration conflict
+	// or a failed build check (docs/parallel-task-worktrees.md I4). Only the
+	// task prompt reads it.
+	Integration *task.Integration
+	// Verify is the project's pre-integration build check command (R1) and
+	// DocsOnly the daemon's verdict that the task changed documentation only,
+	// so the check is skipped. Only the commit prompt reads them.
+	Verify   string
+	DocsOnly bool
+	// WorktreeMounts are the extra host paths a TaskAgent with a TaskWorktree
+	// mounts read-write next to it (W5): each repo's git common dir — where
+	// the worktree's objects, refs and admin dir live — and the shared
+	// workspace's .gomodcache when one is staged. Computed by the daemon,
+	// which owns the git calls. Ignored for every other Kind.
+	WorktreeMounts []string
+	// Touches and Areas are the task's declared parallelism hints (the task
+	// file's touches:/areas:, docs/parallel-task-worktrees.md H1). Only the
+	// task prompt and its .orch/context.yaml read them.
+	Touches *[]string
+	Areas   []string
+	// MaxParallelTasks is the project's effective task concurrency limit.
+	// Only the planning prompt reads it: above 1 it asks for the hints (H4).
+	MaxParallelTasks int
+
 	ProjectPath string
 	TasksDir    string
 	TaskPath    string
 	TaskName    string
 	FailedTasks []string
+	// InFlightTasks is the wolf's list of tasks still in flight (X3); see
+	// prompts.Data.InFlightTasks.
+	InFlightTasks []prompts.InFlightTask
+	// UnintegratedTasks is the archive agent's list of task work not on the
+	// shared branch (X6); see prompts.Data.UnintegratedTasks.
+	UnintegratedTasks []prompts.UnintegratedTask
 
 	// StaticMCPs are the MCP server names this agent's sandbox should be able
 	// to reach. Forwarded by the daemon from the task's static_mcps field for
-	// task and commit agents (commit shares the task's per-task sandbox), and
+	// task and commit agents (commit copies the task's settings into its own
+	// sandbox), and
 	// set by the daemon for the review agent. They are no longer attached as
 	// sbx static MCPs (`--static-mcp`): when Runner.MCPGatewayURL is set they
 	// are the catalog server names requested for the sandbox's per-sandbox
@@ -60,8 +115,8 @@ type Plan struct {
 
 	// Policies are sbx policy rules applied to the sandbox right after
 	// `sbx create` and before any `sbx exec`. Forwarded by the daemon from
-	// the task's policies field for task and commit agents (commit shares
-	// the task's sandbox; the rules already on it remain in effect), and
+	// the task's policies field for task and commit agents (the commit
+	// agent's sandbox gets the task's rules too), and
 	// supplied by the daemon itself for the archive agent, which has no task
 	// to declare them but does have to reach the git host to push (see
 	// daemon.archivePolicies).
@@ -155,8 +210,11 @@ type Plan struct {
 
 	// ReadOnlyMounts, for the workingman agent, are host paths bind-mounted into
 	// its sandbox READ-ONLY (sbx's `<path>:ro`) next to its writable mounts: the
-	// snapshot dir, the audit-log dir and the ACP sessions root. Ignored for
-	// every other Kind. See workingmanWorkspaces.
+	// snapshot dir, the audit-log dir and the ACP sessions root. See
+	// workingmanWorkspaces. For the wolf, they follow its control dir and
+	// source worktree: the daemon's state dir, so it can read the live
+	// snapshot (docs/parallel-task-worktrees.md X3). Ignored for every other
+	// Kind.
 	ReadOnlyMounts []string
 
 	// Observe describes what the workingman agent observes, for its prompt and
@@ -663,6 +721,8 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		TaskName:                p.TaskName,
 		FailedTasks:             p.FailedTasks,
 		BlockedReason:           p.BlockedReason,
+		InFlightTasks:           p.InFlightTasks,
+		UnintegratedTasks:       p.UnintegratedTasks,
 		BlockedSessionPath:      p.BlockedSessionPath,
 		BlockedSessionSummary:   p.BlockedSessionSummary,
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
@@ -670,6 +730,19 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		IntakeFiles:             p.IntakeFiles,
 		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
+		MaxParallelTasks:        p.MaxParallelTasks,
+		Repos:                   promptRepos(p.Repos),
+		HasTouches:              p.Touches != nil,
+		Touches:                 derefTouches(p.Touches),
+		Areas:                   p.Areas,
+		TaskWorktree:            p.TaskWorktree,
+		TaskBranch:              p.TaskBranch,
+		TaskBase:                promptCommits(p.TaskBase),
+		Attempt:                 p.Attempt,
+		Resumed:                 p.Resumed,
+		Integration:             promptIntegration(p.Integration),
+		Verify:                  p.Verify,
+		DocsOnly:                p.DocsOnly,
 		PushBranch:              p.PushBranch,
 		Sandboxed:               useACP && (p.Kind == agent.WolfAgent || p.Kind == agent.SleepyHeadAgent),
 		Roots:                   p.Observe.Roots,
@@ -694,6 +767,8 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		TaskName:                p.TaskName,
 		FailedTasks:             p.FailedTasks,
 		BlockedReason:           p.BlockedReason,
+		InFlightTasks:           setupInFlight(p.InFlightTasks),
+		UnintegratedTasks:       setupUnintegrated(p.UnintegratedTasks),
 		BlockedSessionPath:      p.BlockedSessionPath,
 		BlockedSessionSummary:   p.BlockedSessionSummary,
 		BlockedSessionAttempted: p.BlockedSessionAttempted,
@@ -701,6 +776,17 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		IntakeFiles:             p.IntakeFiles,
 		ProjectChanges:          p.ProjectChanges,
 		Worktree:                planningWorktree,
+		MaxParallelTasks:        p.MaxParallelTasks,
+		Repos:                   setupRepos(p.Kind, p.Repos),
+		Touches:                 p.Touches,
+		Areas:                   p.Areas,
+		TaskWorktree:            p.TaskWorktree,
+		TaskBranch:              p.TaskBranch,
+		TaskBase:                setupCommits(p.TaskBase),
+		Attempt:                 p.Attempt,
+		Resumed:                 p.Resumed,
+		Verify:                  p.Verify,
+		DocsOnly:                p.DocsOnly,
 		PushBranch:              p.PushBranch,
 		Sandboxed:               useACP && (p.Kind == agent.WolfAgent || p.Kind == agent.SleepyHeadAgent),
 		Roots:                   p.Observe.Roots,
@@ -732,7 +818,7 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 
 	sandboxName := SandboxNameFor(p.Kind, p.ProjectPath, p.TaskName)
 	if r.Sandbox != nil && sandboxName != "" {
-		workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
+		workspaces := sandboxWorkspaces(p, workingDir, planningWorktree)
 		gw, err := r.mcpGateway(r.MCPServersFor(p), r.MCPGatewayDynamic(p.Kind))
 		if err != nil {
 			return nil, cfg, err
@@ -843,6 +929,10 @@ type InteractiveSpec struct {
 	// makes commits SSH-sign — mirroring the ACP commit agent so a `:session`
 	// user's commits are signed too. Ignored for a host command.
 	SigningKey string
+	// Banner, when set, is printed in the tab before the command starts:
+	// the warnings a human working in the session needs
+	// (docs/parallel-task-worktrees.md X3). Empty runs the command as is.
+	Banner string
 }
 
 // LaunchInteractive opens an interactive session in a new terminal tab and
@@ -916,6 +1006,9 @@ func (r *Runner) LaunchInteractive(ctx context.Context, spec InteractiveSpec) (s
 		}
 		command = append([]string{sbxBin}, runArgs...)
 	}
+	if spec.Banner != "" {
+		command = withBanner(spec.Banner, command)
+	}
 
 	launch := agent.Spec{
 		Name:      spec.Name,
@@ -983,7 +1076,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 		return nil, SessionConfig{}, err
 	}
 	sessionID := acpSessionID(p)
-	workspaces := sandboxWorkspaces(p.Kind, workingDir, p.ProjectPath, planningWorktree)
+	workspaces := sandboxWorkspaces(p, workingDir, planningWorktree)
 	if p.Kind == agent.WorkingmanAgent || p.Kind == agent.SleepyHeadAgent {
 		workspaces = workingmanWorkspaces(workingDir, p.WritableMounts, p.ReadOnlyMounts)
 	}
@@ -1414,6 +1507,11 @@ func (r *Runner) resolveWorkingDir(ctx context.Context, p Plan) (string, error) 
 	if p.WorkingDir != "" {
 		return p.WorkingDir, nil
 	}
+	if p.Kind == agent.TaskAgent && p.TaskWorktree != "" {
+		// The daemon provisioned the shared workspace and cut this worktree
+		// from it before the launch (W4); the agent works only in the worktree.
+		return p.TaskWorktree, nil
+	}
 	if r.Workspaces == nil {
 		return "", fmt.Errorf("runner: kind %s needs either WorkingDir or a workspace manager", p.Kind)
 	}
@@ -1512,10 +1610,14 @@ func (p Plan) Pushes() bool {
 //     blocks). The ACP-backed wolf does get a sandbox — see ACPSandboxNameFor.
 //   - Planning → basename of the project's control dir (the dir holding
 //     project.yaml). Workspace = control dir.
-//   - Task / commit → "<work-stream>-<task-name>" where work-stream is the
-//     basename of the project's control dir. Each task gets its OWN sandbox
-//     so its MCP gateway (static_mcps) and policies can differ from siblings; the commit agent
-//     for that task reuses the same sandbox so it sees the task's git work.
+//   - Task → "<work-stream>-<task-name>" where work-stream is the basename of
+//     the project's control dir. Each task gets its OWN sandbox so its MCP
+//     gateway (static_mcps) and policies can differ from siblings.
+//   - Commit → "<work-stream>-<task-name>-commit", a sandbox of its own per
+//     task (docs/parallel-task-worktrees.md W5, R7). It used to reuse the task's
+//     sandbox, but a task agent now mounts only its worktree while the commit
+//     agent mounts the shared workspace, and a changed mount set would make
+//     acp-wrapper recreate the sandbox on every hand-off.
 //   - Archive → "<work-stream>-archive". It runs against the project's wsp
 //     workspace (not a per-task sandbox: it is a whole-project wrap-up), so it
 //     gets a name of its own rather than reusing any task's. Like the other
@@ -1552,11 +1654,16 @@ func SandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 		name = base + "-project"
 	case agent.PlanningAgent:
 		name = base
-	case agent.TaskAgent, agent.CommitAgent:
+	case agent.TaskAgent:
 		if taskName == "" {
 			return ""
 		}
 		name = base + "-" + taskName
+	case agent.CommitAgent:
+		if taskName == "" {
+			return ""
+		}
+		name = base + "-" + taskName + "-commit"
 	case agent.ArchiveAgent:
 		name = base + "-archive"
 	case agent.ReviewAgent:
@@ -1642,6 +1749,14 @@ func (r *Runner) resolveWolfWorktree(ctx context.Context, p Plan) string {
 // task agent's status writeback to `tasks/<name>.yaml` fails because the
 // directory simply doesn't exist inside the sandbox.
 //
+// A task agent with a task worktree (Plan.TaskWorktree) mounts
+// [task worktree, Plan.WorktreeMounts..., orch dir]: its worktree first (cwd),
+// then each repo's git common dir, without which the worktree's `.git`
+// pointer dangles and its commits have nowhere to go, and the staged
+// .gomodcache (docs/parallel-task-worktrees.md W5). It never mounts the shared
+// working trees. The commit agent keeps [shared workspace, orch dir]: the
+// task worktrees sit under the shared workspace at .worktrees/<task>/.
+//
 // The archive agent needs the same two mounts and for the same reason: it does
 // its git work in the wsp workspace but writes `archive: true` back to
 // `project.yaml` in the orch dir.
@@ -1651,25 +1766,138 @@ func (r *Runner) resolveWolfWorktree(ctx context.Context, p Plan) string {
 // the planner can read source code from the wsp-provisioned worktree without
 // trying to clone from GitHub (the sandbox has no auth and prior runs got
 // stuck thrashing on auth failures). Empty falls back to one mount.
-func sandboxWorkspaces(kind agent.Kind, workingDir, projectPath, planningWorktree string) []string {
-	switch kind {
+func sandboxWorkspaces(p Plan, workingDir, planningWorktree string) []string {
+	switch p.Kind {
 	case agent.TaskAgent, agent.CommitAgent, agent.ArchiveAgent:
-		orchDir := filepath.Dir(projectPath)
-		if orchDir == "" || orchDir == workingDir {
-			return []string{workingDir}
+		out := []string{workingDir}
+		if p.Kind == agent.TaskAgent && p.TaskWorktree != "" {
+			for _, m := range p.WorktreeMounts {
+				if m != "" && m != workingDir {
+					out = append(out, m)
+				}
+			}
 		}
-		return []string{workingDir, orchDir}
+		orchDir := filepath.Dir(p.ProjectPath)
+		if orchDir == "" || orchDir == workingDir {
+			return out
+		}
+		return append(out, orchDir)
 	case agent.PlanningAgent, agent.WolfAgent:
 		// The wolf, like planning, runs in the control dir and optionally mounts
 		// the project's source worktree as a second workspace (see
 		// resolveWolfWorktree). The control dir already holds project.yaml,
 		// tasks/ and the blocked-session record, so it needs no extra orch mount.
-		if planningWorktree == "" || planningWorktree == workingDir {
-			return []string{workingDir}
+		out := []string{workingDir}
+		if planningWorktree != "" && planningWorktree != workingDir {
+			out = append(out, planningWorktree)
 		}
-		return []string{workingDir, planningWorktree}
+		if p.Kind == agent.WolfAgent {
+			out = appendReadOnlyMounts(out, p.ReadOnlyMounts)
+		}
+		return out
 	}
 	return []string{workingDir}
+}
+
+// promptCommits converts task commits into the prompts package's shape.
+func promptCommits(in []task.Commit) []prompts.RepoCommit {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]prompts.RepoCommit, len(in))
+	for i, c := range in {
+		out[i] = prompts.RepoCommit{Repo: c.Repo, Hash: c.Hash}
+	}
+	return out
+}
+
+// promptRepos gives the planning prompt each repo's workspace dir name.
+func promptRepos(in []workspace.Repo) []prompts.Repo {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]prompts.Repo, len(in))
+	for i, r := range in {
+		out[i] = prompts.Repo{DirName: r.DirName()}
+	}
+	return out
+}
+
+// setupRepos lists the repo dir names in the planner's .orch/context.yaml.
+// Other kinds have the repos on disk in front of them.
+func setupRepos(kind agent.Kind, in []workspace.Repo) []string {
+	if kind != agent.PlanningAgent || len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, r := range in {
+		out[i] = r.DirName()
+	}
+	return out
+}
+
+// derefTouches is a task's touches globs, nil when it declares none.
+func derefTouches(in *[]string) []string {
+	if in == nil {
+		return nil
+	}
+	return *in
+}
+
+func promptIntegration(in *task.Integration) *prompts.IntegrationReport {
+	if in == nil {
+		return nil
+	}
+	return &prompts.IntegrationReport{
+		Result: in.Result,
+		Repo:   in.Repo,
+		Files:  in.Files,
+		Onto:   promptCommits(in.Onto),
+		Output: in.Output,
+		Landed: in.Landed,
+	}
+}
+
+func setupInFlight(in []prompts.InFlightTask) []setup.InFlightTask {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]setup.InFlightTask, len(in))
+	for i, t := range in {
+		out[i] = setup.InFlightTask{Name: t.Name, Status: t.Status, QueuePosition: t.QueuePosition, Integrating: t.Integrating}
+	}
+	return out
+}
+
+// withBanner wraps command so the tab prints banner first, then exec's the
+// command in its place.
+func withBanner(banner string, command []string) []string {
+	return append([]string{"sh", "-c", `printf '%s\n\n' "$0"; exec "$@"`, banner}, command...)
+}
+
+// setupUnintegrated converts the archive agent's unintegrated-work list into
+// the .orch/context.yaml shape.
+func setupUnintegrated(in []prompts.UnintegratedTask) []setup.UnintegratedTask {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]setup.UnintegratedTask, len(in))
+	for i, t := range in {
+		out[i] = setup.UnintegratedTask{Name: t.Name, Status: t.Status, Branch: t.Branch, Worktree: t.Worktree, Why: t.Why}
+	}
+	return out
+}
+
+// setupCommits converts task commits into the .orch/context.yaml shape.
+func setupCommits(in []task.Commit) []setup.Commit {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]setup.Commit, len(in))
+	for i, c := range in {
+		out[i] = setup.Commit{Repo: c.Repo, Hash: c.Hash}
+	}
+	return out
 }
 
 // ReadOnlySuffix is appended to a workspace path to ask sbx for a read-only
@@ -1724,6 +1952,31 @@ func workingmanWorkspaces(scratch string, writable, readOnly []string) []string 
 		out = append(out, p+ReadOnlySuffix)
 	}
 	return out
+}
+
+// appendReadOnlyMounts adds each of readOnly to mounts as a read-only mount
+// (ReadOnlySuffix), skipping one that is empty, already present, or nested
+// with a mount already in the list: mixing modes on nested mounts is ambiguous,
+// and the writable one must win.
+func appendReadOnlyMounts(mounts, readOnly []string) []string {
+	for _, p := range readOnly {
+		p = absClean(p)
+		if p == "" {
+			continue
+		}
+		nested := false
+		for _, m := range mounts {
+			m = strings.TrimSuffix(m, ReadOnlySuffix)
+			if pathWithin(p, m) || pathWithin(m, p) {
+				nested = true
+				break
+			}
+		}
+		if !nested {
+			mounts = append(mounts, p+ReadOnlySuffix)
+		}
+	}
+	return mounts
 }
 
 // dropCovered removes every path that lies under another path of the list; of

@@ -94,7 +94,8 @@ func TestSandboxNameFor(t *testing.T) {
 		{"planning", agent.PlanningAgent, "", "myproj"},
 		{"wolf", agent.WolfAgent, "", ""},
 		{"task", agent.TaskAgent, "scaffold", "myproj-scaffold"},
-		{"commit", agent.CommitAgent, "scaffold", "myproj-scaffold"},
+		// The commit agent gets a sandbox of its own (W5, R7).
+		{"commit", agent.CommitAgent, "scaffold", "myproj-scaffold-commit"},
 		{"task-no-name", agent.TaskAgent, "", ""},
 		{"commit-no-name", agent.CommitAgent, "", ""},
 		// The archive agent wraps up the whole project, not one task, so its

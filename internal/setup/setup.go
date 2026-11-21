@@ -22,6 +22,13 @@ type Context struct {
 	TaskName      string   `yaml:"task_name,omitempty"`
 	FailedTasks   []string `yaml:"failed_tasks,omitempty"`
 	BlockedReason string   `yaml:"blocked_reason,omitempty"`
+	// InFlightTasks are the tasks still in flight when a wolf launched. See
+	// prompts.Data.InFlightTasks.
+	InFlightTasks []InFlightTask `yaml:"in_flight_tasks,omitempty"`
+	// UnintegratedTasks are the task worktrees and branches holding work that
+	// is not on the shared branch when the archive agent launched. See
+	// prompts.Data.UnintegratedTasks.
+	UnintegratedTasks []UnintegratedTask `yaml:"unintegrated_tasks,omitempty"`
 
 	// BlockedSessionPath/Summary/Attempted mirror project.BlockedSession, the
 	// durable record the wolf agent reads/writes for a blocked project. See
@@ -34,6 +41,29 @@ type Context struct {
 	IntakeFiles    []string `yaml:"intake_files,omitempty"`
 	ProjectChanges []string `yaml:"project_changes,omitempty"`
 	Worktree       string   `yaml:"worktree,omitempty"`
+	// MaxParallelTasks and Repos tell the planner the project's effective
+	// task concurrency limit and the repo dir names its touches globs start
+	// with. See prompts.Data.
+	MaxParallelTasks int      `yaml:"max_parallel_tasks,omitempty"`
+	Repos            []string `yaml:"repos,omitempty"`
+
+	// Touches/Areas are a task's declared parallelism hints
+	// (docs/parallel-task-worktrees.md H1). Touches is a pointer, as on
+	// task.Task, so an explicit `touches: []` is written rather than dropped.
+	Touches *[]string `yaml:"touches,omitempty"`
+	Areas   []string  `yaml:"areas,omitempty"`
+
+	// TaskWorktree/TaskBranch/TaskBase/Attempt describe a task's own worktree
+	// for the task and commit agents. See prompts.Data for the meanings.
+	TaskWorktree string   `yaml:"task_worktree,omitempty"`
+	TaskBranch   string   `yaml:"task_branch,omitempty"`
+	TaskBase     []Commit `yaml:"task_base,omitempty"`
+	Attempt      int      `yaml:"attempt,omitempty"`
+	Resumed      bool     `yaml:"resumed,omitempty"`
+	// Verify/DocsOnly are the commit agent's build check command and the
+	// docs-only verdict that skips it. See prompts.Data.
+	Verify   string `yaml:"verify,omitempty"`
+	DocsOnly bool   `yaml:"docs_only,omitempty"`
 
 	// PushBranch tells the commit agent to push after committing (review-fix
 	// tasks) rather than leaving the commit local. See prompts.Data.PushBranch.
@@ -49,6 +79,30 @@ type Context struct {
 	SnapshotFile string   `yaml:"snapshot_file,omitempty"`
 	AuditLog     string   `yaml:"audit_log,omitempty"`
 	SessionsRoot string   `yaml:"sessions_root,omitempty"`
+}
+
+// InFlightTask is one entry of in_flight_tasks in .orch/context.yaml.
+type InFlightTask struct {
+	Name          string `yaml:"name"`
+	Status        string `yaml:"status"`
+	QueuePosition int    `yaml:"queue_position,omitempty"`
+	Integrating   bool   `yaml:"integrating,omitempty"`
+}
+
+// UnintegratedTask is one entry of unintegrated_tasks in .orch/context.yaml.
+type UnintegratedTask struct {
+	Name     string `yaml:"name"`
+	Status   string `yaml:"status"`
+	Branch   string `yaml:"task_branch,omitempty"`
+	Worktree string `yaml:"worktree,omitempty"`
+	Why      string `yaml:"why,omitempty"`
+}
+
+// Commit is one repo's commit in .orch/context.yaml (same shape as a task
+// file's commits:).
+type Commit struct {
+	Repo string `yaml:"repo"`
+	Hash string `yaml:"hash"`
 }
 
 // Skill is a directory of files copied verbatim into the workspace's

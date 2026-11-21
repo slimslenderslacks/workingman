@@ -6,6 +6,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
@@ -22,12 +25,13 @@ import (
 // restarted — instead the project transitions to blocked and the wolf agent
 // is launched. The bound is intentionally a const: tests seed task files
 // with a near-limit Attempts value to exercise the boundary.
-const maxTaskAttempts = 3
+const maxTaskAttempts = task.MaxAttempts
 
-// afterTaskSession runs after a task agent's session has ended. It re-reads
-// the task file and decides the next action.
+// afterTaskSession runs after a task agent's session has ended. It gives back
+// the task's global token, re-reads the task file and decides the next action.
 //
-//   - status:success   → launch commit agent
+//   - status:success   → stamp succeeded_at; the task joins the commit queue,
+//     and a scheduling pass starts its integration if the queue is free
 //   - status:failed    → restart (if attempts < maxTaskAttempts) or block
 //   - status:running   → agent exited without writing a terminal status;
 //     treated the same as failed (the agent crashed). The daemon wrote
@@ -40,6 +44,9 @@ const maxTaskAttempts = 3
 //   - status:committed → task agent should not commit; treat as invariant
 //     violation and block
 func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Project) {
+	// Released first, whatever the outcome, so no early return below can leak
+	// it (X4), and so the task's own retry can take it again.
+	d.releaseToken(taskPath)
 	if d.isStopped(projectPath) {
 		// enforceStopped killed this session. Put the task back to ready (the
 		// status dispatch moved it off), so a plain `:start` naturally
@@ -68,7 +75,9 @@ func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Proje
 	)
 	switch t.Status {
 	case task.StatusSuccess:
-		d.launchCommitAgent(projectPath, p, t)
+		d.restampBase(p, t)
+		d.stampSucceeded(t)
+		d.schedulePass(projectPath, p, passOpts{})
 	case task.StatusFailed, task.StatusRunning, task.StatusReady:
 		d.handleTaskFailure(projectPath, taskPath, p, t)
 	case task.StatusBlocked:
@@ -85,15 +94,30 @@ func (d *Daemon) afterTaskSession(projectPath, taskPath string, p *project.Proje
 }
 
 // handleTaskFailure bumps Attempts and either resets the task to ready for
-// another run, or — if the retry budget is exhausted — leaves the task as
-// failed and blocks the project. The task file is written by the daemon, but
+// another run, which a scheduling pass starts straight away (the task gets the
+// slot its failed run just freed), or — if the retry budget is exhausted —
+// leaves the task as failed and blocks the project. Either way a worktree task keeps its worktree
+// and branch exactly as the failed attempt left them, dirty or not
+// (docs/parallel-task-worktrees.md W6): the retry runs in the same worktree,
+// and a blocked task's worktree is there for the wolf to inspect. The task file is written by the daemon, but
 // task-file events are observation-only (handleTask), so no fsnotify loop is
 // created. The relaunch moves the task straight on to running again.
 func (d *Daemon) handleTaskFailure(projectPath, taskPath string, p *project.Project, t *task.Task) {
+	if d.resetForRetry(projectPath, taskPath, p, t) {
+		d.schedulePass(projectPath, p, passOpts{prefer: t.Name})
+	}
+}
+
+// resetForRetry is handleTaskFailure without the scheduling pass: it resets
+// the task to ready with one more attempt and reports true, or blocks the
+// project (budget spent, or the save failed) and reports false.
+func (d *Daemon) resetForRetry(projectPath, taskPath string, p *project.Project, t *task.Task) bool {
 	if t.Attempts >= maxTaskAttempts {
 		d.audit.Log("task_retry_exhausted",
+			"path", projectPath,
 			"task", t.Name,
 			"attempts", fmt.Sprintf("%d", t.Attempts),
+			"cause", "failure",
 		)
 		// Retries are done and the project is about to block for the wolf.
 		// Keep this task's sandbox so it can be inspected — the failed run's
@@ -105,7 +129,7 @@ func (d *Daemon) handleTaskFailure(projectPath, taskPath string, p *project.Proj
 			reason += ": " + t.FailureReason
 		}
 		d.transitionProjectBlocked(projectPath, p, reason)
-		return
+		return false
 	}
 	updated := *t
 	updated.Attempts++
@@ -114,13 +138,41 @@ func (d *Daemon) handleTaskFailure(projectPath, taskPath string, p *project.Proj
 	if err := task.Save(taskPath, &updated); err != nil {
 		d.audit.Log("task_save_error", "task", taskPath, "err", err.Error())
 		d.transitionProjectBlocked(projectPath, p, "task save error: "+err.Error())
-		return
+		return false
 	}
 	d.audit.Log("task_retry",
+		"path", projectPath,
 		"task", updated.Name,
 		"attempts", fmt.Sprintf("%d", updated.Attempts),
+		"cause", "failure",
 	)
-	d.launchTaskAgent(projectPath, p, &updated)
+	t.Attempts, t.Status, t.FailureReason = updated.Attempts, updated.Status, updated.FailureReason
+	return true
+}
+
+// stampSucceeded records when the daemon first saw t at success: its place in
+// the commit queue, which is FIFO by succeeded_at (S5). A task that already
+// has one keeps it (a transient integration retry puts it back to success).
+func (d *Daemon) stampSucceeded(t *task.Task) {
+	if t.SucceededAt != nil {
+		return
+	}
+	now := d.clock()
+	var stamped bool
+	if err := task.Update(t.Path, func(cur *task.Task) bool {
+		if cur.Status != task.StatusSuccess || cur.SucceededAt != nil {
+			return false
+		}
+		cur.SucceededAt = &now
+		stamped = true
+		return true
+	}); err != nil {
+		d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
+		return
+	}
+	if stamped {
+		t.SucceededAt = &now
+	}
 }
 
 // retainSandbox persists save_sandbox: true on a task whose sandbox should be
@@ -147,10 +199,24 @@ func (d *Daemon) retainSandbox(taskPath string, t *task.Task) {
 // afterCommitSession runs after a commit agent's session has ended. The
 // commit agent should have moved the task to status:committed. We reload the
 // graph and either dispatch the next ready task or transition the project to
-// done if every task is committed. Any other terminal state from the commit
-// agent is treated as a hard failure — the project is blocked for the wolf
-// agent to investigate.
-func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Project, startFailure string) {
+// done if every task is committed.
+//
+// For a worktree task (il set) any other outcome is routed on the commit
+// agent's integration report (docs/parallel-task-worktrees.md I4,
+// routeIntegrationFailure): a conflict or failed build check re-runs the task,
+// a transient failure relaunches the commit agent, a partial publish or a
+// broken invariant blocks. For a legacy or push task any other terminal state
+// is treated as a hard failure — the project is blocked for the wolf agent to
+// investigate.
+//
+// done releases the session's commit reservation. It is called right before
+// the scheduling pass that starts the next integration, so that pass sees the
+// queue free; the caller also releases it after this returns (endCommit runs
+// once), which covers every early return.
+func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Project, startFailure string, il *integrationLaunch, done func()) {
+	if done == nil {
+		done = func() {}
+	}
 	if d.isStopped(projectPath) {
 		// Same guard as afterTaskSession: a commit agent enforceStopped killed
 		// mid-commit leaves the task at whatever non-committed status it had
@@ -171,6 +237,10 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		"after", "commit-session",
 	)
 	if t.Status != task.StatusCommitted {
+		if il != nil {
+			d.routeIntegrationFailure(projectPath, p, t, startFailure, il, done)
+			return
+		}
 		reason := fmt.Sprintf("commit agent ended with task %q in status %q", t.Name, t.Status)
 		if startFailure != "" {
 			// The agent never ran: say why, rather than leave the wolf (and the
@@ -179,6 +249,15 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		}
 		d.transitionProjectBlocked(projectPath, p, reason)
 		return
+	}
+	if !d.finishCommittedTask(projectPath, p, t) {
+		return
+	}
+	if il != nil {
+		d.auditVerifyCheck(projectPath, t, il)
+		d.audit.Log("integration_succeeded", "path", projectPath, "task", t.Name,
+			"commits", formatCommits(t.Commits), "fast_forward", strconv.FormatBool(il.fastPath(t)))
+		d.auditTouches(projectPath, p, t, il)
 	}
 
 	// Stamp the completion time the first time we observe the task committed,
@@ -196,50 +275,30 @@ func (d *Daemon) afterCommitSession(projectPath, taskPath string, p *project.Pro
 		}
 	}
 
-	g, ok := d.loadTaskGraph(projectPath, p)
-	if !ok {
-		return
-	}
-	if g.AllCommitted() {
-		if d.deferToPlanner(projectPath, "complete") {
-			return
-		}
-		d.transitionProjectComplete(projectPath, p)
-		return
-	}
-	if next := firstUncommittedSuccess(g); next != nil {
-		d.audit.Log("resume_pending_commit", "task", next.Name)
-		d.launchCommitAgent(projectPath, p, next)
-		return
-	}
-	ready := g.Ready()
-	if len(ready) == 0 {
-		// No ready tasks but not all committed — something is stuck (a
-		// failed task with no retry budget, or a graph oddity). Block —
-		// unless a planner is still writing the graph.
-		if d.deferToPlanner(projectPath, "no_ready_tasks") {
-			return
-		}
-		d.transitionProjectBlocked(projectPath, p,
-			"no ready tasks remain but project is not fully committed")
-		return
-	}
-	d.dispatchReadyTask(projectPath, p, ready[0])
+	// One pass both starts the next integration and fills the task slots the
+	// newly committed task freed; its dependents are Ready now (S5). A fully
+	// committed graph completes the project, whatever its status, as it
+	// always has.
+	done()
+	d.schedulePass(projectPath, p, passOpts{complete: true})
 }
 
-// dispatchReadyTask launches the right agent for a ready task. A push task has
-// no code work of its own — it publishes the commit-only fixes a batch of review
-// tasks accumulated in the worktree — so it goes straight to the commit agent in
-// push mode, skipping the (work-less) task-agent phase. Every other task starts
-// with a task agent. Both the status:working dispatch and the post-commit
-// next-task pick route through here so push tasks are handled the same wherever
-// they surface in the graph.
-func (d *Daemon) dispatchReadyTask(projectPath string, p *project.Project, t *task.Task) {
-	if t.IsPushTask() {
-		d.launchCommitAgent(projectPath, p, t)
-		return
+// finishCommittedTask is the one place that tells a worktree task from a
+// legacy one at `committed` (docs/parallel-task-worktrees.md D7), keyed on
+// "does this task have a task_branch?". A legacy task — every task today, and
+// any task an older daemon started — was committed straight onto the shared
+// tree by the commit agent, so there is nothing to verify or clean up. It
+// reports whether afterCommitSession should carry on dispatching.
+//
+// A worktree task is finished by finishWorktreeTask: the ancestor check that
+// its branch landed on the shared branch, then the W6 cleanup. A daemon with
+// no git-backed workspaces can't run those, so it finishes such a task the
+// legacy way.
+func (d *Daemon) finishCommittedTask(projectPath string, p *project.Project, t *task.Task) bool {
+	if !t.HasTaskBranch() || !d.worktreesEnabled() {
+		return true // legacy: committed in the shared tree
 	}
-	d.launchTaskAgent(projectPath, p, t)
+	return d.finishWorktreeTask(projectPath, p, t)
 }
 
 // markTaskRunning persists the ready → running transition for a task the
@@ -283,13 +342,13 @@ func (d *Daemon) markTaskRunning(t *task.Task) bool {
 // they always did — without spending a retry attempt. A task at any other
 // status is left alone. Best-effort: errors are logged.
 func (d *Daemon) releaseRunningTask(taskPath, why string) {
-	released := false
+	released, name := false, ""
 	err := task.Update(taskPath, func(t *task.Task) bool {
 		if t.Status != task.StatusRunning {
 			return false
 		}
 		t.Status = task.StatusReady
-		released = true
+		released, name = true, t.Name
 		return true
 	})
 	if err != nil {
@@ -299,20 +358,23 @@ func (d *Daemon) releaseRunningTask(taskPath, why string) {
 		return
 	}
 	if released {
-		d.audit.Log("task_released", "task", taskPath, "why", why)
+		// path and task identify the task as every task event does (D3);
+		// task_path is the file, which is what this event used to carry.
+		projectPath := filepath.Join(filepath.Dir(filepath.Dir(taskPath)), project.FileName)
+		d.audit.Log("task_released", "path", projectPath, "task", name, "task_path", taskPath, "why", why)
 	}
 }
 
-// taskSessionLive reports whether the project's main slot holds a task or
-// commit agent session working the named task.
+// taskSessionLive reports whether a task agent (in the task's #task:<name>
+// slot) or the commit agent (in #commit) is working the named task.
 func (d *Daemon) taskSessionLive(projectPath, taskName string) bool {
 	d.sessionsMu.Lock()
 	defer d.sessionsMu.Unlock()
-	e, ok := d.sessions[projectPath]
-	if !ok || e.taskName != taskName {
-		return false
+	if _, ok := d.sessions[taskSessionKey(projectPath, taskName)]; ok {
+		return true
 	}
-	return e.kind == agent.TaskAgent || e.kind == agent.CommitAgent
+	e, ok := d.sessions[commitSessionKey(projectPath)]
+	return ok && e.taskName == taskName
 }
 
 // releaseOrphanedTasks runs once per project at startup, after
@@ -344,16 +406,32 @@ func (d *Daemon) releaseOrphanedTasks(projectPath string) {
 	}
 }
 
-// launchCommitAgent runs in the same workspace shape as a task agent — it
-// needs the repos checked out so it can `git commit` inside each one. On
-// session end the daemon re-reads the task and, if it reached committed,
-// either launches the next ready task or marks the project done.
+// launchCommitAgent takes the project's commit reservation and starts the
+// commit agent for t: the relaunch of a transient integration retry, which
+// keeps the same task at the head of the queue (S5). Everything else starts
+// integrations through schedule, which reserves under its lock.
 func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *task.Task) {
 	if d.runner == nil {
 		return
 	}
-	if d.hasSession(projectPath) {
-		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.CommitAgent.String())
+	d.beginCommit(projectPath)
+	d.startCommitAgent(projectPath, p, t)
+}
+
+// startCommitAgent starts the commit agent for the head of the commit queue,
+// in the #commit slot, with the commit reservation already taken (beginCommit);
+// it is released once afterCommitSession has routed the outcome, or here when
+// no session starts. The agent runs in the project's shared workspace — it
+// needs the repos checked out so it can `git commit` inside each one, and for
+// a worktree task the shared branch it fast-forwards is checked out there too.
+// On session end the daemon re-reads the task and routes the outcome.
+func (d *Daemon) startCommitAgent(projectPath string, p *project.Project, t *task.Task) {
+	key := commitSessionKey(projectPath)
+	var once sync.Once
+	release := func() { once.Do(func() { d.endCommit(projectPath) }) }
+	if d.hasSession(key) {
+		release()
+		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.CommitAgent.String(), "task", t.Name)
 		return
 	}
 	root := filepath.Dir(projectPath)
@@ -365,18 +443,16 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		TasksDir:    filepath.Join(root, "tasks"),
 		TaskPath:    t.Path,
 		TaskName:    t.Name,
-		// Commit shares the task's per-task sandbox (same sandbox name);
-		// passing the same MCPs + policies keeps the rule set consistent on
-		// reuse. `sbx create` is skipped when the sandbox already exists, so
-		// policies typically remain whatever the task agent's first create
-		// applied — we forward them here for the case where commit happens
-		// to be the first launch (retry after a crash, etc.).
+		// Commit runs in a sandbox of its own (<work-stream>-<task>-commit,
+		// see runner.SandboxNameFor), mounting the shared workspace rather
+		// than the task's worktree; it gets the task's MCPs and policies so
+		// it can reach whatever the task could.
 		StaticMCPs:  t.StaticMCPs,
 		Policies:    t.Policies,
 		SaveSandbox: t.SaveSandbox,
 		// Commit runs under the task's model for now; it may get its own later.
 		Model: t.Model,
-		// ...and in the task's harness: it shares the task's sandbox.
+		// ...and in the task's harness.
 		Harness: t.Harness,
 		// Only a push task publishes: it pushes the commit-only fixes earlier
 		// review tasks accumulated in the worktree to the remote PR branch. Every
@@ -385,16 +461,51 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 		// so the reviewer sees a coherent batch rather than a stream of commits).
 		PushBranch: t.IsPushTask(),
 	}
+	// A worktree task's commit agent lands its branch on the shared branch
+	// instead of committing the shared tree (the commit prompt's worktree
+	// branch). prepareIntegration first makes an interrupted integration safe
+	// to run again (X7); a dirty shared tree blocks rather than being guessed
+	// at (I3).
+	wtMu := d.worktreeLock(projectPath)
+	wtMu.Lock()
+	// Provision the shared workspace here, under the project's worktree lock,
+	// rather than leave it to the runner: a task launch of the same pass may
+	// be provisioning it at the same moment, and two first-time provisions of
+	// one workspace collide. The runner's own Create then finds it in place.
+	// An error is left for the runner to report as the launch failure.
+	if d.runner.Workspaces != nil {
+		_, _ = d.runner.Workspaces.Create(d.ctx, p.Branch, plan.Repos)
+	}
+	il, err := d.commitWorktree(projectPath, p, t, &plan)
+	wtMu.Unlock()
+	if err != nil {
+		release()
+		d.audit.Log("integration_prepare_error", "path", projectPath, "task", t.Name, "err", err.Error())
+		d.transitionProjectBlocked(projectPath, p,
+			fmt.Sprintf("cannot integrate task %q: %v", t.Name, err))
+		return
+	}
 	// A push task goes straight from ready to this agent, so the commit agent
 	// is what's running it; any other task is already at success.
 	marked := t.IsPushTask() && d.markTaskRunning(t)
-	tracked, err := d.startSessionTracked(projectPath, plan, func(waitErr error) {
+	if il != nil {
+		d.audit.Log("integration_started", "path", projectPath, "task", t.Name,
+			"queue_depth", strconv.Itoa(d.queueDepth(projectPath)), "base", formatCommits(t.Base), "onto", formatOnto(il.onto))
+	}
+	// The reservation outlives the session: it is released only once
+	// afterCommitSession has routed the outcome (live.commit_reserved, X3).
+	tracked, err := d.startSessionTracked(key, plan, func(waitErr error) {
 		startFailure := ""
 		if waitErr != nil {
 			startFailure = d.runner.StartFailure(plan)
 		}
-		d.afterCommitSession(projectPath, plan.TaskPath, p, startFailure)
+		d.afterCommitSession(projectPath, plan.TaskPath, p, startFailure, il, release)
+		release()
+		d.resumeDrainedCleanup(projectPath)
 	})
+	if err != nil || !tracked {
+		release() // no session, so no afterCommitSession either
+	}
 	if marked && (err != nil || (!tracked && !d.taskSessionLive(projectPath, t.Name))) {
 		d.releaseRunningTask(plan.TaskPath, "launch_failed")
 	}
@@ -447,8 +558,39 @@ func (d *Daemon) transitionProjectIdle(projectPath string, p *project.Project) {
 // daemon (no fsnotify loop), pings the user via the configured notifier,
 // and launches the wolf agent to investigate. Idempotent: calling it again
 // while the wolf agent is already running is a session-dedup no-op.
+//
+// A project that is already blocked on disk — a sibling task failing while the
+// wolf works on the first block (X3) — keeps its block: the new reason is
+// appended to blocked_reason (`…; also: <reason>`) and logged as
+// project_block_additional, with no second notification. The wolf is told to
+// re-read project.yaml before handing back.
+//
+// The block is written over the file as it is on disk when it can be read,
+// not over the caller's copy: with tasks in flight that copy is often a
+// session's launch-time one, and writing it back would undo whatever changed
+// since (a `cleanup: true` request, a human's edit).
 func (d *Daemon) transitionProjectBlocked(projectPath string, p *project.Project, reason string) {
-	updated := *p
+	d.blockMu.Lock()
+	base := p
+	if cur, err := project.Load(projectPath); err == nil {
+		base = cur
+		if cur.Status == project.StatusBlocked && cur.BlockedReason != "" {
+			updated := *cur
+			if cur.BlockedReason != reason && !strings.Contains(cur.BlockedReason, "; also: "+reason) {
+				updated.BlockedReason = cur.BlockedReason + "; also: " + reason
+				if err := project.Save(projectPath, &updated); err != nil {
+					d.audit.Log("project_save_error", "path", projectPath, "err", err.Error())
+				}
+				d.audit.Log("project_block_additional", "path", projectPath, "reason", reason)
+			}
+			d.blockMu.Unlock()
+			// A wolf already running keeps its session (launchWolfAgent
+			// dedups); one is started only if none is.
+			d.launchWolfAgent(projectPath, &updated, updated.BlockedReason)
+			return
+		}
+	}
+	updated := *base
 	updated.Status = project.StatusBlocked
 	updated.BlockedReason = reason
 	if err := project.Save(projectPath, &updated); err != nil {
@@ -456,6 +598,7 @@ func (d *Daemon) transitionProjectBlocked(projectPath string, p *project.Project
 		// Even if we couldn't persist the block status, still launch wolf —
 		// the in-memory state is enough to drive the agent.
 	}
+	d.blockMu.Unlock()
 	d.audit.Log("project_blocked", "path", projectPath, "reason", reason)
 	// A blocked project needs a human via the wolf, not a background PR poll —
 	// stop polling until the block is resolved (the resolving agent's status
@@ -529,6 +672,7 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 		Branch:                  p.Branch,
 		Repos:                   workspaceReposFor(p),
 		FailedTasks:             failedOrBlockedTaskPaths(tasksDir),
+		InFlightTasks:           d.inFlightTasks(projectPath),
 		BlockedReason:           reason,
 		BlockedSessionPath:      blockedSessionPath,
 		BlockedSessionSummary:   priorSummary,
@@ -541,6 +685,13 @@ func (d *Daemon) launchWolfAgent(projectPath string, p *project.Project, reason 
 		// Ignored on the host terminal-tab path, where the claude process is already
 		// long-lived.
 		Persistent: true,
+	}
+	if d.snapshot.path != "" {
+		// The live answer to "is an integration in flight?" is the snapshot's
+		// live.integrating / live.commit_reserved (X3). The snapshot is
+		// replaced by rename, so its whole directory is mounted, read-only.
+		plan.Observe.SnapshotFile = d.snapshot.path
+		plan.ReadOnlyMounts = []string{filepath.Dir(d.snapshot.path)}
 	}
 	d.audit.Log("wolf_dispatch", "path", projectPath, "reason", reason)
 	// Ignore start error here: the project is already blocked, recursing
@@ -608,6 +759,20 @@ func (d *Daemon) launchArchiveAgent(projectPath string, p *project.Project) {
 		d.endCleanup(projectPath)
 		return
 	}
+	// Drain, then archive (X6): the archive agent waits for every task agent
+	// and integration still in flight. schedule admits no new task while
+	// cleanup is set, and the last session end to find nothing in flight
+	// revisits the project (resumeDrainedCleanup), which lands back here.
+	if d.projectBusy(projectPath) {
+		d.audit.Log("archive_waiting_in_flight", "path", projectPath,
+			"tasks", strconv.Itoa(d.liveTaskSessions(projectPath)+len(d.admittingNames(projectPath))),
+			"commit_reserved", strconv.FormatBool(d.commitReserved(projectPath)))
+		d.endCleanup(projectPath)
+		return
+	}
+	// Before launch (W6, X6 step 4): drop the committed tasks' worktrees and
+	// collect what still holds unintegrated work, which the agent reports.
+	unintegrated := d.prepareArchive(projectPath, p)
 	root := filepath.Dir(projectPath)
 	plan := runner.Plan{
 		Kind: agent.ArchiveAgent,
@@ -618,7 +783,8 @@ func (d *Daemon) launchArchiveAgent(projectPath string, p *project.Project) {
 		TasksDir:    filepath.Join(root, "tasks"),
 		// It runs sandboxed under ACP and has to push, so it needs the egress a
 		// task would have declared for itself.
-		Policies: archivePolicies(),
+		Policies:          archivePolicies(),
+		UnintegratedTasks: unintegrated,
 	}
 	d.audit.Log("archive_dispatch", "path", projectPath, "branch", p.Branch)
 	if err := d.startSession(archiveSessionKey(projectPath), plan, func(waitErr error) {
@@ -709,6 +875,14 @@ func (d *Daemon) beginCleanup(projectPath string) bool {
 	}
 	d.cleanupInFlight[projectPath] = true
 	return true
+}
+
+// cleanupReserved reports whether an archive agent is dispatched for the
+// project (beginCleanup).
+func (d *Daemon) cleanupReserved(projectPath string) bool {
+	d.cleanupMu.Lock()
+	defer d.cleanupMu.Unlock()
+	return d.cleanupInFlight[projectPath]
 }
 
 func (d *Daemon) endCleanup(projectPath string) {

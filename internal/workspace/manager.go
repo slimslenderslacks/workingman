@@ -74,3 +74,18 @@ type Manager interface {
 	// same as Create does. Safe to call with an empty repos slice (a no-op).
 	AddRepos(ctx context.Context, branch string, repos []Repo) error
 }
+
+// GitBacked is implemented by a Manager that can say whether its workspaces
+// hold real git repositories, one per Repo.DirName, checked out on the
+// workspace's branch. The daemon only cuts per-task git worktrees
+// (internal/worktree) from a workspace whose manager reports true; any other
+// workspace runs its tasks in the shared tree, as before worktrees existed.
+type GitBacked interface {
+	GitBacked() bool
+}
+
+// IsGitBacked reports whether m's workspaces hold real git repositories.
+func IsGitBacked(m Manager) bool {
+	g, ok := m.(GitBacked)
+	return ok && g.GitBacked()
+}

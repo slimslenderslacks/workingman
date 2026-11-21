@@ -118,9 +118,8 @@ argv.
   sbx-specific. `Encode`/`Decode` is the acp-wrapper flag wire format.
 - **`internal/daemon`**:
   - `dispatch_lifecycle.go`: `archivePolicies()` (allow network
-    `github.com`). The commit agent reuses the task's sandbox name, MCPs and
-    policies. The comment states the assumption that "create is skipped when
-    it exists".
+    `github.com`). The commit agent gets its task's MCPs and policies, in a
+    sandbox of its own (`<work-stream>-<task>-commit`).
   - `review.go`: `StaticMCPs: ["github"]`, `reviewNetworkPolicies()`
     (`api.github.com`, `api.githubcopilot.com`), and the block reason text
     that mentions `sbx mcp ls/auth`.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -390,5 +391,25 @@ func TestLaunchInteractiveReportsAlreadyOpen(t *testing.T) {
 	}
 	if len(opener.opened) != 1 || opener.last.Name != "" {
 		t.Errorf("Open calls = %v, Launch spec = %+v; want exactly one Open and no Launch", opener.opened, opener.last)
+	}
+}
+
+// A Banner is printed before the command, which then exec's in its place, so
+// the tab's pid is still the command's own.
+func TestLaunchInteractiveBanner(t *testing.T) {
+	launcher := &fakeLauncher{}
+	r := &Runner{Launcher: launcher}
+	if _, err := r.LaunchInteractive(context.Background(), InteractiveSpec{
+		Inner: []string{"bash"}, Cwd: "/x", Name: "n", Banner: "careful\nnow",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"sh", "-c", `printf '%s\n\n' "$0"; exec "$@"`, "careful\nnow", "bash"}
+	if !reflect.DeepEqual(launcher.last.Command, want) {
+		t.Errorf("command = %q, want %q", launcher.last.Command, want)
+	}
+	out, err := exec.Command(want[0], append(want[1:4], "echo", "ran")...).Output()
+	if err != nil || string(out) != "careful\nnow\n\nran\n" {
+		t.Errorf("wrapped output = %q %v", out, err)
 	}
 }

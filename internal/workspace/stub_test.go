@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -88,5 +89,35 @@ func TestStubRemoveIsIdempotent(t *testing.T) {
 	// Idempotent.
 	if err := m.Remove(ctx, "feat/y", false); err != nil {
 		t.Errorf("second Remove: %v", err)
+	}
+}
+
+func TestGitStubCreatesRealRepos(t *testing.T) {
+	root := t.TempDir()
+	m := NewGitStub(root)
+	ctx := context.Background()
+	dir, err := m.Create(ctx, "feat/x", []Repo{{Identity: "github.com/docker/gateway"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	head := func(repo string) string {
+		out, err := exec.Command("git", "-C", filepath.Join(dir, repo), "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+		if err != nil {
+			t.Fatalf("git rev-parse in %s: %v: %s", repo, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if got := head("gateway"); got != "feat/x" {
+		t.Errorf("gateway on %q, want feat/x", got)
+	}
+	// Create again is a no-op on the existing repo; AddRepos inits the new one.
+	if _, err := m.Create(ctx, "feat/x", []Repo{{Identity: "github.com/docker/gateway"}}); err != nil {
+		t.Fatalf("second Create: %v", err)
+	}
+	if err := m.AddRepos(ctx, "feat/x", []Repo{{Shortname: "extra"}}); err != nil {
+		t.Fatalf("AddRepos: %v", err)
+	}
+	if got := head("extra"); got != "feat/x" {
+		t.Errorf("extra on %q, want feat/x", got)
 	}
 }

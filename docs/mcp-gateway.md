@@ -61,8 +61,8 @@ A sandbox's gateway is minted with `POST <gateway>/gateways` and the body
 `{"servers": [...]}`. The list is:
 
 1. the task's **`static_mcps`** when it names any. Each entry is a catalog
-   server name. The commit agent shares its task's sandbox, so it uses the
-   same list.
+   server name. The commit agent runs in a sandbox of its own
+   (`<work-stream>-<task>-commit`) but is given its task's list.
 2. otherwise the **default set**, `--mcp-gateway-servers` /
    `WORKINGMAN_MCP_GATEWAY_SERVERS` (comma-separated). This covers tasks with
    no `static_mcps` and the agents that have no task (project, planning,

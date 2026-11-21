@@ -692,7 +692,7 @@ func TestTasksForPrefersResolvedModelAndHarness(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, views := tasksFor(dir)
+	_, views, _ := tasksFor(dir)
 	got := map[string]TaskView{}
 	for _, v := range views {
 		got[v.Name] = v

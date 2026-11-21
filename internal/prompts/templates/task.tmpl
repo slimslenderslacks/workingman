@@ -8,16 +8,80 @@ Workspace: {{.Workspace}}
 The daemon has already set this task to `status: running`; you do not need to
 change it until you finish.
 
-Read the task description in the task file and complete the work inside this
+{{if .TaskWorktree}}Read the task description in the task file and complete the work inside this
+workspace. It is this task's own worktree: it holds one directory per repo
+listed in the project file, each a git worktree checked out on this task's
+branch `{{.TaskBranch}}`, not on the project branch `{{.Branch}}`. Other tasks
+work in worktrees of their own, and the shared checkout of `{{.Branch}}` is
+not mounted here. Make whatever code changes the task description requires,
+in these directories only.
+
+You may commit your work on `{{.TaskBranch}}` if that helps you, or leave it
+uncommitted: the commit agent commits whatever you leave and integrates the
+branch onto `{{.Branch}}`. Do not check out, create, move, reset or delete
+any other branch or ref — in particular never touch `{{.Branch}}` — and do not
+push.
+{{if or .HasTouches .Areas}}
+Your task declares the files and shared areas it expects to change:
+{{if .Touches}}
+  touches:{{range .Touches}}
+    - `{{.}}`{{end}}{{else if .HasTouches}}
+  touches: none (no files in any repo){{end}}{{with .Areas}}
+  areas:{{range .}}
+    - `{{.}}`{{end}}{{end}}
+
+Stay within them where you reasonably can. If you must change other files, do
+so, and say which ones in `failure_reason` or your summary. Other tasks may be
+running beside you on the assumption that you won't.
+{{end}}{{with .Integration}}
+This run is a re-run: the commit agent could not integrate this task's branch
+onto `{{$.Branch}}`, because `{{$.Branch}}` moved on while the task worked.
+{{if eq .Result "verify_failed"}}The branch rebased cleanly onto `{{$.Branch}}`, but the project's build check
+then failed{{if .Repo}} (in `{{.Repo}}`){{end}}.{{if .Output}} The tail of its output:
+
+{{.Output}}
+{{end}}{{else}}Rebasing it conflicted{{if .Repo}} in `{{.Repo}}`{{end}}{{if .Files}}, in:
+{{range .Files}}
+  - `{{.}}`{{end}}{{else}}.{{end}}{{end}}
+{{if .Landed}}
+Tasks that landed on `{{$.Branch}}` since this task started: {{range $i, $n := .Landed}}{{if $i}}, {{end}}`{{$n}}`{{end}}.
+{{end}}
+The commit agent aborted, so your branch is exactly as the last attempt left
+it, fully committed. Bring it up to date yourself: in each repo directory, run
+`git rebase refs/heads/{{$.Branch}}`, resolve {{if eq .Result "verify_failed"}}what the build check reports{{else}}the conflicts in the files above{{end}}
+using the code that has landed since (read it: `git log <base>..refs/heads/{{$.Branch}}`),
+`git add` and `git rebase --continue`, and check that the result still does
+what the task asks and builds. If the old approach no longer fits, you may
+start over from the new tip instead (`git reset --hard refs/heads/{{$.Branch}}`).
+Rebasing your own branch onto `{{$.Branch}}` is the one exception to the rule
+about other refs above: you still never move `{{$.Branch}}` itself. If a
+previous run was interrupted mid-rebase, `git status` says so: continue or
+abort it.
+{{end}}{{if or .Attempt .Resumed}}
+{{if .Attempt}}This is attempt {{add .Attempt 1}} of this task: an earlier attempt ended without
+success, and this worktree is exactly as that attempt left it.{{else}}This task ran here before and was interrupted (stopped, or the daemon
+restarted), and this worktree is exactly as that run left it.{{end}} It may contain
+its committed and uncommitted changes. Look before you start:
+{{range .TaskBase}}
+  - `{{.Repo}}`: `git -C {{join $.TaskWorktree .Repo}} status`,
+    `git -C {{join $.TaskWorktree .Repo}} log --oneline {{.Hash}}..HEAD` and
+    `git -C {{join $.TaskWorktree .Repo}} diff {{.Hash}}`{{end}}{{if not .TaskBase}}
+  - `git status`, `git log` and `git diff` in each repo directory{{end}}
+
+Keep, fix or undo those changes as the task needs. To start a repo over from
+where this task began, run `git reset --hard <base>` and `git clean -fd` in it
+(the base is the commit above), and only on `{{.TaskBranch}}`.
+{{end}}{{else}}Read the task description in the task file and complete the work inside this
 workspace. The workspace already contains the repos listed in the project
 file, all on branch `{{.Branch}}`. Make whatever code changes the task
 description requires.
-
+{{end}}
 When done, edit the task file to set `status: success` (or `status: failed`
 with a `failure_reason` if you cannot complete it). The daemon will trigger
 the commit agent on success and will restart the task on failure (up to a
-limit). Do not commit, push, or change `project.yaml` — that is the
-daemon's and commit agent's job.
+limit). {{if .TaskWorktree}}Do not push or change `project.yaml` — integrating your branch is
+the daemon's and commit agent's job.{{else}}Do not commit, push, or change `project.yaml` — that is the
+daemon's and commit agent's job.{{end}}
 
 This holds even when your work leaves nothing for git to commit — e.g. the
 task was a GitHub-API edit (updating the PR body or labels via the github

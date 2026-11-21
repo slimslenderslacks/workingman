@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -456,5 +457,80 @@ func TestArchiveConfirmArchivesAndRemovesWorkspace(t *testing.T) {
 	}
 	if len(wsp.branches) != 1 || wsp.branches[0] != "beta-branch" {
 		t.Errorf("wsp removals = %v, want [beta-branch]", wsp.branches)
+	}
+}
+
+// gitArchive runs git in dir with a fixed identity, signing off.
+func gitArchive(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	full := append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)
+	out, err := exec.Command("git", full...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// :archive deletes the project's task worktrees and its refs/heads/wm/<pb>/*
+// and refs/wm/<pb>/* in every repo before wsp is asked to remove the
+// workspace (docs/parallel-task-worktrees.md X6), so they are gone even when
+// `wsp rm` would leave the repo's refs behind (a worktree of a shared mirror).
+// Another project's wm/ refs stay.
+func TestArchiveRemovesTaskWorktreesAndRefsBeforeWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	root := t.TempDir()
+	wsRoot := t.TempDir()
+	const branch = "beta-branch"
+	ws := writeWorkspace(t, wsRoot, branch)
+	repo := filepath.Join(ws, "widget")
+	gitArchive(t, repo, "init", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitArchive(t, repo, "add", "-A")
+	gitArchive(t, repo, "commit", "-q", "-m", "init")
+	// A failed task's worktree with unintegrated work, a branch without a
+	// worktree, a refs/wm/ ref, and another project's branch.
+	wt := filepath.Join(ws, ".worktrees", "stuck", "widget")
+	gitArchive(t, repo, "worktree", "add", "-q", "-b", "wm/"+branch+"/stuck", wt)
+	if err := os.WriteFile(filepath.Join(wt, "wip"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitArchive(t, wt, "add", "-A")
+	gitArchive(t, wt, "commit", "-q", "-m", "unintegrated")
+	gitArchive(t, repo, "branch", "wm/"+branch+"/loose")
+	gitArchive(t, repo, "update-ref", "refs/wm/"+branch+"/attempt", "HEAD")
+	gitArchive(t, repo, "branch", "wm/other/keep")
+
+	wsp := &fakeWspRemover{root: wsRoot}
+	var atRemove string
+	wsp.removeHook = func(string) {
+		atRemove = gitArchive(t, repo, "for-each-ref", "--format=%(refname)", "refs/heads/wm/", "refs/wm/")
+		if _, err := os.Stat(filepath.Join(ws, ".worktrees")); !os.IsNotExist(err) {
+			t.Errorf(".worktrees/ still there when wsp rm runs (err=%v)", err)
+		}
+	}
+	m := newModel(nil, make(<-chan []SessionView), &fakeAttacher{})
+	m.projectRoot = root
+	m.wspRemover = wsp
+	m.projSel = writeProject(t, root, "beta", branch, true)
+	m = focusProjectsPane(t, m)
+	m, _ = runProjectCommand(t, m, "archive")
+	step, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = step.(model)
+
+	if !strings.Contains(m.statusMsg, "archived beta") {
+		t.Fatalf("statusMsg = %q, want an archived confirmation", m.statusMsg)
+	}
+	if len(wsp.branches) != 1 {
+		t.Fatalf("wsp removals = %v, want one", wsp.branches)
+	}
+	if atRemove != "refs/heads/wm/other/keep" {
+		t.Errorf("wm refs when wsp rm ran = %q, want only the other project's", atRemove)
+	}
+	if got := gitArchive(t, repo, "worktree", "list", "--porcelain"); strings.Contains(got, ".worktrees") {
+		t.Errorf("task worktree still registered:\n%s", got)
 	}
 }

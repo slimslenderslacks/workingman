@@ -168,9 +168,9 @@ func (d *Daemon) onReviewPoll(projectPath string) {
 		d.scheduler.Unregister(reviewPollKey(projectPath))
 		return
 	}
-	if d.hasSession(projectPath) || d.planningInFlight(projectPath) {
-		// A review (or other project-root) agent is mid-run; skip this tick
-		// without disturbing the cadence.
+	if d.projectBusy(projectPath) || d.planningInFlight(projectPath) {
+		// A review (or other project-root) agent is mid-run, or task or commit
+		// work is in flight; skip this tick without disturbing the cadence.
 		d.audit.Log("review_poll_skip_busy", "path", projectPath)
 		return
 	}
@@ -210,7 +210,7 @@ func (d *Daemon) onReviewPoll(projectPath string) {
 // dispatch, and cleared before the launch rather than after: the #review poll is
 // still armed (ensureReviewPoll ran just before this), so a request lost to a
 // mid-run crash just falls back to the normal cadence. A run already in flight
-// makes the dispatch a dedup no-op (dispatchReviewAgent checks hasSession), which
+// makes the dispatch a dedup no-op (dispatchReviewAgent checks projectBusy), which
 // is the right outcome — the kick is already being served.
 func (d *Daemon) forceReviewNow(projectPath string, p *project.Project) {
 	cleared := *p
@@ -227,15 +227,15 @@ func (d *Daemon) forceReviewNow(projectPath string, p *project.Project) {
 }
 
 // dispatchReviewAgent launches a review agent unless one (or any other
-// project-root agent) is already running for the project — the review agent
-// shares the bare project session slot, so it can't run concurrently with a
-// task/commit agent, it also stands aside for a planner, and a poll landing
-// mid-run is a no-op.
+// project-root agent) is already running for the project, or any task or
+// commit work is in flight (projectBusy, docs/parallel-task-worktrees.md X1):
+// the review agent never overlaps task or commit agents, it also stands aside
+// for a planner, and a poll landing mid-run is a no-op.
 func (d *Daemon) dispatchReviewAgent(projectPath string, p *project.Project) {
 	// A planner has a slot of its own but writes the same control dir (task
 	// files, project.yaml status) the review agent does, so the two never
 	// overlap; afterPlanningSession re-dispatches the project when it is done.
-	if d.hasSession(projectPath) || d.planningInFlight(projectPath) {
+	if d.projectBusy(projectPath) || d.planningInFlight(projectPath) {
 		d.audit.Log("session_skip_duplicate", "path", projectPath, "kind", agent.ReviewAgent.String())
 		return
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/scheduler"
+	"github.com/slimslenderslacks/work/internal/worktree"
 )
 
 // Daemon watches a list of root directories for changes to project.yaml,
@@ -40,7 +41,11 @@ type Daemon struct {
 	ctx       context.Context // assigned at Run() entry; used by session goroutines
 
 	sessionsMu sync.Mutex
-	sessions   map[string]sessionEntry // keyed by project file path
+	// sessions is keyed by the project file path for the project and review
+	// agents, and by that path plus a marker for the rest: #task:<name> for
+	// each task agent, #commit for the commit agent, #planning, #wolf and
+	// #archive (see the *SessionKey helpers).
+	sessions map[string]sessionEntry
 
 	// planningMu guards planningFailures and projectFailures, the per-project
 	// counts of consecutive agent cycles that ended without advancing the
@@ -127,6 +132,63 @@ type Daemon struct {
 	powerPaused     bool
 	powerDeferred   map[string]bool
 	powerRevisit    func(string) // test hook; nil = revisitProject
+
+	// worktrees runs the git operations on per-task worktrees (see
+	// worktree.go). The zero value runs the real git binary.
+	worktrees worktree.Manager
+	// worktreeSweepEvery is how often the reaper runs the worktree sweep
+	// (reaper.go, W7); <= 0 means defaultWorktreeSweepInterval. sweepMu
+	// guards sweepKept, the last keep decision logged per project and task,
+	// so a kept worktree is reported once rather than on every sweep.
+	worktreeSweepEvery time.Duration
+	sweepMu            sync.Mutex
+	sweepKept          map[string]string
+
+	// commitMu guards commitBusy and verifyChecks. commitBusy counts, per
+	// project, the commit agents between launchCommitAgent and the end of
+	// their afterCommitSession (beginCommit / endCommit): wider than the
+	// session itself, so it also covers the routing and the relaunch of a
+	// transient retry. The snapshot reports it as live.commit_reserved, which
+	// the wolf checks before committing on the shared branch
+	// (docs/parallel-task-worktrees.md X3). verifyChecks counts the
+	// pre-integration build check outcomes since the daemon started (R1),
+	// reported as the snapshot's verify_checks. Neither is persisted.
+	commitMu     sync.Mutex
+	commitBusy   map[string]int
+	verifyChecks map[string]*VerifyChecks
+
+	// blockMu serializes transitionProjectBlocked's read-modify-write of
+	// project.yaml, so two siblings blocking at once append their reasons
+	// rather than overwrite one another (X3).
+	blockMu sync.Mutex
+
+	// schedLocks holds one mutex per project (schedMu), held by schedule for
+	// its decide-and-reserve step so two passes running on different
+	// session-end goroutines cannot both admit a task into the same free slot
+	// (docs/parallel-task-worktrees.md S4). schedLocksMu guards the map.
+	schedLocksMu sync.Mutex
+	schedLocks   map[string]*sync.Mutex
+	// worktreeLocks serializes the git work of one project's launches
+	// (provisioning, `git worktree add`, prepareIntegration), which now run
+	// concurrently once several tasks are admitted in one pass.
+	worktreeLocks map[string]*sync.Mutex // also guarded by schedLocksMu
+
+	// tokenMu guards the global task cap (S3): taskTokens holds one entry per
+	// task agent holding a token, keyed by task file path (so a release is
+	// idempotent), maxParallelTasks is the cap (0 = none), and capDeferred
+	// lists the projects that wanted a slot while none was free, oldest
+	// first; each token release revisits them in that order. admitting holds
+	// the tasks schedule marked running whose launch has not yet stamped a
+	// worktree on them, keyed project path → task name, so they are not
+	// mistaken for legacy shared-tree work in that window (D7). schedNotes
+	// is what the last pass of each project deferred, and which audit lines
+	// it has already written, so they are logged once rather than per pass.
+	tokenMu          sync.Mutex
+	maxParallelTasks int
+	taskTokens       map[string]bool
+	capDeferred      []string
+	admitting        map[string]map[string]bool
+	schedNotes       map[string]*schedNote
 
 	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
 	// unless WithStateFile configured a path.
@@ -228,6 +290,29 @@ func WithSessionIdleTimeout(timeout time.Duration) Option {
 	}
 }
 
+// WithWorktreeSweepInterval overrides how often the reaper runs the worktree
+// sweep (docs/parallel-task-worktrees.md W7). A non-positive value leaves the
+// default (defaultWorktreeSweepInterval).
+func WithWorktreeSweepInterval(every time.Duration) Option {
+	return func(d *Daemon) {
+		if every > 0 {
+			d.worktreeSweepEvery = every
+		}
+	}
+}
+
+// WithMaxParallelTasks caps the task agents running at once across every
+// project (`orch --max-parallel-tasks`, docs/parallel-task-worktrees.md S3).
+// Commit, planning, review and wolf agents do not count. n <= 0 means no cap,
+// the default.
+func WithMaxParallelTasks(n int) Option {
+	return func(d *Daemon) {
+		if n > 0 {
+			d.maxParallelTasks = n
+		}
+	}
+}
+
 // New returns a Daemon watching roots that logs to a (both required). It
 // applies opts, then validates the workingman-agent scratch dir and the state
 // file (both must lie outside every root). Nothing is watched or dispatched
@@ -259,6 +344,14 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		reviewFinger:       map[string]reviewBaseline{},
 		reviewBackoff:      map[string]int{},
 		dispatchChains:     map[string]chan struct{}{},
+		commitBusy:         map[string]int{},
+		schedLocks:         map[string]*sync.Mutex{},
+		worktreeLocks:      map[string]*sync.Mutex{},
+		admitting:          map[string]map[string]bool{},
+		taskTokens:         map[string]bool{},
+		schedNotes:         map[string]*schedNote{},
+		verifyChecks:       map[string]*VerifyChecks{},
+		sweepKept:          map[string]string{},
 		sessionIdleTimeout: defaultSessionIdleTimeout,
 		clock:              time.Now,
 		sleepCheckEvery:    cronSleepCheckEvery,
@@ -303,6 +396,9 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 func (d *Daemon) Run(ctx context.Context) error {
 	d.ctx = ctx
 	defer d.shutdown()
+	if err := d.gitPreflight(); err != nil {
+		return err
+	}
 	if d.power != nil {
 		// Synchronously first, so a daemon started on battery never dispatches.
 		d.checkPower(ctx)
