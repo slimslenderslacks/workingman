@@ -269,6 +269,10 @@ type Config struct {
 	// sandbox's MCP gateway (see ensureMCPGateway); execArgs injects it as
 	// MCP_URL. Empty when the gateway is disabled or could not be minted.
 	mcpURL string
+
+	// secretLsSleep, when set, replaces the backoff sleep between
+	// `sbx secret ls` retries (see gatewaySecretConfigured); a test seam.
+	secretLsSleep func(context.Context, time.Duration) error
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -778,9 +782,27 @@ func listSandboxes(ctx context.Context, run commandFunc, sbxPath string) (map[st
 	return m, nil
 }
 
-// gatewaySecretConfigured is sbx.GatewaySecretConfigured over run.
-func gatewaySecretConfigured(ctx context.Context, run commandFunc, sbxPath, sandboxName string) (bool, error) {
-	return sbx.GatewaySecretConfigured(ctx, sbx.RunFunc(run), sbxPath, sandboxName)
+// gatewaySecretConfigured reports whether sbx holds an LLM gateway secret for
+// c.SandboxName (see sbx.SecretLs.GatewayConfigured). run's stdout alone is
+// decoded, stderr only quoted in errors. `sbx secret ls` is retried with
+// backoff and serialized across every acp-wrapper on the host by a lock file
+// beside the sessions root (sbx.SecretLsLockPath), held only while sbx runs:
+// many sessions starting at once otherwise trip sbx's own docker hub refresh
+// lock and get a WARN instead of the secrets. An error means every attempt
+// failed.
+func gatewaySecretConfigured(ctx context.Context, run sbx.OutputFunc, c Config) (bool, error) {
+	q := sbx.SecretLs{
+		Run:     run,
+		SbxPath: c.SbxPath,
+		Sleep:   c.secretLsSleep,
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: %s\n", c.SessionID, fmt.Sprintf(format, args...))
+		},
+	}
+	if c.SessionsRoot != "" {
+		q.LockPath = sbx.SecretLsLockPath(c.SessionsRoot)
+	}
+	return q.GatewayConfigured(ctx, c.SandboxName)
 }
 
 // sameWorkspaceSet reports whether a and b contain the same paths, ignoring
@@ -1008,9 +1030,14 @@ func Run(ctx context.Context, c Config) error {
 
 	// Route the agent through the LLM gateway only when sbx can authenticate
 	// it there; otherwise leave ANTHROPIC_BASE_URL unset (the default API).
-	useGateway, err := gatewaySecretConfigured(ctx, execCommand, c.SbxPath, c.SandboxName)
+	// Not knowing is a failure, not "no secret": falling back to the default
+	// API on a TLS-inspecting network only fails later, less clearly.
+	useGateway, err := gatewaySecretConfigured(ctx, sbx.ExecOutput, c)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING %v; not setting ANTHROPIC_BASE_URL\n", c.SessionID, err)
+		err = fmt.Errorf("acpwrapper: cannot tell whether sbx holds the %s secret, not starting the agent without knowing whether to set ANTHROPIC_BASE_URL: %w", gatewayHost, err)
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ERROR %v\n", c.SessionID, err)
+		failRecord(store, c, createdAt, err)
+		return err
 	}
 	c.useGateway = useGateway
 	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: LLM gateway %s: %v\n", c.SessionID, gatewayHost, useGateway)

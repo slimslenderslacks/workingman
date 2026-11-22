@@ -43,7 +43,7 @@ argv.
 | `sbx create` + `sbx run` (`:session`) | create: `claude --name <n> -e MCP_URL=… -e <claude env> --kit <kit> -t <image> --pull missing <ws…>`; run: `--name <n> -e …  -e GIT_*… -- --session-id\|--resume <uuid>` | `runner.LaunchInteractive` / `ensureSessionSandbox` (mirrors `sbx-create.sh`) | n/a (runs in a terminal tab) | A create failure is fatal and DELETEs the gateway. Relies on **run starting a stopped sandbox**. |
 | `sbx exec <n> -- ssh-add -l` | — | `gitsign.Preflight`, `gitsign.PushPreflight`, `check-signing.sh` | looks for `SHA256:` in stdout | A missing key degrades signing to unsigned (`SigningBroken` in session.json). For push it is fatal (`PushBroken`). |
 | `sbx exec <n> -- sh -c 'ssh -T … git@github.com 2>&1'` | — | `gitsign.PushPreflight`, `check-signing.sh` | text classification: "successfully authenticated", "permission denied", "host key verification failed", or unreachable | Fatal for pushing sessions, with an actionable reason that names `sbx policy log` / `sbx policy allow network`. |
-| `sbx secret ls --json` | — | `acpwrapper.gatewaySecretConfigured` | `custom_secrets[].{scope, targets[]}`. Matches when scope is `global` or the sandbox name and `targets` contains `llm.es.atko.services` | An error is logged as a WARNING and the gateway is not used (fail-open to the default API). |
+| `sbx secret ls --json` | — | `acpwrapper.gatewaySecretConfigured`, `runner.ensureSessionSandbox` (both via `sbx.SecretLs`), `acpwrapper.warnScopedLLMSecret` (`sbx.GatewaySecretScopes`, one attempt) | stdout only (stderr is quoted in errors); leading non-JSON lines and JSON log lines are skipped up to the first object with `custom_secrets`/`secrets` (`sbx.DecodeSecretList`). `custom_secrets[].{scope, targets[]}` matches when scope is `global` or the sandbox name and `targets` contains `llm.es.atko.services` | A non-zero exit or undecodable output is retried up to 5 times (jittered backoff from 200ms, doubling). Each invocation holds an advisory `flock` on `<state>/locks/sbx-secret-ls.lock` (beside the sessions root) while sbx runs, never across the sleeps, so parallel starts don't trip sbx's docker hub refresh lock; a lock that can't be had within 30s is logged and skipped. Exhaustion fails the acp-wrapper launch (session.json `failed`, error names `sbx secret ls`); `:session` audits `session_llm_gateway_unknown` and goes on without the gateway. A decoded list with no gateway secret just leaves `ANTHROPIC_BASE_URL` unset. |
 | `sbx daemon stop` / `sbx daemon start -d` | env `SSH_AUTH_SOCK=<private agent>` | `start.sh`, `check-signing.sh restart_sandboxd` | none | `start.sh`: a failed start is fatal. Stop is `|| true`. |
 | `sbx template load` / `sbx template ls` | — | **manual**, documented in `start.sh` comments and `docs/mcp-gateway.md` (`ACP_IMAGE` default `slimslenderslacks/claude-code-acp:0.90.0`) | — | — |
 | `sbx mcp ls` / `sbx mcp auth` | — | **text only**: `daemon/review.go` block reason, `wolf.tmpl` | — | — |
@@ -84,8 +84,9 @@ argv.
   - `commandFunc`/`execCommand`, the single seam for sbx in the wrapper.
   - `ensureSandbox`, `createSandbox`, `listSandboxes`, `sameWorkspaceSet`, and
     `SplitMount`/`JoinMount` (`:ro`).
-  - `gatewaySecretConfigured` (`sbx secret ls`), which drives
-    `ANTHROPIC_BASE_URL`.
+  - `gatewaySecretConfigured` (`sbx secret ls`, via the retrying, host-locked
+    `sbx.SecretLs`), which drives `ANTHROPIC_BASE_URL`; a check that never
+    succeeds fails the launch.
   - `ensureMCPGateway` / `sweepMCPGateways` (via `internal/mcpgateway`):
     the per-sandbox standalone-codemode gateway → `MCP_URL`, plus one
     `sbx exec <n> -- sh -c …` that records it in

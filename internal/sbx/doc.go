@@ -18,9 +18,17 @@
 // sandbox is gone. [DecodeList] accepts both the old {"sandboxes": [...]} and
 // the newer bare-array output.
 //
+// LLM gateway secret: [SecretLs] runs `sbx secret ls --json` for the
+// acp-wrapper and `:session` launches, decoding stdout only
+// ([DecodeSecretList] skips leading WARN and JSON log lines), retrying with
+// jittered backoff, and holding a host-wide flock ([SecretLsLockPath]) only
+// while sbx runs, so many parallel starts don't trip sbx's own docker hub
+// refresh lock. [GatewaySecretScopes] is the single-attempt form.
+//
 // # Key types
 //
 //   - [Sandbox] — one `sbx ls --json` entry (name and workspaces).
+//   - [SecretLs] — the retrying, serialized gateway-secret check.
 //   - [Alive] — existence check used by the TUI's ACP watcher and the
 //     daemon's session reconciliation.
 //   - [SanitizeName], [FitNameTo], [NameBudget], [CheckName] — the naming

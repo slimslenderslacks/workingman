@@ -108,7 +108,7 @@ sbx `create` and `run` start with this environment
 
 ### checks
 
-* do we have a custom_secret set for the llm gateway?
+* do we have a custom_secret set for the llm gateway? (`sbx secret ls --json`: stdout only, leading `WARN:`/log lines skipped, retried up to 5 times with backoff under the host-wide `~/.workingman/locks/sbx-secret-ls.lock`; acp-wrapper fails the launch if it never answers, `:session` carries on without the gateway)
 * explicitly allow host.docker.interal:3333 and localhost:3333 for this sandbox
 
 ## sbx-rm.sh

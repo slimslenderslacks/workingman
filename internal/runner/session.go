@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/sbx"
@@ -47,6 +48,26 @@ func (r *Runner) sbxRunner() sbx.RunFunc {
 	}
 }
 
+// gatewaySecretConfigured is sbx.SecretLs.GatewayConfigured for sandbox,
+// retried and serialized under the same lock file as acp-wrapper's check.
+// With an sbxRun test seam the seam's (combined) output is decoded and the
+// backoff is skipped.
+func (r *Runner) gatewaySecretConfigured(ctx context.Context, sandbox string) (bool, error) {
+	q := sbx.SecretLs{Run: sbx.ExecOutput, SbxPath: r.sbxBin()}
+	if r.sbxRun != nil {
+		run := r.sbxRun
+		q.Run = func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+			out, err := run(ctx, name, args...)
+			return out, nil, err
+		}
+		q.Sleep = func(context.Context, time.Duration) error { return nil }
+	}
+	if root, err := r.sessionsRoot(); err == nil {
+		q.LockPath = sbx.SecretLsLockPath(root)
+	}
+	return q.GatewayConfigured(ctx, sandbox)
+}
+
 // sessionEnv is the `-e` flags shared by `sbx create` and `sbx run`: MCP_URL
 // (when there is a gateway), the claude env, and ANTHROPIC_BASE_URL when sbx
 // can authenticate to the LLM gateway.
@@ -73,7 +94,7 @@ func (r *Runner) ensureSessionSandbox(ctx context.Context, name string, workspac
 	if err := gw.WaitReady(ctx, name, r.MCPGatewayReadyTimeout); err != nil {
 		return nil, fmt.Errorf("MCP gateway (okta-gateway) unavailable: %w", err)
 	}
-	useGateway, err := sbx.GatewaySecretConfigured(ctx, run, bin, name)
+	useGateway, err := r.gatewaySecretConfigured(ctx, name)
 	if err != nil {
 		r.audit("session_llm_gateway_unknown", "sandbox", name, "err", err.Error())
 	}

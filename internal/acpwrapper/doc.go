@@ -27,7 +27,9 @@
 // after the project has been unblocked for UnblockGrace or idle for
 // IdleTimeout. On exit the sandbox is removed unless the task's status, or
 // SaveSandbox, says to keep it for inspection. Before the agent starts, Run
-// also routes it through the LLM gateway when a gateway secret is configured,
+// also routes it through the LLM gateway when a gateway secret is configured
+// (`sbx secret ls --json`, retried with backoff and serialized host-wide by a
+// lock file, failing the launch if it never answers),
 // checks from inside the sandbox that the API endpoint's TLS chain is trusted
 // (failing the launch rather than starting an agent that can only answer
 // "Self-signed certificate detected"),

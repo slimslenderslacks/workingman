@@ -161,28 +161,38 @@ func TestGatewaySecretConfigured(t *testing.T) {
 			`"],"env":"ANTHROPIC_AUTH_TOKEN","placeholder":"sbx-cs-x","kind":"command"}]}`
 	}
 	for _, tc := range []struct {
-		name string
-		out  string
-		err  error
-		want bool
+		name   string
+		out    string
+		stderr string
+		err    error
+		want   bool
 	}{
-		{"global", secret("global", "llm.es.atko.services"), nil, true},
-		{"this sandbox", secret("acp-s", "llm.es.atko.services"), nil, true},
-		{"other sandbox", secret("acp-other", "llm.es.atko.services"), nil, false},
-		{"other host", secret("global", "api.example.com"), nil, false},
-		{"none", `{"secrets":[],"custom_secrets":[]}`, nil, false},
-		{"sbx fails", "", errors.New("exit status 1"), false},
+		{"global", secret("global", "llm.es.atko.services"), "", nil, true},
+		{"this sandbox", secret("acp-s", "llm.es.atko.services"), "", nil, true},
+		{"other sandbox", secret("acp-other", "llm.es.atko.services"), "", nil, false},
+		{"other host", secret("global", "api.example.com"), "", nil, false},
+		{"none", `{"secrets":[],"custom_secrets":[]}`, "", nil, false},
+		{"warn on stderr", secret("global", "llm.es.atko.services"), "WARN: docker hub refresh lock held by another process: context deadline exceeded\n", nil, true},
+		{"warn line before json", "WARN: docker hub refresh lock held by another process: context deadline exceeded\n" + secret("global", "llm.es.atko.services"), "", nil, true},
+		{"sbx fails", "", "boom", errors.New("exit status 1"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+			calls := 0
+			run := func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
+				calls++
 				if got := append([]string{name}, args...); !reflect.DeepEqual(got, []string{"sbx", "secret", "ls", "--json"}) {
 					t.Errorf("ran %v, want sbx secret ls --json", got)
 				}
-				return []byte(tc.out), tc.err
+				return []byte(tc.out), []byte(tc.stderr), tc.err
 			}
-			got, err := gatewaySecretConfigured(context.Background(), run, "sbx", "acp-s")
+			c := Config{SessionID: "s", SbxPath: "sbx", SandboxName: "acp-s", SessionsRoot: filepath.Join(t.TempDir(), "sessions"),
+				secretLsSleep: func(context.Context, time.Duration) error { return nil }}
+			got, err := gatewaySecretConfigured(context.Background(), run, c)
 			if (err != nil) != (tc.err != nil) {
 				t.Errorf("err = %v, want error %v", err, tc.err != nil)
+			}
+			if err != nil && (!strings.Contains(err.Error(), "sbx secret ls") || !strings.Contains(err.Error(), "boom") || calls != 5) {
+				t.Errorf("err = %v after %d calls, want 5 attempts naming sbx secret ls and quoting stderr", err, calls)
 			}
 			if got != tc.want {
 				t.Errorf("gatewaySecretConfigured = %v, want %v", got, tc.want)

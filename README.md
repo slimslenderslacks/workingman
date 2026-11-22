@@ -215,6 +215,15 @@ recreating, and every launch now runs an **LLM TLS preflight** — `curl` from
 inside the sandbox to the endpoint the agent will use — failing the launch
 with that diagnosis (`LLM TLS preflight FAILED` in `acp-wrapper.log`, and the
 session's error) instead of starting an agent that cannot reach the API.
+The secret check itself is retried: with many sessions starting at once
+(`max_parallel_tasks`), concurrent `sbx secret ls` calls contend for sbx's
+docker hub refresh lock and can print `WARN: docker hub refresh lock held by
+another process` instead of the list. acp-wrapper reads stdout only, skips
+leading warning/log lines, retries up to 5 times with jittered backoff, and
+serializes the call (only the call) across wrappers with a lock file at
+`~/.workingman/locks/sbx-secret-ls.lock`. If every attempt fails the launch
+fails with `sbx secret ls failed after 5 attempts` rather than quietly
+falling back to `api.anthropic.com`.
 Check with:
 
 ```bash

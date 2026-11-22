@@ -2,10 +2,6 @@ package sbx
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"slices"
-	"strings"
 )
 
 // RunFunc runs one command and returns its output. Production callers pass a
@@ -46,34 +42,9 @@ func GatewaySecretConfigured(ctx context.Context, run RunFunc, sbxPath, sandbox 
 // GatewaySecretScopes reports which custom secrets targeting LLMGatewayHost
 // apply to sandbox: a global one, and one scoped to sandbox itself. The
 // difference matters because sbx deletes a sandbox-scoped secret when that
-// sandbox is removed, so recreating the sandbox loses it.
+// sandbox is removed, so recreating the sandbox loses it. It runs `sbx secret
+// ls --json` once, without SecretLs's retries or lock, but decodes as
+// tolerantly (DecodeSecretList).
 func GatewaySecretScopes(ctx context.Context, run RunFunc, sbxPath, sandbox string) (global, scoped bool, err error) {
-	if sbxPath == "" {
-		sbxPath = "sbx"
-	}
-	out, err := run(ctx, sbxPath, "secret", "ls", "--json")
-	if err != nil {
-		return false, false, fmt.Errorf("sbx secret ls: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	var data struct {
-		CustomSecrets []struct {
-			Scope   string   `json:"scope"`
-			Targets []string `json:"targets"`
-		} `json:"custom_secrets"`
-	}
-	if err := json.Unmarshal(out, &data); err != nil {
-		return false, false, fmt.Errorf("decode sbx secret ls output: %w", err)
-	}
-	for _, s := range data.CustomSecrets {
-		if !slices.Contains(s.Targets, LLMGatewayHost) {
-			continue
-		}
-		switch s.Scope {
-		case "global":
-			global = true
-		case sandbox:
-			scoped = true
-		}
-	}
-	return global, scoped, nil
+	return SecretLs{Run: combined(run), SbxPath: sbxPath, Attempts: 1}.GatewayScopes(ctx, sandbox)
 }
