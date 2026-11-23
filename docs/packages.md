@@ -39,7 +39,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/prompts` | daemon | Package prompts renders the per-kind instruction text that orch writes to .orch/instructions.md for a newly launched agent. | — | `BehindProject`, `Data`, `InFlightTask`, `IntegrationReport`, `Repo`, `RepoCommit`, `UnintegratedTask` |
 | `internal/router` | daemon | Package router connects inbound channel messages (WhatsApp, Signal) to agent conversations and sends the replies back. | `Agent`, `Auditor`, `Outbound`, `Source` | `Attacher`, `Config`, `Router`, `Session` |
 | `internal/runner` | daemon | Package runner turns the daemon's request to launch an agent (a Plan) into a running session: it prepares the workspace, writes the .orch handoff, and starts the agent over ACP or in a terminal tab. | — | `CommandBuilder`, `Harness`, `InteractiveSpec`, `Observe`, `Plan`, `Runner`, `SandboxCreator`, `SandboxSpec`, `SessionConfig` |
-| `internal/sbx` | shared | Package sbx holds the shared helpers for the sbx sandbox CLI: sandbox-name rules, the robust runner for sbx's JSON-output commands, and the `sbx ls --json` existence check. | — | `Client`, `OutputFunc`, `RunFunc`, `Sandbox` |
+| `internal/sbx` | shared | Package sbx holds the shared helpers for the sbx sandbox CLI: sandbox-name rules, the robust runner for sbx's JSON-output commands, and the `sbx ls --json` existence check. | — | `Client`, `ExtraCA`, `OutputFunc`, `RunFunc`, `Sandbox` |
 | `internal/scheduler` | daemon | Package scheduler runs the daemon's timed callbacks (project cron schedules and PR review polls) on robfig/cron, keyed by a caller-chosen string. | — | `Scheduler` |
 | `internal/service` | daemon | Package service builds the macOS launchd LaunchAgent that keeps the orch daemon running in the background. | — | `Config` |
 | `internal/session` | shared | Package session defines the on-disk record (session.json and agent.sock under ~/.workingman/sessions/<id>/) that lets ACP agent sessions outlive the TUI and the daemon that started them. | — | `Session`, `Status`, `Store` |
@@ -124,6 +124,7 @@ graph LR
   cmd_orch --> internal_power
   cmd_orch --> internal_router
   cmd_orch --> internal_runner
+  cmd_orch --> internal_sbx
   cmd_orch --> internal_scheduler
   cmd_orch --> internal_service
   cmd_orch --> internal_session
@@ -221,7 +222,7 @@ The same graph as text: each package's internal imports and importers.
 |---|---|---|
 | `cmd/acp-wrapper` | `acpwrapper`, `gitsign`, `mcpgateway`, `policy` | — |
 | `cmd/op-read` | `onepassword` | — |
-| `cmd/orch` | `agent`, `audit`, `channels`, `channels/signal`, `channels/signal/setup`, `channels/whatsapp`, `channels/whatsapp/setup`, `daemon`, `mcpgateway`, `notify`, `power`, `router`, `runner`, `scheduler`, `service`, `session`, `terminal`, `tui`, `workspace` | — |
+| `cmd/orch` | `agent`, `audit`, `channels`, `channels/signal`, `channels/signal/setup`, `channels/whatsapp`, `channels/whatsapp/setup`, `daemon`, `mcpgateway`, `notify`, `power`, `router`, `runner`, `sbx`, `scheduler`, `service`, `session`, `terminal`, `tui`, `workspace` | — |
 | `internal/acpchat` | `acpclient`, `session` | `router` |
 | `internal/acpclient` | — | `acpchat`, `tui` |
 | `internal/acpwrapper` | `gitsign`, `mcpgateway`, `policy`, `project`, `sbx`, `session`, `task` | `cmd/acp-wrapper` |
@@ -245,7 +246,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/prompts` | `agent`, `sbx` | `daemon`, `runner` |
 | `internal/router` | `acpchat`, `audit`, `channels` | `cmd/orch` |
 | `internal/runner` | `agent`, `audit`, `gitsign`, `mcpgateway`, `policy`, `prompts`, `sbx`, `session`, `setup`, `task`, `terminal`, `workspace` | `cmd/orch`, `daemon` |
-| `internal/sbx` | — | `acpwrapper`, `daemon`, `prompts`, `runner`, `task`, `tui` |
+| `internal/sbx` | — | `cmd/orch`, `acpwrapper`, `daemon`, `prompts`, `runner`, `task`, `tui` |
 | `internal/scheduler` | — | `cmd/orch`, `daemon` |
 | `internal/service` | — | `cmd/orch` |
 | `internal/session` | — | `cmd/orch`, `acpchat`, `acpwrapper`, `daemon`, `runner`, `tui` |

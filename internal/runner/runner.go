@@ -305,11 +305,15 @@ func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
 // caller then gets it — or a replacement for a reused sandbox whose gateway is
 // gone — from mcpgateway.Manager.Ensure and passes MCP_URL per `sbx exec`.
 // The zero value means no gateway.
+//
+// ExtraCACerts is the absolute path of the per-laptop extra-CA PEM bundle
+// (Runner.ExtraCACerts) the sandbox must trust; empty means none.
 type SandboxSpec struct {
-	Name       string
-	Workspaces []string
-	Policies   []policy.Rule
-	MCPGateway mcpgateway.Manager
+	Name         string
+	Workspaces   []string
+	Policies     []policy.Rule
+	MCPGateway   mcpgateway.Manager
+	ExtraCACerts string
 }
 
 // SandboxCreator ensures a sandbox described by spec exists.
@@ -538,6 +542,14 @@ type Runner struct {
 	// image is what removes the kit's per-create npm install. Empty leaves
 	// every sandbox on the stock claude template.
 	Image string
+
+	// ExtraCACerts, when set, is the absolute path of a PEM bundle of extra
+	// CAs (a TLS-inspecting VPN's root) that every sandbox must trust — see
+	// docs/sandbox-custom-ca.md. orch validates it at startup (sbx.LoadExtraCA).
+	// It is passed as `acp-wrapper --extra-ca-certs`, in SandboxSpec to the
+	// terminal-tab creator, and read by the `:session` path. Empty (the
+	// default) leaves every argv byte-identical to before.
+	ExtraCACerts string
 
 	// SessionsRoot is where per-session directories live; passed to
 	// `acp-wrapper --sessions-root` and used to write the initial session.json.
@@ -828,10 +840,11 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 			return nil, cfg, err
 		}
 		if err := r.Sandbox(ctx, SandboxSpec{
-			Name:       sandboxName,
-			Workspaces: workspaces,
-			Policies:   p.Policies,
-			MCPGateway: gw,
+			Name:         sandboxName,
+			Workspaces:   workspaces,
+			Policies:     p.Policies,
+			MCPGateway:   gw,
+			ExtraCACerts: r.ExtraCACerts,
 		}); err != nil {
 			return nil, cfg, fmt.Errorf("runner: sandbox: %w", err)
 		}
@@ -1252,6 +1265,11 @@ func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRo
 	// before.
 	if img := strings.TrimSpace(h.Image); img != "" {
 		args = append(args, "--template", img)
+	}
+	// The per-laptop extra CA bundle (Runner.ExtraCACerts). Like --template,
+	// omitted entirely when unset so the argv is byte-identical to before.
+	if ca := strings.TrimSpace(r.ExtraCACerts); ca != "" {
+		args = append(args, "--extra-ca-certs", ca)
 	}
 	if persistent {
 		// Conversational session (the wolf): survive client disconnects — the TUI

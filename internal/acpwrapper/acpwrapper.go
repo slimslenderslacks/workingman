@@ -96,6 +96,15 @@ type Config struct {
 	// SbxPath is the sbx executable. Defaults to "sbx" (resolved on PATH).
 	SbxPath string
 
+	// ExtraCACerts, when set, is a PEM bundle of extra CAs (the per-laptop
+	// root of a TLS-inspecting VPN) the sandbox must trust; see
+	// docs/sandbox-custom-ca.md. normalize makes it absolute, and Run re-reads
+	// and re-validates it (sbx.LoadExtraCA) on every launch, before
+	// ensureSandbox, so a refreshed file takes effect without a daemon restart
+	// and one that has become invalid fails the launch. Empty (the default)
+	// changes nothing.
+	ExtraCACerts string
+
 	// ExitWhenEmpty makes the wrapper shut its sandboxed ACP client down
 	// (close its stdin) once the last connected TUI disconnects, after at
 	// least one client has connected. Set by orch's daemon for the
@@ -274,6 +283,10 @@ type Config struct {
 	// JSON-parsed sbx calls (`sbx ls`, `sbx secret ls`; see sbxClient); a test
 	// seam.
 	sbxSleep func(context.Context, time.Duration) error
+
+	// extraCA is ExtraCACerts as loaded and validated by Run; zero when
+	// ExtraCACerts is empty.
+	extraCA sbx.ExtraCA
 
 	// sbxOutput, set by Run to sbx.ExecOutput, runs the JSON-parsed sbx calls
 	// with stdout and stderr kept apart. When nil (tests driving ensureSandbox
@@ -575,6 +588,16 @@ func (c *Config) normalize() error {
 		c.SbxPath = "sbx"
 	}
 
+	if ca := strings.TrimSpace(c.ExtraCACerts); ca != "" {
+		abs, err := filepath.Abs(ca)
+		if err != nil {
+			return fmt.Errorf("acpwrapper: extra CA certs %q: %w", ca, err)
+		}
+		c.ExtraCACerts = abs
+	} else {
+		c.ExtraCACerts = ""
+	}
+
 	// Default the gateway record store even when no gateway is configured now,
 	// so gateways recorded by an earlier, gateway-enabled run are still
 	// released when their sandboxes go.
@@ -582,6 +605,27 @@ func (c *Config) normalize() error {
 		c.MCPGateway.Store.Dir = mcpgateway.StateDir(c.SessionsRoot)
 	}
 
+	return nil
+}
+
+// loadExtraCA loads and validates c.ExtraCACerts into c.extraCA, logging its
+// warnings (expired or non-CA certs) to w. It is a no-op when ExtraCACerts is
+// empty.
+func (c *Config) loadExtraCA(w io.Writer) error {
+	c.extraCA = sbx.ExtraCA{}
+	if c.ExtraCACerts == "" {
+		return nil
+	}
+	ca, err := sbx.LoadExtraCA(c.ExtraCACerts)
+	if err != nil {
+		return fmt.Errorf("acpwrapper: %w", err)
+	}
+	for _, warn := range ca.Warnings {
+		fmt.Fprintf(w, "acp-wrapper: session %s: warning: %s\n", c.SessionID, warn)
+	}
+	fmt.Fprintf(w, "acp-wrapper: session %s: extra CA certs %s: %d certificate(s): %s\n",
+		c.SessionID, ca.Path, len(ca.Certs), strings.Join(ca.Subjects(), "; "))
+	c.extraCA = ca
 	return nil
 }
 
@@ -999,6 +1043,13 @@ func Run(ctx context.Context, c Config) error {
 	store := session.Store{Root: c.SessionsRoot}
 	createdAt := time.Now()
 	if err := store.Write(c.sessionRecord(session.StatusStarting, createdAt, createdAt)); err != nil {
+		return err
+	}
+
+	// Re-validate the extra CA bundle on every launch: orch checked it at
+	// startup, but the file may have been refreshed or removed since.
+	if err := c.loadExtraCA(os.Stderr); err != nil {
+		failRecord(store, c, createdAt, err)
 		return err
 	}
 

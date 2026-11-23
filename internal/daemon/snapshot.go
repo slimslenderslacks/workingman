@@ -85,6 +85,7 @@ type DaemonInfo struct {
 	AcpKit           string    `json:"acp_kit,omitempty"`
 	AcpImage         string    `json:"acp_image,omitempty"`
 	AcpWrapper       string    `json:"acp_wrapper,omitempty"`
+	ExtraCACerts     string    `json:"extra_ca_certs,omitempty"`
 	SessionsRoot     string    `json:"sessions_root,omitempty"`
 	AuditLog         string    `json:"audit_log,omitempty"`
 	StateFile        string    `json:"state_file,omitempty"`

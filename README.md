@@ -235,6 +235,24 @@ sbx secret ls --json | jq '.custom_secrets[] | select(.targets | index("llm.es.a
 grep -E 'LLM gateway|LLM TLS' ~/orch/acp-wrapper.log | tail
 ```
 
+### Custom CA for a TLS-inspecting VPN (`--extra-ca-certs`)
+
+On a laptop whose VPN re-signs HTTPS (git to `github.com`, the direct
+`api.anthropic.com` path), sandboxes need the corporate root. It is an
+optional, per-laptop setting:
+
+| orch flag | Environment variable | Meaning |
+|---|---|---|
+| `--extra-ca-certs <pem>` | `WORKINGMAN_EXTRA_CA_CERTS` | PEM bundle of extra CAs every sandbox must trust. Validated at startup: orch exits if the file is unreadable or holds no PEM `CERTIFICATE` block (a DER file gets an `openssl x509 -inform DER` hint), and warns with subject and `notAfter` about an expired cert. Handed to every sandbox-creating path (`acp-wrapper --extra-ca-certs`, which re-validates it per launch; the terminal-tab and `:session` paths); installing it into each sandbox's trust store is described in [docs/sandbox-custom-ca.md](docs/sandbox-custom-ca.md) §4.3. Empty (the default) changes nothing. |
+
+The flag wins over the environment variable; orch writes the effective value
+to the audit log as `extra_ca_config` and to the state snapshot as
+`extra_ca_certs`. `start.sh` passes no flag (orch reads the variable itself);
+under launchd use `orch service install --root ~/orch -- --extra-ca-certs
+~/.workingman/extra-ca.pem`. Which cert to export, and why the sample
+`corporate-ca.cer` does not work, is in
+[docs/sandbox-custom-ca.md](docs/sandbox-custom-ca.md).
+
 ## MCP gateway (per-sandbox MCP servers)
 
 Sandboxes reach MCP servers through the host's

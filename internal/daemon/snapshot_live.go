@@ -37,6 +37,7 @@ type RuntimeInfo struct {
 	AcpKit           string
 	AcpImage         string
 	AcpWrapper       string
+	ExtraCACerts     string
 	SessionsRoot     string
 	AuditLog         string
 	Headless         bool
@@ -347,6 +348,7 @@ func (d *Daemon) daemonInfo() *DaemonInfo {
 		AcpKit:           info.AcpKit,
 		AcpImage:         info.AcpImage,
 		AcpWrapper:       info.AcpWrapper,
+		ExtraCACerts:     info.ExtraCACerts,
 		SessionsRoot:     root,
 		AuditLog:         info.AuditLog,
 		StateFile:        d.snapshot.path,

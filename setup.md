@@ -23,6 +23,7 @@ Three scripts drive the local setup:
 | ACP_IMAGE | slimslenderslacks/claude-code-acp:0.90.0 |
 | WORKINGMAN_MCP_GATEWAY_URL | http://localhost:3333 |
 | WORKINGMAN_MCP_GATEWAY_SERVERS | github |
+| WORKINGMAN_EXTRA_CA_CERTS | unset (off). PEM bundle of extra CAs every sandbox must trust, for a laptop whose VPN does TLS inspection; read by orch itself (`--extra-ca-certs`), so start.sh passes no flag and only echoes it. See [docs/sandbox-custom-ca.md](docs/sandbox-custom-ca.md) |
 
 ### checks
 
@@ -48,6 +49,7 @@ Three scripts drive the local setup:
 | --acp-kit | ACP_KIT |
 | --acp-image | ACP_IMAGE |
 | --acp-wrapper | $HERE/acp-wrapper |
+| --extra-ca-certs | not passed; defaults to `$WORKINGMAN_EXTRA_CA_CERTS` (empty = off). Validated at startup: orch exits if the file is unreadable or holds no PEM certificate, and warns (subject + notAfter) about expired ones. Under launchd, pass it as a daemon flag: `orch service install --root ~/orch -- --extra-ca-certs ~/.workingman/extra-ca.pem` |
 
 ### acp-wrapper binary
 
@@ -62,6 +64,7 @@ The orch daemon never talks to a sandbox directly: for each agent session (plann
 | --sandbox | sbx sandbox name (default acp-&lt;session-id&gt;) |
 | --kit | acp-kit dir or published ref layered onto the sandbox (required) |
 | --template | prebuilt image for `sbx create -t` (orch passes ACP_IMAGE) |
+| --extra-ca-certs | PEM bundle of extra CAs the sandbox must trust; re-validated on every launch (orch passes it only when `--extra-ca-certs` / `WORKINGMAN_EXTRA_CA_CERTS` is set) |
 | --sbx | path to the sbx binary (default: sbx on PATH) |
 | --workspace | host path to mount; first is the agent cwd and must be writable; `:ro` suffix for read-only (repeatable) |
 | --exit-when-empty | exit once the last client disconnects (one-shot stages) |
