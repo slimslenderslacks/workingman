@@ -24,12 +24,19 @@ type InteractiveLauncher interface {
 	// workspace). Neither provisions anything: a missing directory is an error.
 	OpenOrchDir(ctx context.Context, projectPath string) (string, error)
 	OpenWorkspaceDir(ctx context.Context, projectPath string) (string, error)
+	// OpenTaskWorktreeDir backs `:workspace` from the Tasks pane when the
+	// selected task has its own worktree: a shell in that worktree instead.
+	OpenTaskWorktreeDir(ctx context.Context, projectPath, taskPath string) (string, error)
+	// OpenTaskSession backs `:session` from the Tasks pane when the selected
+	// task has its own worktree: the interactive claude session runs there
+	// instead of in the shared workspace (docs/parallel-task-worktrees.md X3).
+	OpenTaskSession(ctx context.Context, projectPath, taskPath string) (string, error)
 }
 
 // interactiveLaunchedMsg carries the result of an InteractiveLauncher call back
 // into Update so the model can report the new tab or surface an error.
 type interactiveLaunchedMsg struct {
-	kind   string // "session", "orch" or "workspace" — for the status message
+	kind   string // "session", "task session", "orch", "workspace" or "worktree" — for the status message
 	target string
 	err    error
 }
@@ -50,6 +57,20 @@ func (m model) openInteractive(kind string) (tea.Model, tea.Cmd) {
 	}
 	projectPath := m.projSel
 	launcher := m.interactive
+	// From the Tasks pane, `:workspace` and `:session` open the selected
+	// task's own worktree when it has one (docs/parallel-task-worktrees.md D5,
+	// X3): that is where a failed or blocked task's work is.
+	taskPath := ""
+	if (kind == "workspace" || kind == "session") && m.focus == paneTasks {
+		if t, ok := m.selectedTask(); ok && t.Worktree != "" {
+			taskPath = t.Path
+			if kind == "workspace" {
+				kind = "worktree"
+			} else {
+				kind = "task session"
+			}
+		}
+	}
 	m.statusMsg = "opening " + kind + "…"
 	return m, func() tea.Msg {
 		var (
@@ -64,6 +85,10 @@ func (m model) openInteractive(kind string) (tea.Model, tea.Cmd) {
 			target, err = launcher.OpenOrchDir(ctx, projectPath)
 		case "workspace":
 			target, err = launcher.OpenWorkspaceDir(ctx, projectPath)
+		case "worktree":
+			target, err = launcher.OpenTaskWorktreeDir(ctx, projectPath, taskPath)
+		case "task session":
+			target, err = launcher.OpenTaskSession(ctx, projectPath, taskPath)
 		default:
 			err = errors.New("unknown interactive kind " + kind)
 		}
@@ -91,4 +116,14 @@ func (m model) handleInteractiveLaunched(msg interactiveLaunchedMsg) (tea.Model,
 		m.statusMsg = "opened " + msg.kind + " in a new tab → " + msg.target
 	}
 	return m, nil
+}
+
+// selectedTask is the Tasks pane's selected task of the selected project.
+func (m model) selectedTask() (TaskView, bool) {
+	for _, t := range m.selectedProjectTasks() {
+		if t.Path == m.taskSel {
+			return t, true
+		}
+	}
+	return TaskView{}, false
 }

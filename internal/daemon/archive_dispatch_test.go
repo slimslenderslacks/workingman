@@ -537,3 +537,54 @@ func TestStrandedArchiveSessionReapedOnceArchiveSet(t *testing.T) {
 		t.Errorf("verdict after archive:true = %+v, want a stage_complete reap", v)
 	}
 }
+
+// TestCleanupDrainsThenArchives is X6: with tasks in flight, `cleanup: true`
+// admits no new task, keeps the commit queue integrating, and launches the
+// archive agent only when the last task and integration are done — from that
+// last session's end.
+func TestCleanupDrainsThenArchives(t *testing.T) {
+	e := newSchedEnv(t, 2)
+	e.addTask("a", []string{"gateway/a/**"})
+	e.addTask("b", []string{"gateway/b/**"})
+	e.pass()
+	e.finishTask("a", task.StatusSuccess)
+	e.eventually("a integrating", func() bool { return e.integrating() == "a" })
+	e.addTask("c", []string{"gateway/c/**"})
+
+	p, _ := project.Load(e.projectPath)
+	cleanup := *p
+	cleanup.Cleanup = true
+	if err := project.Save(e.projectPath, &cleanup); err != nil {
+		t.Fatal(err)
+	}
+	e.d.dispatchProject(e.projectPath, &cleanup)
+	if n := e.lch.count(agent.ArchiveAgent); n != 0 {
+		t.Fatalf("archive agent launched with work in flight")
+	}
+	if !strings.Contains(e.buf.String(), "archive_waiting_in_flight") {
+		t.Errorf("no archive_waiting_in_flight:\n%s", e.buf.String())
+	}
+
+	e.finishCommit("a")
+	e.eventually("a's integration routed", func() bool { return !e.d.commitReserved(e.projectPath) })
+	if tk := e.task("c"); tk.Status != task.StatusReady {
+		t.Errorf("c = %s, want ready: no task is admitted during cleanup", tk.Status)
+	}
+	if n := e.lch.count(agent.ArchiveAgent); n != 0 {
+		t.Fatalf("archive agent launched while b still runs")
+	}
+	// b finishes; its work still integrates before the archive agent runs.
+	e.finishTask("b", task.StatusSuccess)
+	e.eventually("b integrating", func() bool { return e.integrating() == "b" })
+	if n := e.lch.count(agent.ArchiveAgent); n != 0 {
+		t.Fatalf("archive agent launched beside an integration")
+	}
+	e.finishCommit("b")
+	e.eventually("archive agent launched", func() bool { return e.lch.count(agent.ArchiveAgent) == 1 })
+	if tk := e.task("b"); tk.Status != task.StatusCommitted {
+		t.Errorf("b = %s, want committed before the archive", tk.Status)
+	}
+	if n := e.lch.count(agent.TaskAgent); n != 2 {
+		t.Errorf("task agents started = %d, want 2", n)
+	}
+}

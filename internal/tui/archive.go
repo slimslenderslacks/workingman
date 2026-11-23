@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/slimslenderslacks/work/internal/project"
+	"github.com/slimslenderslacks/work/internal/worktree"
 )
 
 // workspaceRemover is the sliver of workspace.Manager `:archive` needs: tearing
@@ -97,7 +98,8 @@ func loadArchivable(projectPath string) (*project.Project, error) {
 // so a bad selection can't move an arbitrary directory.
 //
 // Ordering and failure policy: every validation runs first, then the workspace
-// is torn down — its `.orch` directory first, then the workspace itself — and
+// is torn down — its task worktrees and the project's `wm/` refs first
+// (removeTaskWorktrees), then its `.orch` directory, then the workspace itself — and
 // only then does the project directory move. Doing the removals first means a
 // failure there aborts the archive with the project still in its original
 // place — nothing is lost and the user can retry once wsp is healthy — whereas
@@ -133,6 +135,9 @@ func archiveProject(root, projectPath string, wsp workspaceRemover) error {
 		return err
 	}
 	if wsp != nil && p.Branch != "" {
+		if err := removeTaskWorktrees(wsp, p.Branch); err != nil {
+			return fmt.Errorf("workspace %s: task worktrees not removed (%v); %s left in place", p.Branch, err, name)
+		}
 		if err := removeWorkspaceOrch(wsp, p.Branch); err != nil {
 			return fmt.Errorf("workspace %s: .orch not removed (%v); %s left in place", p.Branch, err, name)
 		}
@@ -149,6 +154,36 @@ func archiveProject(root, projectPath string, wsp workspaceRemover) error {
 		return err
 	}
 	return os.Rename(projectDir, dest)
+}
+
+// removeTaskWorktrees deletes the project's per-task worktrees and refs from
+// every repo of its wsp workspace (docs/parallel-task-worktrees.md X6): each
+// worktree under .worktrees/, then refs/heads/wm/<branch>/* and
+// refs/wm/<branch>/*, through worktree.Manager.RemoveProject — the helper the
+// daemon's cleanup uses too, so the two agree on paths and ref names. The refs
+// go explicitly, rather than with the workspace, because a repo dir that is a
+// worktree of a shared mirror keeps its refs in the mirror, where `wsp rm`
+// would leave them.
+//
+// The archive agent has already reported any unintegrated work they held
+// (archive: true), so this deletes it. A workspace wsp cannot resolve, or one
+// that does not exist, has nothing to remove; repo dirs without a .git are
+// skipped.
+func removeTaskWorktrees(wsp workspaceRemover, branch string) error {
+	root, err := wsp.Path(branch)
+	if err != nil || root == "" {
+		return nil
+	}
+	repos, err := worktree.GitRepos(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), archiveWorkspaceTimeout)
+	defer cancel()
+	return worktree.Manager{}.RemoveProject(ctx, root, branch, repos)
 }
 
 // removeWorkspaceOrch deletes the `.orch` directory at the root of the wsp
@@ -204,7 +239,7 @@ func (m model) renderConfirmArchiveModal() string {
 	// State the two things the confirm is really agreeing to: the wsp
 	// workspace goes away too, and only a cleaned-up work stream qualifies
 	// (the guard already rejected the others before this modal opened).
-	b.WriteString(dimStyle.Render("Its wsp workspace is removed too. Requires :cleanup (archive: true)."))
+	b.WriteString(dimStyle.Render("Its wsp workspace, task worktrees and wm/ branches are removed too. Requires :cleanup (archive: true)."))
 	b.WriteString("\n\n")
 	b.WriteString(hintStyle.Render("y: archive  •  n/esc: cancel"))
 

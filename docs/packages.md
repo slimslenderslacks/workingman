@@ -28,7 +28,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/channels/whatsapp` | daemon | Package whatsapp is the WhatsApp messaging channel: the Cloud API and Baileys bridge backends, plus the identity helpers and AccessPolicy they share. | `Resolver` | `AccessConfig`, `AccessPolicy`, `Backend`, `BridgeChannel`, `BridgeOptions`, `Channel`, `ChannelOption`, `CloudClient`, `CloudConfig`, `CloudOption`, `Decision`, `DirResolver`, `FactoryDeps`, `GraphError`, `Inbound`, `Kind`, `Mode`, `Option`, `PairOptions`, `PhoneNumberInfo`, `Reason`, `RetryPolicy`, `StaticResolver`, `WebhookConfig` |
 | `internal/channels/whatsapp/bridge` | daemon | Package bridge runs and talks to the vendored Baileys WhatsApp bridge: the "personal number, QR pairing, no public webhook" WhatsApp backend. | `Process` | `APIError`, `Backoff`, `Client`, `Event`, `Health`, `Launch`, `ReadKey`, `SendResult`, `Starter`, `Supervisor`, `SupervisorStatus` |
 | `internal/channels/whatsapp/setup` | daemon | Package setup holds the non-interactive core of `orch whatsapp setup`, `status` and `test`. | — | `Cred`, `Current`, `Guide`, `SaveResult`, `Store`, `Update`, `WebhookSettings` |
-| `internal/daemon` | daemon | Package daemon is the orch control loop: it watches the orch roots, drives each project and task through its state machine, and launches the agent sessions that do the work. | `ChannelSender` | `ACPInfo`, `AuditEvent`, `ChannelOption`, `Daemon`, `DaemonInfo`, `MissedSchedule`, `OfflineOptions`, `Option`, `ProjectLive`, `ProjectSnapshot`, `PullRequestSummary`, `ReviewGatewayConfig`, `ReviewPollInfo`, `RuntimeInfo`, `SessionInfo`, `SessionSnapshot`, `SessionStatus`, `SleepyHeadSession`, `Snapshot`, `TaskSnapshot`, `WolfSession`, `WorkingmanAgentConfig`, `WorkingmanAgentSession` |
+| `internal/daemon` | daemon | Package daemon is the orch control loop: it watches the orch roots, drives each project and task through its state machine, and launches the agent sessions that do the work. | `ChannelSender` | `ACPInfo`, `AuditEvent`, `ChannelOption`, `Daemon`, `DaemonInfo`, `DeferredInfo`, `IntegrationSnapshot`, `MissedSchedule`, `OfflineOptions`, `Option`, `ProjectLive`, `ProjectSnapshot`, `PullRequestSummary`, `RepoCommit`, `ReviewGatewayConfig`, `ReviewPollInfo`, `RuntimeInfo`, `SessionInfo`, `SessionSnapshot`, `SessionStatus`, `SleepyHeadSession`, `Snapshot`, `TaskSnapshot`, `VerifyChecks`, `WolfSession`, `WorkingmanAgentConfig`, `WorkingmanAgentSession` |
 | `internal/gitsign` | shared | Package gitsign makes a sandboxed agent commit as the host user, SSH-sign those commits, and check that the SSH agent forwarded into the sandbox can sign and push. | — | `Config`, `PushResult`, `RunFunc` |
 | `internal/mcpgateway` | shared | Package mcpgateway gives every sandbox workingman creates its own MCP gateway: a sub-gateway of the host's standalone-codemode gateway, minted with POST /gateways and torn down with DELETE /gateways/{id}. | — | `Client`, `Content`, `Gateway`, `Manager`, `RPCError`, `Record`, `ServerState`, `Session`, `SessionOptions`, `Store`, `Tool`, `ToolError`, `ToolResult`, `UnknownServersError` |
 | `internal/notify` | daemon | Package notify is the daemon's user-notification interface: how an agent that needs human attention reaches a person. | `Sender`, `TopicSender` | `Async`, `Call`, `Multi`, `Noop`, `Osascript`, `Recorder` |
@@ -36,19 +36,20 @@ no doc.go or no valid `Role:` line yet.
 | `internal/policy` | shared | Package policy defines the per-task sandbox policy rules (allow or deny one network or filesystem resource pattern) and turns them into `sbx policy` commands. | — | `Action`, `Kind`, `Rule` |
 | `internal/power` | daemon | Package power reports whether the host is running on AC power or battery, so the daemon can stand down while a laptop is unplugged. | `Source` | `ACSource`, `Pmset` |
 | `internal/project` | shared | Package project is the data model and on-disk format of a work stream's project.yaml, plus the two sidecar records the daemon and the wolf agent keep next to it. | — | `BlockedSession`, `CheckState`, `PRFingerprint`, `PlannedSnapshot`, `Project`, `PullRequest`, `Repo`, `Status`, `Writer` |
-| `internal/prompts` | daemon | Package prompts renders the per-kind instruction text that orch writes to .orch/instructions.md for a newly launched agent. | — | `BehindProject`, `Data` |
+| `internal/prompts` | daemon | Package prompts renders the per-kind instruction text that orch writes to .orch/instructions.md for a newly launched agent. | — | `BehindProject`, `Data`, `InFlightTask`, `IntegrationReport`, `Repo`, `RepoCommit`, `UnintegratedTask` |
 | `internal/router` | daemon | Package router connects inbound channel messages (WhatsApp, Signal) to agent conversations and sends the replies back. | `Agent`, `Auditor`, `Outbound`, `Source` | `Attacher`, `Config`, `Router`, `Session` |
 | `internal/runner` | daemon | Package runner turns the daemon's request to launch an agent (a Plan) into a running session: it prepares the workspace, writes the .orch handoff, and starts the agent over ACP or in a terminal tab. | — | `CommandBuilder`, `Harness`, `InteractiveSpec`, `Observe`, `Plan`, `Runner`, `SandboxCreator`, `SandboxSpec`, `SessionConfig` |
-| `internal/sbx` | shared | Package sbx holds the shared helpers for the sbx sandbox CLI: sandbox-name rules and the `sbx ls --json` existence check. | — | `RunFunc`, `Sandbox` |
+| `internal/sbx` | shared | Package sbx holds the shared helpers for the sbx sandbox CLI: sandbox-name rules, the robust runner for sbx's JSON-output commands, and the `sbx ls --json` existence check. | — | `Client`, `OutputFunc`, `RunFunc`, `Sandbox` |
 | `internal/scheduler` | daemon | Package scheduler runs the daemon's timed callbacks (project cron schedules and PR review polls) on robfig/cron, keyed by a caller-chosen string. | — | `Scheduler` |
 | `internal/service` | daemon | Package service builds the macOS launchd LaunchAgent that keeps the orch daemon running in the background. | — | `Config` |
 | `internal/session` | shared | Package session defines the on-disk record (session.json and agent.sock under ~/.workingman/sessions/<id>/) that lets ACP agent sessions outlive the TUI and the daemon that started them. | — | `Session`, `Status`, `Store` |
-| `internal/setup` | daemon | Package setup writes the .orch handoff files and installs skills in an agent's working directory before the agent is launched. | — | `Context`, `Skill` |
-| `internal/task` | shared | Package task is the data model and on-disk format of one tasks/*.yaml file, including the task-name rules that keep a task's sandbox name legal. | — | `Commit`, `Source`, `Status`, `Task` |
-| `internal/taskgraph` | daemon | Package taskgraph loads a project's tasks/*.yaml files into an immutable, validated dependency graph that the daemon queries to decide what to dispatch next. | — | `Graph` |
+| `internal/setup` | daemon | Package setup writes the .orch handoff files and installs skills in an agent's working directory before the agent is launched. | — | `Commit`, `Context`, `InFlightTask`, `Skill`, `UnintegratedTask` |
+| `internal/task` | shared | Package task is the data model and on-disk format of one tasks/*.yaml file, including the task-name rules that keep a task's sandbox name legal. | — | `Commit`, `Integration`, `Source`, `Status`, `Task` |
+| `internal/taskgraph` | daemon | Package taskgraph loads a project's tasks/*.yaml files into an immutable, validated dependency graph that the daemon queries to decide what to dispatch next. | — | `Admission`, `Deferred`, `Graph` |
 | `internal/terminal` | shared | Package terminal opens sessions in new tabs of the user's terminal emulator (Ghostty, WezTerm or kitty) and tracks those tabs across orch restarts. | `Launcher` | `AlreadyOpenError`, `Ghostty`, `Kitty`, `Runner`, `Settings`, `Tab`, `TabLauncher`, `TabRef`, `TabSession`, `WezTerm` |
-| `internal/tui` | tui | Package tui is the orch terminal UI: a bubbletea program that shows live agent sessions, the work-stream (project) gallery and its tasks, and lets the user steer work streams by writing their project.yaml files. | `InteractiveLauncher`, `TabFocuser` | `ProjectView`, `SessionView`, `TaskView` |
-| `internal/workspace` | shared | Package workspace provisions and tears down the multi-repo directory each agent runs in, with the wsp CLI behind a small Manager interface. | `Manager` | `Repo`, `StubManager`, `WspManager` |
+| `internal/tui` | tui | Package tui is the orch terminal UI: a bubbletea program that shows live agent sessions, the work-stream (project) gallery and its tasks, and lets the user steer work streams by writing their project.yaml files. | `InteractiveLauncher`, `TabFocuser` | `ProjectView`, `SessionView`, `TaskIntegration`, `TaskView` |
+| `internal/workspace` | shared | Package workspace provisions and tears down the multi-repo directory each agent runs in, with the wsp CLI behind a small Manager interface. | `GitBacked`, `Manager` | `Repo`, `StubManager`, `WspManager` |
+| `internal/worktree` | shared | Package worktree creates, reuses and removes the per-task git worktrees a project's task agents work in, each on its own task branch cut from the project's shared branch. | — | `Action`, `Manager`, `RepoError`, `RepoResult`, `Result`, `RunFunc`, `Spec`, `Worktree` |
 
 ## Dependency graph
 
@@ -99,6 +100,7 @@ graph LR
     internal_task["task"]
     internal_terminal["terminal"]
     internal_workspace["workspace"]
+    internal_worktree["worktree"]
   end
   subgraph grp_wrapper["wrapper"]
     internal_acpwrapper["acpwrapper"]
@@ -165,6 +167,7 @@ graph LR
   internal_daemon --> internal_taskgraph
   internal_daemon --> internal_terminal
   internal_daemon --> internal_workspace
+  internal_daemon --> internal_worktree
   internal_mcpgateway --> internal_policy
   internal_prompts --> internal_agent
   internal_prompts --> internal_sbx
@@ -193,8 +196,10 @@ graph LR
   internal_tui --> internal_sbx
   internal_tui --> internal_session
   internal_tui --> internal_task
+  internal_tui --> internal_taskgraph
   internal_tui --> internal_terminal
   internal_tui --> internal_workspace
+  internal_tui --> internal_worktree
 
   classDef entry fill:#e8e8e8,stroke:#555,stroke-width:2px,color:#000
   class cmd_acp_wrapper,cmd_op_read,cmd_orch entry
@@ -203,7 +208,7 @@ graph LR
   classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
   class internal_tui tui
   classDef shared fill:#fff1cc,stroke:#c99a06,color:#000
-  class internal_acpclient,internal_gitsign,internal_mcpgateway,internal_policy,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace shared
+  class internal_acpclient,internal_gitsign,internal_mcpgateway,internal_policy,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace,internal_worktree shared
   classDef wrapper fill:#f3e2fb,stroke:#8e44ad,color:#000
   class internal_acpwrapper wrapper
 ```
@@ -229,7 +234,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/channels/whatsapp` | `channels`, `channels/whatsapp/bridge` | `cmd/orch`, `channels/signal`, `channels/whatsapp/setup` |
 | `internal/channels/whatsapp/bridge` | — | `channels/whatsapp` |
 | `internal/channels/whatsapp/setup` | `channels`, `channels/whatsapp` | `cmd/orch` |
-| `internal/daemon` | `agent`, `audit`, `channels`, `gitsign`, `mcpgateway`, `notify`, `policy`, `power`, `project`, `prompts`, `runner`, `sbx`, `scheduler`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |
+| `internal/daemon` | `agent`, `audit`, `channels`, `gitsign`, `mcpgateway`, `notify`, `policy`, `power`, `project`, `prompts`, `runner`, `sbx`, `scheduler`, `session`, `task`, `taskgraph`, `terminal`, `workspace`, `worktree` | `cmd/orch` |
 | `internal/gitsign` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `runner` |
 | `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `cmd/orch`, `acpwrapper`, `daemon`, `runner` |
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
@@ -246,7 +251,8 @@ The same graph as text: each package's internal imports and importers.
 | `internal/session` | — | `cmd/orch`, `acpchat`, `acpwrapper`, `daemon`, `runner`, `tui` |
 | `internal/setup` | — | `runner` |
 | `internal/task` | `policy`, `sbx` | `acpwrapper`, `daemon`, `runner`, `taskgraph`, `tui` |
-| `internal/taskgraph` | `task` | `daemon` |
+| `internal/taskgraph` | `task` | `daemon`, `tui` |
 | `internal/terminal` | `agent` | `cmd/orch`, `daemon`, `runner`, `tui` |
-| `internal/tui` | `acpclient`, `policy`, `project`, `sbx`, `session`, `task`, `terminal`, `workspace` | `cmd/orch` |
+| `internal/tui` | `acpclient`, `policy`, `project`, `sbx`, `session`, `task`, `taskgraph`, `terminal`, `workspace`, `worktree` | `cmd/orch` |
 | `internal/workspace` | — | `cmd/orch`, `daemon`, `runner`, `tui` |
+| `internal/worktree` | — | `daemon`, `tui` |

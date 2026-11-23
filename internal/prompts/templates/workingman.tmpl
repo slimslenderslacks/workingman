@@ -90,8 +90,22 @@ ACP sessions root (read-only) — one directory per agent session, named by sess
   attempts, failure_reason, blocked_reason, depends_on), `pull_requests[]`,
   and a `live` block (`sessions` = agent kinds running for it, `wolf_in_flight`,
   failure counters, PR-poll state).
+- Integration: each task works on its own branch in its own worktree, and a
+  commit agent lands finished (`success`) tasks on the shared branch one at a
+  time. `commit_queue` lists the tasks waiting for that, head first;
+  `live.running_tasks` names the tasks a task agent is working on and
+  `live.integrating` the one being landed; `max_parallel_tasks` is the
+  project's limit. Per task: `queue_position`, `waiting_on` (dependencies
+  that finished but have not landed yet, so the task cannot start),
+  `integration` (why its last landing failed: `result` conflict /
+  verify_failed / error / partial, `repo`, `files`, `landed`), `worktree`,
+  `task_branch`, `completed_at`. These answer "why isn't X running?": its
+  deps are not committed, it is waiting on an integration, or it is queued
+  behind another task. `verify_checks` counts the project's pre-integration
+  build checks.
 - `sessions[]`: live agent sessions — `kind`, `work_stream`, `task`, `started_at`,
-  and for ACP sessions `acp.session_dir` / `acp.status`.
+  `worktree` (a task agent's own checkout), and for ACP sessions
+  `acp.session_dir` / `acp.status`.
 - `audit_events[]`: the last events, oldest first.
 - `daemon`: `state`, `pid`, `started_at`, flags, paths.
 
@@ -120,7 +134,9 @@ Task status (`tasks/<name>.yaml` `status:`):
 - `ready` → `running` once every task in `depends_on` is `committed`: the
   daemon writes `running` itself when it dispatches the task's agent.
 - `running` → `success` (then a commit agent makes it `committed`), `failed`,
-  or `blocked`.
+  or `blocked`. `success` means queued for integration, not done; a task can
+  sit there while the queue ahead of it lands. A conflict while landing sends
+  it back to `ready` for a re-run, with `integration` set.
 - `failed` is retried automatically (back to `ready`) until `attempts` reaches
   3; after that, or when a task reports `blocked`, the PROJECT becomes `blocked`
   and the wolf is summoned. `failure_reason` / `blocked_reason` say why.

@@ -32,6 +32,9 @@ type WspManager struct {
 // NewWsp returns a WspManager that uses wsp and gh from PATH.
 func NewWsp() *WspManager { return &WspManager{} }
 
+// GitBacked is always true: every repo in a wsp workspace is a git clone.
+func (m *WspManager) GitBacked() bool { return true }
+
 func (m *WspManager) binary() string {
 	if m.Binary != "" {
 		return m.Binary

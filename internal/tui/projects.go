@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/task"
+	"github.com/slimslenderslacks/work/internal/taskgraph"
 )
 
 // ProjectView is the read-only snapshot of a single project that the TUI's
@@ -95,6 +97,18 @@ type ProjectView struct {
 	// user having to open the raw file. Empty whenever the project isn't
 	// blocked (see project.Project.BlockedReason's own contract).
 	BlockedReason string
+	// MaxParallel is the project's effective task limit
+	// (project.Project.MaxParallel): 1 unless max_parallel_tasks raises it.
+	MaxParallel int
+	// CommitQueue names the tasks waiting to be integrated onto the shared
+	// branch, head first (taskgraph.Queued); each one's TaskView.QueuePos is
+	// its place here.
+	CommitQueue []string
+	// Integrating names the task whose commit agent is running. It is not
+	// read from disk: the model fills it in from the live sessions
+	// (withLiveState) just before rendering, so ScanProjects leaves it empty
+	// and projectViewEqual ignores it.
+	Integrating string
 }
 
 // TaskView is the snapshot the Tasks pane renders for one task: name, model,
@@ -138,6 +152,43 @@ type TaskView struct {
 	// stat'd. The Tasks pane's "age" column renders time-since-CreatedAt, and
 	// Recency() falls back to it for a task that hasn't completed.
 	CreatedAt time.Time
+	// Attempts mirrors the task file's `attempts`: the runs already spent.
+	Attempts int
+	// SucceededAt mirrors `succeeded_at`: when the daemon first saw the task
+	// at success, which orders the commit queue. Zero when unset.
+	SucceededAt time.Time
+	// Worktree mirrors `worktree`: the task's own checkout, empty on the
+	// legacy path and once it has been cleaned up after committing.
+	Worktree string
+	// QueuePos is the task's 1-based place in the project's commit queue,
+	// 0 when it is not queued.
+	QueuePos int
+	// WaitingOn names the task's dependencies that are at success: done,
+	// but not integrated yet, so this task can't start until they land.
+	WaitingOn []string
+	// Integration is the task file's report of its latest failed attempt to
+	// land on the shared branch; nil when there is none.
+	Integration *TaskIntegration
+	// Exclusive is task.Task.Exclusive: the task declares no independence
+	// hints, so it never runs beside another task.
+	Exclusive bool
+}
+
+// TaskIntegration is the part of a task's `integration:` block the Tasks pane
+// and detail pane show: what went wrong landing it, where, and how many
+// commit agent retries it has had.
+type TaskIntegration struct {
+	Result   string
+	Repo     string
+	Files    []string
+	Attempts int
+}
+
+func (a *TaskIntegration) equal(b *TaskIntegration) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Result == b.Result && a.Repo == b.Repo && a.Attempts == b.Attempts && slices.Equal(a.Files, b.Files)
 }
 
 // Recency is the single timestamp the Tasks pane orders by: the most recent
@@ -269,7 +320,7 @@ func loadProjectView(path string) (ProjectView, bool) {
 			LoadErr:    err.Error(),
 		}, true
 	}
-	counts, tasks := tasksFor(filepath.Join(filepath.Dir(path), "tasks"))
+	counts, tasks, queue := tasksFor(filepath.Join(filepath.Dir(path), "tasks"))
 	var createdAt time.Time
 	if pr.CreatedAt != nil {
 		createdAt = *pr.CreatedAt
@@ -293,12 +344,15 @@ func loadProjectView(path string) (ProjectView, bool) {
 		PullRequests:  append([]project.PullRequest(nil), pr.PullRequests...),
 		Hidden:        pr.Hide,
 		BlockedReason: pr.BlockedReason,
+		MaxParallel:   pr.MaxParallel(),
+		CommitQueue:   queue,
 	}, true
 }
 
-// tasksFor reads a project's tasks/ directory and returns both the per-status
-// counts and the ordered list of task views. Both are derived from the same
-// scan so a project that has 12 tasks doesn't pay for the YAML decode twice.
+// tasksFor reads a project's tasks/ directory and returns the per-status
+// counts, the ordered list of task views and the commit queue's task names,
+// head first. All are derived from the same scan so a project that has 12
+// tasks doesn't pay for the YAML decode twice.
 //
 // This is deliberately NOT taskgraph.Load: that loader is strict (it aborts on
 // the first task with an empty name, a duplicate name, or a bad dependency),
@@ -311,13 +365,14 @@ func loadProjectView(path string) (ProjectView, bool) {
 // independently, skip any that fail to parse (a half-written file on disk), and
 // give an unnamed seed a display name from its filename stem so it shows up
 // immediately as a pending row. Mirrors ScanProjects' per-file resilience.
-func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
+func tasksFor(tasksDir string) (map[task.Status]int, []TaskView, []string) {
 	counts := map[task.Status]int{}
 	entries, err := os.ReadDir(tasksDir)
 	if err != nil {
-		return counts, nil
+		return counts, nil, nil
 	}
 	tasks := make([]TaskView, 0, len(entries))
+	loaded := make([]*task.Task, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
 			continue
@@ -335,7 +390,9 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 		name := t.Name
 		if name == "" {
 			name = strings.TrimSuffix(e.Name(), ".yaml")
+			t.Name = name
 		}
+		loaded = append(loaded, t)
 		var completedAt time.Time
 		if t.CompletedAt != nil {
 			completedAt = *t.CompletedAt
@@ -356,13 +413,35 @@ func tasksFor(tasksDir string) (map[task.Status]int, []TaskView) {
 			DependsOn:   append([]string(nil), t.DependsOn...),
 			Commits:     append([]task.Commit(nil), t.Commits...),
 			CreatedAt:   createdAt,
+			Attempts:    t.Attempts,
+			Worktree:    t.Worktree,
+			Exclusive:   t.Exclusive(),
 		})
+		v := &tasks[len(tasks)-1]
+		if t.SucceededAt != nil {
+			v.SucceededAt = *t.SucceededAt
+		}
+		if in := t.Integration; in != nil {
+			v.Integration = &TaskIntegration{Result: in.Result, Repo: in.Repo, Files: append([]string(nil), in.Files...), Attempts: in.Attempts}
+		}
 	}
 	if len(tasks) == 0 {
-		return counts, nil
+		return counts, nil, nil
+	}
+	// The queue and the waiting-on lists need every task loaded first. loaded
+	// and tasks are still index-aligned here, before the sort.
+	var queue []string
+	pos := map[string]int{}
+	for i, t := range taskgraph.Queued(loaded) {
+		queue = append(queue, t.Name)
+		pos[t.Name] = i + 1
+	}
+	for i, t := range loaded {
+		tasks[i].QueuePos = pos[t.Name]
+		tasks[i].WaitingOn = taskgraph.WaitingOnIntegration(t, loaded)
 	}
 	sortTasksByRecency(tasks)
-	return counts, tasks
+	return counts, tasks, queue
 }
 
 // sortTasksByRecency orders the Tasks pane most-recent-first: one ordering over
@@ -549,6 +628,7 @@ func projectViewEqual(a, b ProjectView) bool {
 		a.Archive != b.Archive || a.CronActive != b.CronActive ||
 		a.Cron != b.Cron || a.WatchingPR != b.WatchingPR ||
 		a.Hidden != b.Hidden || a.BlockedReason != b.BlockedReason ||
+		a.MaxParallel != b.MaxParallel || !slices.Equal(a.CommitQueue, b.CommitQueue) ||
 		!a.LastUpdate.Equal(b.LastUpdate) {
 		return false
 	}
@@ -601,7 +681,9 @@ func projectViewEqual(a, b ProjectView) bool {
 // rule order is meaningful and MCP order is what the planner wrote.
 func taskViewEqual(a, b TaskView) bool {
 	if a.Name != b.Name || a.Model != b.Model || a.Harness != b.Harness || a.Status != b.Status || a.Path != b.Path ||
-		!a.CompletedAt.Equal(b.CompletedAt) {
+		!a.CompletedAt.Equal(b.CompletedAt) || a.Attempts != b.Attempts || !a.SucceededAt.Equal(b.SucceededAt) ||
+		a.Worktree != b.Worktree || a.QueuePos != b.QueuePos || a.Exclusive != b.Exclusive ||
+		!slices.Equal(a.WaitingOn, b.WaitingOn) || !a.Integration.equal(b.Integration) {
 		return false
 	}
 	if len(a.StaticMCPs) != len(b.StaticMCPs) {

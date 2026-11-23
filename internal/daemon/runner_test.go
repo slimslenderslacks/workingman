@@ -234,7 +234,7 @@ func TestPlanningAgentSeesPendingIntakeFiles(t *testing.T) {
 // never ran (because the project went through a block/wolf cycle that
 // bypassed afterTaskSession). On the next dispatch — startup, status=working
 // observation, cron firing — the daemon must resume by launching the commit
-// agent, not log no_ready_tasks.
+// agent, not log no_ready_tasks. The task is the commit queue's head (S5).
 // TestNumericPrefixTaskFilenames is the regression for the bug the user
 // reported: the planning agent writes task files with sort-friendly names
 // like "00-foo.yaml" while the task's `name:` field is just "foo". The
@@ -347,10 +347,10 @@ func TestResumeStuckSuccessTask(t *testing.T) {
 
 	// First scheduled action should be the commit agent for `first` —
 	// not a task agent, and definitely not no_ready_tasks.
-	if ok, snap := waitForWithin(t, buf, "resume_pending_commit", 3*time.Second); !ok {
-		t.Fatalf("daemon did not resume pending commit.\naudit:\n%s", snap)
-	}
 	expectKindSession(t, buf, "commit", 1)
+	if n := countStartedKind(buf.String(), "task"); n != 0 {
+		t.Errorf("task agents started = %d before the queued task integrated, want 0:\n%s", n, buf.String())
+	}
 	if strings.Contains(buf.String(), "no_ready_tasks") {
 		t.Errorf("dispatch shouldn't reach no_ready_tasks when a success task is pending commit:\n%s", buf.String())
 	}

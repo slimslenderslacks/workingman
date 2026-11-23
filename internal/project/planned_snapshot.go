@@ -34,6 +34,10 @@ type PlannedSnapshot struct {
 	Cron        string     `yaml:"cron,omitempty"`
 	CronUntil   *time.Time `yaml:"cron_until,omitempty"`
 	CronMaxRuns int        `yaml:"cron_max_runs,omitempty"`
+	// MaxParallelTasks is the raw limit as configured, so a change between
+	// planning cycles shows up in Describe: the planner's hint block depends on
+	// it (docs/parallel-task-worktrees.md D2, H4).
+	MaxParallelTasks int `yaml:"max_parallel_tasks,omitempty"`
 }
 
 // PlannedSnapshotPath returns the path to the last-planned record that
@@ -82,6 +86,8 @@ func SnapshotFromProject(p *Project) *PlannedSnapshot {
 		Cron:        p.Cron,
 		CronUntil:   p.CronUntil,
 		CronMaxRuns: p.CronMaxRuns,
+
+		MaxParallelTasks: p.MaxParallelTasks,
 	}
 }
 
@@ -122,7 +128,7 @@ func (s *PlannedSnapshot) AddedRepos(p *Project) (addedExisting, addedNew []Repo
 
 // Describe returns a human-readable line per intent field that changed
 // between this snapshot and p — description, repos/new_repos additions and
-// removals, branch, and cron — for the daemon to hand the planning agent so
+// removals, branch, cron and max_parallel_tasks — for the daemon to hand the planning agent so
 // it knows what prompted this invocation instead of having to guess. Nil
 // when nothing changed.
 //
@@ -146,6 +152,11 @@ func (s *PlannedSnapshot) Describe(p *Project) []string {
 	}
 	if s.Cron != p.Cron {
 		changes = append(changes, fmt.Sprintf("cron changed from %q to %q", s.Cron, p.Cron))
+	}
+	// Compare effective limits, so absent → 1 (same limit) is not a change.
+	before := (&Project{MaxParallelTasks: s.MaxParallelTasks}).MaxParallel()
+	if after := p.MaxParallel(); before != after {
+		changes = append(changes, fmt.Sprintf("max_parallel_tasks changed from %d to %d", before, after))
 	}
 	return changes
 }

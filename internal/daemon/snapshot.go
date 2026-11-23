@@ -15,6 +15,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
+	"github.com/slimslenderslacks/work/internal/taskgraph"
 )
 
 // SnapshotVersion is the schema version stamped into every Snapshot. Bump it
@@ -122,6 +123,19 @@ type ProjectSnapshot struct {
 
 	PullRequests []PullRequestSummary `json:"pull_requests"`
 
+	// MaxParallelTasks is the effective per-project task limit
+	// (project.MaxParallel): 1 unless max_parallel_tasks raises it.
+	MaxParallelTasks int `json:"max_parallel_tasks"`
+	// CommitQueue lists the tasks waiting to be integrated onto the shared
+	// branch, head first (taskgraph.Queued): derived from the task files, so
+	// an offline snapshot has it too. The head is the one integrating when
+	// live.integrating names it.
+	CommitQueue []string `json:"commit_queue"`
+	// VerifyChecks counts the pre-integration build check outcomes since the
+	// daemon started (docs/parallel-task-worktrees.md R1). Daemon snapshots
+	// only, and only for a project that sets `verify:`.
+	VerifyChecks *VerifyChecks `json:"verify_checks,omitempty"`
+
 	// TaskCounts has an entry for every task status (zero included) so a
 	// reader never has to guess whether a missing key means zero.
 	TaskCounts map[string]int `json:"task_counts"`
@@ -129,6 +143,10 @@ type ProjectSnapshot struct {
 	Tasks      []TaskSnapshot `json:"tasks"`
 
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
+
+	// hasVerify records that the project sets `verify:`, so a daemon
+	// snapshot reports VerifyChecks for it.
+	hasVerify bool
 
 	// Live is the daemon's in-memory view of this project; nil in an offline
 	// snapshot.
@@ -143,6 +161,16 @@ type PullRequestSummary struct {
 	State  string `json:"state,omitempty"`
 }
 
+// VerifyChecks counts a project's pre-integration build checks (R1): Run is
+// every check that ran, Failed the ones of those that failed, Skipped the
+// integrations that could have needed one but did not run it (the fast path,
+// or a docs-only diff).
+type VerifyChecks struct {
+	Run     int `json:"run"`
+	Failed  int `json:"failed"`
+	Skipped int `json:"skipped"`
+}
+
 // TaskSnapshot is one task of a project.
 type TaskSnapshot struct {
 	Name          string   `json:"name"`
@@ -151,6 +179,50 @@ type TaskSnapshot struct {
 	FailureReason string   `json:"failure_reason,omitempty"`
 	BlockedReason string   `json:"blocked_reason,omitempty"`
 	DependsOn     []string `json:"depends_on"`
+
+	// Touches and Areas are the planner's independence hints, as on disk.
+	// Touches keeps the absent/empty distinction: omitted when the task has
+	// none, [] when it declares that it touches nothing.
+	Touches *[]string `json:"touches,omitempty"`
+	Areas   []string  `json:"areas,omitempty"`
+	// Exclusive is true for a task with no hints at all, which never runs
+	// beside another task (task.Exclusive).
+	Exclusive bool `json:"exclusive"`
+	// Worktree, TaskBranch and Base locate a task's own worktree, branch and
+	// the shared tips it was cut from or last rebased onto. Omitted for a
+	// task on the legacy path (and after its worktree is cleaned up).
+	Worktree   string       `json:"worktree,omitempty"`
+	TaskBranch string       `json:"task_branch,omitempty"`
+	Base       []RepoCommit `json:"base,omitempty"`
+	// SucceededAt is when the daemon first saw the task at success (it orders
+	// the commit queue); CompletedAt when it saw it committed.
+	SucceededAt *time.Time `json:"succeeded_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	// QueuePosition is the task's 1-based place in the project's
+	// commit_queue; omitted when it is not queued.
+	QueuePosition int `json:"queue_position,omitempty"`
+	// WaitingOn names the task's dependencies that are at success: done, but
+	// not integrated yet, so this task cannot start until they land.
+	WaitingOn []string `json:"waiting_on,omitempty"`
+	// Integration is the latest failed attempt to land the task (a conflict,
+	// a failed build check, a transient error or a partial publish).
+	Integration *IntegrationSnapshot `json:"integration,omitempty"`
+}
+
+// RepoCommit is one repo's commit: a task's base, or a shared tip.
+type RepoCommit struct {
+	Repo string `json:"repo"`
+	Hash string `json:"hash"`
+}
+
+// IntegrationSnapshot is the part of a task's integration: block a reader
+// needs to see why it has not landed (I4).
+type IntegrationSnapshot struct {
+	Result   string   `json:"result"`
+	Repo     string   `json:"repo,omitempty"`
+	Files    []string `json:"files,omitempty"`
+	Attempts int      `json:"attempts,omitempty"`
+	Landed   []string `json:"landed,omitempty"`
 }
 
 // ProjectLive is the slice of a project's state that exists only in daemon
@@ -159,6 +231,16 @@ type ProjectLive struct {
 	// Sessions lists the agent kinds currently running for this project
 	// (e.g. ["task", "wolf"]).
 	Sessions []string `json:"sessions"`
+	// RunningTasks names the tasks a task agent is working on, sorted. Use
+	// it, not Sessions, to see which tasks run: Sessions repeats a kind.
+	RunningTasks []string `json:"running_tasks"`
+	// Integrating names the task whose commit agent is running, if any.
+	Integrating string `json:"integrating,omitempty"`
+	// CommitReserved is true from a commit agent's launch until the daemon
+	// has finished routing its outcome, which is longer than the session. A
+	// wolf must not commit on the shared branch while it, or Integrating, is
+	// set (docs/parallel-task-worktrees.md X3).
+	CommitReserved bool `json:"commit_reserved"`
 	// WolfInFlight is true while the project's wolf agent is running.
 	WolfInFlight bool `json:"wolf_in_flight"`
 	// CleanupInFlight is true from the archive agent's dispatch until its
@@ -175,6 +257,9 @@ type ProjectLive struct {
 	ReviewPoll *ReviewPollInfo `json:"review_poll,omitempty"`
 	// CronSchedule is the cron spec registered with the scheduler, if any.
 	CronSchedule string `json:"cron_schedule,omitempty"`
+	// Deferred says why ready tasks were not started on the project's last
+	// scheduling pass; absent when nothing was held back.
+	Deferred *DeferredInfo `json:"deferred,omitempty"`
 }
 
 // ReviewPollInfo is the state of a project's #review poll.
@@ -199,14 +284,21 @@ type ReviewPollInfo struct {
 
 // SessionSnapshot is one agent session.
 type SessionSnapshot struct {
-	// Key is the daemon's session-map key (the project.yaml path, with a
-	// "#planning"/"#wolf"/"#archive" suffix for those kinds). Empty for disk-sourced
-	// sessions in an offline snapshot.
+	// Key is the daemon's session-map key: the project.yaml path, with a
+	// "#planning"/"#wolf"/"#archive" suffix for those kinds, or a fixed name
+	// for the daemon-owned workingman and sleepy-head agents. The project,
+	// task, commit and review agents share the bare path today; match the
+	// path as a prefix rather than exactly to stay correct once task and
+	// commit agents get "#task:<name>" / "#commit" keys. Empty for
+	// disk-sourced sessions in an offline snapshot.
 	Key         string `json:"key,omitempty"`
 	Kind        string `json:"kind"`
 	WorkStream  string `json:"work_stream,omitempty"`
 	ProjectPath string `json:"project_path,omitempty"`
 	Task        string `json:"task,omitempty"`
+	// Worktree is a task agent's working directory when it runs in its own
+	// task worktree, so a reader can open the right checkout.
+	Worktree string `json:"worktree,omitempty"`
 	// StartedAt is when the daemon began tracking the session (or, for a
 	// disk-sourced session, the session dir's created_at).
 	StartedAt   time.Time `json:"started_at"`
@@ -354,6 +446,7 @@ func loadProjectSnapshot(path, tasksDir string) ProjectSnapshot {
 		PullRequests: []PullRequestSummary{},
 		TaskCounts:   map[string]int{},
 		Tasks:        []TaskSnapshot{},
+		CommitQueue:  []string{},
 	}
 	for _, s := range allTaskStatuses {
 		snap.TaskCounts[string(s)] = 0
@@ -380,6 +473,8 @@ func loadProjectSnapshot(path, tasksDir string) ProjectSnapshot {
 	snap.WatchingPR = p.Status == project.StatusIdle && p.WatchingPR()
 	snap.Cron = p.Cron
 	snap.CronActive = p.Cron != "" && !p.CronExpired()
+	snap.MaxParallelTasks = p.MaxParallel()
+	snap.hasVerify = p.Verify != ""
 	for _, pr := range p.PullRequests {
 		snap.PullRequests = append(snap.PullRequests, PullRequestSummary{
 			Repo: pr.Repo, Number: pr.Number, URL: pr.URL, State: pr.State,
@@ -388,38 +483,70 @@ func loadProjectSnapshot(path, tasksDir string) ProjectSnapshot {
 
 	// Load tasks file-by-file rather than through taskgraph.Load: that loader
 	// is strict (one bad file fails the whole graph), which is right for
-	// dispatch but wrong for a status report. Mirrors the TUI's tasksFor.
-	entries, err := os.ReadDir(tasksDir)
-	if err != nil {
-		return snap
+	// dispatch but wrong for a status report. Mirrors the TUI's tasksFor. A
+	// pending seed not yet named by planning appears under its filename stem.
+	tasks := loadTasksLenient(tasksDir)
+	queuePos := map[string]int{}
+	for i, t := range taskgraph.Queued(tasks) {
+		snap.CommitQueue = append(snap.CommitQueue, t.Name)
+		queuePos[t.Name] = i + 1
 	}
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".yaml" {
-			continue
-		}
-		t, err := task.Load(filepath.Join(tasksDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		name := t.Name
-		if name == "" {
-			// A pending seed not yet named by planning.
-			name = strings.TrimSuffix(e.Name(), ".yaml")
-		}
+	for _, t := range tasks {
 		snap.TaskCounts[string(t.Status)]++
 		snap.TaskTotal++
-		deps := append([]string{}, t.DependsOn...)
-		snap.Tasks = append(snap.Tasks, TaskSnapshot{
-			Name:          name,
+		ts := TaskSnapshot{
+			Name:          t.Name,
 			Status:        string(t.Status),
 			Attempts:      t.Attempts,
 			FailureReason: t.FailureReason,
 			BlockedReason: t.BlockedReason,
-			DependsOn:     deps,
-		})
+			DependsOn:     append([]string{}, t.DependsOn...),
+			Areas:         append([]string(nil), t.Areas...),
+			Exclusive:     t.Exclusive(),
+			Worktree:      t.Worktree,
+			TaskBranch:    t.TaskBranch,
+			Base:          repoCommits(t.Base),
+			SucceededAt:   utcTime(t.SucceededAt),
+			CompletedAt:   utcTime(t.CompletedAt),
+			QueuePosition: queuePos[t.Name],
+			WaitingOn:     taskgraph.WaitingOnIntegration(t, tasks),
+		}
+		if t.Touches != nil {
+			touches := append([]string{}, (*t.Touches)...)
+			ts.Touches = &touches
+		}
+		if in := t.Integration; in != nil {
+			ts.Integration = &IntegrationSnapshot{
+				Result:   in.Result,
+				Repo:     in.Repo,
+				Files:    append([]string(nil), in.Files...),
+				Attempts: in.Attempts,
+				Landed:   append([]string(nil), in.Landed...),
+			}
+		}
+		snap.Tasks = append(snap.Tasks, ts)
 	}
 	sort.SliceStable(snap.Tasks, func(i, j int) bool { return snap.Tasks[i].Name < snap.Tasks[j].Name })
 	return snap
+}
+
+func repoCommits(cs []task.Commit) []RepoCommit {
+	if len(cs) == 0 {
+		return nil
+	}
+	out := make([]RepoCommit, len(cs))
+	for i, c := range cs {
+		out[i] = RepoCommit{Repo: c.Repo, Hash: c.Hash}
+	}
+	return out
+}
+
+func utcTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
 }
 
 func truncate(s string, n int) string {
@@ -440,13 +567,39 @@ func cloneProjectSnapshot(p ProjectSnapshot) ProjectSnapshot {
 	for k, v := range p.TaskCounts {
 		out.TaskCounts[k] = v
 	}
+	out.CommitQueue = cloneStrings(p.CommitQueue)
+	if p.VerifyChecks != nil {
+		vc := *p.VerifyChecks
+		out.VerifyChecks = &vc
+	}
 	out.Tasks = make([]TaskSnapshot, len(p.Tasks))
 	for i, t := range p.Tasks {
 		t.DependsOn = append([]string{}, t.DependsOn...)
+		t.Areas = cloneStrings(t.Areas)
+		t.Base = append([]RepoCommit(nil), t.Base...)
+		t.WaitingOn = cloneStrings(t.WaitingOn)
+		if t.Touches != nil {
+			touches := append([]string{}, (*t.Touches)...)
+			t.Touches = &touches
+		}
+		if t.Integration != nil {
+			in := *t.Integration
+			in.Files = cloneStrings(in.Files)
+			in.Landed = cloneStrings(in.Landed)
+			t.Integration = &in
+		}
 		out.Tasks[i] = t
 	}
 	out.Live = nil
 	return out
+}
+
+// cloneStrings copies s, keeping nil as nil (and so omitempty fields omitted).
+func cloneStrings(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string{}, s...)
 }
 
 // auditEventsFromLines parses audit lines (oldest first) into events, redacting

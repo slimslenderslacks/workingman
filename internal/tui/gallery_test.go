@@ -34,11 +34,12 @@ func TestRenderProjectCardIncludesNameStatusAndBreakdown(t *testing.T) {
 	if !strings.Contains(out, "working") {
 		t.Errorf("card missing status; got:\n%s", out)
 	}
-	// Done == success + committed = 4.
+	// success is queued (Q), not done: D counts committed only.
 	if !strings.Contains(out, "R:2") ||
 		!strings.Contains(out, "W:1") ||
+		!strings.Contains(out, "Q:1") ||
 		!strings.Contains(out, "B:0") ||
-		!strings.Contains(out, "D:4") ||
+		!strings.Contains(out, "D:3") ||
 		!strings.Contains(out, "F:1") {
 		t.Errorf("breakdown line missing or wrong; got:\n%s", out)
 	}

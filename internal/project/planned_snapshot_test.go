@@ -180,3 +180,40 @@ func TestSnapshotFromProjectCapturesIntentFields(t *testing.T) {
 		t.Errorf("snapshot aliased the project's Repos slice; got %+v", s.Repos)
 	}
 }
+
+func TestPlannedSnapshotMaxParallelTasks(t *testing.T) {
+	p := &Project{Description: "x", Branch: "b", MaxParallelTasks: 3}
+	s := SnapshotFromProject(p)
+	if s.MaxParallelTasks != 3 {
+		t.Fatalf("snapshot MaxParallelTasks = %d, want 3", s.MaxParallelTasks)
+	}
+	path := filepath.Join(t.TempDir(), "last-planned.yaml")
+	if err := SavePlannedSnapshot(path, s); err != nil {
+		t.Fatalf("SavePlannedSnapshot: %v", err)
+	}
+	got, err := LoadPlannedSnapshot(path)
+	if err != nil {
+		t.Fatalf("LoadPlannedSnapshot: %v", err)
+	}
+	if got.MaxParallelTasks != 3 {
+		t.Errorf("round-tripped MaxParallelTasks = %d, want 3", got.MaxParallelTasks)
+	}
+	if changes := got.Describe(p); len(changes) != 0 {
+		t.Errorf("Describe() = %v, want no changes", changes)
+	}
+
+	p.MaxParallelTasks = 1
+	joined := strings.Join(got.Describe(p), "\n")
+	if !strings.Contains(joined, "max_parallel_tasks changed from 3 to 1") {
+		t.Errorf("Describe() missing limit change; got:\n%s", joined)
+	}
+
+	// An older snapshot without the field against a project setting 0 or 1:
+	// the effective limit is 1 both ways, so nothing changed.
+	old := &PlannedSnapshot{Description: "x", Branch: "b"}
+	for _, n := range []int{0, 1} {
+		if changes := old.Describe(&Project{Description: "x", Branch: "b", MaxParallelTasks: n}); len(changes) != 0 {
+			t.Errorf("max_parallel_tasks %d vs absent: Describe() = %v, want none", n, changes)
+		}
+	}
+}

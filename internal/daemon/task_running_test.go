@@ -121,6 +121,11 @@ func TestCrashWhileRunningRetries(t *testing.T) {
 	if ok, snap := waitForWithin(t, buf, "task_retry_exhausted", 6*time.Second); !ok {
 		t.Fatalf("retries never exhausted:\n%s", snap)
 	}
+	// task_retry_exhausted is logged before save_sandbox is persisted;
+	// sandbox_retained is logged after, so the task file is final by then.
+	if ok, snap := waitForWithin(t, buf, "sandbox_retained", 6*time.Second); !ok {
+		t.Fatalf("sandbox was never retained:\n%s", snap)
+	}
 	got := mustLoadTask(t, taskPath)
 	if got.Attempts != 3 {
 		t.Errorf("attempts = %d, want 3", got.Attempts)
@@ -197,7 +202,7 @@ func TestReleaseOrphanedTasks(t *testing.T) {
 	mustSaveTask(t, live, &task.Task{Name: "live", Status: task.StatusRunning})
 	mustSaveTask(t, done, &task.Task{Name: "done", Status: task.StatusSuccess})
 
-	d.sessions[projectPath] = sessionEntry{sess: newStubSession("x"), kind: agent.TaskAgent, taskName: "live"}
+	d.sessions[taskSessionKey(projectPath, "live")] = sessionEntry{sess: newStubSession("x"), kind: agent.TaskAgent, taskName: "live"}
 	d.releaseOrphanedTasks(projectPath)
 
 	if got := mustLoadTask(t, orphan); got.Status != task.StatusReady || got.Attempts != 1 {

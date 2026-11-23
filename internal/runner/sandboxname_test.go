@@ -91,11 +91,18 @@ func TestSandboxNameIsStableAcrossCalls(t *testing.T) {
 			t.Fatalf("SandboxNameFor is not stable: %q then %q", want, got)
 		}
 	}
-	// The commit agent must land on the task agent's sandbox — it reuses it to
-	// see the task's git work — so the two derivations have to agree even when
-	// the name had to be shortened.
-	if got := SandboxNameFor(agent.CommitAgent, projectPath, taskName); got != want {
-		t.Errorf("commit agent sandbox = %q, want the task agent's %q", got, want)
+	// The commit agent has a sandbox of its own (its mounts differ from the
+	// task's, docs/parallel-task-worktrees.md W5); it must stay distinct from
+	// the task's and stable even when both names had to be shortened.
+	commit := SandboxNameFor(agent.CommitAgent, projectPath, taskName)
+	if commit == want {
+		t.Errorf("commit agent sandbox = %q, must differ from the task agent's", commit)
+	}
+	if len(commit) > sbx.MaxNameLen {
+		t.Errorf("commit agent sandbox %q is over %d chars", commit, sbx.MaxNameLen)
+	}
+	if again := SandboxNameFor(agent.CommitAgent, projectPath, taskName); again != commit {
+		t.Errorf("commit sandbox name not stable: %q then %q", commit, again)
 	}
 }
 
@@ -109,7 +116,7 @@ func TestSandboxNameUnchangedWhenItFits(t *testing.T) {
 		want     string
 	}{
 		{agent.TaskAgent, "add-healthz-handler", "myproj-add-healthz-handler"},
-		{agent.CommitAgent, "add-healthz-handler", "myproj-add-healthz-handler"},
+		{agent.CommitAgent, "add-healthz-handler", "myproj-add-healthz-handler-commit"},
 		{agent.PlanningAgent, "", "myproj"},
 		{agent.ProjectAgent, "", "myproj-project"},
 		{agent.ArchiveAgent, "", "myproj-archive"},

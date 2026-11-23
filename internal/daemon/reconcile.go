@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
@@ -99,28 +102,43 @@ func (d *Daemon) reconcileSessions() {
 		projectPath := project.CanonicalPath(rec.ProjectPath)
 		sess := newReconciledSession(rec.ID, store, nil)
 		onEnd := func(error) { d.revisitProject(projectPath) }
-		if kind == agent.TaskAgent || kind == agent.CommitAgent {
-			// An adopted agent's end is not judged by afterTaskSession (its
-			// launch callback died with the previous daemon); the revisit just
-			// re-dispatches from disk. If it left its task at the running the
-			// daemon wrote at dispatch, put it back to ready first so that
-			// re-dispatch can see it — the pre-restart "re-run it" behaviour.
-			taskPath := rec.TaskPath
-			onEnd = func(error) {
-				if taskPath != "" {
-					d.releaseRunningTask(taskPath, "adopted_session_ended")
-				}
-				d.revisitProject(projectPath)
-			}
-		}
-		// The planner, the wolf and the archive agent each live in a slot of
-		// their own (see launchPlanningAgent / launchWolfAgent /
-		// launchArchiveAgent) so they can run in tandem with
-		// the project's main agent; adopting either under the bare project path
-		// would both occupy that main slot and let a second one launch alongside
-		// it.
+		// Every agent but the project and review agents lives in a slot of its
+		// own (docs/parallel-task-worktrees.md S2, X7): each task agent in
+		// #task:<name>, the commit agent in #commit, and the planner, the wolf
+		// and the archive agent in theirs. Adopting one under the bare project
+		// path would both occupy that slot and let a second one launch beside
+		// it — and two adopted task sessions of one project would collide.
 		key := projectPath
+		taskPath := rec.TaskPath
 		switch kind {
+		case agent.TaskAgent:
+			name := taskNameFor(taskPath)
+			if name == "" {
+				d.audit.Log("session_reconcile_error", "id", rec.ID, "kind", rec.Kind, "err", "task file unreadable: "+taskPath)
+				continue
+			}
+			key = taskSessionKey(projectPath, name)
+			// The adopted session ends the way a live one does
+			// (afterTaskSession), routing on what its task file says; that
+			// also releases the global token re-taken here.
+			d.takeToken(taskPath)
+			onEnd = func(error) {
+				d.afterAdoptedTaskSession(projectPath, taskPath)
+				d.resumeDrainedCleanup(projectPath)
+			}
+		case agent.CommitAgent:
+			key = commitSessionKey(projectPath)
+			if d.commitReserved(projectPath) {
+				// A second live commit session for one project points at an
+				// earlier crash bug; its task is left to integration recovery.
+				d.audit.Log("session_reconcile_error", "id", rec.ID, "kind", rec.Kind, "path", projectPath, "err", "second commit session for the project")
+				continue
+			}
+			d.beginCommit(projectPath, taskNameFor(taskPath))
+			onEnd = func(error) {
+				d.afterAdoptedCommitSession(projectPath, taskPath)
+				d.resumeDrainedCleanup(projectPath)
+			}
 		case agent.PlanningAgent:
 			// Planning has a slot of its own too (see launchPlanningAgent), and
 			// its dedup is the planning reservation, which died with the previous
@@ -149,6 +167,11 @@ func (d *Daemon) reconcileSessions() {
 		}
 		if d.trackConfiguredSession(key, sess, kind, taskNameFor(rec.TaskPath), d.reconciledConfig(rec, kind), onEnd) {
 			d.audit.Log("session_reconciled", "key", key, "kind", rec.Kind, "id", rec.ID)
+		} else if kind == agent.TaskAgent {
+			// Already tracked: give back the token taken for it.
+			d.releaseToken(taskPath)
+		} else if kind == agent.CommitAgent {
+			d.endCommit(projectPath)
 		} else if kind == agent.ArchiveAgent {
 			// Already tracked, so nothing will run afterArchiveSession for this
 			// reservation — release the one we just took.
@@ -158,6 +181,76 @@ func (d *Daemon) reconcileSessions() {
 			d.endPlanning(projectPath)
 		}
 	}
+}
+
+// afterAdoptedTaskSession ends a task session adopted from a previous daemon
+// the way a live one ends (X7 part 2): a task the agent left at the running
+// the daemon wrote at dispatch is first put back to ready, the agent having
+// died without writing anything — the pre-restart "re-run it, without
+// spending an attempt" behaviour — and then afterTaskSession routes on the
+// task file, as it would have live: success is stamped and queued, failed is
+// retried or blocks. The callback's project copy is re-read from disk.
+func (d *Daemon) afterAdoptedTaskSession(projectPath, taskPath string) {
+	if taskPath == "" {
+		d.releaseToken(taskPath)
+		d.revisitProject(projectPath)
+		return
+	}
+	d.releaseRunningTask(taskPath, "adopted_session_ended")
+	p, err := project.Load(projectPath)
+	if err != nil {
+		d.releaseToken(taskPath)
+		return
+	}
+	t, err := task.Load(taskPath)
+	if err == nil && t.Status == task.StatusReady {
+		// Released above: no outcome to judge; just give it its slot back.
+		d.releaseToken(taskPath)
+		d.revisitProject(projectPath)
+		return
+	}
+	d.afterTaskSession(projectPath, taskPath, p)
+}
+
+// afterAdoptedCommitSession ends a commit session adopted from a previous
+// daemon the way a live one ends: afterCommitSession verifies and cleans up a
+// committed task and routes anything else on the integration report. The
+// launch-time state it would have had (integrationLaunch) is gone, so it is
+// rebuilt as "unknown": a fresh launch re-derives it.
+func (d *Daemon) afterAdoptedCommitSession(projectPath, taskPath string) {
+	var once sync.Once
+	release := func() { once.Do(func() { d.endCommit(projectPath) }) }
+	defer release()
+	if taskPath == "" {
+		release()
+		d.revisitProject(projectPath)
+		return
+	}
+	// A push task the daemon marked running is put back, as before.
+	d.releaseRunningTask(taskPath, "adopted_session_ended")
+	p, err := project.Load(projectPath)
+	if err != nil {
+		return
+	}
+	t, err := task.Load(taskPath)
+	if err != nil {
+		release()
+		d.revisitProject(projectPath)
+		return
+	}
+	var il *integrationLaunch
+	if t.HasTaskBranch() && !t.IsPushTask() && d.worktreesEnabled() {
+		il = &integrationLaunch{verify: p.Verify}
+		if t.Integration != nil {
+			il.attempts = t.Integration.Attempts
+		}
+	}
+	if t.Status == task.StatusReady {
+		release()
+		d.revisitProject(projectPath)
+		return
+	}
+	d.afterCommitSession(projectPath, taskPath, p, "", il, release)
 }
 
 // taskNameFor loads the task's Name field from its on-disk file for display
@@ -294,3 +387,93 @@ func (s *reconciledSession) sandboxDead(ctx context.Context, rec session.Session
 // that want to stop an adopted session's local tracking should drop it from
 // d.sessions directly, exactly like the shutdown/detach path does.
 func (s *reconciledSession) Close() error { return nil }
+
+// resumeOrphanedOutcomes replays, once per project at startup, what the
+// session-end callbacks of sessions that ended while no daemon was watching
+// would have done (docs/parallel-task-worktrees.md X7 part 3). It runs after
+// releaseOrphanedTasks and only touches tasks no adopted session is working:
+//
+//   - success with no succeeded_at and a task branch: stamped from the task
+//     file's mtime, so the queue roughly follows finish order. A legacy task
+//     keeps the "sorts first" rule.
+//   - failed with integration.result conflict or verify_failed: the conflict
+//     re-run path (attempts++, back to ready, or block when spent).
+//   - failed otherwise: handleTaskFailure's retry or block.
+//   - blocked: the block the task agent asked for.
+//   - committed with its task branch's worktree still set (the cleanup never
+//     ran): the afterCommitSession verification and W6 cleanup, and
+//     completed_at if missing.
+//
+// None of these starts an agent; the scheduling pass that follows does. A
+// failed or blocked task on a project that is not working or idle (blocked
+// already, stopped) is left for the wolf or `:start`.
+func (d *Daemon) resumeOrphanedOutcomes(projectPath string) {
+	p, err := project.Load(projectPath)
+	if err != nil || (p.Status != project.StatusWorking && p.Status != project.StatusIdle) {
+		return
+	}
+	for _, t := range loadTasksLenient(filepath.Join(filepath.Dir(projectPath), "tasks")) {
+		if d.taskSessionLive(projectPath, t.Name) {
+			continue
+		}
+		switch t.Status {
+		case task.StatusSuccess:
+			if t.SucceededAt != nil || !t.HasTaskBranch() || t.IsPushTask() {
+				continue
+			}
+			at := d.clock()
+			if info, err := os.Stat(t.Path); err == nil {
+				at = info.ModTime()
+			}
+			if err := task.Update(t.Path, func(cur *task.Task) bool {
+				if cur.Status != task.StatusSuccess || cur.SucceededAt != nil {
+					return false
+				}
+				cur.SucceededAt = &at
+				return true
+			}); err != nil {
+				d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
+				continue
+			}
+			d.audit.Log("outcome_resumed", "path", projectPath, "task", t.Name, "status", string(t.Status), "action", "succeeded_at")
+		case task.StatusFailed:
+			if t.Integration != nil && (t.Integration.Result == integrationConflict || t.Integration.Result == integrationVerifyFailed) {
+				d.audit.Log("outcome_resumed", "path", projectPath, "task", t.Name, "status", string(t.Status), "action", "conflict_rerun")
+				if !d.requeueConflict(projectPath, p, t) {
+					return // blocked
+				}
+				continue
+			}
+			d.audit.Log("outcome_resumed", "path", projectPath, "task", t.Name, "status", string(t.Status), "action", "retry")
+			if !d.resetForRetry(projectPath, t.Path, p, t) {
+				return
+			}
+		case task.StatusBlocked:
+			d.audit.Log("outcome_resumed", "path", projectPath, "task", t.Name, "status", string(t.Status), "action", "block")
+			d.retainSandbox(t.Path, t)
+			d.transitionProjectBlocked(projectPath, p,
+				fmt.Sprintf("task %q reported blocked: %s", t.Name, t.BlockedReason))
+			return
+		case task.StatusCommitted:
+			if !t.HasTaskBranch() || t.Worktree == "" || !d.worktreesEnabled() {
+				continue
+			}
+			d.audit.Log("outcome_resumed", "path", projectPath, "task", t.Name, "status", string(t.Status), "action", "finish")
+			if !d.finishCommittedTask(projectPath, p, t) {
+				return
+			}
+			if t.CompletedAt == nil {
+				now := d.clock()
+				if err := task.Update(t.Path, func(cur *task.Task) bool {
+					if cur.CompletedAt != nil {
+						return false
+					}
+					cur.CompletedAt = &now
+					return true
+				}); err != nil {
+					d.audit.Log("task_save_error", "task", t.Path, "err", err.Error())
+				}
+			}
+		}
+	}
+}

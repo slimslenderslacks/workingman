@@ -203,6 +203,7 @@ func TestDefaultSandboxCreatorMintsGatewayFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir()) // sbx.DefaultLockPath
 
 	store := mcpgateway.Store{Dir: t.TempDir()}
 	m := mcpgateway.Manager{
@@ -258,12 +259,15 @@ func TestDefaultSandboxCreatorReuseReappliesGatewayRules(t *testing.T) {
 	gw := newFakeGateway(t)
 	logPath := filepath.Join(t.TempDir(), "sbx.log")
 	bin := t.TempDir()
+	// A WARN line after the list (sbx's docker hub refresh lock under
+	// concurrent starts) is ignored.
 	script := "#!/bin/sh\necho \"sbx $*\" >> '" + logPath + "'\n" +
-		"[ \"$1\" = ls ] && echo '{\"sandboxes\":[{\"name\":\"task-x\",\"workspaces\":[\"/ws\"]}]}'\nexit 0\n"
+		"[ \"$1\" = ls ] && echo '{\"sandboxes\":[{\"name\":\"task-x\",\"workspaces\":[\"/ws\"]}]}' && echo 'WARN: docker hub refresh lock held by another process'\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(bin, "sbx"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir()) // sbx.DefaultLockPath
 	m := mcpgateway.Manager{
 		Client:  mcpgateway.Client{BaseURL: gw.srv.URL},
 		Store:   mcpgateway.Store{Dir: t.TempDir()},

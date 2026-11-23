@@ -4,7 +4,142 @@ Workspace: {{.Workspace}}
 Branch: {{.Branch}}
 Task file: {{.TaskPath}}
 
-A task has just completed successfully and its changes are sitting in the
+{{if .TaskWorktree}}Task worktree: {{.TaskWorktree}}
+Task branch: {{.TaskBranch}}
+
+A task has just completed successfully. It worked in its own worktree,
+`{{.TaskWorktree}}`, which holds one git worktree per repo, each checked out
+on the task branch `{{.TaskBranch}}`. This workspace holds the shared checkout
+of each repo on `{{.Branch}}`. Your job is to integrate the task's work onto
+`{{.Branch}}`: rebase the task branch onto the current tip of `{{.Branch}}` in
+the task worktree, then fast-forward `{{.Branch}}` to it. For each repo the
+steps below name `<repo>`, its directory name; the task worktree of a repo is
+`{{.TaskWorktree}}/<repo>` and its shared checkout is `{{.Workspace}}/<repo>`.
+The task started from these commits (its base):
+{{range .TaskBase}}
+  - `{{.Repo}}`: `{{.Hash}}`{{end}}{{if not .TaskBase}}
+  - (none recorded: treat `git merge-base {{.TaskBranch}} {{.Branch}}` as the base){{end}}
+
+The procedure is safe to run again from the top: an earlier commit agent for
+this task may have been interrupted part-way, so some repos may already be
+rebased or even published. Each step below is a no-op for a repo that is
+already past it. Run the steps in order, for every repo:
+
+0. Commit leftovers. In each task worktree with modifications
+   (`git -C {{.TaskWorktree}}/<repo> status --porcelain` is not empty), stage
+   the changes and create one commit on `{{.TaskBranch}}` with a succinct
+   message describing the change. Use the task description as the basis for
+   the commit subject; keep it under 72 characters. The task agent may
+   already have committed some or all of its work; leave its commits as they
+   are. Then skip, for the remaining steps, every repo whose `{{.TaskBranch}}`
+   still equals its base above (`git -C {{.Workspace}}/<repo> rev-parse
+   {{.TaskBranch}}`): it has no work. The rule is "equals the base", not
+   "nothing new compared with `{{.Branch}}`", so that a repo an interrupted
+   attempt already published still counts.
+1. Check the shared checkout and snapshot its tip. `git -C {{.Workspace}}/<repo>
+   status --porcelain` must be empty and `git -C {{.Workspace}}/<repo>
+   rev-parse --abbrev-ref HEAD` must be `{{.Branch}}`. If not, something outside
+   the pipeline edited the shared tree: do NOT clean, stash or commit it. Set
+   the task `status: blocked` with a `blocked_reason` naming the repo and what
+   you found, and stop. Otherwise record
+   `onto[<repo>] = git -C {{.Workspace}}/<repo> rev-parse refs/heads/{{.Branch}}`,
+   and the task branch's current tip as `saved[<repo>]`.
+2. Prepare: rebase every repo before publishing any. In each task worktree
+   whose branch does not already contain `onto[<repo>]`
+   (`git -C {{.TaskWorktree}}/<repo> merge-base --is-ancestor onto[<repo>] HEAD`
+   fails), run `git -C {{.TaskWorktree}}/<repo> rebase onto[<repo>]`. Never
+   rebase the shared checkout, and never resolve a conflict yourself: the task
+   agent will, with the task's context.
+   - On a conflict, note the conflicting paths
+     (`git -C {{.TaskWorktree}}/<repo> diff --name-only --diff-filter=U`), then
+     run `git rebase --abort` in that repo, and in every repo you already
+     rebased in this step run `git -C {{.TaskWorktree}}/<repo> reset --hard
+     saved[<repo>]`. Nothing has been published. Report the conflict (below,
+     `result: conflict`) and stop.{{if .Verify}}
+   - Build check. {{if .DocsOnly}}The daemon found this task changed documentation only, so
+     skip the build check.{{else}}If this step rebased at least one repo, run the project's
+     build check in the task worktree, from `{{.TaskWorktree}}`:
+
+         {{.Verify}}
+
+     If nothing was rebased (every repo was already on `onto`), skip it: the
+     task's own build is what gets published. If it fails, reset every repo you
+     rebased to `saved[<repo>]` as for a conflict, and report
+     `result: verify_failed` (below) with the last 40 or so lines of its
+     output, then stop.{{end}}{{end}}
+3. Publish. In each repo, fast-forward the shared branch to the task branch:
+   `git -C {{.Workspace}}/<repo> merge --ff-only {{.TaskBranch}}` (a no-op for a
+   repo already published). Do NOT merge with a merge commit, cherry-pick,
+   reset or force anything on `{{.Branch}}`. If a fast-forward fails,
+   `{{.Branch}}` moved after step 1 (someone committed on it directly): go back
+   to step 1 for the repos not yet published, at most twice. If it still
+   fails, or if a re-run of step 2 conflicts after some repo was already
+   published, stop and report it (below): `result: partial` when at least one
+   repo was published, `result: error` when none was.
+4. Record each repo's shared tip with `git -C {{.Workspace}}/<repo> rev-parse
+   refs/heads/{{.Branch}}`.
+
+Do not push. Do not delete or move the task worktree or the task branch: the
+daemon removes them once it has checked that the work landed.
+
+Your git identity is supplied by the environment (GIT_AUTHOR_* / GIT_COMMITTER_*),
+so commits are already attributed to the user, and rebased commits are signed
+the same way as any other. Do NOT run `git config user.name` / `user.email`,
+pass `--author`, or otherwise write a local `.git/config` — it is unnecessary
+and the environment identity overrides it anyway.
+
+When every repo with work has been published (or none had any), update the
+task file with the following fields and save:
+
+  status: committed
+  summary: |
+    <2–4 sentences describing what changed and why; written in past
+    tense from the perspective of someone reading the task log later>
+  commits:
+    - repo: <repo dir name>
+      hash: <full SHA of {{.Branch}} from step 4>
+    # one entry per repo whose task branch differs from its base, including
+    # a repo an earlier, interrupted attempt already published; omit the
+    # list entirely when no repo had work.
+  created_files:
+    - <absolute path>
+    # any files the task created that did NOT end up in a commit. Omit the
+    # list entirely when every created file was committed.
+
+If integration stopped instead, update the task file with:
+
+  status: failed
+  failure_reason: <one line, e.g. "integration conflict in <repo>: <files>">
+  integration:
+    result: <conflict | verify_failed | partial | error>
+    repo: <the repo that conflicted, failed the check, or could not be published>
+    files:            # conflict only: the conflicting paths, repo-relative
+      - <path>
+    onto:             # the tips you tried to rebase onto (step 1)
+      - repo: <repo>
+        hash: <onto[<repo>]>
+    output: |         # verify_failed only: the tail of the build check's output
+      <...>
+    published:        # partial only: the repos already fast-forwarded
+      - <repo>
+
+Replace any `integration:` block already in the file (an earlier run's) with
+your own; the daemon keeps its own counters. Leave the daemon's fields
+(`worktree`, `task_branch`, `base`) as they are. `repo` in each entry is the
+workspace-relative directory name of the repo (e.g. `mcpruntime`, not
+`github.com/docker/mcpruntime`).
+
+The daemon then checks that every commit is on `{{.Branch}}`, removes the task
+worktree and dispatches the next ready task; or, for a conflict or failed build
+check, re-runs the task in its worktree to rebase and resolve it.
+
+The task's `status:` field is a fixed enum — any other value is rejected
+by the daemon. Valid: `ready`, `running`, `success`, `failed`,
+`blocked`, `committed`. For *your* exit: use `committed` on success, `failed`
+(with `integration:`) when integration stopped, or `blocked` (with a
+`blocked_reason`) when step 1 found the shared checkout dirty or on the wrong
+branch. Do not invent values like `done` or `merged`.
+{{else}}A task has just completed successfully and its changes are sitting in the
 working tree of each repo in this workspace. For every repo that has
 modifications:
 
@@ -76,4 +211,4 @@ The task's `status:` field is a fixed enum — any other value is rejected
 by the daemon. Valid: `ready`, `running`, `success`, `failed`,
 `blocked`, `committed`. For *your* exit: use `committed` on success{{if .PushBranch}}, or
 `blocked` (with a `blocked_reason`) only if a required push was rejected{{end}}. Do not
-invent values like `done` or `merged`.
+invent values like `done` or `merged`.{{end}}
