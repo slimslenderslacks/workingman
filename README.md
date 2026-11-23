@@ -215,6 +215,11 @@ recreating, and every launch now runs an **LLM TLS preflight** — `curl` from
 inside the sandbox to the endpoint the agent will use — failing the launch
 with that diagnosis (`LLM TLS preflight FAILED` in `acp-wrapper.log`, and the
 session's error) instead of starting an agent that cannot reach the API.
+A **git TLS preflight** follows it (`git ls-remote` of github.com from inside
+the sandbox): a rejected certificate fails the launch (`git TLS preflight
+FAILED`) with a hint to set `--extra-ca-certs` / `WORKINGMAN_EXTRA_CA_CERTS`,
+or that the configured CA is wrong or expired; `./check-ca.sh` proves a CA
+end to end (setup.md, "Custom CA").
 Every sbx call whose output is parsed as JSON (`sbx ls --json`, which finds
 the sandbox to reuse, and `sbx secret ls --json`) is retried: with many
 sessions starting at once (`max_parallel_tasks`), concurrent sbx calls contend

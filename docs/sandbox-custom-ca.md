@@ -1,9 +1,10 @@
 # Sandboxes with an optional, per-laptop custom CA — design
 
-Status: implemented through `apply-ca-on-sandbox-create` (`internal/sbx`
-`ExtraCAScript` / `EnsureExtraCA`); designed for the follow-up tasks `acp-kit-ca-install-helper`,
-`workingman-extra-ca-config`, `apply-ca-on-sandbox-create` and
-`ca-preflight-and-check-script` (checklist in §9).
+Status: implemented (`internal/sbx` `ExtraCAScript` / `EnsureExtraCA`,
+`acpwrapper.gitTLSPreflight`, `check-ca.sh`) by the tasks
+`acp-kit-ca-install-helper`, `workingman-extra-ca-config`,
+`apply-ca-on-sandbox-create` and `ca-preflight-and-check-script` (checklist
+in §9).
 
 ## 0. Summary
 
@@ -639,15 +640,15 @@ note that the sample `corporate-ca.cer` is DER, the wrong root and expired.
 - [x] Docs: §8. Run `go test ./...` and `task docs:check`.
 
 ### `ca-preflight-and-check-script`
-- [ ] `gitTLSPreflight` + `gitTLSHint` in `llmtls.go`, run after
+- [x] `gitTLSPreflight` + `gitTLSHint` in `llmtls.go`, run after
       `llmTLSPreflight`. Generalize `curlStatus` → `probeStatus`. Extend
       `llmTLSHint` with the extra-CA alternative. Add tests: OK,
       cert-fail-without-CA, cert-fail-with-CA (expired wording), missing git,
       non-cert warning.
-- [ ] `check-ca.sh` per §6.2 (without/with probes, double install for
+- [x] `check-ca.sh` per §6.2 (without/with probes, double install for
       idempotence, optional stop/start persistence check, trap cleanup), plus
       the Taskfile `check:ca` target. Check it with `bash -n` / shellcheck.
-- [ ] `setup.md` "Custom CA (VPN / TLS inspection)" section (§6.3), including
+- [x] `setup.md` "Custom CA (VPN / TLS inspection)" section (§6.3), including
       the expected fingerprint of `Okta Inc Decryption Root CA` from §1.2.
-- [ ] Result note: the operator must run `./check-ca.sh
+- [x] Result note: the operator must run `./check-ca.sh
       ~/.workingman/extra-ca.pem` on the laptop for the end-to-end proof.

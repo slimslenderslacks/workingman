@@ -6,6 +6,8 @@ Three scripts drive the local setup:
 * [sbx-create.sh](#sbx-createsh) — create an MCP gateway, configure secrets and network policy, then create and run a sandbox.
 * [sbx-rm.sh](#sbx-rmsh) — delete the sandbox's gateway and remove the sandbox.
 
+On a laptop whose VPN inspects TLS, also see [Custom CA (VPN / TLS inspection)](#custom-ca-vpn--tls-inspection) and `check-ca.sh`.
+
 ## start.sh
 
 | Variable | Description / default |
@@ -120,3 +122,74 @@ sbx `create` and `run` start with this environment
 ## sbx-rm.sh
 
 delete the gateway created for this sandbox and then `sbx rm`
+
+## Custom CA (VPN / TLS inspection)
+
+Design and measurements: [docs/sandbox-custom-ca.md](docs/sandbox-custom-ca.md).
+
+### When you need it
+
+When the laptop's VPN re-signs HTTPS with a corporate CA, sandboxes do not
+trust it, and inside them:
+
+* `git` over https to github.com fails with `SSL certificate verification failed: certificate signer not trusted` (or `SSL certificate problem: ...`). acp-wrapper's **git TLS preflight** (`git ls-remote https://github.com/slimslenderslacks/workingman` from inside the sandbox) fails the launch with `git TLS preflight FAILED` in `acp-wrapper.log` and the session's error.
+* the agent, when no global sbx secret targets the LLM gateway, answers only `Unable to connect to API: Self-signed certificate detected`; the **LLM TLS preflight** fails the launch with `LLM TLS preflight FAILED`.
+
+Other failures of either probe (no git/curl in the sandbox, network policy, DNS, timeouts) only warn.
+Laptops not on such a VPN leave the setting unset and nothing changes.
+
+### Export the current corporate root (macOS keychain)
+
+Use the root's exact name: `-c "Okta"` also matches the expired `Okta Inc Root CA`.
+
+```bash
+# What is there (label + SHA-256):
+security find-certificate -a -c "Okta" -Z | grep -E '"labl"|SHA-256'
+mkdir -p ~/.workingman
+security find-certificate -a -c "Okta Inc Decryption Root CA" -p > ~/.workingman/extra-ca.pem
+openssl x509 -in ~/.workingman/extra-ca.pem -noout -subject -enddate -fingerprint -sha256
+```
+
+Generic form: `security find-certificate -a -c "<name>" -p > ~/.workingman/extra-ca.pem`.
+The file must be PEM; a DER `.cer` converts with
+`openssl x509 -inform DER -in corporate-ca.cer -out ~/.workingman/extra-ca.pem`.
+
+As measured on 2026-11-23, the VPN chains to `CN=Okta Inc Decryption Root CA, O=Okta`
+(valid 2025-11-17 .. 2030-11-16), SHA-256
+`A3:9F:E4:9D:3A:F8:98:39:2D:62:A4:62:38:70:50:30:99:DE:1B:C0:7A:20:E5:F8:E1:A7:57:96:F3:57:79:9A`.
+To see what the VPN presents now: `openssl s_client -connect github.com:443 -servername github.com -showcerts </dev/null | grep -E '^ *[0-9] s:|i:'`.
+
+**The sample `/Users/jim.clark/orch/sandbox-ca-certs/corporate-ca.cer` will not work.**
+It is DER, it is `CN=Okta Inc Root CA` (not the root the VPN chains to), and it
+**expired** (`notAfter=Dec 14 22:30:17 2025 GMT`). An expired anchor is useless:
+curl, git and node all refuse to chain to it. Whenever the VPN's root is
+reissued, re-export it and re-run `check-ca.sh`.
+
+### Enable it on this laptop
+
+* `start.sh`: `export WORKINGMAN_EXTRA_CA_CERTS=~/.workingman/extra-ca.pem` before `./start.sh` (orch reads it; start.sh echoes it).
+* launchd: `orch service install --root ~/orch -- --extra-ca-certs ~/.workingman/extra-ca.pem`.
+* `sbx-create.sh`: reads the same variable, or `--extra-ca-certs PEM`.
+
+orch exits at startup if the file is unreadable or holds no PEM certificate,
+and warns about expired certs. Every launch then installs the CA into the
+sandbox (`/usr/local/share/ca-certificates/workingman-extra-ca.crt` +
+`update-ca-certificates`) before the preflights run.
+
+### Prove it: check-ca.sh
+
+```bash
+./check-ca.sh ~/.workingman/extra-ca.pem   # or: task check:ca -- ~/.workingman/extra-ca.pem
+./check-ca.sh                              # uses $WORKINGMAN_EXTRA_CA_CERTS
+```
+
+* prints each cert's subject, issuer, notAfter and SHA-256, and flags expired ones loudly
+* creates a throwaway probe sandbox `ca-probe-<pid>` like the daemon (`sbx create claude --kit $ACP_KIT -t $ACP_IMAGE --pull missing`, sbx-create.sh's defaults) and allows `github.com,api.anthropic.com` for it
+* runs `git ls-remote https://github.com/slimslenderslacks/workingman HEAD`, `curl https://github.com` and `curl https://api.anthropic.com` **without** the CA, installs it with the daemon's script (from sbx-create.sh's heredoc; run twice to check idempotence), then runs them again **with** it
+* if `sbx stop` exists, stops the probe and re-probes without re-installing (informational)
+* prints a probe × without/with table and removes the probe sandbox on exit
+
+It exits non-zero unless every probe passes with the CA and at least one cert
+is unexpired. On the VPN, the expected result is CERT-FAIL without and ok with.
+If everything passes without the CA, the network does not need one right now.
+

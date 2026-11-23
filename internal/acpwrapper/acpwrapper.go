@@ -1142,6 +1142,11 @@ func Run(ctx context.Context, c Config) error {
 		failRecord(store, c, createdAt, err)
 		return err
 	}
+	if err := gitTLSPreflight(ctx, execCommand, c); err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ERROR %v\n", c.SessionID, err)
+		failRecord(store, c, createdAt, err)
+		return err
+	}
 
 	// Signing preflight: when signing is configured, confirm the forwarded agent
 	// can actually reach a key. This runs fresh on every Run() invocation — every
