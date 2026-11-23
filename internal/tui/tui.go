@@ -304,7 +304,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 	case projectsMsg:
-		m.projects = msg.views
+		m.projects = withIntegrating(msg.views, m.sessions)
 		m.loaded = true
 		m.projSel = reconcileProjectSelection(m.visibleProjects(), m.projSel)
 		m.taskSel = reconcileTaskSelection(m.selectedProjectTasks(), m.taskSel)
@@ -312,6 +312,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForProjects(m.projCh)
 	case sessionsMsg:
 		m.sessions = msg.views
+		m.projects = withIntegrating(m.projects, m.sessions)
 		m.sessLoaded = true
 		m.sessSel = reconcileSelection(m.sessions, m.sessSel)
 		return m, waitForSessions(m.sessCh)
@@ -808,7 +809,7 @@ func (m model) handleCenterClick(xRel, y int, l uiLayout) (tea.Model, tea.Cmd) {
 		// the table's data rows use — width is irrelevant to how many lines
 		// it produces, so 0 is fine here; see taskDepTree and
 		// taskTreeMaxLines for why this must match renderTasks' call.
-		treeRows := len(taskDepTree(tasks, m.taskSel, 0, taskTreeMaxLines(l.tasksH)))
+		treeRows := len(taskDepTree(tasks, m.taskSel, "", 0, taskTreeMaxLines(l.tasksH)))
 		// The pane may be scrolled (centered on the selection), so map the
 		// clicked visible row through the same window the renderer used. y is
 		// relative to the center column's top, so shift it down by
@@ -1827,9 +1828,9 @@ func hyperlink(url, label string) string {
 }
 
 // renderTaskBreakdown renders the per-state task counts in a compact form.
-// Done counts both committed and success tasks — from the user's vantage the
-// task is "done" once it has produced a successful run, even if the commit
-// agent hasn't flipped it to committed yet.
+// Done counts committed tasks only. A task at success is queued (Q) for the
+// commit agent to integrate it onto the shared branch: with a commit queue that
+// can take minutes, and counting it as done would hide the backlog.
 func renderTaskBreakdown(counts map[task.Status]int, width int) string {
 	if len(counts) == 0 {
 		return dimStyle.Render(truncate("no tasks", width))
@@ -1837,11 +1838,39 @@ func renderTaskBreakdown(counts map[task.Status]int, width int) string {
 	ready := counts[task.StatusReady]
 	running := counts[task.StatusRunning]
 	blocked := counts[task.StatusBlocked]
-	done := counts[task.StatusSuccess] + counts[task.StatusCommitted]
+	queued := counts[task.StatusSuccess]
+	done := counts[task.StatusCommitted]
 	failed := counts[task.StatusFailed]
-	line := fmt.Sprintf("R:%d W:%d B:%d D:%d F:%d",
-		ready, running, blocked, done, failed)
+	line := fmt.Sprintf("R:%d W:%d Q:%d B:%d D:%d F:%d",
+		ready, running, queued, blocked, done, failed)
 	return dimStyle.Render(truncate(line, width))
+}
+
+// withIntegrating returns views with each project's Integrating set from the
+// live sessions: the task of the project's running commit agent. The slice is
+// copied, never written in place, because WatchProjects keeps the one it sent
+// to compare the next scan against.
+func withIntegrating(views []ProjectView, sessions []SessionView) []ProjectView {
+	if len(views) == 0 {
+		return views
+	}
+	byPath := map[string]string{}
+	for _, s := range sessions {
+		if s.AgentName != "commit" || s.TaskName == "" {
+			continue
+		}
+		path := s.ID
+		if i := strings.LastIndexByte(path, '#'); i >= 0 {
+			path = path[:i]
+		}
+		byPath[path] = s.TaskName
+	}
+	out := make([]ProjectView, len(views))
+	copy(out, views)
+	for i := range out {
+		out[i].Integrating = byPath[out[i].Path]
+	}
+	return out
 }
 
 // truncate clips s to width display columns. Width 0 returns empty.
@@ -2173,6 +2202,7 @@ func (m model) renderTasks(width, height int) string {
 		b.WriteString(dimStyle.Render("(none)"))
 		return style.Render(clampLines(b.String(), innerHeight))
 	}
+	proj, _ := m.selectedProject()
 
 	// When the selected task's dependency graph has more than one task in
 	// it, draw that graph as a tree right above the table (see taskDepTree)
@@ -2180,7 +2210,7 @@ func (m model) renderTasks(width, height int) string {
 	// row highlighting alone. taskTreeMaxLines caps it from the same pane
 	// height handleCenterClick uses, so the two stay in lockstep about how
 	// many rows the tree consumed — see taskRowAtY.
-	treeLines := taskDepTree(tasks, m.taskSel, innerWidth, taskTreeMaxLines(height))
+	treeLines := taskDepTree(tasks, m.taskSel, proj.Integrating, innerWidth, taskTreeMaxLines(height))
 	for _, l := range treeLines {
 		b.WriteString(l)
 		b.WriteString("\n")
@@ -2213,7 +2243,7 @@ func (m model) renderTasks(width, height int) string {
 		case related[t.Name]:
 			state = taskRowRelated
 		}
-		b.WriteString(renderTaskRow(t, cols, state, pendingDeps(t, statusByName)))
+		b.WriteString(renderTaskRow(t, cols, state, pendingDeps(t, statusByName), proj.Integrating))
 	}
 	return style.Render(clampLines(b.String(), innerHeight))
 }
@@ -2321,7 +2351,7 @@ func taskTreeMaxLines(paneHeight int) int {
 // handleCenterClick both rely on len() of the result to keep the table's
 // row math and the tree in lockstep (see taskTreeMaxLines); width only
 // truncates each line's text, so it never affects that count.
-func taskDepTree(tasks []TaskView, selPath string, width, maxLines int) []string {
+func taskDepTree(tasks []TaskView, selPath, integrating string, width, maxLines int) []string {
 	if maxLines <= 0 {
 		return nil
 	}
@@ -2337,12 +2367,12 @@ func taskDepTree(tasks []TaskView, selPath string, width, maxLines int) []string
 	}
 
 	order := make(map[string]int, len(tasks))
-	statusOf := make(map[string]task.Status, len(tasks))
+	viewOf := make(map[string]TaskView, len(tasks))
 	depsOf := make(map[string][]string, len(tasks))
 	dependentsOf := make(map[string][]string, len(tasks))
 	for i, t := range tasks {
 		order[t.Name] = i
-		statusOf[t.Name] = t.Status
+		viewOf[t.Name] = t
 		depsOf[t.Name] = t.DependsOn
 		for _, dep := range t.DependsOn {
 			dependentsOf[dep] = append(dependentsOf[dep], t.Name)
@@ -2404,11 +2434,11 @@ func taskDepTree(tasks []TaskView, selPath string, width, maxLines int) []string
 		if isLast {
 			branch, childPrefix = "└── ", prefix+"    "
 		}
-		style := taskStatusStyle(statusOf[name])
+		style := taskViewStyle(viewOf[name])
 		if name == sel.Name {
 			style = style.Bold(true)
 		}
-		label := fmt.Sprintf("%s%s%s %s", prefix, branch, taskStatusGlyph(statusOf[name]), name)
+		label := fmt.Sprintf("%s%s%s %s", prefix, branch, taskViewGlyph(viewOf[name], integrating), name)
 		lines = append(lines, style.Render(truncate(label, width)))
 
 		path[name] = true
@@ -2577,7 +2607,15 @@ const (
 // out entirely. pending is the row's already-computed pendingDeps count —
 // how many of its dependencies aren't committed yet — rendered in the deps
 // cell instead of the dependency names themselves, which don't fit a
-// narrow column once a task has more than one or two.
+// narrow column once a task has more than one or two. integrating is the task
+// the project's commit agent is landing ("" when none), which tells an
+// integrating success task from a queued one.
+//
+// A row whose task is somewhere in the integration pipeline gets a trailing
+// dim hint after the status (taskRowHint): its queue position, the
+// dependencies it waits on, or its last conflict. The status column's width
+// is not enough for it, so the hint is laid out past the table's last column
+// and simply clipped by the pane.
 //
 // In the plain state the status column is the only one that carries
 // colour, same palette as the project status indicator so the eye learns
@@ -2585,7 +2623,76 @@ const (
 // row uniformly (selected: the same accent used elsewhere for "active
 // selection"; related: a dimmer, distinct hue) so the highlight reads at a
 // glance without competing with the status colouring.
-func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) string {
+func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int, integrating string) string {
+	row := renderTaskRowCells(t, c, state, pending)
+	if hint := taskRowHint(t, integrating); hint != "" && c.status > 0 {
+		row += " " + dimStyle.Render(hint)
+	}
+	return row
+}
+
+// taskRowHint is the dim note after a task row's status that says where the
+// task is in the integration pipeline (docs/parallel-task-worktrees.md D5):
+//
+//   - "integrating" for the task the commit agent is landing;
+//   - "queue #2" for a task waiting in the commit queue;
+//   - "waiting on X (integrating)" for a task whose dependencies finished but
+//     have not landed yet, so it cannot start;
+//   - "conflict in a.go, b.go (attempt 2/3)" for a task re-running, or
+//     blocked, after its integration failed.
+//
+// Empty for every other task.
+func taskRowHint(t TaskView, integrating string) string {
+	switch {
+	case t.Status == task.StatusSuccess && t.Name == integrating:
+		return "integrating"
+	case t.QueuePos > 0:
+		return fmt.Sprintf("queue #%d", t.QueuePos)
+	case t.Integration != nil && t.Status != task.StatusCommitted:
+		return integrationHint(t)
+	case len(t.WaitingOn) > 0:
+		names := make([]string, len(t.WaitingOn))
+		for i, n := range t.WaitingOn {
+			names[i] = n
+			if n == integrating {
+				names[i] += " (integrating)"
+			}
+		}
+		return "waiting on " + strings.Join(names, ", ")
+	}
+	return ""
+}
+
+// integrationHint describes a task's last failed integration for its row
+// hint: what failed, where, and which attempt the task is on.
+func integrationHint(t TaskView) string {
+	in := t.Integration
+	var what string
+	switch in.Result {
+	case "conflict":
+		what = "conflict"
+		if len(in.Files) > 0 {
+			what += " in " + strings.Join(in.Files, ", ")
+		} else if in.Repo != "" {
+			what += " in " + in.Repo
+		}
+	case "verify_failed":
+		what = "build check failed"
+		if in.Repo != "" {
+			what += " in " + in.Repo
+		}
+	case "partial":
+		what = "partially integrated"
+	default:
+		what = "integration error"
+		if in.Repo != "" {
+			what += " in " + in.Repo
+		}
+	}
+	return fmt.Sprintf("%s (attempt %d/%d)", what, t.Attempts+1, task.MaxAttempts+1)
+}
+
+func renderTaskRowCells(t TaskView, c taskColumns, state taskRowState, pending int) string {
 	model := t.Model
 	if model == "" {
 		// Defensive: TaskView already resolves this (task.DisplayModel), but
@@ -2638,7 +2745,7 @@ func renderTaskRow(t TaskView, c taskColumns, state taskRowState, pending int) s
 	if c.status > 0 {
 		nonStatus := nonEmpty(cells[:7])
 		joined := strings.Join(nonStatus, gap)
-		statusCell := taskStatusStyle(t.Status).Render(truncate(status, c.status))
+		statusCell := taskViewStyle(t).Render(truncate(status, c.status))
 		statusCell = padCell(statusCell, c.status)
 		if joined == "" {
 			return statusCell
@@ -2732,14 +2839,15 @@ func nonEmpty(parts []string) []string {
 
 // taskStatusStyle picks the same colour palette renderStatus uses for
 // project status, plus a couple of task-specific cases. Falls back to dim
-// for unknown values.
+// for unknown values. success is in the running colour: the task is queued for
+// integration, or being integrated, and not done until it is committed.
 func taskStatusStyle(s task.Status) lipgloss.Style {
 	switch s {
 	case task.StatusReady:
 		return statusReady
-	case task.StatusRunning:
+	case task.StatusRunning, task.StatusSuccess:
 		return statusRunning
-	case task.StatusSuccess, task.StatusCommitted:
+	case task.StatusCommitted:
 		return statusDone
 	case task.StatusBlocked:
 		return statusBlocked

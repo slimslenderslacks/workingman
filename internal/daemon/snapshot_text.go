@@ -115,14 +115,17 @@ func (s *Snapshot) WriteText(w io.Writer) error {
 		for _, r := range pr.PullRequests {
 			p("    PR %s#%d %s %s\n", r.Repo, r.Number, orDash(r.State), r.URL)
 		}
-		var counts []string
-		for _, st := range taskStatusOrder {
-			if n := pr.TaskCounts[st]; n > 0 {
-				counts = append(counts, fmt.Sprintf("%d %s", n, st))
-			}
+		if counts := taskCountsLine(pr); counts != "" {
+			p("    tasks: %s\n", counts)
 		}
-		if len(counts) > 0 {
-			p("    tasks: %s\n", strings.Join(counts, ", "))
+		if pr.MaxParallelTasks > 1 {
+			p("    max_parallel_tasks: %d\n", pr.MaxParallelTasks)
+		}
+		if len(pr.CommitQueue) > 0 {
+			p("    queue: %s\n", queueLine(pr))
+		}
+		if vc := pr.VerifyChecks; vc != nil {
+			p("    verify checks: %d run, %d failed, %d skipped\n", vc.Run, vc.Failed, vc.Skipped)
 		}
 		if len(pr.Tasks) > 0 {
 			tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
@@ -131,11 +134,23 @@ func (s *Snapshot) WriteText(w io.Writer) error {
 				if len(t.DependsOn) > 0 {
 					extra += " deps=" + strings.Join(t.DependsOn, ",")
 				}
+				if t.QueuePosition > 0 {
+					extra += fmt.Sprintf(" queue=#%d", t.QueuePosition)
+				}
+				if len(t.WaitingOn) > 0 {
+					extra += " waiting_on=" + strings.Join(t.WaitingOn, ",")
+				}
+				if in := t.Integration; in != nil {
+					extra += " integration=" + integrationText(in)
+				}
 				if t.FailureReason != "" {
 					extra += " failure=" + oneLine(t.FailureReason)
 				}
 				if t.BlockedReason != "" {
 					extra += " blocked=" + oneLine(t.BlockedReason)
+				}
+				if t.Worktree != "" && t.Status != "committed" {
+					extra += " worktree=" + t.Worktree
 				}
 				fmt.Fprintf(tw, "      - %s\t%s\tattempts=%d\t%s\n", t.Name, t.Status, t.Attempts, strings.TrimSpace(extra))
 			}
@@ -145,6 +160,9 @@ func (s *Snapshot) WriteText(w io.Writer) error {
 			var parts []string
 			if len(l.Sessions) > 0 {
 				parts = append(parts, "sessions="+strings.Join(l.Sessions, ","))
+			}
+			if l.CommitReserved {
+				parts = append(parts, "commit-reserved")
 			}
 			if l.WolfInFlight {
 				parts = append(parts, "wolf-in-flight")
@@ -191,6 +209,86 @@ func (s *Snapshot) WriteText(w io.Writer) error {
 		p("  %s %s%s\n", ev.Time.Format(time.RFC3339), ev.Event, b.String())
 	}
 	return err
+}
+
+// taskCountsLine is the per-project task summary: the count of each status,
+// with the running tasks named and `success` split into the task being
+// integrated and the rest of the queue, e.g.
+// "1 ready, 2 running (a, b), 1 integrating (c), 1 queued, 3 committed".
+func taskCountsLine(pr ProjectSnapshot) string {
+	integrating := ""
+	if pr.Live != nil {
+		integrating = pr.Live.Integrating
+	}
+	var running []string
+	queuedSuccess, integratingSuccess := 0, 0
+	for _, t := range pr.Tasks {
+		switch t.Status {
+		case "running":
+			running = append(running, t.Name)
+		case "success":
+			if t.Name == integrating {
+				integratingSuccess++
+			} else {
+				queuedSuccess++
+			}
+		}
+	}
+	var counts []string
+	for _, st := range taskStatusOrder {
+		n := pr.TaskCounts[st]
+		switch {
+		case st == "running" && n > 0 && len(running) == n:
+			counts = append(counts, fmt.Sprintf("%d running (%s)", n, strings.Join(running, ", ")))
+		case st == "success" && n > 0 && integratingSuccess+queuedSuccess == n:
+			if integratingSuccess > 0 {
+				counts = append(counts, fmt.Sprintf("%d integrating (%s)", integratingSuccess, integrating))
+			}
+			if queuedSuccess > 0 {
+				counts = append(counts, fmt.Sprintf("%d queued", queuedSuccess))
+			}
+		case n > 0:
+			counts = append(counts, fmt.Sprintf("%d %s", n, st))
+		}
+	}
+	return strings.Join(counts, ", ")
+}
+
+// queueLine renders the commit queue head first, marking the task being
+// integrated: "c (integrating), d".
+func queueLine(pr ProjectSnapshot) string {
+	integrating := ""
+	if pr.Live != nil {
+		integrating = pr.Live.Integrating
+	}
+	parts := make([]string, len(pr.CommitQueue))
+	for i, name := range pr.CommitQueue {
+		parts[i] = name
+		if name == integrating {
+			parts[i] += " (integrating)"
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// integrationText is a task's integration report in one token-ish string:
+// "conflict(gateway:a.go,b.go)" or "error(attempt 2)".
+func integrationText(in *IntegrationSnapshot) string {
+	var detail []string
+	where := in.Repo
+	if len(in.Files) > 0 {
+		where += ":" + strings.Join(in.Files, ",")
+	}
+	if where != "" {
+		detail = append(detail, where)
+	}
+	if in.Attempts > 0 {
+		detail = append(detail, fmt.Sprintf("attempt %d", in.Attempts))
+	}
+	if len(detail) == 0 {
+		return in.Result
+	}
+	return in.Result + "(" + strings.Join(detail, " ") + ")"
 }
 
 func orDash(s string) string {

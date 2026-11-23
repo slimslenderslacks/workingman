@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,6 +76,9 @@ func renderProjectDetailBody(v ProjectView, width int) string {
 	sections := [][]string{renderProjectDetailHeader(v, width)}
 	if badges := renderProjectDetailBadges(v, width); len(badges) > 0 {
 		sections = append(sections, badges)
+	}
+	if line := renderProjectDetailParallel(v, width); line != "" {
+		sections = append(sections, []string{line})
 	}
 	sections = append(sections, renderProjectDetailTasks(v, width))
 
@@ -173,6 +177,48 @@ func renderProjectDetailBadges(v ProjectView, width int) []string {
 	return lines
 }
 
+// renderProjectDetailParallel is the detail pane's view of the pipeline,
+// shown when the project allows more than one task at a time or anything is
+// waiting to integrate: "parallel: 2 (running a, b · integrating c · queued
+// d)". Empty otherwise, so a serial project with nothing queued looks as it
+// always did.
+func renderProjectDetailParallel(v ProjectView, width int) string {
+	var running, queued []string
+	for _, t := range v.Tasks {
+		if t.Status == task.StatusRunning {
+			running = append(running, t.Name)
+		}
+	}
+	sort.Strings(running)
+	for _, name := range v.CommitQueue {
+		if name != v.Integrating {
+			queued = append(queued, name)
+		}
+	}
+	limit := v.MaxParallel
+	if limit < 1 {
+		limit = 1
+	}
+	if limit <= 1 && len(v.CommitQueue) == 0 {
+		return ""
+	}
+	var parts []string
+	if len(running) > 0 {
+		parts = append(parts, "running "+strings.Join(running, ", "))
+	}
+	if v.Integrating != "" {
+		parts = append(parts, "integrating "+v.Integrating)
+	}
+	if len(queued) > 0 {
+		parts = append(parts, "queued "+strings.Join(queued, ", "))
+	}
+	line := fmt.Sprintf("parallel: %d", limit)
+	if len(parts) > 0 {
+		line += " (" + strings.Join(parts, " · ") + ")"
+	}
+	return dimStyle.Render(truncate(line, width))
+}
+
 // renderProjectDetailTasks renders the task graph: one line per task with a
 // status glyph and colored label, followed by an indented dependency line
 // when it has any, and an indented line naming the repos its commits landed
@@ -185,9 +231,15 @@ func renderProjectDetailTasks(v ProjectView, width int) []string {
 		return lines
 	}
 	for _, t := range v.Tasks {
-		style := taskStatusStyle(t.Status)
-		row := fmt.Sprintf("%s %s  %s", taskStatusGlyph(t.Status), t.Name, t.Status)
+		style := taskViewStyle(t)
+		row := fmt.Sprintf("%s %s  %s", taskViewGlyph(t, v.Integrating), t.Name, t.Status)
+		if hint := taskRowHint(t, v.Integrating); hint != "" {
+			row += "  · " + hint
+		}
 		lines = append(lines, style.Render(truncate(row, width)))
+		if t.Worktree != "" && (t.Status == task.StatusFailed || t.Status == task.StatusBlocked) {
+			lines = append(lines, dimStyle.Render(truncate("    worktree: "+t.Worktree, width)))
+		}
 		if len(t.DependsOn) > 0 {
 			dep := "    ← " + strings.Join(t.DependsOn, ", ")
 			lines = append(lines, dimStyle.Render(truncate(dep, width)))
@@ -207,13 +259,17 @@ func renderProjectDetailTasks(v ProjectView, width int) []string {
 // taskStatusGlyph returns a compact symbol for a task's status, mirroring
 // the vocabulary sessionStatusGlyph established for sessions: a single
 // glyph that reads at a glance and pairs with taskStatusStyle's color.
+// success is queued for integration (⧗), not done: only committed gets ✓.
+// taskViewGlyph refines it with what only the task view knows.
 func taskStatusGlyph(s task.Status) string {
 	switch s {
 	case task.StatusReady:
 		return "○"
 	case task.StatusRunning:
 		return "●"
-	case task.StatusSuccess, task.StatusCommitted:
+	case task.StatusSuccess:
+		return "⧗"
+	case task.StatusCommitted:
 		return "✓"
 	case task.StatusFailed:
 		return "✗"
@@ -222,6 +278,31 @@ func taskStatusGlyph(s task.Status) string {
 	default:
 		return "?"
 	}
+}
+
+// taskViewGlyph is taskStatusGlyph for a task in context
+// (docs/parallel-task-worktrees.md D5): a success task the project's commit
+// agent is landing (integrating names it) shows ⇡ rather than the queued ⧗,
+// and a ready task carrying an integration report, a conflict re-run waiting
+// for a slot, shows ↻.
+func taskViewGlyph(t TaskView, integrating string) string {
+	switch {
+	case t.Status == task.StatusSuccess && integrating != "" && t.Name == integrating:
+		return "⇡"
+	case t.Status == task.StatusReady && t.Integration != nil:
+		return "↻"
+	}
+	return taskStatusGlyph(t.Status)
+}
+
+// taskViewStyle is the colour for taskViewGlyph: a conflict re-run waiting
+// for a slot is in the running colour, as it is already part-way through the
+// pipeline; everything else follows its status.
+func taskViewStyle(t TaskView) lipgloss.Style {
+	if t.Status == task.StatusReady && t.Integration != nil {
+		return statusRunning
+	}
+	return taskStatusStyle(t.Status)
 }
 
 // wrapDisplayWidth hard-wraps each newline-separated line of s to width

@@ -56,9 +56,11 @@
 //   - command_picker.go — the ":" menu and dispatch of each command.
 //   - wolf.go, review.go, cleanup.go, stop.go, hide.go — the project-file
 //     writes behind :wolf, :review, :cleanup, :stop/:start and :hide/:show.
-//   - archive.go — :archive: removes the wsp workspace, then moves the
+//   - archive.go — :archive: removes the project's task worktrees and wm/
+//     refs (internal/worktree), then the wsp workspace, then moves the
 //     project directory to the sibling <root>.backup directory.
-//   - interactive.go — :session, :orch and :workspace through [InteractiveLauncher].
+//   - interactive.go — :session, :orch and :workspace through [InteractiveLauncher];
+//     from the Tasks pane, :session and :workspace open the selected task's worktree.
 //   - tab_attach.go — attaching to non-ACP sessions through [TabFocuser].
 //   - acpwatch.go — [WatchACPSessions]: discovers ACP sessions on disk,
 //     dials their sockets, sends the opening prompt and streams events.
@@ -117,7 +119,8 @@
 //   - [SessionView] — one live agent session, adapted from the daemon's
 //     SessionInfo by cmd/orch so this package doesn't import internal/daemon.
 //   - [InteractiveLauncher] — interface for :session, :orch and :workspace; implemented in
-//     cmd/orch over the daemon's OpenInteractiveSession/OpenOrchDirTab/OpenWorkspaceDirTab.
+//     cmd/orch over the daemon's OpenInteractiveSession/OpenTaskSession/OpenOrchDirTab/
+//     OpenWorkspaceDirTab/OpenTaskWorktreeDirTab.
 //   - [TabFocuser] — interface to focus a session's terminal tab; implemented
 //     by terminal.TabLauncher, shared with the daemon by cmd/orch.
 //   - [InboxStore] and [InboxItem] — the store interface the inbox reads and

@@ -81,3 +81,45 @@ func TestApplyRejectsEmptySkill(t *testing.T) {
 		t.Error("expected error for skill with empty Name and Source")
 	}
 }
+
+// A task's hints reach .orch/context.yaml, and an explicit `touches: []`
+// is written rather than dropped (docs/parallel-task-worktrees.md H1).
+func TestApplyWritesHints(t *testing.T) {
+	ws := t.TempDir()
+	touches := []string{"gateway/internal/api/**"}
+	ctx := Context{Kind: "task", Workspace: ws, Touches: &touches, Areas: []string{"go-deps"}}
+	if err := Apply(ws, ctx, "x", nil); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(ws, ".orch", "context.yaml"))
+	for _, want := range []string{"touches:\n    - gateway/internal/api/**\n", "areas:\n    - go-deps\n"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("context.yaml missing %q:\n%s", want, data)
+		}
+	}
+
+	empty := []string{}
+	ws = t.TempDir()
+	if err := Apply(ws, Context{Kind: "task", Workspace: ws, Touches: &empty}, "x", nil); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(filepath.Join(ws, ".orch", "context.yaml"))
+	if !strings.Contains(string(data), "touches: []\n") {
+		t.Errorf("an explicit touches: [] must be kept:\n%s", data)
+	}
+
+	ws = t.TempDir()
+	plan := Context{Kind: "planning", Workspace: ws, MaxParallelTasks: 3, Repos: []string{"gateway", "docs"}}
+	if err := Apply(ws, plan, "x", nil); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(filepath.Join(ws, ".orch", "context.yaml"))
+	for _, want := range []string{"max_parallel_tasks: 3\n", "repos:\n    - gateway\n    - docs\n"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("planning context.yaml missing %q:\n%s", want, data)
+		}
+	}
+	if strings.Contains(string(data), "touches") {
+		t.Errorf("no hints means no touches key:\n%s", data)
+	}
+}

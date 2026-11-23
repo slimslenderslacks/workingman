@@ -6,10 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
+	"github.com/slimslenderslacks/work/internal/task"
 )
 
 // spawningLauncher hands back a fresh, un-closed stubSession per launch so the
@@ -165,5 +167,47 @@ func TestLaunchWolfAgentOnHostUsesTerminalTab(t *testing.T) {
 	}
 	if strings.Contains(string(instructions), "you are sandboxed") || !strings.Contains(string(instructions), "macOS notification") {
 		t.Errorf("host wolf instructions should keep the host guidance:\n%s", instructions)
+	}
+}
+
+// TestWolfRunsInTandemWithParallelSlots is the tandem test with the slots
+// split (X3): the wolf launches beside two task agents and an integration,
+// leaves all three running, and a blocked project starts no new task or
+// commit agent beside it.
+func TestWolfRunsInTandemWithParallelSlots(t *testing.T) {
+	e := newSchedEnv(t, 3)
+	for _, n := range []string{"a", "b", "c"} {
+		e.addTask(n, []string{"gateway/" + n + "/**"})
+	}
+	e.pass()
+	e.finishTask("a", task.StatusSuccess)
+	e.eventually("a integrating", func() bool { return e.integrating() == "a" })
+	e.addTask("d", []string{"gateway/d/**"})
+
+	p, _ := project.Load(e.projectPath)
+	e.d.transitionProjectBlocked(e.projectPath, p, "summoned")
+	if !e.d.hasSession(wolfSessionKey(e.projectPath)) {
+		t.Fatal("wolf did not launch beside the task and commit slots")
+	}
+	for _, key := range []string{taskSessionKey(e.projectPath, "b"), taskSessionKey(e.projectPath, "c"), commitSessionKey(e.projectPath)} {
+		if !e.d.hasSession(key) {
+			t.Errorf("%s was disturbed by the wolf", key)
+		}
+	}
+	e.pass()
+	if tk := e.task("d"); tk.Status != task.StatusReady {
+		t.Errorf("d = %s, want ready: a blocked project admits nothing", tk.Status)
+	}
+	// The integration already running finishes; nothing new starts after it.
+	e.finishCommit("a")
+	e.eventually("a committed", func() bool { return !e.d.commitReserved(e.projectPath) })
+	e.finishTask("b", task.StatusSuccess)
+	e.eventually("b's session ended", func() bool { return !e.d.hasSession(taskSessionKey(e.projectPath, "b")) })
+	time.Sleep(100 * time.Millisecond)
+	if n := e.lch.count(agent.CommitAgent); n != 1 {
+		t.Errorf("commit agents started = %d, want 1 (the queue is frozen while blocked)", n)
+	}
+	if n := e.lch.count(agent.TaskAgent); n != 3 {
+		t.Errorf("task agents started = %d, want 3", n)
 	}
 }

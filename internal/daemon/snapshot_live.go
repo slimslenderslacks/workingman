@@ -300,8 +300,16 @@ func (d *Daemon) buildSnapshot(live bool) *Snapshot {
 	if live {
 		snap.LiveStateAvailable = true
 		snap.Sessions = d.liveSessionSnapshots()
+		attachSessionWorktrees(snap.Sessions, snap.Projects)
 		for i := range snap.Projects {
-			snap.Projects[i].Live = d.projectLive(snap.Projects[i].Path, snap.Sessions)
+			pr := &snap.Projects[i]
+			pr.Live = d.projectLive(pr.Path, snap.Sessions)
+			if pr.hasVerify {
+				pr.VerifyChecks = d.verifyCheckCounts(pr.Path)
+				if pr.VerifyChecks == nil {
+					pr.VerifyChecks = &VerifyChecks{}
+				}
+			}
 		}
 		// Sessions the daemon doesn't track but whose ACP dir is on disk are
 		// not added: the daemon reconciles those into its own tracking at
@@ -349,6 +357,8 @@ func (d *Daemon) daemonInfo() *DaemonInfo {
 
 // splitSessionKey separates a session-map key into its project path and the
 // agent-slot marker ("" for the shared slot, "planning", "wolf", "archive").
+// It splits on the last "#", which task names cannot contain
+// (task.ValidName), so a later "task:<name>" marker splits the same way.
 func splitSessionKey(key string) (projectPath, marker string) {
 	if i := strings.LastIndexByte(key, '#'); i >= 0 {
 		return key[:i], key[i+1:]
@@ -425,9 +435,33 @@ func (d *Daemon) liveSessionSnapshots() []SessionSnapshot {
 	return out
 }
 
+// attachSessionWorktrees fills in each task session's worktree from its
+// task's file: the task agent's cwd when it runs in a task worktree. A commit
+// agent works in the shared tree, and a legacy task has no worktree, so
+// neither gets one.
+func attachSessionWorktrees(sessions []SessionSnapshot, projects []ProjectSnapshot) {
+	byProject := map[string]*ProjectSnapshot{}
+	for i := range projects {
+		byProject[projects[i].Path] = &projects[i]
+	}
+	for i := range sessions {
+		s := &sessions[i]
+		pr := byProject[s.ProjectPath]
+		if s.Kind != agent.TaskAgent.String() || s.Task == "" || pr == nil {
+			continue
+		}
+		for _, t := range pr.Tasks {
+			if t.Name == s.Task {
+				s.Worktree = t.Worktree
+				break
+			}
+		}
+	}
+}
+
 // projectLive gathers the in-memory state for one project.
 func (d *Daemon) projectLive(projectPath string, sessions []SessionSnapshot) *ProjectLive {
-	live := &ProjectLive{Sessions: []string{}}
+	live := &ProjectLive{Sessions: []string{}, RunningTasks: []string{}}
 	for _, s := range sessions {
 		if s.ProjectPath != projectPath {
 			continue
@@ -438,9 +472,18 @@ func (d *Daemon) projectLive(projectPath string, sessions []SessionSnapshot) *Pr
 			live.WolfInFlight = true
 		case agent.ReviewAgent.String():
 			live.ReviewAgentInFlight = true
+		case agent.TaskAgent.String():
+			if s.Task != "" {
+				live.RunningTasks = append(live.RunningTasks, s.Task)
+			}
+		case agent.CommitAgent.String():
+			live.Integrating = s.Task
 		}
 	}
 	sort.Strings(live.Sessions)
+	sort.Strings(live.RunningTasks)
+	live.CommitReserved = d.commitReserved(projectPath)
+	live.Deferred = d.deferredInfo(projectPath)
 
 	d.planningMu.Lock()
 	live.PlanningFailures = d.planningFailures[projectPath]

@@ -61,8 +61,8 @@ A sandbox's gateway is minted with `POST <gateway>/gateways` and the body
 `{"servers": [...]}`. The list is:
 
 1. the task's **`static_mcps`** when it names any. Each entry is a catalog
-   server name. The commit agent shares its task's sandbox, so it uses the
-   same list.
+   server name. The commit agent runs in a sandbox of its own
+   (`<work-stream>-<task>-commit`) but is given its task's list.
 2. otherwise the **default set**, `--mcp-gateway-servers` /
    `WORKINGMAN_MCP_GATEWAY_SERVERS` (comma-separated). This covers tasks with
    no `static_mcps` and the agents that have no task (project, planning,
@@ -107,9 +107,13 @@ with the github, logseq and gmail tools behind it.
 
 ## Order of operations
 
-For a sandbox that does not exist yet, both creation paths
-(`acpwrapper.createSandbox` and `runner.DefaultSandboxCreator`) run these
-steps in this order:
+Whether the sandbox exists is read from `sbx ls --json` through
+`sbx.Client.List`: stdout only, `WARN:`/JSON log lines before or after the
+list skipped, retried up to 5 times with jittered backoff under the host-wide
+`~/.workingman/locks/sbx.lock`, so concurrent session starts don't fail on
+sbx's docker hub refresh warning. For a sandbox that does not exist yet, both
+creation paths (`acpwrapper.createSandbox` and `runner.DefaultSandboxCreator`)
+run these steps in this order:
 
 1. **Create the gateway.** `POST <gateway>/gateways {"servers": [...]}`
    (`mcpgateway.Manager.Prepare`). This happens before the sandbox exists.
@@ -347,7 +351,10 @@ its session directory.
   keeps its gateway, so a relaunch reuses both.
 - **Restart cleanup**: every acp-wrapper launch sweeps the store. A record
   whose sandbox `sbx ls` no longer lists, and that is older than 10 minutes
-  (`mcpgateway.SweepGrace`), has its gateway DELETEd. This catches kept
+  (`mcpgateway.SweepGrace`), has its gateway DELETEd. The listing is the same
+  retried, host-locked `sbx.Client.List` the reuse lookup uses (WARN lines
+  around the JSON skipped); if it still fails nothing is released, since a
+  gateway is never released on a guess. This catches kept
   sandboxes that someone later removed by hand, and wrappers that died before
   their exit cleanup.
 

@@ -1,0 +1,153 @@
+{
+  "work_stream": "pipe",
+  "path": "<root>/pipe/project.yaml",
+  "status": "working",
+  "branch": "pipe-branch",
+  "description": "pipeline",
+  "review": false,
+  "review_now": false,
+  "cleanup": false,
+  "archive": false,
+  "replan": false,
+  "watching_pr": false,
+  "hidden": false,
+  "cron_active": false,
+  "pull_requests": [],
+  "max_parallel_tasks": 2,
+  "commit_queue": [
+    "head",
+    "next"
+  ],
+  "verify_checks": {
+    "run": 2,
+    "failed": 1,
+    "skipped": 1
+  },
+  "task_counts": {
+    "blocked": 0,
+    "committed": 1,
+    "failed": 0,
+    "ready": 3,
+    "running": 0,
+    "success": 2
+  },
+  "task_total": 6,
+  "tasks": [
+    {
+      "name": "base",
+      "status": "committed",
+      "attempts": 0,
+      "depends_on": [],
+      "touches": [],
+      "exclusive": false,
+      "completed_at": "2026-11-19T09:00:00Z"
+    },
+    {
+      "name": "conflicted",
+      "status": "ready",
+      "attempts": 1,
+      "depends_on": [],
+      "touches": [
+        "gateway/internal/**"
+      ],
+      "exclusive": false,
+      "worktree": "/ws/pipe-branch/.worktrees/conflicted",
+      "task_branch": "wm/pipe-branch/conflicted",
+      "base": [
+        {
+          "repo": "gateway",
+          "hash": "aaaa"
+        }
+      ],
+      "integration": {
+        "result": "conflict",
+        "repo": "gateway",
+        "files": [
+          "internal/a.go",
+          "internal/b.go"
+        ],
+        "landed": [
+          "base"
+        ]
+      }
+    },
+    {
+      "name": "dependent",
+      "status": "ready",
+      "attempts": 0,
+      "depends_on": [
+        "next"
+      ],
+      "touches": [
+        "gateway/docs/**"
+      ],
+      "exclusive": false,
+      "waiting_on": [
+        "next"
+      ]
+    },
+    {
+      "name": "head",
+      "status": "success",
+      "attempts": 0,
+      "depends_on": [],
+      "touches": [
+        "gateway/cmd/**"
+      ],
+      "exclusive": false,
+      "worktree": "/ws/pipe-branch/.worktrees/head",
+      "task_branch": "wm/pipe-branch/head",
+      "base": [
+        {
+          "repo": "gateway",
+          "hash": "aaaa"
+        }
+      ],
+      "succeeded_at": "2026-11-19T10:00:00Z",
+      "queue_position": 1
+    },
+    {
+      "name": "legacy",
+      "status": "ready",
+      "attempts": 0,
+      "depends_on": [],
+      "exclusive": true
+    },
+    {
+      "name": "next",
+      "status": "success",
+      "attempts": 0,
+      "depends_on": [],
+      "areas": [
+        "go-deps"
+      ],
+      "exclusive": false,
+      "worktree": "/ws/pipe-branch/.worktrees/next",
+      "task_branch": "wm/pipe-branch/next",
+      "base": [
+        {
+          "repo": "gateway",
+          "hash": "aaaa"
+        }
+      ],
+      "succeeded_at": "2026-11-19T10:05:00Z",
+      "queue_position": 2
+    }
+  ],
+  "updated_at": "0001-01-01T00:00:00Z",
+  "live": {
+    "sessions": [
+      "commit"
+    ],
+    "running_tasks": [],
+    "integrating": "head",
+    "commit_reserved": true,
+    "wolf_in_flight": false,
+    "cleanup_in_flight": false,
+    "review_agent_in_flight": false,
+    "planning_failures": 0,
+    "project_failures": 0,
+    "review_fix_cycles": 0,
+    "review_errors": 0
+  }
+}

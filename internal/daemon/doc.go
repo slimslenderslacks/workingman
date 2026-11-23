@@ -18,11 +18,13 @@
 // workingman, sleepy-head, step-up) in agents.md; this comment is a map of
 // where each lives.
 //
-// Each project has one shared session slot, keyed by its project.yaml path,
-// used in turn by its project, task, commit and review agents. Planning,
-// wolf and archive agents run in slots of their own ("<path>#planning",
-// "#wolf", "#archive"), and the workingman and Step-Up agents, which belong
-// to no project, have fixed keys. The daemon writes project.yaml and task files
+// Each project's session slots are keyed by its project.yaml path: the bare
+// path for its project and review agents, "<path>#task:<name>" for each task
+// agent, "#commit" for its one commit agent, and "#planning", "#wolf" and
+// "#archive" for the others. The workingman and Step-Up agents, which
+// belong to no project, have fixed keys. A project runs up to max_parallel_tasks tasks at
+// once (one by default), and integrates them one at a time through its
+// commit queue (docs/parallel-task-worktrees.md). The daemon writes project.yaml and task files
 // itself (status transitions) and ignores the fsnotify events its own writes
 // cause.
 //
@@ -40,13 +42,17 @@
 //   - watcher.go: recursive watch setup, routing by file name, and the
 //     startup scan that re-evaluates every project.yaml already on disk.
 //   - dispatch.go: handleProject and dispatchProject, the per-status router
-//     (unpopulated → project agent, ready → planning, working → next ready
-//     task, cleanup → archive), plus the planning and project agents, their
-//     circuit breakers and backoff, and cron registration.
+//     (unpopulated → project agent, ready → planning, working → a scheduling
+//     pass, cleanup → archive), plus the planning, project and task agents,
+//     their circuit breakers and backoff, and cron registration.
+//   - schedule.go: the scheduling pass. It starts the commit queue's head,
+//     then fills the free task slots within the project's limit, the global
+//     cap ([WithMaxParallelTasks]) and the tasks' independence hints. Also
+//     the slot keys and the global task tokens.
 //   - dispatch_lifecycle.go: what happens when a session ends. Task results
-//     lead to commit, retry or block; commit results lead to the next task or
-//     project completion. Also the idle/blocked transitions, the wolf agent
-//     and the archive (cleanup) agent.
+//     lead to the commit queue, retry or block; commit results lead to the
+//     next pass or project completion. Also the commit agent, the idle and
+//     blocked transitions, the wolf agent and the archive (cleanup) agent.
 //   - cron_missed.go: sleep-aware cron. Persists when each schedule last
 //     fired ([WithCronState]), counts ticks lost to daemon downtime or host
 //     sleep into one [MissedSchedule] per project, and never fires them itself.
@@ -86,8 +92,11 @@
 //   - reconcile.go: at startup, adopts ACP sessions left on disk by a
 //     previous orch process so they are not dispatched twice.
 //   - interactive.go: [Daemon.OpenInteractiveSession],
-//     [Daemon.OpenOrchDirTab] and [Daemon.OpenWorkspaceDirTab], which back the
-//     TUI's :session, :orch and :workspace commands.
+//     [Daemon.OpenTaskSession], [Daemon.OpenOrchDirTab],
+//     [Daemon.OpenWorkspaceDirTab] and [Daemon.OpenTaskWorktreeDirTab], which
+//     back the TUI's :session, :orch and :workspace commands.
+//   - archive_worktrees.go: the archive agent's pre-launch worktree cleanup
+//     and its list of unintegrated task work.
 //   - workingman_agent.go: supervises the always-on workingman agent
 //     ([WithWorkingmanAgent]), restarting it with backoff (superviseAgent,
 //     shared with the Step-Up agent).

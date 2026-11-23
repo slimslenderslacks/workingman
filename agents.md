@@ -5,6 +5,14 @@
 > synopsis, exported types and the import graph. Read it first to find your way
 > around the code; [docs/package-docs.md](docs/package-docs.md) explains the
 > `doc.go` convention that feeds it.
+>
+> **In progress:** [docs/parallel-task-worktrees.md](docs/parallel-task-worktrees.md)
+> is the design for running a project's tasks in parallel, each in its own git
+> worktree, with the commit agent serializing integration onto the shared
+> branch. Phases 1 and 2 have shipped: every non-push task already runs in
+> its own worktree (concurrency is still 1), and the commit agent integrates
+> it by rebasing onto the shared tip and fast-forwarding, as the task and
+> commit agent sections below describe.
 
 The orchestrator launches ten kinds of `claude` sessions. Seven run over a
 project's lifecycle: **project → planning → task → commit**, with **wolf**,
@@ -133,17 +141,17 @@ while a planner is already running gets a follow-up run once that one ends
 directory (no wsp workspace of its own) — sandbox name is the bare
 work-stream basename (`SandboxNameFor`, case `PlanningAgent`). It is tracked
 under a **dedicated planning slot**, `planningSessionKey = projectPath +
-"#planning"`, rather than the main slot task/commit agents hold, so a planner
-can run while a task/commit agent is mid-flight. Design choice: task and commit
+"#planning"`, beside the task (`#task:<name>`) and commit (`#commit`) slots,
+so a planner can run while task and commit agents are mid-flight. Design choice: task and commit
 agents work in the wsp workspace and only touch their own task file, while the
 planner only adds task files in the control dir, so they do not conflict;
 sharing one slot is what used to strand intake on a working project. The
 one-planner rule is enforced by an in-memory reservation (`beginPlanning` /
 `endPlanning`, `planningBusy`) taken before `runner.Start` and released in
 `afterPlanningSession`, re-taken by `reconcileSessions` for an adopted planner.
-Planning still waits for the main slot when it holds a project or review agent
-(both write the control dir), and a cron re-plan waits for it to be empty (a
-re-plan may delete tasks). While a planner is in flight, task dispatch defers
+Planning still waits for the bare slot when it holds a project or review agent
+(both write the control dir), and a cron re-plan waits for every task and
+commit slot and commit reservation to clear (a re-plan may delete tasks). While a planner is in flight, task dispatch defers
 project completion and graph-error/no-ready-task blocks to
 `afterPlanningSession`, and review dispatch stands aside. But unlike
 project/wolf, planning *also* provisions the project's wsp worktree
@@ -213,28 +221,50 @@ project comes to rest.
 
 **Kind:** `agent.TaskAgent`. **Template:** `task.tmpl`. **Interactive:** no.
 
-**Trigger.** `dispatchNextTask` → `dispatchReadyOrPending` →
-`dispatchReadyTask` → `launchTaskAgent`, whenever a project is `status:
-working` (or has pending manual tasks in `reviewing`/`done`) and has a task in
-`Ready()` state in the DAG built by `internal/taskgraph`. A push task
-(`t.IsPushTask()`) skips the task agent entirely and goes straight to the
-commit agent (see below).
+**Trigger.** A scheduling pass (`schedule`, `internal/daemon/schedule.go`)
+on a project that is `status: working` (or `idle` with pending manual tasks)
+admits tasks from `Ready()` in the DAG built by `internal/taskgraph` —
+`Graph.Runnable`, up to `max_parallel_tasks` (default 1) minus the tasks
+already in flight, within the global `--max-parallel-tasks` cap, skipping
+tasks whose hints overlap one in flight — marks each running, and calls
+`launchTaskAgent` for it. Every task agent has a session slot of its own,
+`<project.yaml>#task:<name>`. A push task (`t.IsPushTask()`) skips the task
+agent entirely and joins the commit queue (see below).
 
-**Workspace/session.** *No* `WorkingDir` — `Runner.resolveWorkingDir` calls
-`workspace.Manager.Create(ctx, branch, repos)` (wsp), provisioning/reusing a
-workspace named after the project's `branch`, containing every repo in
-`p.Repos` + `p.NewRepos` on that branch. Sandbox name is
-`"<work-stream>-<task-name>"` — each task gets its **own** sandbox (so a
-task's `static_mcps`/`policies` can differ from siblings), mounted with two
-workspaces: the wsp worktree itself and the project's control/orch dir
-(needed so the task agent's status write-back to `tasks/<name>.yaml` lands
-somewhere that exists inside the sandbox).
+**Workspace/session.** *No* `WorkingDir`. The daemon's `launchTaskAgent`
+first provisions/reuses the project's **shared workspace** with
+`workspace.Manager.Create(ctx, branch, repos)` (wsp) — named after the
+project's `branch`, containing every repo in `p.Repos` + `p.NewRepos` on that
+branch — and then, in `prepareTaskWorktree` (`internal/daemon/worktree.go`),
+gives the task its **own worktree**: `<shared>/.worktrees/<task>/`, one
+`git worktree` per repo on the task branch `wm/<branch>/<task>`
+(`internal/worktree`). The first dispatch cuts it from the shared tip; every
+later dispatch (a retry, `:start` after a stop, a wolf reset) reuses it
+exactly as the last run left it, dirty or not. The daemon stamps `worktree`,
+`task_branch` and `base` on the task file, and a failure to cut it releases
+the task and blocks the project (`worktree_create_error`). The agent's cwd
+is the worktree root (`Plan.TaskWorktree`; `.orch/` is written there), and
+sandbox name `"<work-stream>-<task-name>"` — each task gets its **own**
+sandbox (so a task's `static_mcps`/`policies` can differ from siblings) —
+mounts the worktree, each repo's git common dir (so the worktree's `.git`
+pointer resolves and its commits land in the shared repo), the shared
+`.gomodcache` when staged, and the project's control/orch dir (so the status
+write-back to `tasks/<name>.yaml` lands somewhere that exists inside the
+sandbox). It never mounts the shared working trees.
+
+Legacy path: with a workspace manager that isn't git-backed (the plain stub),
+for a push task, or while legacy work is still in the shared tree (another
+task with no `task_branch` at `running`/`success`, or uncommitted changes in a
+shared repo; `worktree_skipped_legacy`), the task runs in the shared
+workspace as it did before worktrees.
 
 **Reads/writes.** Reads its own `TaskPath` (task yaml) and the project file.
-Does the actual code work in the workspace. Writes only `status:
-success|failed` (+ `failure_reason` on failure) back to its task file — it
-must NOT commit, push, or touch `project.yaml`; that's the commit agent's and
-daemon's job. A task whose `static_mcps` includes `post-office` can also
+Does the actual code work in its worktree; it may commit on its own task
+branch (or leave the work uncommitted) but must not touch any other ref or
+push. Writes only `status: success|failed` (+ `failure_reason` on failure)
+back to its task file — it must NOT touch `project.yaml`; integrating the
+work is the commit agent's and daemon's job. (On the legacy path it must not
+commit either.) A task whose `static_mcps` includes `post-office` can also
 message the operator or another agent while it works (see
 [Messaging capability](#messaging-capability-post-office)).
 The agent's `acp-wrapper` also annotates the task file (via `task.Update`,
@@ -248,15 +278,24 @@ resolved ones when present.
 **Prompt structure (`task.tmpl`).** Short and direct — this is the exact text
 this very orchestrator run received (see `.orch/instructions.md` in this
 task's own sandbox): task name/paths up top, "read the description and do the
-work," explicit instruction that even a git-no-op (a GitHub-API-only change)
+work" — for a worktree task, that it is on its own branch and must leave
+every other ref alone, plus, on a retry (`attempts > 0`) or a resumed run, a
+block saying the worktree may hold the earlier run's committed and
+uncommitted changes, how to inspect them against `base`, and that it may
+keep, fix or undo them; on a re-run after an integration conflict or a
+failed build check (the task's `integration:` block is set), a block naming
+the conflicting repo and files (or the build output) and the tasks that
+landed meanwhile, telling it to rebase its own branch onto the shared branch
+and resolve them — an explicit instruction that even a git-no-op (a GitHub-API-only change)
 should still exit `success` so the commit agent can finalize it, and the fixed
 status enum with a call-out that `committed` from a task agent is an
 invariant violation.
 
 **Completion signal / lifecycle.** `afterTaskSession` re-reads the task file:
-`success` → `launchCommitAgent`; `failed`/`running`/`ready` (agent crashed or
+`success` → re-stamp `base` (merge base with the shared branch) and
+`launchCommitAgent`; `failed`/`running`/`ready` (agent crashed or
 never started) → `handleTaskFailure`, which bumps `Attempts` and resets to
-`ready` for a relaunch, up to `maxTaskAttempts` (3), after which it retains
+`ready` for a relaunch in the **same** worktree, up to `maxTaskAttempts` (3), after which it retains
 the sandbox (`retainSandbox`, sets `save_sandbox: true` for post-mortem) and
 blocks the project (→ wolf); `blocked` → retains the sandbox and blocks
 immediately (no retry budget spent); `committed` → treated as an invariant
@@ -268,28 +307,52 @@ violation, blocks the project.
 
 **Kind:** `agent.CommitAgent`. **Template:** `commit.tmpl`. **Interactive:** no.
 
-**Trigger.** Two paths: (1) `afterTaskSession` on `status: success`; (2) the
-"resume pending commit" recovery in `dispatchReadyOrPending` /
-`afterCommitSession` / `dispatchNextTask`, which re-launches a commit agent
-for any task stuck at `success` (covers a daemon restart between task-end and
-commit-start). A push task (`t.IsPushTask()`) is dispatched straight here from
-`dispatchReadyTask`, with `PushBranch: true`.
+**Trigger.** The commit queue (`taskgraph.Queued`: tasks at `success`, plus
+push tasks at `ready` whose dependencies are committed, FIFO by the
+daemon-stamped `succeeded_at`). Every scheduling pass starts the commit agent
+for the queue's head unless the project's commit reservation is held, so one
+integration runs per project at a time, in the `<project.yaml>#commit` slot.
+The queue is rebuilt from disk, so a daemon restart between task-end and
+commit-start resumes it with no special case. A push task runs here with
+`PushBranch: true`; a transient integration failure relaunches the commit
+agent for the same task (`launchCommitAgent`).
 
-**Workspace/session.** Same shape as the task agent — no `WorkingDir`, so it
-reuses/re-provisions the same wsp workspace, and shares the **same sandbox**
-as the task it's committing (`SandboxNameFor` uses the same
-`"<work-stream>-<task-name>"` for both `TaskAgent` and `CommitAgent`), forwarding
-the task's `StaticMCPs`/`Policies`/`SaveSandbox` in case the commit happens to
-be the sandbox's first launch (e.g. a retry after a crash).
+**Workspace/session.** No `WorkingDir`, so it runs in the project's shared
+wsp workspace — where the shared branch is checked out, and under which the
+task's worktree sits at `.worktrees/<task>/`. It has a sandbox of its **own**,
+`"<work-stream>-<task-name>-commit"` (`SandboxNameFor`), mounting the shared
+workspace and the control dir: its mounts differ from the task sandbox's, so
+reusing that one would make acp-wrapper recreate it on every hand-off. It
+gets the task's `StaticMCPs`/`Policies`/`SaveSandbox`/model/harness.
 
-**Reads/writes.** Reads the task file and does `git add`/`git commit` (and,
-for a push task, `git push`) directly in each repo of the workspace, using
+**Reads/writes.** Reads the task file. For a worktree task
+(`Plan.TaskWorktree` set from the task's `task_branch`) it commits any
+leftovers in the task worktree, rebases the task branch onto the shared tip
+there, and fast-forwards the shared branch to it (`git merge --ff-only`); a legacy or push task does `git
+add`/`git commit` (and, for a push task, `git push`) directly in each repo of
+the shared workspace. Either way it uses
 the git identity injected by the environment (never `git config
 user.name`/`--author`). Writes `status: committed`, a `summary:`, a
 `commits:` list (repo dir name + full SHA), and an optional `created_files:`
-list back to the task file.
+list back to the task file — or, when a worktree integration stops,
+`status: failed` with an `integration:` report (`result: conflict |
+verify_failed | partial | error`, `repo`, `files`, `onto`, `output`,
+`published`).
 
-**Prompt structure (`commit.tmpl`).** Two modes gated by `{{if .PushBranch}}`:
+**Prompt structure (`commit.tmpl`).** A worktree task (`{{if .TaskWorktree}}`)
+gets the I3 procedure of docs/parallel-task-worktrees.md, written to be
+safe to re-run from the top after an interrupted attempt: step 0 commit
+leftovers in the task worktree and skip repos whose task branch still equals
+`base`; step 1 check each shared checkout is clean and on the shared branch
+(else `status: blocked`) and snapshot its tip; step 2 rebase every repo's
+task branch onto its tip before publishing any — on a conflict abort it and
+reset every repo already rebased, so nothing is published, and report
+`result: conflict`; when the project sets `verify:` and something was
+rebased (and the daemon did not find the task docs-only), run that build
+check and report `result: verify_failed` on failure; step 3 fast-forward
+each shared repo with `--ff-only`, going back to step 1 at most twice if the
+tip moved (`result: partial` if some repo was already published, else
+`result: error`); step 4 record each repo's shared tip. Otherwise, two modes gated by `{{if .PushBranch}}`:
 - **Ordinary commit** (default): for every repo with modifications, stage,
   make one commit with a subject under 72 chars derived from the task
   description, capture the SHA — then write `status: committed` + `summary` +
@@ -311,12 +374,33 @@ failure) it records `status: failed` plus `error` in `session.json`: the TUI's
 tab shows that error instead of a "starting" placeholder, and
 `afterCommitSession` puts it in the project's `blocked_reason`.
 
-**Completion signal / lifecycle.** `afterCommitSession` requires `status:
-committed`; anything else blocks the project for the wolf. On success it
+**Before launch** (worktree task): `prepareIntegration`
+(`internal/daemon/integration.go`) aborts a rebase an interrupted run left in
+the task worktree (`integration_rebase_aborted`), removes stale `index.lock`
+files (`integration_lock_cleared`), and blocks the project instead of
+launching when a shared repo has uncommitted changes. It records each repo's
+shared tip, which tells the fast path (nothing to rebase) from a real rebase.
+
+**Completion signal / lifecycle.** For a legacy or push task
+`afterCommitSession` requires `status: committed`; anything else blocks the
+project for the wolf. A worktree task's other outcomes are routed on its
+`integration:` report (`routeIntegrationFailure`): `conflict` or
+`verify_failed` → re-run the task in the same worktree with `attempts++`
+(`task_retry cause=conflict|verify`), or block with a reason naming the
+tasks that landed meanwhile once `maxTaskAttempts` is spent; `error`, no
+report, or the task still at `success` (a transient failure, including a
+commit agent that could not start) → relaunch only the commit agent, up to
+`maxIntegrationAttempts` (2, counted in `integration.attempts`), then block;
+`partial` or `blocked` → block. For a committed worktree
+task `finishCommittedTask` then checks that every `commits:` hash and the
+task branch are ancestors of the shared branch, and that no repo with work
+is missing from `commits:` (`integration_verify_failed` → block, worktree
+kept), clears `integration:`, and removes the worktree and branch — the only point in a task's life
+where they go (`worktree_removed`; a failed removal is only logged). On success it
 stamps `completed_at` (once), reloads the task graph, and either
 transitions the project to `done`/`reviewing` (`transitionProjectComplete`,
-all committed) or dispatches the next ready task (`firstUncommittedSuccess`
-first, then `g.Ready()`).
+all committed) or runs a scheduling pass, which starts the next integration
+and fills the task slots the committed task freed.
 
 ---
 
@@ -403,7 +487,15 @@ missing fields the project agent couldn't infer, clear `blocked_reason`, set
 `ready`); (2) a project blocked out of the PR-review loop (four specific
 `blocked_reason` shapes from the review agent, and the instruction that the
 "almost always" correct exit is back to `status: idle` with the PR watch data
-intact). Ends with the fixed status enums for both project and task.
+intact). An "integration conflicts" paragraph explains task worktrees and the
+`integration:` block and gives three ways out of an integration block (reset
+the task to `ready` with `attempts: 0`, reusing or first resetting its
+worktree; resolve by hand in the worktree and set `success`; finish a partial
+publish and set `committed`), followed by the shared-branch warning: never
+move the shared branch or leave the shared tree dirty while an integration
+is in flight (any task at `success`), and route changes through a task
+worktree and the queue instead. Ends with the fixed status enums for both
+project and task.
 
 **Completion signal / lifecycle.** No enforced schema — the wolf just edits
 whatever files resolve the block. Whatever ends the session, the daemon's

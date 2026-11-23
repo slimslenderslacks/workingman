@@ -715,3 +715,43 @@ func TestRenderStepUp(t *testing.T) {
 		}
 	}
 }
+
+// The archive prompt lists the task work not on the shared branch
+// (docs/parallel-task-worktrees.md X6), and leaves the list out when there is
+// none.
+func TestRenderArchiveUnintegratedWork(t *testing.T) {
+	base := Data{ProjectPath: "/orch/myproj/project.yaml", Workspace: "/ws", Branch: "feat/x"}
+	plain, err := Render(agent.ArchiveAgent, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "WORK NOT CARRIED INTO THE BRANCH") {
+		t.Errorf("list rendered with no unintegrated work:\n%s", plain)
+	}
+	for _, want := range []string{".worktrees/", "against the rules"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("missing %q in:\n%s", want, plain)
+		}
+	}
+
+	with := base
+	with.UnintegratedTasks = []UnintegratedTask{
+		{Name: "stuck", Status: "failed", Branch: "wm/feat/x/stuck", Worktree: "/ws/.worktrees/stuck", Why: "wm/feat/x/stuck in gateway is not on feat/x"},
+		{Name: "gone", Status: "orphaned", Branch: "wm/feat/x/gone"},
+	}
+	out, err := Render(agent.ArchiveAgent, with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"WORK NOT CARRIED INTO THE BRANCH",
+		"- stuck (failed) branch wm/feat/x/stuck worktree /ws/.worktrees/stuck: wm/feat/x/stuck in gateway is not on feat/x",
+		"- gone (orphaned) branch wm/feat/x/gone",
+		"unintegrated_tasks",
+		"Do not try to integrate",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}

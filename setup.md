@@ -108,7 +108,9 @@ sbx `create` and `run` start with this environment
 
 ### checks
 
-* do we have a custom_secret set for the llm gateway?
+* does the sandbox already exist with these mounts? (`sbx ls --json`)
+* do we have a custom_secret set for the llm gateway? (`sbx secret ls --json`; acp-wrapper fails the launch if it never answers, `:session` carries on without the gateway)
+* both JSON calls go through `sbx.Client`: stdout only, `WARN:`/JSON log lines before or after the document skipped, retried up to 5 times with jittered backoff under the host-wide `~/.workingman/locks/sbx.lock` (held only while sbx runs); exhaustion names the command (`sbx ls --json failed after 5 attempts: ...`)
 * explicitly allow host.docker.interal:3333 and localhost:3333 for this sandbox
 
 ## sbx-rm.sh
