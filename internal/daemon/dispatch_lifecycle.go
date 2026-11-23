@@ -414,7 +414,7 @@ func (d *Daemon) launchCommitAgent(projectPath string, p *project.Project, t *ta
 	if d.runner == nil {
 		return
 	}
-	d.beginCommit(projectPath)
+	d.beginCommit(projectPath, t.Name)
 	d.startCommitAgent(projectPath, p, t)
 }
 

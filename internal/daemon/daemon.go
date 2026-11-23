@@ -152,17 +152,19 @@ type Daemon struct {
 	sweepMu            sync.Mutex
 	sweepKept          map[string]string
 
-	// commitMu guards commitBusy and verifyChecks. commitBusy counts, per
-	// project, the commit agents between launchCommitAgent and the end of
-	// their afterCommitSession (beginCommit / endCommit): wider than the
-	// session itself, so it also covers the routing and the relaunch of a
-	// transient retry. The snapshot reports it as live.commit_reserved, which
-	// the wolf checks before committing on the shared branch
-	// (docs/parallel-task-worktrees.md X3). verifyChecks counts the
+	// commitMu guards commitBusy, commitTask and verifyChecks. commitBusy
+	// counts, per project, the commit agents between launchCommitAgent and
+	// the end of their afterCommitSession (beginCommit / endCommit): wider
+	// than the session itself, so it also covers the routing and the
+	// relaunch of a transient retry. The snapshot reports it as
+	// live.commit_reserved, which the wolf checks before committing on the
+	// shared branch (docs/parallel-task-worktrees.md X3). commitTask names
+	// the task the reservation is for (landingTask). verifyChecks counts the
 	// pre-integration build check outcomes since the daemon started (R1),
-	// reported as the snapshot's verify_checks. Neither is persisted.
+	// reported as the snapshot's verify_checks. None is persisted.
 	commitMu     sync.Mutex
 	commitBusy   map[string]int
+	commitTask   map[string]string
 	verifyChecks map[string]*VerifyChecks
 
 	// blockMu serializes transitionProjectBlocked's read-modify-write of
@@ -353,6 +355,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		reviewBackoff:      map[string]int{},
 		dispatchChains:     map[string]chan struct{}{},
 		commitBusy:         map[string]int{},
+		commitTask:         map[string]string{},
 		schedLocks:         map[string]*sync.Mutex{},
 		worktreeLocks:      map[string]*sync.Mutex{},
 		admitting:          map[string]map[string]bool{},

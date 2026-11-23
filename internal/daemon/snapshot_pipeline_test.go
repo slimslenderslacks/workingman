@@ -132,7 +132,7 @@ func pipelineSnapshot(t *testing.T) (*Snapshot, string, string) {
 	t.Cleanup(func() { _ = d.watcher.Close() })
 
 	d.trackSession(projectPath, newStubSession("orch-commit-pipe"), agent.CommitAgent, "head", nil)
-	d.beginCommit(projectPath)
+	d.beginCommit(projectPath, "head")
 	d.countVerifyCheck(projectPath, verifyCheckRun)
 	d.countVerifyCheck(projectPath, verifyCheckFailed)
 	d.countVerifyCheck(projectPath, verifyCheckSkipped)

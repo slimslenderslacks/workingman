@@ -499,13 +499,15 @@ func worktreeRoot(shared string, t *task.Task) string {
 	return worktree.Root(shared, t.Name)
 }
 
-// beginCommit reserves the project's commit slot from launchCommitAgent until
-// endCommit, after afterCommitSession has routed the outcome. A transient
-// retry relaunches from inside afterCommitSession, so the count can briefly be
-// 2; the project is commit-reserved while it is above 0.
-func (d *Daemon) beginCommit(projectPath string) {
+// beginCommit reserves the project's commit slot, for the integration of the
+// named task, from launchCommitAgent until endCommit, after
+// afterCommitSession has routed the outcome. A transient retry relaunches
+// from inside afterCommitSession, so the count can briefly be 2; the project
+// is commit-reserved while it is above 0.
+func (d *Daemon) beginCommit(projectPath, taskName string) {
 	d.commitMu.Lock()
 	d.commitBusy[projectPath]++
+	d.commitTask[projectPath] = taskName
 	d.commitMu.Unlock()
 	d.markSnapshotDirty()
 }
@@ -514,6 +516,7 @@ func (d *Daemon) endCommit(projectPath string) {
 	d.commitMu.Lock()
 	if d.commitBusy[projectPath] <= 1 {
 		delete(d.commitBusy, projectPath)
+		delete(d.commitTask, projectPath)
 	} else {
 		d.commitBusy[projectPath]--
 	}
@@ -527,6 +530,17 @@ func (d *Daemon) commitReserved(projectPath string) bool {
 	d.commitMu.Lock()
 	defer d.commitMu.Unlock()
 	return d.commitBusy[projectPath] > 0
+}
+
+// landingTask is the task the project's commit reservation is for, "" when
+// none is held. Its commit agent may already have written it `committed`, but
+// it has not landed until afterCommitSession has verified and finished it
+// (I3, W6) and released the reservation, so the scheduler does not treat it
+// as committed until then (taskgraph.Graph.Landing).
+func (d *Daemon) landingTask(projectPath string) string {
+	d.commitMu.Lock()
+	defer d.commitMu.Unlock()
+	return d.commitTask[projectPath]
 }
 
 // Build check outcomes counted in verifyChecks (R1).

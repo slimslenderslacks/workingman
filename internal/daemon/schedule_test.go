@@ -430,6 +430,38 @@ func TestScheduleDependentWaitsOnIntegration(t *testing.T) {
 	e.eventually("child running", func() bool { return eqStrings(e.running(), "child") })
 }
 
+// A dependency its commit agent has written committed has not landed until
+// the daemon has verified and finished the integration: a pass run in
+// between (the watcher's, on the task file's write) starts no dependent, and
+// the session end that finishes it does (S5).
+func TestScheduleDependentWaitsForIntegrationToFinish(t *testing.T) {
+	e := newSchedEnv(t, 3)
+	e.addTask("base", []string{"gateway/base/**"})
+	e.addTask("child", []string{"gateway/child/**"}, "base")
+	e.pass()
+	e.finishTask("base", task.StatusSuccess)
+	e.eventually("base integrating", func() bool { return e.integrating() == "base" })
+	// The commit agent lands base and writes committed, but its session (and
+	// so afterCommitSession) has not ended yet.
+	tk := e.task("base")
+	gitOK(t, filepath.Join(e.shared, "gateway"), "merge", "-q", "--ff-only", tk.TaskBranch)
+	e.setTask("base", func(t *task.Task) { t.Status = task.StatusCommitted })
+	e.pass()
+	if got := e.running(); len(got) != 0 {
+		t.Fatalf("running = %v while base's integration is unfinished, want none", got)
+	}
+	if tk := e.task("child"); tk.Status != task.StatusReady {
+		t.Fatalf("child = %s, want ready", tk.Status)
+	}
+	if !e.lch.close("commit-base") {
+		t.Fatal("no open commit session for base")
+	}
+	e.eventually("child running", func() bool { return eqStrings(e.running(), "child") })
+	if i, j := strings.Index(e.buf.String(), "integration_succeeded"), strings.Index(e.buf.String(), "task_running task=child"); i < 0 || j < i {
+		t.Errorf("child started before base's integration_succeeded:\n%s", e.buf.String())
+	}
+}
+
 // The commit queue is FIFO by succeeded_at and integrates one task at a time:
 // a task that finishes while another integrates waits its turn, and the end
 // of each integration starts the next (S5).

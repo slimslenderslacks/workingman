@@ -411,3 +411,38 @@ func names(ts []*task.Task) []string {
 	}
 	return out
 }
+
+// A task being landed is seen at success: its dependents are not Ready, it
+// holds its slot and the graph is not AllCommitted, until the daemon has
+// finished its integration. The loaded graph itself is unchanged.
+func TestLandingHoldsDependents(t *testing.T) {
+	dir := tasksDir(t)
+	writeTask(t, dir, "a", task.StatusCommitted)
+	writeTask(t, dir, "b", task.StatusReady, "a")
+	g, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	l := g.Landing("a")
+	if got := l.Ready(); len(got) != 0 {
+		t.Errorf("Ready while a lands = %v, want none", names(got))
+	}
+	if got := names(l.InFlight()); len(got) != 1 || got[0] != "a" {
+		t.Errorf("InFlight while a lands = %v, want [a]", got)
+	}
+	if got := names(g.Ready()); len(got) != 1 || got[0] != "b" {
+		t.Errorf("Landing changed the loaded graph: Ready = %v", got)
+	}
+	if g.Task("a").Status != task.StatusCommitted {
+		t.Errorf("Landing changed the loaded task: %s", g.Task("a").Status)
+	}
+	if g.Landing("") != g || g.Landing("b") != g || g.Landing("gone") != g {
+		t.Error("Landing of a task not at committed should return the graph itself")
+	}
+
+	writeTask(t, dir, "b", task.StatusCommitted, "a")
+	g, _ = Load(dir)
+	if g.Landing("b").AllCommitted() {
+		t.Error("AllCommitted while b lands")
+	}
+}

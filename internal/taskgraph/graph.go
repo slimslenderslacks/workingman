@@ -268,6 +268,28 @@ func (g *Graph) Empty() bool { return len(g.tasks) == 0 }
 // `ready` was skipped or clobbered while another agent held the project slot.
 func (g *Graph) HasPendingSeed() bool { return g.seeds > 0 }
 
+// Landing returns a copy of g in which the named task, if it is at
+// `committed`, is seen at `success` instead: its commit agent has written
+// committed, but the daemon has not yet verified and finished the
+// integration (docs/parallel-task-worktrees.md S5, I3). Until it has, the
+// task has not landed, so it still holds its slot, its dependents are not
+// Ready and the graph is not AllCommitted. Any other name returns g itself.
+func (g *Graph) Landing(name string) *Graph {
+	t := g.tasks[name]
+	if t == nil || t.Status != task.StatusCommitted {
+		return g
+	}
+	c := *g
+	c.tasks = make(map[string]*task.Task, len(g.tasks))
+	for n, o := range g.tasks {
+		c.tasks[n] = o
+	}
+	landing := *t
+	landing.Status = task.StatusSuccess
+	c.tasks[name] = &landing
+	return &c
+}
+
 func (g *Graph) depsCommitted(name string) bool {
 	for _, dep := range g.deps[name] {
 		if g.tasks[dep].Status != task.StatusCommitted {

@@ -373,6 +373,12 @@ func (d *Daemon) decidePass(projectPath string, fallback *project.Project, o pas
 	if !ok {
 		return nil, true
 	}
+	// A task its commit agent has written committed has not landed until
+	// afterCommitSession has verified and finished it (I3, W6): until then it
+	// keeps its slot and its dependents wait, so they never start ahead of
+	// integration_succeeded (S5). A pass triggered by the task file's write
+	// (the watcher) would otherwise race that verification.
+	g = g.Landing(d.landingTask(projectPath))
 	if g.AllCommitted() {
 		if (!working && !o.complete) || p.Cleanup {
 			return nil, false
@@ -406,7 +412,7 @@ func (d *Daemon) decidePass(projectPath string, fallback *project.Project, o pas
 		if head := queueHead(g.Queued(), len(inflight) < limit); head != nil {
 			l.commit = head
 			if d.runner != nil {
-				d.beginCommit(projectPath)
+				d.beginCommit(projectPath, head.Name)
 			}
 			if head.Status == task.StatusReady {
 				inflight = append(inflight, head)

@@ -38,6 +38,8 @@
 //   - [InFlight], [Queued], [WaitingOnIntegration] — slot, commit-queue and
 //     waiting views over a plain task slice, shared with lenient readers.
 //   - [Graph.Runnable] / [Admission] — greedy admission with barriers.
+//   - [Graph.Landing] — the graph with the task being integrated seen at
+//     success until the daemon has finished landing it.
 //   - [Overlap] / [GlobsOverlap] — the H2 overlap test; [Graph.Overlap] over
 //     the effective hints.
 //   - [Uncovered] / [PathCovered] — which changed paths a task's hints miss.

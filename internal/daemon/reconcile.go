@@ -134,7 +134,7 @@ func (d *Daemon) reconcileSessions() {
 				d.audit.Log("session_reconcile_error", "id", rec.ID, "kind", rec.Kind, "path", projectPath, "err", "second commit session for the project")
 				continue
 			}
-			d.beginCommit(projectPath)
+			d.beginCommit(projectPath, taskNameFor(taskPath))
 			onEnd = func(error) {
 				d.afterAdoptedCommitSession(projectPath, taskPath)
 				d.resumeDrainedCleanup(projectPath)
