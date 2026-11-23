@@ -111,6 +111,14 @@ type Daemon struct {
 	dispatchMu     sync.Mutex
 	dispatchChains map[string]chan struct{}
 
+	// handlers counts the asynchronous handlers still running (event
+	// dispatches, session-end callbacks), so shutdown can wait them out: one
+	// that outlived Run would keep writing to disk (a project save, an
+	// agent's .orch files) after Run returned. See beginHandler.
+	handlersMu      sync.Mutex
+	handlersClosing bool
+	handlers        sync.WaitGroup
+
 	// sessionIdleTimeout bounds how long a tracked session may go without any
 	// ACP stream activity before the stranded-session reaper terminates it.
 	// See reaper.go.
@@ -495,7 +503,10 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 		if prev != nil {
 			<-prev
 		}
-		d.handle(ev)
+		if d.beginHandler() {
+			d.handle(ev)
+			d.handlers.Done()
+		}
 		// Drop the chain entry if nothing newer has queued behind us, so a
 		// project that goes quiet doesn't leave its key pinned in the map
 		// forever.
@@ -517,6 +528,8 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 func (d *Daemon) shutdown() {
 	defer d.writeFinalSnapshot()
 	d.watcher.Close()
+	// d.ctx is done, so a launch a handler still attempts fails fast.
+	d.endHandlers()
 	// The MCP session lives on the review gateway: end it first.
 	d.closeReviewMCP()
 	if d.reviewGW != nil {
@@ -637,9 +650,35 @@ func (d *Daemon) trackConfiguredSession(key string, sess agent.Session, kind age
 			return
 		default:
 		}
+		if !d.beginHandler() {
+			return
+		}
+		defer d.handlers.Done()
 		onEnd(waitErr)
 	}()
 	return true
+}
+
+// beginHandler registers an asynchronous handler about to run; it reports
+// false, and the handler must not run, once shutdown has begun. A handler
+// that gets true calls d.handlers.Done when it finishes.
+func (d *Daemon) beginHandler() bool {
+	d.handlersMu.Lock()
+	defer d.handlersMu.Unlock()
+	if d.handlersClosing {
+		return false
+	}
+	d.handlers.Add(1)
+	return true
+}
+
+// endHandlers stops new handlers from starting and waits for the running
+// ones to finish.
+func (d *Daemon) endHandlers() {
+	d.handlersMu.Lock()
+	d.handlersClosing = true
+	d.handlersMu.Unlock()
+	d.handlers.Wait()
 }
 
 func (d *Daemon) hasSession(key string) bool {
