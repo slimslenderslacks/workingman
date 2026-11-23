@@ -44,7 +44,10 @@
 // trust behind a TLS-inspecting VPN. An unreadable, empty or non-PEM file
 // (with a DER conversion hint) or a bad certificate is an error. Expired,
 // not-yet-valid and non-CA certificates are only warnings. The returned
-// [ExtraCA] carries the normalized PEM (CERTIFICATE blocks only). See
+// [ExtraCA] carries the normalized PEM (CERTIFICATE blocks only).
+// [EnsureExtraCA] installs it into a sandbox's system trust store by running
+// [ExtraCAScript] over `sbx exec` ([ExtraCAInstallArgs]); it is idempotent,
+// so every create and reuse path calls it on every launch. See
 // docs/sandbox-custom-ca.md.
 //
 // # Key types
@@ -55,7 +58,8 @@
 //     daemon's session reconciliation.
 //   - [SanitizeName], [FitNameTo], [NameBudget], [CheckName] — the naming
 //     rules.
-//   - [ExtraCA] — a validated extra-CA bundle, from [LoadExtraCA].
+//   - [ExtraCA] — a validated extra-CA bundle, from [LoadExtraCA];
+//     installed with [EnsureExtraCA].
 //
 // # Collaborators
 //

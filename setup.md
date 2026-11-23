@@ -96,6 +96,7 @@ Orchestrate three things:
    * trap all failures with a gateway delete
 * `sbx secret ls ...` and `sbx policy allow network ...`
 * `sbx create ...`
+* with `--extra-ca-certs PEM` (default `$WORKINGMAN_EXTRA_CA_CERTS`): `sbx exec <name> -- sh -c <script> sh <base64 PEM>`, the daemon's idempotent CA install (the heredoc is byte-identical to `sbx.ExtraCAScript`, checked by a Go test)
 * `sbx run ...`
 
 sbx `create` and `run` start with this environment

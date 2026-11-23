@@ -352,12 +352,23 @@ type SandboxCreator func(ctx context.Context, spec SandboxSpec) error
 //     gateway (DELETEd instead if any step failed). No `--static-mcp`
 //     flags: MCP servers are reached through the gateway.
 //
+// When spec.ExtraCACerts is set, the bundle is re-read on every call and
+// installed (sbx.EnsureExtraCA) after the policies on create, and on reuse
+// too, so a sandbox that predates the setting converges; a failed install
+// fails the call (and discards a just-minted gateway).
+//
 // Recreation is safe here because we never use --clone — the sandbox is a
 // thin bind-mount wrapper, so rm just stops the container and leaves the
 // host paths (worktrees, orch dir) untouched.
 func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 	if len(spec.Workspaces) == 0 {
 		return fmt.Errorf("sandbox: at least one workspace is required")
+	}
+	// Re-read the extra CA per launch, as acp-wrapper does: the file may have
+	// been refreshed (or broken) since orch validated it at startup.
+	ca, err := loadSpecExtraCA(spec.ExtraCACerts)
+	if err != nil {
+		return err
 	}
 	existing, err := readSandboxWorkspaces(ctx, spec.Name)
 	if err != nil {
@@ -371,6 +382,11 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 				for _, r := range rules {
 					_ = exec.CommandContext(ctx, "sbx", r.CLIArgs(spec.Name)...).Run()
 				}
+			}
+			// The sandbox may predate the extra CA setting: ensure it on
+			// every launch (a no-op when already installed).
+			if _, err := sbx.EnsureExtraCA(ctx, sandboxRun, "sbx", spec.Name, ca); err != nil {
+				return err
 			}
 			return nil
 		}
@@ -409,10 +425,29 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 				r.Action, r.Kind, spec.Name, r.Resource, err, strings.TrimSpace(string(out))))
 		}
 	}
+	if _, err := sbx.EnsureExtraCA(ctx, sandboxRun, "sbx", spec.Name, ca); err != nil {
+		return fail(err)
+	}
 	if err := spec.MCPGateway.Save(gw); err != nil {
 		spec.MCPGateway.Discard(ctx, gw)
 	}
 	return nil
+}
+
+// sandboxRun runs DefaultSandboxCreator's extra-CA install (`sbx exec`); a
+// package var so tests can assert its argv.
+var sandboxRun sbx.RunFunc = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// loadSpecExtraCA loads and validates the extra CA bundle at path
+// (sbx.LoadExtraCA); the zero ExtraCA, which installs nothing, when path is
+// empty.
+func loadSpecExtraCA(path string) (sbx.ExtraCA, error) {
+	if strings.TrimSpace(path) == "" {
+		return sbx.ExtraCA{}, nil
+	}
+	return sbx.LoadExtraCA(path)
 }
 
 // readSandboxWorkspaces returns the workspace list for the named sandbox,

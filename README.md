@@ -243,7 +243,7 @@ optional, per-laptop setting:
 
 | orch flag | Environment variable | Meaning |
 |---|---|---|
-| `--extra-ca-certs <pem>` | `WORKINGMAN_EXTRA_CA_CERTS` | PEM bundle of extra CAs every sandbox must trust. Validated at startup: orch exits if the file is unreadable or holds no PEM `CERTIFICATE` block (a DER file gets an `openssl x509 -inform DER` hint), and warns with subject and `notAfter` about an expired cert. Handed to every sandbox-creating path (`acp-wrapper --extra-ca-certs`, which re-validates it per launch; the terminal-tab and `:session` paths); installing it into each sandbox's trust store is described in [docs/sandbox-custom-ca.md](docs/sandbox-custom-ca.md) §4.3. Empty (the default) changes nothing. |
+| `--extra-ca-certs <pem>` | `WORKINGMAN_EXTRA_CA_CERTS` | PEM bundle of extra CAs every sandbox must trust. Validated at startup: orch exits if the file is unreadable or holds no PEM `CERTIFICATE` block (a DER file gets an `openssl x509 -inform DER` hint), and warns with subject and `notAfter` about an expired cert. Handed to every sandbox-creating path (`acp-wrapper --extra-ca-certs`, which re-validates it per launch; the terminal-tab and `:session` paths). On every launch, after `sbx create` and its policies or on a reused sandbox, it is installed into the sandbox's system trust store by an idempotent `sbx exec` (`/usr/local/share/ca-certificates/workingman-extra-ca.crt` + `update-ca-certificates`; [docs/sandbox-custom-ca.md](docs/sandbox-custom-ca.md) §4.3). A failed install fails the launch. Empty (the default) changes nothing. |
 
 The flag wins over the environment variable; orch writes the effective value
 to the audit log as `extra_ca_config` and to the state snapshot as
@@ -395,8 +395,9 @@ To get the same wiring for a sandbox you start yourself, outside the daemon:
 sandbox with `-e MCP_URL=http://host.docker.internal:<port>/gateways/<id>`
 from the `slimslenderslacks/claude-code-acp:0.90.0` template (`--image`,
 default `$ACP_IMAGE`), allows the gateway port in its network policy,
-records the gateway in `~/.workingman/gateways/<name>.json` (the record the
-daemon uses), and attaches with `sbx run` unless `--no-run`. Workspaces
+installs the extra CA when `--extra-ca-certs` (default
+`$WORKINGMAN_EXTRA_CA_CERTS`) is set, records the gateway in
+`~/.workingman/gateways/<name>.json` (the record the daemon uses), and attaches with `sbx run` unless `--no-run`. Workspaces
 default to the current directory. If any step fails, the gateway is DELETEd.
 The gateway is `$WORKINGMAN_MCP_GATEWAY_URL`, else `http://localhost:3333`
 (`--gateway-url`).

@@ -2,7 +2,9 @@ package sbx
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -122,4 +124,64 @@ func loadExtraCA(path string, now time.Time) (ExtraCA, error) {
 		ca.Warnings = append(ca.Warnings, fmt.Sprintf("ERROR: extra CA certs %s: every certificate has expired, so sandboxes will still reject the VPN's chain; re-export the current root (docs/sandbox-custom-ca.md §1.4)", abs))
 	}
 	return ca, nil
+}
+
+// ExtraCAPath is where the extra CA bundle goes inside a sandbox, beside the
+// proxy-ca.crt sbx itself installs there at create time.
+const ExtraCAPath = "/usr/local/share/ca-certificates/workingman-extra-ca.crt"
+
+// ExtraCAScript installs the base64-encoded PEM bundle in $1 into the
+// sandbox's system trust store (ExtraCAPath + update-ca-certificates), which
+// curl, git, node and Python all read (docs/sandbox-custom-ca.md §2). It runs
+// as root, or through `sudo -n` when `sbx exec` runs as the agent user. It is
+// idempotent: when the file is unchanged and the bundle still holds it, it
+// exits 0 with "already installed". Input without a PEM certificate exits 2.
+// WORKINGMAN_EXTRA_CA_DST / WORKINGMAN_EXTRA_CA_BUNDLE override the paths for
+// tests only.
+//
+// sbx-create.sh carries a byte-identical copy between its
+// WORKINGMAN_EXTRA_CA_EOF markers; a test keeps the two in sync.
+const ExtraCAScript = `set -eu
+dst=${WORKINGMAN_EXTRA_CA_DST:-/usr/local/share/ca-certificates/workingman-extra-ca.crt}
+bundle=${WORKINGMAN_EXTRA_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+printf '%s' "$1" | base64 -d >"$tmp"
+grep -q -- '-----BEGIN CERTIFICATE-----' "$tmp" || { echo "workingman-extra-ca: no PEM certificate in input" >&2; exit 2; }
+if [ "$(id -u)" = 0 ]; then as_root=; else as_root="sudo -n"; fi
+first=$(sed -n 2p "$tmp")
+if cmp -s "$tmp" "$dst" && grep -qxF "$first" "$bundle"; then
+  echo "workingman-extra-ca: already installed" >&2; exit 0
+fi
+$as_root install -m 0644 "$tmp" "$dst"
+$as_root update-ca-certificates >/dev/null
+grep -qxF "$first" "$bundle" || { echo "workingman-extra-ca: $bundle does not contain the extra CA after update-ca-certificates" >&2; exit 1; }
+echo "workingman-extra-ca: installed $dst" >&2
+`
+
+// ExtraCAInstallArgs is the argv (after the sbx binary) that installs pem
+// into sandbox's system trust store: `exec <sandbox> -- sh -c
+// <ExtraCAScript> sh <base64 pem>`. The PEM travels as an argv word, so the
+// stdin-less RunFunc seams can carry it.
+func ExtraCAInstallArgs(sandbox string, pem []byte) []string {
+	return []string{"exec", sandbox, "--", "sh", "-c", ExtraCAScript, "sh",
+		base64.StdEncoding.EncodeToString(pem)}
+}
+
+// EnsureExtraCA installs ca into sandbox with ExtraCAInstallArgs through run,
+// on every launch: the script is a no-op when the CA is already there, so a
+// reused, repaired or pre-config sandbox converges too. It returns the
+// script's diagnostic ("installed ..." / "already installed"). It does
+// nothing and returns "" when ca holds no PEM (the setting is off). A
+// non-zero exit is an error naming the bundle, the sandbox and sbx's output.
+func EnsureExtraCA(ctx context.Context, run RunFunc, sbxPath, sandbox string, ca ExtraCA) (string, error) {
+	if len(ca.PEM) == 0 {
+		return "", nil
+	}
+	out, err := run(ctx, sbxPath, ExtraCAInstallArgs(sandbox, ca.PEM)...)
+	msg := strings.TrimSpace(string(out))
+	if err != nil {
+		return msg, fmt.Errorf("install extra CA (%s) into sandbox %q: %w: %s", ca.Path, sandbox, err, msg)
+	}
+	return msg, nil
 }

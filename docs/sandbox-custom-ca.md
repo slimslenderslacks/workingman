@@ -1,6 +1,7 @@
 # Sandboxes with an optional, per-laptop custom CA — design
 
-Status: design, for the follow-up tasks `acp-kit-ca-install-helper`,
+Status: implemented through `apply-ca-on-sandbox-create` (`internal/sbx`
+`ExtraCAScript` / `EnsureExtraCA`); designed for the follow-up tasks `acp-kit-ca-install-helper`,
 `workingman-extra-ca-config`, `apply-ca-on-sandbox-create` and
 `ca-preflight-and-check-script` (checklist in §9).
 
@@ -363,14 +364,16 @@ func ExtraCAInstallArgs(sandbox string, pem []byte) []string {
 }
 ```
 
-`ExtraCAScript` is the script below. It was measured in this sandbox: the
+`ExtraCAScript` is the script below (as implemented, the two paths are
+overridable through the environment so a Go test can run it against a temp
+bundle). It was measured in this sandbox: the
 first run took 0.21 s, a repeat 0.004 s ("already installed"), and garbage
 input exited 2. After installing the Decryption Root, `git ls-remote` succeeded.
 
 ```sh
 set -eu
-dst=/usr/local/share/ca-certificates/workingman-extra-ca.crt
-bundle=/etc/ssl/certs/ca-certificates.crt
+dst=${WORKINGMAN_EXTRA_CA_DST:-/usr/local/share/ca-certificates/workingman-extra-ca.crt}
+bundle=${WORKINGMAN_EXTRA_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 printf '%s' "$1" | base64 -d >"$tmp"
@@ -402,8 +405,9 @@ echo "workingman-extra-ca: installed $dst" >&2
   on drift). The installer does not support removal, because the off path must
   run no extra command.
 
-The Go wrapper `ensureExtraCA(ctx, run, sbxPath, sandbox string, pem []byte) error`
-is a no-op when `len(pem)==0`. Otherwise it runs the argv and, on a non-zero
+The Go wrapper, as implemented
+`sbx.EnsureExtraCA(ctx, run, sbxPath, sandbox string, ca ExtraCA) (string, error)`,
+is a no-op (no sbx call) when `len(ca.PEM)==0`. Otherwise it runs the argv and, on a non-zero
 exit, returns
 `fmt.Errorf("install extra CA (%s) into sandbox %q: %w: %s", path, sandbox, err, out)`.
 It logs `extra CA installed` / `already installed` from stderr.
@@ -611,28 +615,28 @@ note that the sample `corporate-ca.cer` is DER, the wrong root and expired.
       Run `go test ./...` and `task docs:check`.
 
 ### `apply-ca-on-sandbox-create`
-- [ ] `internal/sbx`: `ExtraCAScript`, `ExtraCAPath`, `ExtraCAInstallArgs`
+- [x] `internal/sbx`: `ExtraCAScript`, `ExtraCAPath`, `ExtraCAInstallArgs`
       (§4.3). There is no acp-kit helper, so the §4.3 script is the only
       mechanism. Do **not** add `-e NODE_EXTRA_CA_CERTS/GIT_SSL_CAINFO` (§2).
-- [ ] acpwrapper: `ensureExtraCA` in `createSandbox` (after policies, before
+- [x] acpwrapper: `ensureExtraCA` in `createSandbox` (after policies, before
       `Save`, via `fail`) and on `ensureSandbox`'s reuse path. Repair
       (`rm --force` + create) is covered by `createSandbox`.
-- [ ] runner: `DefaultSandboxCreator` (create path before `Save` with
+- [x] runner: `DefaultSandboxCreator` (create path before `Save` with
       `Discard` on failure; reuse path), with a `sandboxRun` seam for tests.
       `ensureSessionSandbox` (create before `gw.Save` via `fail`; reuse).
-- [ ] Existing and pre-config sandboxes are covered by the per-launch ensure.
+- [x] Existing and pre-config sandboxes are covered by the per-launch ensure.
       No marker is needed (§3).
-- [ ] `sbx-create.sh --extra-ca-certs` (default `$WORKINGMAN_EXTRA_CA_CERTS`)
+- [x] `sbx-create.sh --extra-ca-certs` (default `$WORKINGMAN_EXTRA_CA_CERTS`)
       with the script in a `WORKINGMAN_EXTRA_CA_EOF` heredoc, and a Go test
       asserting it is byte-identical to `sbx.ExtraCAScript`.
-- [ ] Tests (fake `commandFunc` / `sbxRunner` / `sandboxRun`): the exact argv
+- [x] Tests (fake `commandFunc` / `sbxRunner` / `sandboxRun`): the exact argv
       with the setting on (`exec <n> -- sh -c <script> sh <b64>`) and off (no
       such call); a failure discards the gateway on create and errors on
       reuse.
-- [ ] Optional: run the §4.3 script in a Go test against `/bin/sh` with a temp
+- [x] Optional: run the §4.3 script in a Go test against `/bin/sh` with a temp
       `dst`/`bundle` (parametrize the paths through env defaults) to cover
       idempotence and bad input.
-- [ ] Docs: §8. Run `go test ./...` and `task docs:check`.
+- [x] Docs: §8. Run `go test ./...` and `task docs:check`.
 
 ### `ca-preflight-and-check-script`
 - [ ] `gitTLSPreflight` + `gitTLSHint` in `llmtls.go`, run after

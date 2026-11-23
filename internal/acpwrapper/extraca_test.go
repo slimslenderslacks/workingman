@@ -8,13 +8,18 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/policy"
+	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
 )
 
@@ -110,5 +115,92 @@ func TestRunFailsOnInvalidExtraCACerts(t *testing.T) {
 	}
 	if rec.Status != session.StatusFailed || !strings.Contains(rec.Error, bad) {
 		t.Errorf("session.json = %+v, want failed naming %s", rec, bad)
+	}
+}
+
+// extraCAConfig is a Config whose extra CA has been loaded, as Run does.
+func extraCAConfig(t *testing.T, c Config) Config {
+	t.Helper()
+	c.ExtraCACerts = writeTestCA(t, time.Now().AddDate(1, 0, 0))
+	if err := c.loadExtraCA(io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// With the extra CA configured, every ensureSandbox path — create, repair
+// (rm --force + create) and reuse — ends with exactly the install exec, after
+// the policies; with it unset, the calls are the same minus that exec.
+func TestEnsureSandboxInstallsExtraCA(t *testing.T) {
+	rule := policy.Rule{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "api.github.com"}
+	base := Config{SessionID: "s", SandboxName: "acp-s", KitPath: "/kits/acp", SbxPath: "sbx",
+		Workspaces: []string{"/repo"}, Policies: []policy.Rule{rule}}
+	for _, tc := range []struct {
+		name, ls string
+		want     [][]string // sbx calls with the setting off
+	}{
+		{"create", `{"sandboxes":[]}`, [][]string{
+			{"sbx", "ls", "--json"},
+			{"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp", "/repo"},
+			{"sbx", "policy", "allow", "network", "--sandbox", "acp-s", "api.github.com"},
+		}},
+		{"repair", `{"sandboxes":[{"name":"acp-s","workspaces":["/old"]}]}`, [][]string{
+			{"sbx", "ls", "--json"},
+			{"sbx", "rm", "--force", "acp-s"},
+			{"sbx", "create", "claude", "--name", "acp-s", "--kit", "/kits/acp", "/repo"},
+			{"sbx", "policy", "allow", "network", "--sandbox", "acp-s", "api.github.com"},
+		}},
+		{"reuse", `{"sandboxes":[{"name":"acp-s","workspaces":["/repo"]}]}`, [][]string{
+			{"sbx", "ls", "--json"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			off := &fakeSbx{lsOutput: tc.ls}
+			if _, err := ensureSandbox(context.Background(), off.run, base); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(off.calls, tc.want) {
+				t.Errorf("off: calls =\n%q\nwant\n%q", off.calls, tc.want)
+			}
+
+			c := extraCAConfig(t, base)
+			on := &fakeSbx{lsOutput: tc.ls}
+			if _, err := ensureSandbox(context.Background(), on.run, c); err != nil {
+				t.Fatal(err)
+			}
+			want := append(slices.Clone(tc.want), append([]string{"sbx"}, sbx.ExtraCAInstallArgs("acp-s", c.extraCA.PEM)...))
+			if !reflect.DeepEqual(on.calls, want) {
+				t.Errorf("on: calls =\n%q\nwant\n%q", on.calls, want)
+			}
+		})
+	}
+}
+
+// A failed install on a new sandbox fails the launch and DELETEs the gateway
+// minted for it; on a reused sandbox it fails the launch and keeps the
+// sandbox (no rm).
+func TestEnsureSandboxExtraCAFailure(t *testing.T) {
+	g := newFakeGateway(t)
+	c := extraCAConfig(t, gatewayConfig(t, g, "gmail"))
+	f := &fakeSbx{lsOutput: `{"sandboxes":[]}`, failCmd: "exec"}
+	_, err := ensureSandbox(context.Background(), f.run, c)
+	if err == nil || !strings.Contains(err.Error(), `install extra CA (`+c.ExtraCACerts+`) into sandbox "acp-s"`) {
+		t.Fatalf("create: err = %v, want the install failure", err)
+	}
+	if !reflect.DeepEqual(g.deleted, []string{"gw-1"}) {
+		t.Errorf("create: deleted = %v, want [gw-1]", g.deleted)
+	}
+	if _, ok, _ := c.MCPGateway.Store.Load("acp-s"); ok {
+		t.Error("create: gateway record left behind")
+	}
+
+	reuse := &fakeSbx{lsOutput: `{"sandboxes":[{"name":"acp-s","workspaces":["/repo"]}]}`, failCmd: "exec"}
+	if _, err := ensureSandbox(context.Background(), reuse.run, c); err == nil || !strings.Contains(err.Error(), "install extra CA") {
+		t.Fatalf("reuse: err = %v, want the install failure", err)
+	}
+	for _, call := range reuse.calls {
+		if call[1] == "rm" || call[1] == "create" {
+			t.Errorf("reuse: unexpected %v", call)
+		}
 	}
 }

@@ -641,8 +641,9 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 // createSandbox runs `sbx create claude --name <name> --kit <kit>
 // <c.Workspaces...>` and then applies c.Policies in declaration order (so
 // deny-all + allow-host stacks evaluate left-to-right), followed by the MCP
-// gateway's allow rules. The sandbox's gateway is POSTed before `sbx create`
-// and recorded after the policies succeed (DELETEd if any step fails). No `--static-mcp` flags: MCP servers reach the
+// gateway's allow rules, then installs the extra CA (ensureExtraCA) when one
+// is configured. The sandbox's gateway is POSTed before `sbx create`
+// and recorded after those steps succeed (DELETEd if any step fails). No `--static-mcp` flags: MCP servers reach the
 // sandbox through its per-sandbox gateway (MCP_URL) instead.
 // It is the one place that "attaches" a sandbox's workspace mounts, used both
 // for a brand-new sandbox and to repair one whose mounts must change (the
@@ -696,6 +697,9 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 				r.Action, r.Kind, name, r.Resource, err, strings.TrimSpace(string(out))))
 		}
 	}
+	if err := ensureExtraCA(ctx, run, c, name); err != nil {
+		return fail(err)
+	}
 	if err := c.MCPGateway.Save(gw); err != nil {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING %v\n", c.SessionID, err)
 		c.MCPGateway.Discard(ctx, gw)
@@ -714,14 +718,17 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 //     already proves the workspace/policy set lines up (see the
 //     Config.Policies doc). The MCP gateway's allow rules are re-applied
 //     best-effort, so a sandbox created before the gateway was configured can
-//     still reach it.
+//     still reach it. The extra CA, when configured, is ensured (a
+//     failure is a launch error), so a sandbox created before the setting
+//     gets it too.
 //  3. Different set → `sbx rm --force`, release its MCP gateway, then fall
 //     through (self-heals drift).
 //  4. No sandbox named c.SandboxName, or it was just removed by (3):
 //     `sbx create claude --name <name> --kit <kit> <ws...>`, then one
 //     `sbx policy <action> <kind> --sandbox <name> <resource>` per rule in
 //     c.Policies, in declaration order (so deny-all + allow-host stacks
-//     evaluate left-to-right), then the gateway's allow rules.
+//     evaluate left-to-right), then the gateway's allow rules, then the
+//     extra CA install when configured.
 //
 // On create the gateway is minted first (createSandbox → Manager.Prepare),
 // before `sbx create`, and recorded once the sandbox and its policies exist;
@@ -756,6 +763,11 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, erro
 		}
 		if sameWorkspaceSet(existing, c.Workspaces) && drift == "" {
 			reapplyGatewayPolicies(ctx, run, c)
+			// A reused sandbox may predate the extra CA setting (or have
+			// lost the install): ensure it on every launch.
+			if err := ensureExtraCA(ctx, run, c, c.SandboxName); err != nil {
+				return "", err
+			}
 			return c.SandboxName, nil
 		}
 		if drift != "" {
@@ -770,6 +782,22 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, erro
 	}
 
 	return createSandbox(ctx, run, c, c.SandboxName)
+}
+
+// ensureExtraCA installs the extra CA bundle loaded by Run (c.extraCA) into
+// the sandbox's system trust store (sbx.EnsureExtraCA), before any preflight
+// or agent uses the network: node reads NODE_EXTRA_CA_CERTS (the system
+// bundle) only at startup. Idempotent, so it runs on every launch, create or
+// reuse. A no-op, with no sbx call, when no extra CA is configured.
+func ensureExtraCA(ctx context.Context, run commandFunc, c Config, name string) error {
+	msg, err := sbx.EnsureExtraCA(ctx, sbx.RunFunc(run), c.SbxPath, name, c.extraCA)
+	if err != nil {
+		return fmt.Errorf("acpwrapper: %w", err)
+	}
+	if msg != "" {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: sandbox %s: %s\n", c.SessionID, name, msg)
+	}
+	return nil
 }
 
 // reapplyGatewayPolicies applies the MCP gateway's allow rules to a reused
