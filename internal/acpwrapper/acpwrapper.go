@@ -270,9 +270,34 @@ type Config struct {
 	// MCP_URL. Empty when the gateway is disabled or could not be minted.
 	mcpURL string
 
-	// secretLsSleep, when set, replaces the backoff sleep between
-	// `sbx secret ls` retries (see gatewaySecretConfigured); a test seam.
-	secretLsSleep func(context.Context, time.Duration) error
+	// sbxSleep, when set, replaces the backoff sleep between retries of the
+	// JSON-parsed sbx calls (`sbx ls`, `sbx secret ls`; see sbxClient); a test
+	// seam.
+	sbxSleep func(context.Context, time.Duration) error
+
+	// sbxOutput, set by Run to sbx.ExecOutput, runs the JSON-parsed sbx calls
+	// with stdout and stderr kept apart. When nil (tests driving ensureSandbox
+	// directly), listSandboxes adapts the commandFunc it was given instead.
+	sbxOutput sbx.OutputFunc
+}
+
+// sbxClient is the sbx.Client every JSON-parsed sbx call goes through: stdout
+// decoded on its own, retried with backoff, logged per session, and
+// serialized across every acp-wrapper (and the daemon) on the host by
+// sbx.LockPath beside the sessions root, held only while sbx runs.
+func (c Config) sbxClient(run sbx.OutputFunc) sbx.Client {
+	q := sbx.Client{
+		Run:     run,
+		SbxPath: c.SbxPath,
+		Sleep:   c.sbxSleep,
+		Logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: %s\n", c.SessionID, fmt.Sprintf(format, args...))
+		},
+	}
+	if c.SessionsRoot != "" {
+		q.LockPath = sbx.LockPath(c.SessionsRoot)
+	}
+	return q
 }
 
 // SessionDir is the per-session directory holding the socket and session.json.
@@ -676,9 +701,9 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 // install cost; it is out of scope for and does not change this function's
 // naming/traceability behavior above, which is this task's actual fix.
 func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, error) {
-	sandboxes, err := listSandboxes(ctx, run, c.SbxPath)
+	sandboxes, err := listSandboxes(ctx, run, c)
 	if err != nil {
-		return "", fmt.Errorf("acpwrapper: sbx ls: %w", err)
+		return "", fmt.Errorf("acpwrapper: %w", err)
 	}
 	if existing, ok := sandboxes[c.SandboxName]; ok {
 		drift := ""
@@ -753,7 +778,7 @@ func sweepMCPGateways(ctx context.Context, run commandFunc, c Config) {
 	if recs, err := c.MCPGateway.Store.List(); err != nil || len(recs) == 0 {
 		return
 	}
-	sandboxes, err := listSandboxes(ctx, run, c.SbxPath)
+	sandboxes, err := listSandboxes(ctx, run, c)
 	if err != nil {
 		return // can't tell what's gone; never release on a guess
 	}
@@ -765,15 +790,17 @@ func sweepMCPGateways(ctx context.Context, run commandFunc, c Config) {
 
 // listSandboxes returns every sandbox's workspace list, keyed by name, from
 // `sbx ls --json` — the stable read interface sbx exposes. Used to find an
-// existing sandbox by c.SandboxName.
-func listSandboxes(ctx context.Context, run commandFunc, sbxPath string) (map[string][]string, error) {
-	out, err := run(ctx, sbxPath, "ls", "--json")
+// existing sandbox by c.SandboxName. It goes through c.sbxClient: stdout only
+// (c.sbxOutput; run's combined output when unset), WARN and JSON log lines
+// around the list skipped, retried up to 5 times under the host-wide lock.
+func listSandboxes(ctx context.Context, run commandFunc, c Config) (map[string][]string, error) {
+	out := c.sbxOutput
+	if out == nil {
+		out = sbx.Combined(sbx.RunFunc(run))
+	}
+	list, err := c.sbxClient(out).List(ctx)
 	if err != nil {
 		return nil, err
-	}
-	list, err := sbx.DecodeList(out)
-	if err != nil {
-		return nil, fmt.Errorf("decode sbx ls output: %w", err)
 	}
 	m := make(map[string][]string, len(list))
 	for _, s := range list {
@@ -783,26 +810,15 @@ func listSandboxes(ctx context.Context, run commandFunc, sbxPath string) (map[st
 }
 
 // gatewaySecretConfigured reports whether sbx holds an LLM gateway secret for
-// c.SandboxName (see sbx.SecretLs.GatewayConfigured). run's stdout alone is
-// decoded, stderr only quoted in errors. `sbx secret ls` is retried with
-// backoff and serialized across every acp-wrapper on the host by a lock file
-// beside the sessions root (sbx.SecretLsLockPath), held only while sbx runs:
-// many sessions starting at once otherwise trip sbx's own docker hub refresh
-// lock and get a WARN instead of the secrets. An error means every attempt
-// failed.
+// c.SandboxName (see sbx.Client.GatewayConfigured). run's stdout alone is
+// decoded, stderr only quoted in errors. `sbx secret ls` goes through
+// c.sbxClient like `sbx ls`: retried with backoff and serialized across every
+// acp-wrapper on the host by the lock beside the sessions root, held only
+// while sbx runs — many sessions starting at once otherwise trip sbx's own
+// docker hub refresh lock and get a WARN instead of the secrets. An error
+// means every attempt failed.
 func gatewaySecretConfigured(ctx context.Context, run sbx.OutputFunc, c Config) (bool, error) {
-	q := sbx.SecretLs{
-		Run:     run,
-		SbxPath: c.SbxPath,
-		Sleep:   c.secretLsSleep,
-		Logf: func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: %s\n", c.SessionID, fmt.Sprintf(format, args...))
-		},
-	}
-	if c.SessionsRoot != "" {
-		q.LockPath = sbx.SecretLsLockPath(c.SessionsRoot)
-	}
-	return q.GatewayConfigured(ctx, c.SandboxName)
+	return c.sbxClient(run).GatewayConfigured(ctx, c.SandboxName)
 }
 
 // sameWorkspaceSet reports whether a and b contain the same paths, ignoring
@@ -1002,6 +1018,7 @@ func Run(ctx context.Context, c Config) error {
 		return err
 	}
 
+	c.sbxOutput = sbx.ExecOutput
 	ensureStart := time.Now()
 	sandboxName, err := ensureSandbox(ctx, execCommand, c)
 	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ensureSandbox took %s\n", c.SessionID, time.Since(ensureStart))
@@ -1032,7 +1049,7 @@ func Run(ctx context.Context, c Config) error {
 	// it there; otherwise leave ANTHROPIC_BASE_URL unset (the default API).
 	// Not knowing is a failure, not "no secret": falling back to the default
 	// API on a TLS-inspecting network only fails later, less clearly.
-	useGateway, err := gatewaySecretConfigured(ctx, sbx.ExecOutput, c)
+	useGateway, err := gatewaySecretConfigured(ctx, c.sbxOutput, c)
 	if err != nil {
 		err = fmt.Errorf("acpwrapper: cannot tell whether sbx holds the %s secret, not starting the agent without knowing whether to set ANTHROPIC_BASE_URL: %w", gatewayHost, err)
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ERROR %v\n", c.SessionID, err)

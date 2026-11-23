@@ -72,7 +72,7 @@ func TestSecretLsRetriesTransientFailures(t *testing.T) {
 	var calls int32
 	var slept []time.Duration
 	var logs []string
-	q := SecretLs{
+	q := Client{
 		Run: script(&calls,
 			result{stderr: "WARN: lock", err: errors.New("exit status 1")},
 			result{stdout: "WARN: docker hub refresh lock held by another process"},
@@ -100,13 +100,13 @@ func TestSecretLsRetriesTransientFailures(t *testing.T) {
 func TestSecretLsExhaustion(t *testing.T) {
 	var calls int32
 	var slept []time.Duration
-	q := SecretLs{
+	q := Client{
 		Run:    script(&calls, result{stdout: "", stderr: "WARN: docker hub refresh lock held", err: errors.New("exit status 1")}),
 		Sleep:  func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil },
 		Jitter: func(d time.Duration) time.Duration { return d },
 	}
 	_, _, err := q.GatewayScopes(context.Background(), "s")
-	if err == nil || !strings.Contains(err.Error(), "sbx secret ls failed after 5 attempts") || !strings.Contains(err.Error(), "docker hub refresh lock held") {
+	if err == nil || !strings.Contains(err.Error(), "sbx secret ls --json failed after 5 attempts") || !strings.Contains(err.Error(), "docker hub refresh lock held") {
 		t.Fatalf("err = %v, want the exhaustion error quoting stderr", err)
 	}
 	if calls != 5 {
@@ -120,11 +120,11 @@ func TestSecretLsExhaustion(t *testing.T) {
 func TestSecretLsHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var calls int32
-	q := SecretLs{
+	q := Client{
 		Run:   script(&calls, result{stdout: "WARN: x"}),
 		Sleep: func(ctx context.Context, _ time.Duration) error { cancel(); return ctx.Err() },
 	}
-	if _, err := q.List(ctx); !errors.Is(err, context.Canceled) {
+	if _, err := q.SecretList(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 	if calls != 1 {
@@ -133,7 +133,7 @@ func TestSecretLsHonorsCancellation(t *testing.T) {
 }
 
 func TestSecretLsDefaultJitter(t *testing.T) {
-	q := SecretLs{}
+	q := Client{}
 	for range 100 {
 		if d := q.jitter(200 * time.Millisecond); d < 100*time.Millisecond || d >= 300*time.Millisecond {
 			t.Fatalf("jitter(200ms) = %s, want within [100ms, 300ms)", d)
@@ -143,7 +143,7 @@ func TestSecretLsDefaultJitter(t *testing.T) {
 
 // Concurrent callers sharing a lock file never run sbx at the same time.
 func TestSecretLsLockSerializesGoroutines(t *testing.T) {
-	lock := SecretLsLockPath(filepath.Join(t.TempDir(), "state", "sessions"))
+	lock := LockPath(filepath.Join(t.TempDir(), "state", "sessions"))
 	var inside, overlaps, calls int32
 	run := func(context.Context, string, ...string) ([]byte, []byte, error) {
 		atomic.AddInt32(&calls, 1)
@@ -157,7 +157,7 @@ func TestSecretLsLockSerializesGoroutines(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 10 {
 		wg.Go(func() {
-			q := SecretLs{Run: run, LockPath: lock}
+			q := Client{Run: run, LockPath: lock}
 			if ok, err := q.GatewayConfigured(context.Background(), "s"); err != nil || !ok {
 				t.Errorf("GatewayConfigured = %v, %v", ok, err)
 			}
@@ -173,7 +173,7 @@ func TestSecretLsLockSerializesGoroutines(t *testing.T) {
 // and each records its [start, end] inside the lock; no two intervals overlap.
 func TestSecretLsLockSerializesProcesses(t *testing.T) {
 	dir := t.TempDir()
-	lock := filepath.Join(dir, "locks", "sbx-secret-ls.lock")
+	lock := filepath.Join(dir, "locks", "sbx.lock")
 	const n = 6
 	cmds := make([]*exec.Cmd, n)
 	for i := range cmds {
@@ -215,13 +215,13 @@ func TestSecretLsLockHelper(t *testing.T) {
 		t.Skip("subprocess helper for TestSecretLsLockSerializesProcesses")
 	}
 	var start, end int64
-	q := SecretLs{LockPath: lock, Run: func(context.Context, string, ...string) ([]byte, []byte, error) {
+	q := Client{LockPath: lock, Run: func(context.Context, string, ...string) ([]byte, []byte, error) {
 		start = time.Now().UnixNano()
 		time.Sleep(20 * time.Millisecond)
 		end = time.Now().UnixNano()
 		return []byte(globalSecret), nil, nil
 	}}
-	if _, err := q.List(context.Background()); err != nil {
+	if _, err := q.SecretList(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(os.Getenv("SECRET_LS_LOCK_OUT"), fmt.Appendf(nil, "%d %d", start, end), 0o644); err != nil {
@@ -237,7 +237,7 @@ func TestSecretLsLockFailureProceedsUnlocked(t *testing.T) {
 	}
 	var logs []string
 	var calls int32
-	q := SecretLs{
+	q := Client{
 		Run:      script(&calls, result{stdout: globalSecret}),
 		LockPath: filepath.Join(file, "locks", "x.lock"),
 		Logf:     func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
@@ -254,9 +254,9 @@ func TestSecretLsLockFailureProceedsUnlocked(t *testing.T) {
 // LockTimeout is skipped rather than waited on forever.
 func TestSecretLsLockTimeoutAndNotHeldWhileSleeping(t *testing.T) {
 	lock := filepath.Join(t.TempDir(), "x.lock")
-	other := SecretLs{LockPath: lock}
+	other := Client{LockPath: lock}
 	var calls int32
-	q := SecretLs{
+	q := Client{
 		Run:      script(&calls, result{stdout: "WARN: x"}, result{stdout: globalSecret}),
 		LockPath: lock,
 		Sleep: func(context.Context, time.Duration) error {
@@ -264,7 +264,7 @@ func TestSecretLsLockTimeoutAndNotHeldWhileSleeping(t *testing.T) {
 			return nil
 		},
 	}
-	if _, err := q.List(context.Background()); err != nil {
+	if _, err := q.SecretList(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {
@@ -274,9 +274,9 @@ func TestSecretLsLockTimeoutAndNotHeldWhileSleeping(t *testing.T) {
 	unlock := other.lockOrFail(t)
 	defer unlock()
 	var logs []string
-	q = SecretLs{Run: script(new(int32), result{stdout: globalSecret}), LockPath: lock, LockTimeout: 50 * time.Millisecond,
+	q = Client{Run: script(new(int32), result{stdout: globalSecret}), LockPath: lock, LockTimeout: 50 * time.Millisecond,
 		Logf: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}
-	if _, err := q.List(context.Background()); err != nil {
+	if _, err := q.SecretList(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(logs) != 1 || !strings.Contains(logs[0], "still held") {
@@ -285,7 +285,7 @@ func TestSecretLsLockTimeoutAndNotHeldWhileSleeping(t *testing.T) {
 }
 
 // lockOrFail takes q's lock, failing the test if it falls back to unlocked.
-func (q SecretLs) lockOrFail(t *testing.T) func() {
+func (q Client) lockOrFail(t *testing.T) func() {
 	t.Helper()
 	failed := false
 	q.Logf = func(string, ...any) { failed = true }

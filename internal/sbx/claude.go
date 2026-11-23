@@ -43,8 +43,8 @@ func GatewaySecretConfigured(ctx context.Context, run RunFunc, sbxPath, sandbox 
 // apply to sandbox: a global one, and one scoped to sandbox itself. The
 // difference matters because sbx deletes a sandbox-scoped secret when that
 // sandbox is removed, so recreating the sandbox loses it. It runs `sbx secret
-// ls --json` once, without SecretLs's retries or lock, but decodes as
+// ls --json` once, without Client's retries or lock, but decodes as
 // tolerantly (DecodeSecretList).
 func GatewaySecretScopes(ctx context.Context, run RunFunc, sbxPath, sandbox string) (global, scoped bool, err error) {
-	return SecretLs{Run: combined(run), SbxPath: sbxPath, Attempts: 1}.GatewayScopes(ctx, sandbox)
+	return Client{Run: Combined(run), SbxPath: sbxPath, Attempts: 1}.GatewayScopes(ctx, sandbox)
 }

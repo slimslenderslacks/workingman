@@ -34,7 +34,7 @@ argv.
 
 | Subcommand | Flags / shape | Who | Parsed output | Failure handling |
 |---|---|---|---|---|
-| `sbx ls --json` | — | `internal/sbx.Alive`, `runner.readSandboxWorkspaces`, `acpwrapper.listSandboxes` | `sbx.DecodeList`: either `[{name, workspaces[]}]` (v0.50+) or `{"sandboxes":[...]}` (older) | `Alive` returns a **tri-state**: `(false, nil)` means definitely gone, and `err != nil` means inconclusive and must never be read as gone. Ensure paths wrap the error and abort the launch. |
+| `sbx ls --json` | — | `internal/sbx.Alive`, `runner.readSandboxWorkspaces`, `runner.ensureSessionSandbox`, `acpwrapper.listSandboxes` (all via `sbx.Client.List`) | stdout only (stderr is quoted in errors); `WARN:` lines and JSON log objects before or after the list are skipped, and only the first bare array or `{"sandboxes": ...}` object starting its own line is decoded, trailing data ignored (`sbx.DecodeList`): either `[{name, workspaces[]}]` (v0.50+) or `{"sandboxes":[...]}` (older) | Retried and host-locked exactly like `sbx secret ls` below (same `sbx.Client`, same lock file). `Alive` returns a **tri-state**: `(false, nil)` means definitely gone, and `err != nil` means inconclusive and must never be read as gone. Ensure paths abort the launch on exhaustion with `sbx ls --json failed after 5 attempts: ...`. `Alive` and `readSandboxWorkspaces` have no sessions root and use `sbx.DefaultLockPath` (`~/.workingman/locks/sbx.lock`, the same file as the default sessions root's). |
 | `sbx create claude` | `--name <n>`, `--kit <kit>` (ACP only), `-t <image> --pull missing` (when `--acp-image` is set), then positional workspaces (no `--static-mcp` any more: MCP servers go through the per-sandbox gateway, see `internal/mcpgateway`), where the first is primary and a `<path>:ro` suffix means read-only | `acpwrapper.createSandbox`, `runner.DefaultSandboxCreator` (no kit/template), `check-signing.sh` (probe sandbox) | none (CombinedOutput is captured for error text) | The error is wrapped with the trimmed output and the launch fails. The wrapper logs the create duration to stderr. |
 | `sbx rm --force <n>` | — | `acpwrapper.ensureSandbox` (mount drift), `acpwrapper.removeSandboxOnExit`, `runner.DefaultSandboxCreator` (drift), `check-signing.sh` cleanup | none | Drift path: a fatal error. Exit path: best-effort, logged and never returned. Script: `|| true`. |
 | `sbx policy <allow\|deny> <network\|filesystem> --sandbox <n> <resource>` | one invocation per rule, in declaration order, after create and before any exec | `policy.Rule.CLIArgs` (used by `acpwrapper.createSandbox` and `runner.DefaultSandboxCreator`), `check-signing.sh probe_push` | none | Validated first (`Rule.Validate`), then a failure is fatal to create. Rules are **not** re-applied to a reused sandbox. |
@@ -43,7 +43,7 @@ argv.
 | `sbx create` + `sbx run` (`:session`) | create: `claude --name <n> -e MCP_URL=… -e <claude env> --kit <kit> -t <image> --pull missing <ws…>`; run: `--name <n> -e …  -e GIT_*… -- --session-id\|--resume <uuid>` | `runner.LaunchInteractive` / `ensureSessionSandbox` (mirrors `sbx-create.sh`) | n/a (runs in a terminal tab) | A create failure is fatal and DELETEs the gateway. Relies on **run starting a stopped sandbox**. |
 | `sbx exec <n> -- ssh-add -l` | — | `gitsign.Preflight`, `gitsign.PushPreflight`, `check-signing.sh` | looks for `SHA256:` in stdout | A missing key degrades signing to unsigned (`SigningBroken` in session.json). For push it is fatal (`PushBroken`). |
 | `sbx exec <n> -- sh -c 'ssh -T … git@github.com 2>&1'` | — | `gitsign.PushPreflight`, `check-signing.sh` | text classification: "successfully authenticated", "permission denied", "host key verification failed", or unreachable | Fatal for pushing sessions, with an actionable reason that names `sbx policy log` / `sbx policy allow network`. |
-| `sbx secret ls --json` | — | `acpwrapper.gatewaySecretConfigured`, `runner.ensureSessionSandbox` (both via `sbx.SecretLs`), `acpwrapper.warnScopedLLMSecret` (`sbx.GatewaySecretScopes`, one attempt) | stdout only (stderr is quoted in errors); leading non-JSON lines and JSON log lines are skipped up to the first object with `custom_secrets`/`secrets` (`sbx.DecodeSecretList`). `custom_secrets[].{scope, targets[]}` matches when scope is `global` or the sandbox name and `targets` contains `llm.es.atko.services` | A non-zero exit or undecodable output is retried up to 5 times (jittered backoff from 200ms, doubling). Each invocation holds an advisory `flock` on `<state>/locks/sbx-secret-ls.lock` (beside the sessions root) while sbx runs, never across the sleeps, so parallel starts don't trip sbx's docker hub refresh lock; a lock that can't be had within 30s is logged and skipped. Exhaustion fails the acp-wrapper launch (session.json `failed`, error names `sbx secret ls`); `:session` audits `session_llm_gateway_unknown` and goes on without the gateway. A decoded list with no gateway secret just leaves `ANTHROPIC_BASE_URL` unset. |
+| `sbx secret ls --json` | — | `acpwrapper.gatewaySecretConfigured`, `runner.ensureSessionSandbox` (both via `sbx.Client.GatewayConfigured`), `acpwrapper.warnScopedLLMSecret` (`sbx.GatewaySecretScopes`, one attempt) | stdout only (stderr is quoted in errors); non-JSON lines and JSON log lines are skipped up to the first object with `custom_secrets`/`secrets`, and anything after it ignored (`sbx.DecodeSecretList`). `custom_secrets[].{scope, targets[]}` matches when scope is `global` or the sandbox name and `targets` contains `llm.es.atko.services` | A non-zero exit or undecodable output is retried up to 5 times (jittered backoff from 200ms, doubling). Each invocation holds an advisory `flock` on `<state>/locks/sbx.lock` (beside the sessions root; shared with `sbx ls`) while sbx runs, never across the sleeps, so parallel starts don't trip sbx's docker hub refresh lock; a lock that can't be had within 30s is logged and skipped. Exhaustion fails the acp-wrapper launch (session.json `failed`, error names `sbx secret ls --json`); `:session` audits `session_llm_gateway_unknown` and goes on without the gateway. A decoded list with no gateway secret just leaves `ANTHROPIC_BASE_URL` unset. |
 | `sbx daemon stop` / `sbx daemon start -d` | env `SSH_AUTH_SOCK=<private agent>` | `start.sh`, `check-signing.sh restart_sandboxd` | none | `start.sh`: a failed start is fatal. Stop is `|| true`. |
 | `sbx template load` / `sbx template ls` | — | **manual**, documented in `start.sh` comments and `docs/mcp-gateway.md` (`ACP_IMAGE` default `slimslenderslacks/claude-code-acp:0.90.0`) | — | — |
 | `sbx mcp ls` / `sbx mcp auth` | — | **text only**: `daemon/review.go` block reason, `wolf.tmpl` | — | — |
@@ -84,8 +84,9 @@ argv.
   - `commandFunc`/`execCommand`, the single seam for sbx in the wrapper.
   - `ensureSandbox`, `createSandbox`, `listSandboxes`, `sameWorkspaceSet`, and
     `SplitMount`/`JoinMount` (`:ro`).
-  - `gatewaySecretConfigured` (`sbx secret ls`, via the retrying, host-locked
-    `sbx.SecretLs`), which drives `ANTHROPIC_BASE_URL`; a check that never
+  - `gatewaySecretConfigured` (`sbx secret ls`) and `listSandboxes`
+    (`sbx ls`), both via the retrying, host-locked `sbx.Client`
+    (`Config.sbxClient`); the former drives `ANTHROPIC_BASE_URL`; a check that never
     succeeds fails the launch.
   - `ensureMCPGateway` / `sweepMCPGateways` (via `internal/mcpgateway`):
     the per-sandbox standalone-codemode gateway → `MCP_URL`, plus one
@@ -165,8 +166,10 @@ argv.
   `Runner.LaunchInteractive` honors `Runner.SbxPath` for exec but not for
   ensure. `sbx.Alive` and `DefaultSandboxCreator` always use `"sbx"` from
   PATH.
-- **The `sbx ls` read path is implemented three times**: `sbx.Alive`,
-  `runner.readSandboxWorkspaces`, and `acpwrapper.listSandboxes`. The
+- **The `sbx ls` read path has four callers** (`sbx.Alive`,
+  `runner.readSandboxWorkspaces`, `runner.ensureSessionSandbox` and
+  `acpwrapper.listSandboxes`), though all now share `sbx.Client.List` for
+  running, decoding, retrying and locking. The
   ensure/drift logic is implemented twice: `runner.DefaultSandboxCreator` and
   `acpwrapper.ensureSandbox`, which differ only in the kit and template.
 - **Policies and MCPs are applied only on create.** A reused sandbox keeps

@@ -186,7 +186,7 @@ func TestGatewaySecretConfigured(t *testing.T) {
 				return []byte(tc.out), []byte(tc.stderr), tc.err
 			}
 			c := Config{SessionID: "s", SbxPath: "sbx", SandboxName: "acp-s", SessionsRoot: filepath.Join(t.TempDir(), "sessions"),
-				secretLsSleep: func(context.Context, time.Duration) error { return nil }}
+				sbxSleep: func(context.Context, time.Duration) error { return nil }}
 			got, err := gatewaySecretConfigured(context.Background(), run, c)
 			if (err != nil) != (tc.err != nil) {
 				t.Errorf("err = %v, want error %v", err, tc.err != nil)

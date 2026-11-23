@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -356,7 +357,7 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 	}
 	existing, err := readSandboxWorkspaces(ctx, spec.Name)
 	if err != nil {
-		return fmt.Errorf("sbx ls: %w", err)
+		return err
 	}
 	if existing != nil {
 		if sameWorkspaceSet(existing, spec.Workspaces) {
@@ -412,15 +413,18 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 
 // readSandboxWorkspaces returns the workspace list for the named sandbox,
 // or nil if no sandbox by that name exists. `sbx ls --json` is the only
-// stable read interface sbx exposes.
+// stable read interface sbx exposes; it runs through sbx.Client (stdout only,
+// WARN lines skipped, retried) under sbx.DefaultLockPath, since a
+// SandboxCreator has no sessions root of its own. That is the same lock the
+// acp-wrappers and `:session` use with the default sessions root.
 func readSandboxWorkspaces(ctx context.Context, name string) ([]string, error) {
-	out, err := exec.CommandContext(ctx, "sbx", "ls", "--json").Output()
+	q := sbx.Client{
+		LockPath: sbx.DefaultLockPath(),
+		Logf:     func(format string, args ...any) { log.Printf("sandbox %s: "+format, append([]any{name}, args...)...) },
+	}
+	list, err := q.List(ctx)
 	if err != nil {
 		return nil, err
-	}
-	list, err := sbx.DecodeList(out)
-	if err != nil {
-		return nil, fmt.Errorf("decode sbx ls output: %w", err)
 	}
 	for _, s := range list {
 		if s.Name == name {

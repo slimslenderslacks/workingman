@@ -159,7 +159,10 @@ func TestLaunchInteractiveSessionFollowsSbxCreate(t *testing.T) {
 func TestLaunchInteractiveSessionReusesAndResumes(t *testing.T) {
 	gwSrv, _ := newGatewayServer(t)
 	launcher := &fakeLauncher{}
-	fs := &fakeSbx{ls: `[{"name":"session-widget","workspaces":["/orch/widget","/ws/widget"]}]`, resume: true}
+	// sbx's WARN lines around the list (concurrent starts) are skipped.
+	fs := &fakeSbx{ls: "WARN: docker hub refresh lock held by another process\n" +
+		`[{"name":"session-widget","workspaces":["/orch/widget","/ws/widget"]}]` +
+		"\nWARN: docker hub refresh lock held by another process: context deadline exceeded\n", resume: true}
 	r := &Runner{
 		Launcher:      launcher,
 		SessionsRoot:  filepath.Join(t.TempDir(), "sessions"),

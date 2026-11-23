@@ -48,24 +48,26 @@ func (r *Runner) sbxRunner() sbx.RunFunc {
 	}
 }
 
-// gatewaySecretConfigured is sbx.SecretLs.GatewayConfigured for sandbox,
-// retried and serialized under the same lock file as acp-wrapper's check.
-// With an sbxRun test seam the seam's (combined) output is decoded and the
-// backoff is skipped.
-func (r *Runner) gatewaySecretConfigured(ctx context.Context, sandbox string) (bool, error) {
-	q := sbx.SecretLs{Run: sbx.ExecOutput, SbxPath: r.sbxBin()}
+// sbxClient is the sbx.Client for the JSON-parsed sbx calls of a `:session`
+// launch (`sbx ls`, `sbx secret ls`): retried and serialized under the same
+// lock file as acp-wrapper's (sbx.LockPath beside the sessions root, else
+// sbx.DefaultLockPath). With an sbxRun test seam the seam's (combined)
+// output is decoded and the backoff is skipped.
+func (r *Runner) sbxClient() sbx.Client {
+	q := sbx.Client{Run: sbx.ExecOutput, SbxPath: r.sbxBin(), LockPath: sbx.DefaultLockPath()}
 	if r.sbxRun != nil {
-		run := r.sbxRun
-		q.Run = func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
-			out, err := run(ctx, name, args...)
-			return out, nil, err
-		}
+		q.Run = sbx.Combined(r.sbxRun)
 		q.Sleep = func(context.Context, time.Duration) error { return nil }
 	}
 	if root, err := r.sessionsRoot(); err == nil {
-		q.LockPath = sbx.SecretLsLockPath(root)
+		q.LockPath = sbx.LockPath(root)
 	}
-	return q.GatewayConfigured(ctx, sandbox)
+	return q
+}
+
+// gatewaySecretConfigured is sbx.Client.GatewayConfigured for sandbox.
+func (r *Runner) gatewaySecretConfigured(ctx context.Context, sandbox string) (bool, error) {
+	return r.sbxClient().GatewayConfigured(ctx, sandbox)
 }
 
 // sessionEnv is the `-e` flags shared by `sbx create` and `sbx run`: MCP_URL
@@ -103,13 +105,9 @@ func (r *Runner) ensureSessionSandbox(ctx context.Context, name string, workspac
 		return nil, fmt.Errorf("mcp gateway policy: %w", err)
 	}
 
-	out, err := run(ctx, bin, "ls", "--json")
+	list, err := r.sbxClient().List(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("sbx ls: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	list, err := sbx.DecodeList(out)
-	if err != nil {
-		return nil, fmt.Errorf("decode sbx ls output: %w", err)
+		return nil, err
 	}
 	var existing []string
 	found := false
