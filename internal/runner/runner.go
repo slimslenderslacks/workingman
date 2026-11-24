@@ -305,11 +305,15 @@ func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
 // caller then gets it — or a replacement for a reused sandbox whose gateway is
 // gone — from mcpgateway.Manager.Ensure and passes MCP_URL per `sbx exec`.
 // The zero value means no gateway.
+//
+// ExtraCACerts is the absolute path of the per-laptop extra-CA PEM bundle
+// (Runner.ExtraCACerts) the sandbox must trust; empty means none.
 type SandboxSpec struct {
-	Name       string
-	Workspaces []string
-	Policies   []policy.Rule
-	MCPGateway mcpgateway.Manager
+	Name         string
+	Workspaces   []string
+	Policies     []policy.Rule
+	MCPGateway   mcpgateway.Manager
+	ExtraCACerts string
 }
 
 // SandboxCreator ensures a sandbox described by spec exists.
@@ -348,12 +352,23 @@ type SandboxCreator func(ctx context.Context, spec SandboxSpec) error
 //     gateway (DELETEd instead if any step failed). No `--static-mcp`
 //     flags: MCP servers are reached through the gateway.
 //
+// When spec.ExtraCACerts is set, the bundle is re-read on every call and
+// installed (sbx.EnsureExtraCA) after the policies on create, and on reuse
+// too, so a sandbox that predates the setting converges; a failed install
+// fails the call (and discards a just-minted gateway).
+//
 // Recreation is safe here because we never use --clone — the sandbox is a
 // thin bind-mount wrapper, so rm just stops the container and leaves the
 // host paths (worktrees, orch dir) untouched.
 func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 	if len(spec.Workspaces) == 0 {
 		return fmt.Errorf("sandbox: at least one workspace is required")
+	}
+	// Re-read the extra CA per launch, as acp-wrapper does: the file may have
+	// been refreshed (or broken) since orch validated it at startup.
+	ca, err := loadSpecExtraCA(spec.ExtraCACerts)
+	if err != nil {
+		return err
 	}
 	existing, err := readSandboxWorkspaces(ctx, spec.Name)
 	if err != nil {
@@ -367,6 +382,11 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 				for _, r := range rules {
 					_ = exec.CommandContext(ctx, "sbx", r.CLIArgs(spec.Name)...).Run()
 				}
+			}
+			// The sandbox may predate the extra CA setting: ensure it on
+			// every launch (a no-op when already installed).
+			if _, err := sbx.EnsureExtraCA(ctx, sandboxRun, "sbx", spec.Name, ca); err != nil {
+				return err
 			}
 			return nil
 		}
@@ -405,10 +425,29 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 				r.Action, r.Kind, spec.Name, r.Resource, err, strings.TrimSpace(string(out))))
 		}
 	}
+	if _, err := sbx.EnsureExtraCA(ctx, sandboxRun, "sbx", spec.Name, ca); err != nil {
+		return fail(err)
+	}
 	if err := spec.MCPGateway.Save(gw); err != nil {
 		spec.MCPGateway.Discard(ctx, gw)
 	}
 	return nil
+}
+
+// sandboxRun runs DefaultSandboxCreator's extra-CA install (`sbx exec`); a
+// package var so tests can assert its argv.
+var sandboxRun sbx.RunFunc = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// loadSpecExtraCA loads and validates the extra CA bundle at path
+// (sbx.LoadExtraCA); the zero ExtraCA, which installs nothing, when path is
+// empty.
+func loadSpecExtraCA(path string) (sbx.ExtraCA, error) {
+	if strings.TrimSpace(path) == "" {
+		return sbx.ExtraCA{}, nil
+	}
+	return sbx.LoadExtraCA(path)
 }
 
 // readSandboxWorkspaces returns the workspace list for the named sandbox,
@@ -538,6 +577,14 @@ type Runner struct {
 	// image is what removes the kit's per-create npm install. Empty leaves
 	// every sandbox on the stock claude template.
 	Image string
+
+	// ExtraCACerts, when set, is the absolute path of a PEM bundle of extra
+	// CAs (a TLS-inspecting VPN's root) that every sandbox must trust — see
+	// docs/sandbox-custom-ca.md. orch validates it at startup (sbx.LoadExtraCA).
+	// It is passed as `acp-wrapper --extra-ca-certs`, in SandboxSpec to the
+	// terminal-tab creator, and read by the `:session` path. Empty (the
+	// default) leaves every argv byte-identical to before.
+	ExtraCACerts string
 
 	// SessionsRoot is where per-session directories live; passed to
 	// `acp-wrapper --sessions-root` and used to write the initial session.json.
@@ -828,10 +875,11 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 			return nil, cfg, err
 		}
 		if err := r.Sandbox(ctx, SandboxSpec{
-			Name:       sandboxName,
-			Workspaces: workspaces,
-			Policies:   p.Policies,
-			MCPGateway: gw,
+			Name:         sandboxName,
+			Workspaces:   workspaces,
+			Policies:     p.Policies,
+			MCPGateway:   gw,
+			ExtraCACerts: r.ExtraCACerts,
 		}); err != nil {
 			return nil, cfg, fmt.Errorf("runner: sandbox: %w", err)
 		}
@@ -1252,6 +1300,11 @@ func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRo
 	// before.
 	if img := strings.TrimSpace(h.Image); img != "" {
 		args = append(args, "--template", img)
+	}
+	// The per-laptop extra CA bundle (Runner.ExtraCACerts). Like --template,
+	// omitted entirely when unset so the argv is byte-identical to before.
+	if ca := strings.TrimSpace(r.ExtraCACerts); ca != "" {
+		args = append(args, "--extra-ca-certs", ca)
 	}
 	if persistent {
 		// Conversational session (the wolf): survive client disconnects — the TUI

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/slimslenderslacks/work/internal/sbx"
 )
@@ -49,7 +50,7 @@ func llmTLSPreflight(ctx context.Context, run commandFunc, c Config) error {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING could not run the LLM TLS preflight against %s: %v: %s\n", c.SessionID, url, err, text)
 		return nil
 	}
-	status, detail := curlStatus(text)
+	status, detail := probeStatus(text, "curl")
 	switch status {
 	case "0":
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: LLM TLS preflight OK (%s)\n", c.SessionID, url)
@@ -71,17 +72,101 @@ func (c Config) llmTLSHint() string {
 	if c.useGateway {
 		return "the sbx proxy should re-sign " + gatewayHost + " with its own CA; check `sbx policy log` and the sandbox's CA bundle (/etc/ssl/certs/ca-certificates.crt)"
 	}
-	return "no sbx custom secret targeting " + gatewayHost + " applies to this sandbox, so ANTHROPIC_BASE_URL was left unset and the agent goes to " + directAPIURL +
+	hint := "no sbx custom secret targeting " + gatewayHost + " applies to this sandbox, so ANTHROPIC_BASE_URL was left unset and the agent goes to " + directAPIURL +
 		" through the network's TLS-inspecting proxy. Configure the LLM gateway secret globally (`sbx secret ls --json` must list a custom secret with scope \"global\" and target " + gatewayHost +
 		"); a secret scoped to one sandbox is deleted by sbx when that sandbox is removed, including when acp-wrapper recreates it"
+	if c.ExtraCACerts == "" {
+		return hint + ". Alternatively, install the network's CA into every sandbox: export the current corporate root (docs/sandbox-custom-ca.md §1.4) and set --extra-ca-certs / " + sbx.ExtraCAEnv
+	}
+	return hint + ". The configured extra CA (" + c.extraCADescription() + ") does not validate it either: it is the wrong root or expired; re-export it (docs/sandbox-custom-ca.md §1.4) and run ./check-ca.sh " + c.ExtraCACerts
 }
 
-// curlStatus splits the probe's output into curl's exit status (the last
-// "curl=<n>" line) and whatever curl printed before it.
-func curlStatus(out string) (status, detail string) {
+// gitProbeURL is the repository gitTLSPreflight runs `git ls-remote` against.
+// A variable so tests can override it.
+var gitProbeURL = "https://github.com/slimslenderslacks/workingman"
+
+// gitTLSPreflight checks, from inside the sandbox and through its proxy, that
+// git over https can verify github.com's certificate chain. On a laptop whose
+// VPN inspects TLS, github.com is re-signed with a corporate CA the sandbox
+// does not hold unless --extra-ca-certs installed it (docs/sandbox-custom-ca.md
+// §1.2), and every clone, fetch and push over https then fails mid-task.
+//
+// Only a certificate failure is an error, with a hint that depends on whether
+// an extra CA is configured. A sandbox without git, a network the sandbox's
+// policy denies, DNS or a timeout only warn, like llmTLSPreflight.
+func gitTLSPreflight(ctx context.Context, run commandFunc, c Config) error {
+	url := gitProbeURL
+	probe := `command -v git >/dev/null 2>&1 || { echo "git=missing"; exit 0; }; ` +
+		`if command -v timeout >/dev/null 2>&1; then t="timeout 20"; else t=; fi; ` +
+		`GIT_TERMINAL_PROMPT=0 $t git ls-remote "$1" HEAD 2>&1 >/dev/null; echo "git=$?"`
+	out, err := run(ctx, c.SbxPath, "exec", c.SandboxName, "--", "sh", "-c", probe, "sh", url)
+	text := strings.TrimSpace(string(out))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING could not run the git TLS preflight against %s: %v: %s\n", c.SessionID, url, err, text)
+		return nil
+	}
+	status, detail := probeStatus(text, "git")
+	switch {
+	case status == "0":
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: git TLS preflight OK (%s)\n", c.SessionID, url)
+		return nil
+	case status == "missing":
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: git TLS preflight skipped: no git in sandbox %q\n", c.SessionID, c.SandboxName)
+		return nil
+	// gnutls builds print "SSL certificate verification failed: ...",
+	// OpenSSL builds "SSL certificate problem: ...".
+	case status != "" && strings.Contains(strings.ToLower(detail), "certificate"):
+		return fmt.Errorf("acpwrapper: git TLS preflight FAILED for sandbox %q: https://github.com presents a certificate chain the sandbox does not trust (%s), so git over https would fail; %s",
+			c.SandboxName, detail, c.gitTLSHint(detail))
+	default:
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING git TLS preflight against %s: git exit %s: %s\n", c.SessionID, url, status, detail)
+		return nil
+	}
+}
+
+// gitTLSHint is the remediation for a failed gitTLSPreflight; detail is what
+// git printed.
+func (c Config) gitTLSHint(detail string) string {
+	if c.ExtraCACerts == "" {
+		return "the network re-signs github.com with a CA the sandbox does not hold (VPN TLS inspection). Export the current corporate root (docs/sandbox-custom-ca.md §1.4) and set --extra-ca-certs / " + sbx.ExtraCAEnv
+	}
+	hint := "the configured extra CA (" + c.extraCADescription() + ") does not validate github.com's chain: it is the wrong root or EXPIRED. Re-export it (docs/sandbox-custom-ca.md §1.4) and run ./check-ca.sh " + c.ExtraCACerts
+	if strings.Contains(strings.ToLower(detail), "expired") || c.extraCAExpired(time.Now()) {
+		hint = "a certificate has EXPIRED; " + hint
+	}
+	return hint
+}
+
+// extraCADescription names the loaded extra CA for a hint: its path, then
+// each certificate's subject and notAfter.
+func (c Config) extraCADescription() string {
+	parts := []string{c.ExtraCACerts}
+	for _, cert := range c.extraCA.Certs {
+		parts = append(parts, fmt.Sprintf("%s, notAfter %s", cert.Subject, cert.NotAfter.UTC().Format(time.RFC3339)))
+	}
+	return strings.Join(parts, ": ")
+}
+
+// extraCAExpired reports whether every loaded extra-CA certificate has
+// expired by now (false when none is loaded).
+func (c Config) extraCAExpired(now time.Time) bool {
+	if len(c.extraCA.Certs) == 0 {
+		return false
+	}
+	for _, cert := range c.extraCA.Certs {
+		if now.Before(cert.NotAfter) {
+			return false
+		}
+	}
+	return true
+}
+
+// probeStatus splits a preflight probe's output into the probed command's
+// exit status (the last "<key>=<n>" line) and whatever it printed before it.
+func probeStatus(out, key string) (status, detail string) {
 	lines := strings.Split(out, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		if s, ok := strings.CutPrefix(strings.TrimSpace(lines[i]), "curl="); ok {
+		if s, ok := strings.CutPrefix(strings.TrimSpace(lines[i]), key+"="); ok {
 			return s, strings.TrimSpace(strings.Join(lines[:i], " "))
 		}
 	}

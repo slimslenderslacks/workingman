@@ -17,8 +17,9 @@ import (
 //  1. mint a per-sandbox MCP gateway (dynamic, over SessionMCPServers — none
 //     by default, so the agent attaches what it needs with mcp-add);
 //  2. `sbx create claude --kit <Kit> -t <Image> --pull missing -e MCP_URL=…
-//     -e <claude env> <workspaces…>`, then allow the gateway's port and record
-//     the gateway;
+//     -e <claude env> <workspaces…>`, then allow the gateway's port, install
+//     the extra CA when Runner.ExtraCACerts is set (also on reuse), and
+//     record the gateway;
 //  3. attach the tab with `sbx run --name <sandbox> -e …`, so the pty runs the
 //     sandbox's own interactive claude. With acp-kit's image that `claude` is
 //     its shim, which registers MCP_URL as the `okta-gateway` MCP server.
@@ -91,6 +92,10 @@ func sessionEnv(mcpURL string, useGateway bool) []string {
 // workspaces mounted and returns the env (`-e` flags) to attach with.
 func (r *Runner) ensureSessionSandbox(ctx context.Context, name string, workspaces []string, gw mcpgateway.Manager) ([]string, error) {
 	run, bin := r.sbxRunner(), r.sbxBin()
+	ca, err := loadSpecExtraCA(r.ExtraCACerts)
+	if err != nil {
+		return nil, err
+	}
 	// As acp-wrapper does: a gateway that is still starting must not leave the
 	// session without MCP_URL baked into a brand-new sandbox.
 	if err := gw.WaitReady(ctx, name, r.MCPGatewayReadyTimeout); err != nil {
@@ -150,6 +155,9 @@ func (r *Runner) ensureSessionSandbox(ctx context.Context, name string, workspac
 					rule.Action, rule.Kind, name, rule.Resource, err, strings.TrimSpace(string(out))))
 			}
 		}
+		if _, err := sbx.EnsureExtraCA(ctx, run, bin, name, ca); err != nil {
+			return fail(err)
+		}
 		if err := gw.Save(rec); err != nil {
 			gw.Discard(ctx, rec)
 		}
@@ -158,6 +166,10 @@ func (r *Runner) ensureSessionSandbox(ctx context.Context, name string, workspac
 		// was configured can still reach it.
 		for _, rule := range gwRules {
 			_, _ = run(ctx, bin, rule.CLIArgs(name)...)
+		}
+		// A reused sandbox may predate the extra CA setting.
+		if _, err := sbx.EnsureExtraCA(ctx, run, bin, name, ca); err != nil {
+			return nil, err
 		}
 	}
 

@@ -19,6 +19,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/power"
 	"github.com/slimslenderslacks/work/internal/runner"
+	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/scheduler"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/terminal"
@@ -109,6 +110,7 @@ func runDaemon(args []string) {
 	stubRoot := fs.String("stub-workspace-root", "", `when --workspace-manager=stub, directory where workspaces are created (default: $TMPDIR/orch-workspaces)`)
 	acpKit := fs.String("acp-kit", "", "acp-kit reference layered onto non-interactive agents' sandboxes (a local kit dir or published ref). When set, the planning/task/commit agents, the wolf and the workingman agent launch as acp-wrapper-backed ACP sessions instead of in terminal tabs running 'sbx exec claude -p'")
 	acpImage := fs.String("acp-image", "", "prebuilt container image every ACP sandbox is created from, passed to `sbx create -t` (default: the stock claude template). Point it at acp-kit's prebuilt image (`make image-build`) so the kit's ~540MB npm install is paid once at image-build time instead of on every sandbox create. --acp-kit is still layered on top; only matters when --acp-kit is set")
+	extraCACerts := fs.String("extra-ca-certs", os.Getenv(sbx.ExtraCAEnv), "PEM bundle of extra CAs every sandbox must trust, for a laptop whose VPN re-signs HTTPS with a corporate root (default $WORKINGMAN_EXTRA_CA_CERTS). Validated at startup: orch exits if the file is unreadable or holds no PEM certificate, and warns (subject + notAfter) about expired certs. Passed to every sandbox-creating path; empty changes nothing. See docs/sandbox-custom-ca.md")
 	acpWrapper := fs.String("acp-wrapper", "", "path to the acp-wrapper binary (default: acp-wrapper on PATH)")
 	sessionsRoot := fs.String("sessions-root", "", "root dir holding per-session dirs for ACP agents (default ~/.workingman/sessions)")
 	wolfHost := fs.Bool("wolf-host", false, "escape hatch: run the wolf agent in a new terminal tab directly on the host (full host access, no sandbox, only reachable from that tab) instead of as a persistent ACP session in its own sandbox. Only matters when --acp-kit is set")
@@ -178,6 +180,14 @@ func runDaemon(args []string) {
 		a.Log("acp_kit_warning", "kit", *acpKit, "image", *acpImage, "detail", w)
 	}
 
+	// The per-laptop extra CA bundle: an invalid one fails startup here rather
+	// than every sandbox launch later. Expired certs only warn, because the
+	// file may still hold a valid root beside them.
+	extraCA, err := loadExtraCACerts(*extraCACerts, os.Stderr, a)
+	if err != nil {
+		log.Fatalf("orch: --extra-ca-certs: %v", err)
+	}
+
 	wsMgr, err := buildWorkspaceManager(*workspaceMode, *stubRoot)
 	if err != nil {
 		log.Fatal(err)
@@ -205,6 +215,7 @@ func runDaemon(args []string) {
 		MCPGatewayURL:     strings.TrimSpace(*mcpGatewayURL),
 		MCPGatewayServers: splitList(*mcpGatewayServers),
 		MCPGatewayStatic:  *mcpGatewayStatic,
+		ExtraCACerts:      extraCA,
 
 		WorkingmanAgentMCPStatic: !*workingmanMCPDynamic,
 	}
@@ -283,6 +294,7 @@ func runDaemon(args []string) {
 				AcpKit:           *acpKit,
 				AcpImage:         *acpImage,
 				AcpWrapper:       *acpWrapper,
+				ExtraCACerts:     extraCA,
 				SessionsRoot:     *sessionsRoot,
 				AuditLog:         absPath(*auditPath),
 				Headless:         *headless,

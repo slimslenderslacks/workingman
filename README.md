@@ -215,6 +215,11 @@ recreating, and every launch now runs an **LLM TLS preflight** — `curl` from
 inside the sandbox to the endpoint the agent will use — failing the launch
 with that diagnosis (`LLM TLS preflight FAILED` in `acp-wrapper.log`, and the
 session's error) instead of starting an agent that cannot reach the API.
+A **git TLS preflight** follows it (`git ls-remote` of github.com from inside
+the sandbox): a rejected certificate fails the launch (`git TLS preflight
+FAILED`) with a hint to set `--extra-ca-certs` / `WORKINGMAN_EXTRA_CA_CERTS`,
+or that the configured CA is wrong or expired; `./check-ca.sh` proves a CA
+end to end (setup.md, "Custom CA").
 Every sbx call whose output is parsed as JSON (`sbx ls --json`, which finds
 the sandbox to reuse, and `sbx secret ls --json`) is retried: with many
 sessions starting at once (`max_parallel_tasks`), concurrent sbx calls contend
@@ -234,6 +239,24 @@ Check with:
 sbx secret ls --json | jq '.custom_secrets[] | select(.targets | index("llm.es.atko.services")) | .scope'
 grep -E 'LLM gateway|LLM TLS' ~/orch/acp-wrapper.log | tail
 ```
+
+### Custom CA for a TLS-inspecting VPN (`--extra-ca-certs`)
+
+On a laptop whose VPN re-signs HTTPS (git to `github.com`, the direct
+`api.anthropic.com` path), sandboxes need the corporate root. It is an
+optional, per-laptop setting:
+
+| orch flag | Environment variable | Meaning |
+|---|---|---|
+| `--extra-ca-certs <pem>` | `WORKINGMAN_EXTRA_CA_CERTS` | PEM bundle of extra CAs every sandbox must trust. Validated at startup: orch exits if the file is unreadable or holds no PEM `CERTIFICATE` block (a DER file gets an `openssl x509 -inform DER` hint), and warns with subject and `notAfter` about an expired cert. Handed to every sandbox-creating path (`acp-wrapper --extra-ca-certs`, which re-validates it per launch; the terminal-tab and `:session` paths). On every launch, after `sbx create` and its policies or on a reused sandbox, it is installed into the sandbox's system trust store by an idempotent `sbx exec` (`/usr/local/share/ca-certificates/workingman-extra-ca.crt` + `update-ca-certificates`; [docs/sandbox-custom-ca.md](docs/sandbox-custom-ca.md) §4.3). A failed install fails the launch. Empty (the default) changes nothing. |
+
+The flag wins over the environment variable; orch writes the effective value
+to the audit log as `extra_ca_config` and to the state snapshot as
+`extra_ca_certs`. `start.sh` passes no flag (orch reads the variable itself);
+under launchd use `orch service install --root ~/orch -- --extra-ca-certs
+~/.workingman/extra-ca.pem`. Which cert to export, and why the sample
+`corporate-ca.cer` does not work, is in
+[docs/sandbox-custom-ca.md](docs/sandbox-custom-ca.md).
 
 ## MCP gateway (per-sandbox MCP servers)
 
@@ -377,8 +400,9 @@ To get the same wiring for a sandbox you start yourself, outside the daemon:
 sandbox with `-e MCP_URL=http://host.docker.internal:<port>/gateways/<id>`
 from the `slimslenderslacks/claude-code-acp:0.90.0` template (`--image`,
 default `$ACP_IMAGE`), allows the gateway port in its network policy,
-records the gateway in `~/.workingman/gateways/<name>.json` (the record the
-daemon uses), and attaches with `sbx run` unless `--no-run`. Workspaces
+installs the extra CA when `--extra-ca-certs` (default
+`$WORKINGMAN_EXTRA_CA_CERTS`) is set, records the gateway in
+`~/.workingman/gateways/<name>.json` (the record the daemon uses), and attaches with `sbx run` unless `--no-run`. Workspaces
 default to the current directory. If any step fails, the gateway is DELETEd.
 The gateway is `$WORKINGMAN_MCP_GATEWAY_URL`, else `http://localhost:3333`
 (`--gateway-url`).

@@ -39,6 +39,17 @@
 // finds the secrets document). [GatewaySecretScopes] is the single-attempt,
 // unlocked form.
 //
+// Extra CA: [LoadExtraCA] reads and validates the optional per-laptop PEM
+// bundle (`orch --extra-ca-certs`, else [ExtraCAEnv]) that sandboxes must
+// trust behind a TLS-inspecting VPN. An unreadable, empty or non-PEM file
+// (with a DER conversion hint) or a bad certificate is an error. Expired,
+// not-yet-valid and non-CA certificates are only warnings. The returned
+// [ExtraCA] carries the normalized PEM (CERTIFICATE blocks only).
+// [EnsureExtraCA] installs it into a sandbox's system trust store by running
+// [ExtraCAScript] over `sbx exec` ([ExtraCAInstallArgs]); it is idempotent,
+// so every create and reuse path calls it on every launch. See
+// docs/sandbox-custom-ca.md.
+//
 // # Key types
 //
 //   - [Sandbox] — one `sbx ls --json` entry (name and workspaces).
@@ -47,13 +58,17 @@
 //     daemon's session reconciliation.
 //   - [SanitizeName], [FitNameTo], [NameBudget], [CheckName] — the naming
 //     rules.
+//   - [ExtraCA] — a validated extra-CA bundle, from [LoadExtraCA];
+//     installed with [EnsureExtraCA].
 //
 // # Collaborators
 //
 // No internal imports. Used by internal/task (task-name budget),
 // internal/prompts (quotes that budget to agents), internal/runner and
-// internal/acpwrapper (sandbox names), internal/daemon (reconciling sessions
-// against live sandboxes) and internal/tui (ACP watcher). Most other sbx calls
+// internal/acpwrapper (sandbox names; acpwrapper also re-validates the extra
+// CA per launch), cmd/orch (the extra CA at startup), internal/daemon
+// (reconciling sessions against live sandboxes) and internal/tui (ACP
+// watcher). Most other sbx calls
 // are still made directly by those callers; docs/sandbox-provider-design.md
 // proposes moving them all behind one sandbox.Provider interface.
 package sbx
