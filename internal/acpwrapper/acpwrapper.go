@@ -96,6 +96,15 @@ type Config struct {
 	// SbxPath is the sbx executable. Defaults to "sbx" (resolved on PATH).
 	SbxPath string
 
+	// ExtraCACerts, when set, is a PEM bundle of extra CAs (the per-laptop
+	// root of a TLS-inspecting VPN) the sandbox must trust; see
+	// docs/sandbox-custom-ca.md. normalize makes it absolute, and Run re-reads
+	// and re-validates it (sbx.LoadExtraCA) on every launch, before
+	// ensureSandbox, so a refreshed file takes effect without a daemon restart
+	// and one that has become invalid fails the launch. Empty (the default)
+	// changes nothing.
+	ExtraCACerts string
+
 	// ExitWhenEmpty makes the wrapper shut its sandboxed ACP client down
 	// (close its stdin) once the last connected TUI disconnects, after at
 	// least one client has connected. Set by orch's daemon for the
@@ -275,6 +284,10 @@ type Config struct {
 	// JSON-parsed sbx calls (`sbx ls`, `sbx secret ls`; see sbxClient); a test
 	// seam.
 	sbxSleep func(context.Context, time.Duration) error
+
+	// extraCA is ExtraCACerts as loaded and validated by Run; zero when
+	// ExtraCACerts is empty.
+	extraCA sbx.ExtraCA
 
 	// sbxOutput, set by Run to sbx.ExecOutput, runs the JSON-parsed sbx calls
 	// with stdout and stderr kept apart. When nil (tests driving ensureSandbox
@@ -576,6 +589,16 @@ func (c *Config) normalize() error {
 		c.SbxPath = "sbx"
 	}
 
+	if ca := strings.TrimSpace(c.ExtraCACerts); ca != "" {
+		abs, err := filepath.Abs(ca)
+		if err != nil {
+			return fmt.Errorf("acpwrapper: extra CA certs %q: %w", ca, err)
+		}
+		c.ExtraCACerts = abs
+	} else {
+		c.ExtraCACerts = ""
+	}
+
 	// Default the gateway record store even when no gateway is configured now,
 	// so gateways recorded by an earlier, gateway-enabled run are still
 	// released when their sandboxes go.
@@ -583,6 +606,27 @@ func (c *Config) normalize() error {
 		c.MCPGateway.Store.Dir = mcpgateway.StateDir(c.SessionsRoot)
 	}
 
+	return nil
+}
+
+// loadExtraCA loads and validates c.ExtraCACerts into c.extraCA, logging its
+// warnings (expired or non-CA certs) to w. It is a no-op when ExtraCACerts is
+// empty.
+func (c *Config) loadExtraCA(w io.Writer) error {
+	c.extraCA = sbx.ExtraCA{}
+	if c.ExtraCACerts == "" {
+		return nil
+	}
+	ca, err := sbx.LoadExtraCA(c.ExtraCACerts)
+	if err != nil {
+		return fmt.Errorf("acpwrapper: %w", err)
+	}
+	for _, warn := range ca.Warnings {
+		fmt.Fprintf(w, "acp-wrapper: session %s: warning: %s\n", c.SessionID, warn)
+	}
+	fmt.Fprintf(w, "acp-wrapper: session %s: extra CA certs %s: %d certificate(s): %s\n",
+		c.SessionID, ca.Path, len(ca.Certs), strings.Join(ca.Subjects(), "; "))
+	c.extraCA = ca
 	return nil
 }
 
@@ -598,8 +642,9 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 // createSandbox runs `sbx create claude --name <name> --kit <kit>
 // <c.Workspaces...>` and then applies c.Policies in declaration order (so
 // deny-all + allow-host stacks evaluate left-to-right), followed by the MCP
-// gateway's allow rules. The sandbox's gateway is POSTed before `sbx create`
-// and recorded after the policies succeed (DELETEd if any step fails). No `--static-mcp` flags: MCP servers reach the
+// gateway's allow rules, then installs the extra CA (ensureExtraCA) when one
+// is configured. The sandbox's gateway is POSTed before `sbx create`
+// and recorded after those steps succeed (DELETEd if any step fails). No `--static-mcp` flags: MCP servers reach the
 // sandbox through its per-sandbox gateway (MCP_URL) instead.
 // It is the one place that "attaches" a sandbox's workspace mounts, used both
 // for a brand-new sandbox and to repair one whose mounts must change (the
@@ -653,6 +698,9 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 				r.Action, r.Kind, name, r.Resource, err, strings.TrimSpace(string(out))))
 		}
 	}
+	if err := ensureExtraCA(ctx, run, c, name); err != nil {
+		return fail(err)
+	}
 	if err := c.MCPGateway.Save(gw); err != nil {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING %v\n", c.SessionID, err)
 		c.MCPGateway.Discard(ctx, gw)
@@ -671,14 +719,17 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 //     and then the MCP gateway's allow rules are re-applied best-effort, in
 //     the create order, so rules added to the task since the sandbox was
 //     created hold, and a sandbox created before the gateway was configured
-//     can still reach it.
+//     can still reach it. The extra CA, when configured, is ensured (a
+//     failure is a launch error), so a sandbox created before the setting
+//     gets it too.
 //  3. Different set → `sbx rm --force`, release its MCP gateway, then fall
 //     through (self-heals drift).
 //  4. No sandbox named c.SandboxName, or it was just removed by (3):
 //     `sbx create claude --name <name> --kit <kit> <ws...>`, then one
 //     `sbx policy <action> <kind> --sandbox <name> <resource>` per rule in
 //     c.Policies, in declaration order (so deny-all + allow-host stacks
-//     evaluate left-to-right), then the gateway's allow rules.
+//     evaluate left-to-right), then the gateway's allow rules, then the
+//     extra CA install when configured.
 //
 // On create the gateway is minted first (createSandbox → Manager.Prepare),
 // before `sbx create`, and recorded once the sandbox and its policies exist;
@@ -713,6 +764,11 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, erro
 		}
 		if sameWorkspaceSet(existing, c.Workspaces) && drift == "" {
 			reapplyPolicies(ctx, run, c)
+			// A reused sandbox may predate the extra CA setting (or have
+			// lost the install): ensure it on every launch.
+			if err := ensureExtraCA(ctx, run, c, c.SandboxName); err != nil {
+				return "", err
+			}
 			return c.SandboxName, nil
 		}
 		if drift != "" {
@@ -727,6 +783,22 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, erro
 	}
 
 	return createSandbox(ctx, run, c, c.SandboxName)
+}
+
+// ensureExtraCA installs the extra CA bundle loaded by Run (c.extraCA) into
+// the sandbox's system trust store (sbx.EnsureExtraCA), before any preflight
+// or agent uses the network: node reads NODE_EXTRA_CA_CERTS (the system
+// bundle) only at startup. Idempotent, so it runs on every launch, create or
+// reuse. A no-op, with no sbx call, when no extra CA is configured.
+func ensureExtraCA(ctx context.Context, run commandFunc, c Config, name string) error {
+	msg, err := sbx.EnsureExtraCA(ctx, sbx.RunFunc(run), c.SbxPath, name, c.extraCA)
+	if err != nil {
+		return fmt.Errorf("acpwrapper: %w", err)
+	}
+	if msg != "" {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: sandbox %s: %s\n", c.SessionID, name, msg)
+	}
+	return nil
 }
 
 // reapplyPolicies applies c.Policies, then the MCP gateway's allow rules, to
@@ -1009,6 +1081,13 @@ func Run(ctx context.Context, c Config) error {
 		return err
 	}
 
+	// Re-validate the extra CA bundle on every launch: orch checked it at
+	// startup, but the file may have been refreshed or removed since.
+	if err := c.loadExtraCA(os.Stderr); err != nil {
+		failRecord(store, c, createdAt, err)
+		return err
+	}
+
 	// A configured MCP gateway that is not answering yet (standalone-codemode
 	// listens only after attaching its whole catalog) must not leave the agent
 	// without MCP_URL for its whole life: wait for it, and fail the launch if
@@ -1066,6 +1145,11 @@ func Run(ctx context.Context, c Config) error {
 	c.useGateway = useGateway
 	fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: LLM gateway %s: %v\n", c.SessionID, gatewayHost, useGateway)
 	if err := llmTLSPreflight(ctx, execCommand, c); err != nil {
+		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ERROR %v\n", c.SessionID, err)
+		failRecord(store, c, createdAt, err)
+		return err
+	}
+	if err := gitTLSPreflight(ctx, execCommand, c); err != nil {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: ERROR %v\n", c.SessionID, err)
 		failRecord(store, c, createdAt, err)
 		return err

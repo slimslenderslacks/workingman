@@ -238,9 +238,11 @@ if [ "$CHECK_AGENT" != 1 ] && [ -n "$WORKINGMAN_MCP_GATEWAY_URL" ]; then
   fi
 fi
 
+# orch reads WORKINGMAN_EXTRA_CA_CERTS (the per-laptop VPN root, see
+# docs/sandbox-custom-ca.md) itself, so it needs no flag here; just echo it.
 # Say which kit, image and gateway this run uses: the usual answer to "why does
 # a sandbox have mcp-gateway instead of okta-gateway" is one of these three.
-echo "start: acp-kit=$ACP_KIT acp-image=${ACP_IMAGE:-<stock claude template>} mcp-gateway-url=${WORKINGMAN_MCP_GATEWAY_URL:-<none: sandboxes keep mcp-gateway>} mcp-gateway-servers=${WORKINGMAN_MCP_GATEWAY_SERVERS:-<none>} workingman-agent-mcp-dynamic=$WORKINGMAN_AGENT_MCP_DYNAMIC" >&2
+echo "start: acp-kit=$ACP_KIT acp-image=${ACP_IMAGE:-<stock claude template>} mcp-gateway-url=${WORKINGMAN_MCP_GATEWAY_URL:-<none: sandboxes keep mcp-gateway>} mcp-gateway-servers=${WORKINGMAN_MCP_GATEWAY_SERVERS:-<none>} workingman-agent-mcp-dynamic=$WORKINGMAN_AGENT_MCP_DYNAMIC extra-ca-certs=${WORKINGMAN_EXTRA_CA_CERTS:-<none>}" >&2
 
 # Run orch as a child (not exec) so the EXIT trap can stop the private agent.
 # Forward INT/TERM to it for a clean shutdown and preserve its exit status.

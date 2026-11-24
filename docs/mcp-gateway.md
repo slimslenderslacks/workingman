@@ -127,9 +127,17 @@ run these steps in this order:
    then the gateway's allow rules. For a loopback gateway URL those are
    `sbx policy allow network --sandbox <name> host.docker.internal:<port>`
    and `… localhost:<port>`. For any other host it is `<host>:<port>`. This
-   happens before anything runs in the sandbox. After these steps the
-   gateway is recorded. If `sbx create` or any policy fails, the gateway is
-   DELETEd and nothing is recorded.
+   happens before anything runs in the sandbox.
+3a. **Install the extra CA** (only with `--extra-ca-certs` /
+   `WORKINGMAN_EXTRA_CA_CERTS`). `sbx exec <name> -- sh -c <sbx.ExtraCAScript>
+   sh <base64 PEM>` writes the bundle to
+   `/usr/local/share/ca-certificates/workingman-extra-ca.crt` and runs
+   `update-ca-certificates`; see [sandbox-custom-ca.md](sandbox-custom-ca.md).
+   With the setting unset there is no such call. After these steps the
+   gateway is recorded. If `sbx create`, any policy or the CA install fails,
+   the gateway is DELETEd and nothing is recorded. A reused sandbox gets the
+   same (idempotent) install on every launch, and a failure there fails the
+   launch but keeps the gateway.
 4. **Launch the agent with `MCP_URL`.** `mcpgateway.Manager.Ensure` gets
    the recorded gateway (still live, same servers) and the agent starts with
    `sbx exec -e MCP_URL=<sandbox url> …`. `sbx create` has no flag for

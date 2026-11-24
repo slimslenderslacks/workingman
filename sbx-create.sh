@@ -10,6 +10,8 @@
 #   3. sbx create ... --kit $ACP_KIT -e MCP_URL=... plus acp-wrapper's claude
 #      env (gateway model aliases, and ANTHROPIC_BASE_URL=https://llm.es.atko.services
 #      when sbx holds a secret for that host); allow the gateway port
+#   3b. with --extra-ca-certs: install the CA into the sandbox's trust store
+#      (the daemon's own idempotent step, docs/sandbox-custom-ca.md §4.3)
 #   4. sbx run --name <sandbox> -e ...   (attach; skip with --no-run)
 #
 # The gateway is recorded at $WORKINGMAN_GATEWAY_STATE/<sandbox>.json
@@ -29,6 +31,9 @@
 #                        "" for none). The kit's install step rewrites
 #                        claude-acp-client, so it must be as new as the image.
 #   --agent AGENT        sbx agent (default: claude)
+#   --extra-ca-certs PEM extra CA bundle (a TLS-inspecting VPN's root) to install
+#                        into the sandbox (default $WORKINGMAN_EXTRA_CA_CERTS;
+#                        "" for none). See docs/sandbox-custom-ca.md
 #   --no-run             create only; don't attach
 #   workspace...         paths to mount (default: current directory)
 set -euo pipefail
@@ -45,6 +50,7 @@ if [ -f "$HERE/../acp-kit/spec.yaml" ]; then DEFAULT_KIT="$(cd "$HERE/../acp-kit
 else DEFAULT_KIT="$HOME/dev/repos/slimslenderslacks/acp-kit"; fi
 KIT="${ACP_KIT-$DEFAULT_KIT}"
 AGENT="claude"
+EXTRA_CA="${WORKINGMAN_EXTRA_CA_CERTS-}"
 DYNAMIC=true
 RUN=1
 WORKSPACES=()
@@ -61,6 +67,8 @@ while [ $# -gt 0 ]; do
     --kit) KIT="${2?--kit needs a value}"; shift 2 ;;
     --kit=*) KIT="${1#*=}"; shift ;;
     --agent) AGENT="${2:?--agent needs a value}"; shift 2 ;;
+    --extra-ca-certs) EXTRA_CA="${2?--extra-ca-certs needs a value}"; shift 2 ;;
+    --extra-ca-certs=*) EXTRA_CA="${1#*=}"; shift ;;
     --no-run) RUN=0; shift ;;
     --static) DYNAMIC=false; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -72,6 +80,37 @@ done
 case "$NAME" in */*|.|..) die "invalid sandbox name '$NAME'" ;; esac
 [ ${#WORKSPACES[@]} -gt 0 ] || WORKSPACES=("$PWD")
 for bin in sbx curl jq; do command -v "$bin" >/dev/null || die "'$bin' not found on PATH"; done
+
+# The extra CA is validated before anything is minted or created. Only its
+# CERTIFICATE blocks are sent, as the daemon sends its normalized bundle.
+EXTRA_CA_B64=""
+if [ -n "$EXTRA_CA" ]; then
+  [ -r "$EXTRA_CA" ] || die "--extra-ca-certs: cannot read '$EXTRA_CA'"
+  grep -q -- '-----BEGIN CERTIFICATE-----' "$EXTRA_CA" ||
+    die "--extra-ca-certs: no PEM certificate in '$EXTRA_CA' (DER? convert with: openssl x509 -inform DER -in '$EXTRA_CA' -out '$EXTRA_CA.pem')"
+  EXTRA_CA_B64=$(sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$EXTRA_CA" | base64 | tr -d '\n')
+fi
+# Byte-identical to sbx.ExtraCAScript (internal/sbx/extraca.go); a Go test
+# keeps the two in sync.
+EXTRA_CA_SCRIPT=$(cat <<'WORKINGMAN_EXTRA_CA_EOF'
+set -eu
+dst=${WORKINGMAN_EXTRA_CA_DST:-/usr/local/share/ca-certificates/workingman-extra-ca.crt}
+bundle=${WORKINGMAN_EXTRA_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+printf '%s' "$1" | base64 -d >"$tmp"
+grep -q -- '-----BEGIN CERTIFICATE-----' "$tmp" || { echo "workingman-extra-ca: no PEM certificate in input" >&2; exit 2; }
+if [ "$(id -u)" = 0 ]; then as_root=; else as_root="sudo -n"; fi
+first=$(sed -n 2p "$tmp")
+if cmp -s "$tmp" "$dst" && grep -qxF "$first" "$bundle"; then
+  echo "workingman-extra-ca: already installed" >&2; exit 0
+fi
+$as_root install -m 0644 "$tmp" "$dst"
+$as_root update-ca-certificates >/dev/null
+grep -qxF "$first" "$bundle" || { echo "workingman-extra-ca: $bundle does not contain the extra CA after update-ca-certificates" >&2; exit 1; }
+echo "workingman-extra-ca: installed $dst" >&2
+WORKINGMAN_EXTRA_CA_EOF
+)
 
 STATE_DIR="${WORKINGMAN_GATEWAY_STATE:-$HOME/.workingman/gateways}"
 RECORD="$STATE_DIR/$NAME.json"
@@ -124,6 +163,10 @@ args=(create "$AGENT" --name "$NAME" "${CLAUDE_ENV[@]}")
 [ -n "$IMAGE" ] && args+=(-t "$IMAGE" --pull missing)
 sbx "${args[@]}" "${WORKSPACES[@]}"
 sbx policy allow network --sandbox "$NAME" "host.docker.internal:$PORT,localhost:$PORT" >/dev/null
+if [ -n "$EXTRA_CA_B64" ]; then
+  sbx exec "$NAME" -- sh -c "$EXTRA_CA_SCRIPT" sh "$EXTRA_CA_B64"
+  echo "sbx-create: extra CA $EXTRA_CA installed"
+fi
 
 mkdir -p "$STATE_DIR"
 jq -n --arg sandbox "$NAME" --arg base "$GATEWAY_URL" --arg id "$GW_ID" --arg url "$GW_URL" \
