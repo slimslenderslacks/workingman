@@ -388,6 +388,29 @@ Errors fall into three kinds:
 - `*mcpgateway.RPCError` — a JSON-RPC error, such as an unknown tool. The
   session still works.
 
+### Daemon-owned gateways and sessions
+
+A host process that needs its own long-lived gateway (the daemon's review
+check today, the Slack channel later) uses two reusable types instead of
+driving `Client` and `OpenSession` itself:
+
+- `mcpgateway.DaemonGateway{Key, Servers, BaseURL, Store, Name, Audit}` owns
+  one static gateway over `Servers`: `Start` runs the mint loop (stale record
+  under `Key` DELETEd first, exponential backoff on failure), `URL` hands it
+  out (minting on demand once the backoff has passed), `Invalidate` drops one
+  a caller found gone so a fresh one is minted, and `Close` DELETEs it and its
+  record. Audit events are `<Name>_gateway_*`.
+- `mcpgateway.DaemonSession{Gateway, Name, ClientName, Audit}` owns one MCP
+  session on it: opened lazily, recreated with backoff after
+  `ErrSessionLost` (invalidating the gateway when the open itself is lost),
+  closed by `Close`. Audit events are `<Name>_mcp_*`. It implements the
+  one-method `mcpgateway.ToolCaller` interface (`CallTool`), which is all a
+  consumer should depend on, so its tests can use a fake.
+
+Give each consumer its own `Key` and a `Store` outside the per-sandbox
+gateways directory (for example `<gateways-dir>/daemon/`, which the sweep
+skips).
+
 ## The daemon's own gateway (PR fingerprint check)
 
 Besides the per-sandbox gateways, the orch daemon mints **one gateway of its
@@ -396,8 +419,9 @@ cheap PR fingerprint check that decides whether a watched PR changed and the
 review agent needs to run. The check runs on the host and goes through
 standalone-codemode's github credentials. The daemon doesn't need the `gh`
 CLI or any local GitHub auth. Code: `internal/daemon/review_gateway.go` (the
-gateway), `internal/daemon/review_mcp.go` (the session and the tool calls)
-and `internal/daemon/review.go` (the poll gate).
+gateway, an `mcpgateway.DaemonGateway` named `review` under key
+`orch-daemon`), `internal/daemon/review_mcp.go` (the tool calls, on an
+`mcpgateway.DaemonSession`) and `internal/daemon/review.go` (the poll gate).
 
 ### Gateway lifecycle
 

@@ -489,6 +489,32 @@ func TestEnsureSandboxNoopWhenSameWorkspaces(t *testing.T) {
 	}
 }
 
+// A reused sandbox gets the task's policies re-applied, in declaration order,
+// so a rule added to the task since the sandbox was created (Step-Up persists
+// the changes it applies to policies:) holds for the next session; a failing
+// rule is logged and does not stop the launch.
+func TestEnsureSandboxReappliesPoliciesOnReuse(t *testing.T) {
+	f := &fakeSbx{lsOutput: `{"sandboxes":[{"name":"acp-s","workspaces":["/repo"]}]}`, failCmd: "policy"}
+	c := Config{
+		SandboxName: "acp-s", KitPath: "k", SbxPath: "sbx", Workspaces: []string{"/repo"},
+		Policies: []policy.Rule{
+			{Action: policy.ActionAllow, Kind: policy.KindNetwork, Resource: "proxy.golang.org"},
+			{Action: policy.ActionAllow, Kind: policy.KindFilesystem, Resource: "/data/cache/**"},
+		},
+	}
+	if name, err := ensureSandbox(context.Background(), f.run, c); err != nil || name != "acp-s" {
+		t.Fatalf("ensureSandbox = %q, %v", name, err)
+	}
+	want := [][]string{
+		{"sbx", "ls", "--json"},
+		{"sbx", "policy", "allow", "network", "--sandbox", "acp-s", "proxy.golang.org"},
+		{"sbx", "policy", "allow", "filesystem", "--sandbox", "acp-s", "/data/cache/**"},
+	}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("sbx calls = %v, want %v", f.calls, want)
+	}
+}
+
 func TestEnsureSandboxRecreatesOnDrift(t *testing.T) {
 	f := &fakeSbx{lsOutput: `{"sandboxes":[{"name":"acp-s","workspaces":["/old"]}]}`}
 	c := Config{SandboxName: "acp-s", KitPath: "k", SbxPath: "sbx", Workspaces: []string{"/repo"}}

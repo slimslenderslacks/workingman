@@ -79,6 +79,10 @@ type Context struct {
 	SnapshotFile string   `yaml:"snapshot_file,omitempty"`
 	AuditLog     string   `yaml:"audit_log,omitempty"`
 	SessionsRoot string   `yaml:"sessions_root,omitempty"`
+
+	// StepUpDir is the Step-Up agent's request directory. See
+	// prompts.Data.StepUpDir.
+	StepUpDir string `yaml:"step_up_dir,omitempty"`
 }
 
 // InFlightTask is one entry of in_flight_tasks in .orch/context.yaml.

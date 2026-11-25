@@ -299,3 +299,33 @@ func TestRouterConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestRouteNotifyOption(t *testing.T) {
+	cfg, err := Parse([]byte(`
+channels:
+  wa: {type: whatsapp}
+routes:
+  - {topic: post-office, channel: wa, chat: "1"}
+  - {topic: post-office, channel: wa, chat: "2", notify: false}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Routes[0].Notifies() || cfg.Routes[1].Notifies() {
+		t.Errorf("Notifies = %v, %v; want true, false", cfg.Routes[0].Notifies(), cfg.Routes[1].Notifies())
+	}
+	if k := cfg.Routes[1].Key(); k.Notify != nil || k.Chat != "2" {
+		t.Errorf("Key = %+v", k)
+	}
+	// The same route twice is a duplicate whatever its options.
+	_, err = Parse([]byte(`
+channels:
+  wa: {type: whatsapp}
+routes:
+  - {topic: post-office, channel: wa, chat: "1"}
+  - {topic: post-office, channel: wa, chat: "1", notify: false}
+`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("err = %v, want a duplicate-route error", err)
+	}
+}

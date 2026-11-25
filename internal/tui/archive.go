@@ -241,7 +241,7 @@ func (m model) renderConfirmArchiveModal() string {
 	// (the guard already rejected the others before this modal opened).
 	b.WriteString(dimStyle.Render("Its wsp workspace, task worktrees and wm/ branches are removed too. Requires :cleanup (archive: true)."))
 	b.WriteString("\n\n")
-	b.WriteString(hintStyle.Render("y: archive  •  n/esc: cancel"))
+	b.WriteString(m.withInboxBadge(hintStyle.Render("y: archive  •  n/esc: cancel")))
 
 	width := 64
 	if m.width > 0 && m.width-4 < width {

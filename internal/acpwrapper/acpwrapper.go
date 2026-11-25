@@ -210,10 +210,11 @@ type Config struct {
 	RequireOktaGateway bool
 
 	// Policies are sbx policy rules applied with `sbx policy ...` after the
-	// sandbox is created and before any `sbx exec`. Skipped on an existing
-	// sandbox because the sandbox name encodes the task identity, and so its
-	// policy set. The MCP gateway's allow rules (MCPGateway.PolicyRules) are
-	// appended after them on create, and re-applied best-effort on reuse.
+	// sandbox is created and before any `sbx exec`. On a reused sandbox they
+	// are re-applied best-effort, so rules added to the task since the
+	// sandbox was created (Step-Up persists the changes it applies to the
+	// task's policies:) hold for its next session too. The MCP gateway's
+	// allow rules (MCPGateway.PolicyRules) follow them in both cases.
 	Policies []policy.Rule
 
 	// GitName / GitEmail are the host user's git identity. When BOTH are set,
@@ -714,11 +715,11 @@ func createSandbox(ctx context.Context, run commandFunc, c Config, name string) 
 //
 //  1. `sbx ls --json` to find an existing sandbox by c.SandboxName.
 //  2. Same workspace set → reuse c.SandboxName. This is the existing
-//     task<->commit-agent reuse fast path (same derived name): a name match
-//     already proves the workspace/policy set lines up (see the
-//     Config.Policies doc). The MCP gateway's allow rules are re-applied
-//     best-effort, so a sandbox created before the gateway was configured can
-//     still reach it. The extra CA, when configured, is ensured (a
+//     task<->commit-agent reuse fast path (same derived name). c.Policies
+//     and then the MCP gateway's allow rules are re-applied best-effort, in
+//     the create order, so rules added to the task since the sandbox was
+//     created hold, and a sandbox created before the gateway was configured
+//     can still reach it. The extra CA, when configured, is ensured (a
 //     failure is a launch error), so a sandbox created before the setting
 //     gets it too.
 //  3. Different set → `sbx rm --force`, release its MCP gateway, then fall
@@ -762,7 +763,7 @@ func ensureSandbox(ctx context.Context, run commandFunc, c Config) (string, erro
 			drift = c.harnessDrift(c.SandboxName)
 		}
 		if sameWorkspaceSet(existing, c.Workspaces) && drift == "" {
-			reapplyGatewayPolicies(ctx, run, c)
+			reapplyPolicies(ctx, run, c)
 			// A reused sandbox may predate the extra CA setting (or have
 			// lost the install): ensure it on every launch.
 			if err := ensureExtraCA(ctx, run, c, c.SandboxName); err != nil {
@@ -800,17 +801,23 @@ func ensureExtraCA(ctx context.Context, run commandFunc, c Config, name string) 
 	return nil
 }
 
-// reapplyGatewayPolicies applies the MCP gateway's allow rules to a reused
-// sandbox. Best-effort: a failure (sbx refusing a duplicate rule, say) is
-// logged, never returned — the rules were applied when the sandbox was
-// created by a gateway-aware wrapper, so this only matters for older ones.
-func reapplyGatewayPolicies(ctx context.Context, run commandFunc, c Config) {
-	rules, err := c.MCPGateway.PolicyRules()
+// reapplyPolicies applies c.Policies, then the MCP gateway's allow rules, to
+// a reused sandbox, in the order createSandbox applies them. Best-effort: a
+// failure (sbx refusing a duplicate rule, say) is logged, never returned —
+// the sandbox already holds every rule it was created with, so this only adds
+// rules the task (or the gateway) gained since.
+func reapplyPolicies(ctx context.Context, run commandFunc, c Config) {
+	rules := slices.Clone(c.Policies)
+	gwRules, err := c.MCPGateway.PolicyRules()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING mcp gateway policy: %v\n", c.SessionID, err)
-		return
 	}
+	rules = append(rules, gwRules...)
 	for _, r := range rules {
+		if err := r.Validate(); err != nil {
+			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING skipping policy on %s: %v\n", c.SessionID, c.SandboxName, err)
+			continue
+		}
 		if out, err := run(ctx, c.SbxPath, r.CLIArgs(c.SandboxName)...); err != nil {
 			fmt.Fprintf(os.Stderr, "acp-wrapper: session %s: WARNING sbx policy %s %s %s %s: %v: %s\n",
 				c.SessionID, r.Action, r.Kind, c.SandboxName, r.Resource, err, strings.TrimSpace(string(out)))

@@ -10,11 +10,15 @@ import (
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/channels"
 	"github.com/slimslenderslacks/work/internal/channels/signal"
+	"github.com/slimslenderslacks/work/internal/channels/slack"
 	"github.com/slimslenderslacks/work/internal/channels/whatsapp"
 	"github.com/slimslenderslacks/work/internal/daemon"
+	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/notify"
+	"github.com/slimslenderslacks/work/internal/postoffice"
 	"github.com/slimslenderslacks/work/internal/router"
 	"github.com/slimslenderslacks/work/internal/runner"
+	"github.com/slimslenderslacks/work/internal/session"
 )
 
 // conversationIndexFile is the wolf-notification correlation table, kept in
@@ -32,6 +36,9 @@ type daemonChannels struct {
 	// router is the inbound-message router, created by start once the daemon
 	// exists; nil until then and when channels are disabled.
 	router *router.Router
+	// postOffice is the agent-messaging store the Dispatcher fans out from
+	// and the router answers into; nil when it could not be opened.
+	postOffice *postoffice.Store
 }
 
 // enabled reports whether any channel is configured.
@@ -41,7 +48,9 @@ func (c *daemonChannels) enabled() bool { return c != nil && c.reg != nil }
 // location) and builds — without starting — the Registry. A missing file, or
 // one that enables no channel, disables channels and is not an error; an
 // invalid config is, so a typo is not mistaken for "channels off".
-func setupChannels(configPath, logDir, stateDir string, a *audit.Logger) (*daemonChannels, error) {
+// postOfficeDir is the post-office store root (postOfficeDirFor); a store
+// that cannot be opened only disables post-office delivery.
+func setupChannels(configPath, logDir, stateDir, postOfficeDir string, a *audit.Logger) (*daemonChannels, error) {
 	resolved, err := channels.ResolveConfigPath(configPath)
 	if err != nil {
 		return nil, err
@@ -67,6 +76,7 @@ func setupChannels(configPath, logDir, stateDir string, a *audit.Logger) (*daemo
 			Cloud:  whatsapp.CloudFactory(logger),
 		}),
 		signal.Type: signal.Factory(logger),
+		slack.Type:  slack.Factory(slackDeps(stateDir, logger, a)),
 	}
 	reg, err := channels.Build(cfg, filepath.Dir(resolved), factories)
 	if err != nil {
@@ -88,8 +98,28 @@ func setupChannels(configPath, logDir, stateDir string, a *audit.Logger) (*daemo
 		idx, _ = channels.NewFileConversationIndex("")
 	}
 	c.index = idx
+	if po, err := postoffice.Open(postOfficeDir); err != nil {
+		a.Log("postoffice_error", "dir", postOfficeDir, "err", err.Error())
+	} else {
+		po.Logf = func(format string, args ...any) { a.Log("postoffice_store", "msg", fmt.Sprintf(format, args...)) }
+		c.postOffice = po
+	}
 	a.Log("channels_configured", "config", resolved, "channels", fmt.Sprint(reg.Names()))
 	return c, nil
+}
+
+// slackDeps places the Slack channel's state beside the daemon's state dir
+// (~/.workingman/slack) and its sub-gateway record with the daemon's other
+// gateway records (~/.workingman/gateways/daemon), where acp-wrapper's sweep
+// never looks.
+func slackDeps(stateDir string, logger *slog.Logger, a *audit.Logger) slack.FactoryDeps {
+	home := filepath.Dir(stateDir)
+	return slack.FactoryDeps{
+		Logger:       logger,
+		StateDir:     filepath.Join(home, "slack"),
+		GatewayStore: mcpgateway.Store{Dir: daemon.ReviewGatewayStateDir(filepath.Join(home, "gateways"))},
+		Audit:        a.Log,
+	}
 }
 
 // options returns the daemon options that wire channels in: the notifier
@@ -137,6 +167,28 @@ func (c *daemonChannels) start(ctx context.Context, a *audit.Logger, d *daemon.D
 	if err := c.reg.Start(ctx, handler); err != nil {
 		a.Log("channel_start_error", "err", err.Error())
 	}
+	c.startDispatcher(ctx, a)
+}
+
+// startDispatcher runs the post-office Dispatcher (docs/messaging-design.md
+// §5.2) under ctx: operator messages in the store's inbox go out on the
+// post-office topic, and the other channels hear when one is answered.
+func (c *daemonChannels) startDispatcher(ctx context.Context, a *audit.Logger) {
+	if c.postOffice == nil {
+		return
+	}
+	disp, err := postoffice.NewDispatcher(postoffice.DispatcherConfig{
+		Store: c.postOffice,
+		Out:   c.reg,
+		Index: c.index,
+		Audit: a,
+	})
+	if err != nil {
+		a.Log("postoffice_error", "err", err.Error())
+		return
+	}
+	go disp.Run(ctx)
+	a.Log("postoffice_dispatcher_start", "dir", c.postOffice.Root)
 }
 
 // routerConfig is the inbound router's wiring: the daemon as its Source, the
@@ -148,11 +200,21 @@ func (c *daemonChannels) routerConfig(a *audit.Logger, d *daemon.Daemon) router.
 		Out:               c.reg,
 		Index:             c.index,
 		Audit:             a,
+		PostOffice:        c.postOfficeForRouter(),
 		PermissionTimeout: rc.PermissionTimeoutDuration(),
 		TurnTimeout:       rc.TurnTimeoutDuration(),
 		ThinkingAfter:     rc.ThinkingAfterDuration(),
 		QueueSize:         rc.QueueSize,
 	}
+}
+
+// postOfficeForRouter is the store as a router.PostOffice: a nil interface,
+// not a typed nil, when the store is unavailable.
+func (c *daemonChannels) postOfficeForRouter() router.PostOffice {
+	if c.postOffice == nil {
+		return nil
+	}
+	return c.postOffice
 }
 
 // daemonSource adapts the daemon to router.Source.
@@ -226,4 +288,15 @@ func stateDirFor(sessionsRoot string) (string, error) {
 		return "", err
 	}
 	return filepath.Dir(p), nil
+}
+
+// postOfficeDirFor is the post-office store root for a sessions root:
+// $WORKINGMAN_POST_OFFICE_DIR, else ~/.workingman/post-office beside the
+// sessions directory.
+func postOfficeDirFor(sessionsRoot string) (string, error) {
+	store, err := session.NewStore(sessionsRoot)
+	if err != nil {
+		return "", err
+	}
+	return postoffice.DefaultDir(store.Root), nil
 }

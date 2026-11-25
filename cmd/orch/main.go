@@ -17,6 +17,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/daemon"
 	"github.com/slimslenderslacks/work/internal/mcpgateway"
+	"github.com/slimslenderslacks/work/internal/postoffice"
 	"github.com/slimslenderslacks/work/internal/power"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/sbx"
@@ -48,6 +49,7 @@ const usageHeader = `usage: orch --root <dir> [flags]        run the daemon, wit
        orch catchup <project-path>      fire a behind project's schedule once, now (used by sleepy-head)
        orch whatsapp <subcommand>       set up and check the WhatsApp channel (see docs/channels.md)
        orch signal <subcommand>         set up and check the Signal channel (see docs/channels.md)
+       orch slack <subcommand>          set up and check the Slack channel (see docs/channels.md)
        orch service install|uninstall|status   run the daemon in the background via launchd (macOS)
 
 whatsapp subcommands:
@@ -60,6 +62,11 @@ signal subcommands:
   setup    configure signal-cli URL, account, owner allowlist, optional groups and routes
   status   show the (masked) config and whether signal-cli is reachable and registered
   test     send a test message and print its timestamp or the error
+
+slack subcommands:
+  setup    configure the gateway URL, conversation (default: your DM-to-self), allow_from and the post-office route
+  status   show the config, whether the gateway serves the slack tools, and the watch list and cursors
+  test     post a test message and wait for a reply in its thread
 
 Run "orch <subcommand> -h" for a subcommand's flags. Daemon flags:
 
@@ -90,6 +97,9 @@ func main() {
 	if len(args) > 0 && args[0] == "signal" {
 		os.Exit(runSignal(args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
+	if len(args) > 0 && args[0] == "slack" {
+		os.Exit(runSlack(args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	runDaemon(args)
 }
 
@@ -119,6 +129,8 @@ func runDaemon(args []string) {
 	channelsConfig := fs.String("channels-config", "", "messaging-channels config (default ~/.workingman/channels.yaml, or $WORKINGMAN_CHANNELS_CONFIG). A missing file disables channels and the daemon behaves exactly as without them")
 	var workingmanMode workingmanFlag
 	fs.Var(&workingmanMode, "workingman-agent", `run the workingman agent: a persistent assistant in its own sandbox that answers questions about the orch state and, on request, edits the orch roots (projects, tasks, intake). "auto" (default) turns it on whenever --acp-kit is set, with or without channels; --workingman-agent / =on forces it on (requires --acp-kit); =off disables it`)
+	var stepUpMode workingmanFlag
+	fs.Var(&stepUpMode, "step-up-agent", `run the Step-Up agent: a persistent agent in its own sandbox that takes other agents' requests for more sandbox capability (such as a network route) through post-office, asks the operator and replies. "auto" (default) turns it on when --acp-kit is set and post-office answers on `+postoffice.DefaultAddr+`; --step-up-agent / =on forces it on (requires --acp-kit); =off disables it`)
 	headless := fs.Bool("headless", false, "run the daemon without the embedded TUI (for CI/non-interactive use)")
 	mcpGatewayURL := fs.String("mcp-gateway-url", os.Getenv("WORKINGMAN_MCP_GATEWAY_URL"), "base URL of the host's standalone-codemode gateway, e.g. http://localhost:3333 (default $WORKINGMAN_MCP_GATEWAY_URL). When set, every sandbox gets its own sub-gateway (POST /gateways) over the task's static_mcps — or --mcp-gateway-servers when a task names none — exposed inside it as MCP_URL (localhost rewritten to host.docker.internal), with the gateway's port allowed in its network policy; the gateway is DELETEd when the sandbox is removed. Empty disables the gateway (and MCP_URL)")
 	mcpGatewayStatic := fs.Bool("mcp-gateway-static", os.Getenv("WORKINGMAN_MCP_GATEWAY_STATIC") == "1", "give no sandbox a dynamic gateway (default false, or true when $WORKINGMAN_MCP_GATEWAY_STATIC=1). By default the wolf and task agents' gateways are dynamic: they also serve mcp-find and mcp-add over the whole catalog")
@@ -253,7 +265,11 @@ func runDaemon(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ch, err := setupChannels(*channelsConfig, filepath.Dir(*auditPath), stateDir, a)
+	postOfficeDir, err := postOfficeDirFor(*sessionsRoot)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ch, err := setupChannels(*channelsConfig, filepath.Dir(*auditPath), stateDir, postOfficeDir, a)
 	if err != nil {
 		log.Fatalf("channels: %v", err)
 	}
@@ -311,6 +327,17 @@ func runDaemon(args []string) {
 			log.Fatalf("%s", why) // asked for explicitly: don't silently run without it
 		}
 		a.Log("workingman_agent_flag", "enabled", "false", "why", why)
+	}
+	if on, why := stepUpAgentEnabled(stepUpMode, *acpKit, postOfficeReachable); on {
+		dopts = append(dopts, daemon.WithStepUpAgent(daemon.StepUpAgentConfig{
+			AuditLog: absPath(*auditPath),
+		}))
+		a.Log("step_up_agent_flag", "enabled", "true", "why", why)
+	} else {
+		if stepUpMode == workingmanOn {
+			log.Fatalf("%s", why)
+		}
+		a.Log("step_up_agent_flag", "enabled", "false", "why", why)
 	}
 	d, err := daemon.New(roots, a, dopts...)
 	if err != nil {
@@ -381,7 +408,7 @@ func runDaemon(args []string) {
 		}
 	}
 
-	tuiErr := tui.Run(ctx, roots, sessCh, acpSessionsRoot, interactiveLauncher{d}, tabs)
+	tuiErr := tui.Run(ctx, roots, sessCh, acpSessionsRoot, postOfficeDir, interactiveLauncher{d}, tabs)
 
 	// TUI exited — either the user quit or ctx was already cancelled. Cancel
 	// to be sure, then wait for the daemon to wind down so its shutdown
@@ -482,8 +509,15 @@ func runTUI(args []string) {
 	// The TUI no longer shows an audit pane (tail -f the daemon's --audit-log
 	// instead); the flag is still accepted so existing invocations don't break.
 	_ = fs.String("audit-log", "", "deprecated and ignored: the TUI no longer shows the audit log; tail -f it instead")
+	sessionsRoot := fs.String("sessions-root", "", "sessions root the post-office store sits beside, for the inbox (default ~/.workingman/sessions; $WORKINGMAN_POST_OFFICE_DIR overrides the store)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
+	}
+	// The inbox reads the post-office store directly, so it works here too,
+	// with no daemon.
+	postOfficeDir, err := postOfficeDirFor(*sessionsRoot)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -495,7 +529,7 @@ func runTUI(args []string) {
 	// mode wires the daemon's WatchSessions into the TUI).
 	// Standalone tui has no daemon/runner, so :session, :orch and :workspace are unavailable
 	// (nil launcher). Run `orch --root=...` for the integrated experience.
-	if err := tui.Run(ctx, roots, nil, "", nil, nil); err != nil {
+	if err := tui.Run(ctx, roots, nil, "", postOfficeDir, nil, nil); err != nil {
 		log.Fatal(err)
 	}
 }

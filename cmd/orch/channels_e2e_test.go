@@ -145,7 +145,7 @@ func newE2EEnvWith(t *testing.T, config func(env *e2eEnv) string) *e2eEnv {
 	}
 
 	env.a = audit.New(env.audit)
-	env.dc, err = setupChannels(cfgPath, logDir, filepath.Join(base, "state"), env.a)
+	env.dc, err = setupChannels(cfgPath, logDir, filepath.Join(base, "state"), filepath.Join(base, "post-office"), env.a)
 	if err != nil {
 		t.Fatalf("setupChannels: %v", err)
 	}

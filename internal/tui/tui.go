@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/slimslenderslacks/work/internal/postoffice"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
@@ -47,6 +49,10 @@ const (
 	// root into the sibling ~/<root>.backup dir; the project then disappears
 	// from the gallery on the next scan.
 	modeConfirmArchive
+	// modeInbox is the full-screen post-office inbox (inbox.go), opened with
+	// `I` from every mode that isn't typing text and closed with `I` or esc,
+	// which return to the mode it was opened from (inboxPrevMode).
+	modeInbox
 )
 
 type projectsMsg struct {
@@ -200,6 +206,25 @@ type model struct {
 	// attach a session) is also bound to a key. Turning it on enables the
 	// click handling in handleMouse. See toggleMouse.
 	mouseCapture bool
+
+	// The post-office inbox (inbox.go). inbox is the latest feed snapshot,
+	// in display order, fed by inboxCh; inboxStore is where answers and
+	// dismissals are claimed. Both are nil in models with no store wired in,
+	// and then `I` does nothing. inboxSel is the selected message id,
+	// inboxScroll the body's scroll offset, inboxTyping whether keys go to the
+	// reply line inboxReply, and inboxErr the last action's error. inboxBell
+	// rings the terminal bell when a new operator request arrives.
+	inbox         []InboxItem
+	inboxCh       <-chan []InboxItem
+	inboxStore    InboxStore
+	inboxLoaded   bool
+	inboxSel      string
+	inboxScroll   int
+	inboxTyping   bool
+	inboxReply    lineInput
+	inboxErr      string
+	inboxPrevMode uiMode
+	inboxBell     bool
 }
 
 func newModel(projCh <-chan []ProjectView, sessCh <-chan []SessionView, attacher tabAttacher) model {
@@ -230,6 +255,9 @@ func (m model) Init() tea.Cmd {
 	}
 	if m.acpCh != nil {
 		cmds = append(cmds, waitForACP(m.acpCh))
+	}
+	if m.inboxCh != nil {
+		cmds = append(cmds, waitForInbox(m.inboxCh))
 	}
 	if m.mouseCapture {
 		cmds = append(cmds, tea.EnableMouseCellMotion)
@@ -305,6 +333,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.acp.markFailed(msg.id, msg.title, msg.text)
 		}
 		return m, waitForACP(m.acpCh)
+	case inboxMsg:
+		next, bell := m.applyInbox(msg.items)
+		return next, tea.Batch(waitForInbox(next.inboxCh), bell)
 	case attachResultMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("attach %s: %v", msg.target, msg.err)
@@ -331,6 +362,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// trapped in a modal they don't know how to exit.
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		// `I` opens the inbox from every mode that isn't typing text; inside
+		// the inbox handleInboxKey treats it as close (or, while typing a
+		// reply, as text).
+		if m.mode == modeInbox {
+			return m.handleInboxKey(msg)
+		}
+		if msg.String() == "I" && m.canOpenInbox() {
+			return m.openInbox(), nil
 		}
 		// The ACP tab view captures keys whole while it's open, layered on top
 		// of any pane focus the normal UI had.
@@ -636,9 +676,6 @@ func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.acp.prev()
 		m.acpComposing = false
 		return m, nil
-	case "ctrl+u":
-		t.draft = ""
-		return m, nil
 	case "ctrl+f":
 		m.scrollACP(m.acpPage())
 		return m, nil
@@ -646,37 +683,25 @@ func (m model) handleACPComposeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollACP(-m.acpPage())
 		return m, nil
 	}
-	switch msg.Type {
-	case tea.KeyEnter:
-		text := strings.TrimSpace(t.draft)
-		if text == "" {
-			return m, nil
-		}
-		send := m.acpSend
-		if send == nil {
-			send = acpInputs.Send
-		}
-		if err := send(t.id, text); err != nil {
-			// Keep the draft so nothing typed is lost; show why it didn't go.
-			m.acpInputErr = err.Error()
-			return m, nil
-		}
-		t.draft = ""
-		// A sent message returns to normal mode; enter starts the next one.
-		m.acpComposing = false
-	case tea.KeyBackspace:
-		if r := []rune(t.draft); len(r) > 0 {
-			t.draft = string(r[:len(r)-1])
-		}
-	case tea.KeySpace:
-		t.draft += " "
-	case tea.KeyRunes:
-		if msg.Alt {
-			return m, nil
-		}
-		// A paste can carry newlines; a message is a single line.
-		t.draft += strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(string(msg.Runes))
+	if !t.input.update(msg) {
+		return m, nil
 	}
+	text := t.input.value()
+	if text == "" {
+		return m, nil
+	}
+	send := m.acpSend
+	if send == nil {
+		send = acpInputs.Send
+	}
+	if err := send(t.id, text); err != nil {
+		// Keep the draft so nothing typed is lost; show why it didn't go.
+		m.acpInputErr = err.Error()
+		return m, nil
+	}
+	t.input.reset()
+	// A sent message returns to normal mode; enter starts the next one.
+	m.acpComposing = false
 	return m, nil
 }
 
@@ -2084,6 +2109,9 @@ func (m model) View() string {
 	if m.mode == modeConfirmArchive {
 		return m.renderConfirmArchiveModal()
 	}
+	if m.mode == modeInbox {
+		return m.renderInboxView()
+	}
 
 	// The ACP tab view takes over the whole window when open.
 	if m.showACP {
@@ -2829,7 +2857,9 @@ func taskStatusStyle(s task.Status) lipgloss.Style {
 	return dimStyle
 }
 
-// renderFooter draws the bottom hint line. Variants, in precedence order:
+// renderFooter draws the bottom hint line, led by the inbox badge (which is
+// shown with every variant, so it is never hidden). Variants, in precedence
+// order:
 //
 //   - statusMsg set (e.g. tab-attach failure, "created project foo"): the
 //     message replaces the hint so the user can't miss it.
@@ -2860,16 +2890,23 @@ func (m model) renderFooter() string {
 		if m.acpCh != nil {
 			base += "  •  a: acp tabs"
 		}
+		if m.inboxCh != nil {
+			base += "  •  I: inbox"
+		}
 		if m.focus == paneProjects {
 			base += "  •  :"
 		}
 		text = base + "  •  focus: " + paneName(m.focus)
 		style = hintStyle
 	}
-	if m.width > 0 {
-		text = truncate(text, m.width)
+	badge := m.inboxBadge()
+	if badge != "" {
+		badge += "  "
 	}
-	return style.Render(text)
+	if m.width > 0 {
+		text = truncate(text, max(m.width-lipgloss.Width(badge), 0))
+	}
+	return badge + style.Render(text)
 }
 
 func paneName(p pane) string {
@@ -2890,6 +2927,9 @@ func paneName(p pane) string {
 // caller wires up to a real source (the daemon's WatchSessions) or leaves nil
 // for standalone/demo mode. When sessionsRoot is non-empty, Run also watches that ACP
 // sessions root and feeds the `a`-key tab view one tab per live ACP session.
+// When postOfficeRoot is non-empty, Run opens the post-office store there and
+// feeds the `I`-key inbox from it; the feed is file-based, so it works with no
+// daemon.
 // Run blocks until the user quits or ctx is cancelled.
 //
 // The mouse starts uncaptured so the terminal's native click-drag selection
@@ -2898,7 +2938,7 @@ func paneName(p pane) string {
 // Attaching to a non-ACP session focuses its terminal tab through tabs (nil
 // uses a default terminal.TabLauncher), so the TUI keeps running in its own
 // tab while the user works in the session's.
-func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, sessionsRoot string, interactive InteractiveLauncher, tabs TabFocuser) error {
+func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, sessionsRoot, postOfficeRoot string, interactive InteractiveLauncher, tabs TabFocuser) error {
 	tuiCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -2917,6 +2957,16 @@ func Run(ctx context.Context, roots []string, sessCh <-chan []SessionView, sessi
 	if sessionsRoot != "" {
 		m.acpCh = WatchACPSessions(tuiCtx, sessionsRoot, 0)
 		m.acpRemove = session.Store{Root: sessionsRoot}.Remove
+	}
+	// An unusable store costs only the inbox, not the whole TUI.
+	if postOfficeRoot != "" {
+		if store, err := postoffice.Open(postOfficeRoot); err != nil {
+			m.statusMsg = "inbox unavailable: " + err.Error()
+		} else {
+			m.inboxStore = store
+			m.inboxCh = WatchInbox(tuiCtx, store, time.Second)
+			m.inboxBell = os.Getenv(EnvInboxBell) != "0"
+		}
 	}
 	// projectRoot backs `:archive`'s backup-directory computation. Standalone
 	// tui mode without any --root leaves it empty.

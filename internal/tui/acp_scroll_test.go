@@ -426,8 +426,8 @@ func TestACPComposeKeepsLettersAsText(t *testing.T) {
 		m = acpKey(t, m, k)
 	}
 	tab := acpSel(t, m)
-	if tab.draft != "jkG" {
-		t.Errorf("draft = %q, want jkG", tab.draft)
+	if tab.input.draft != "jkG" {
+		t.Errorf("draft = %q, want jkG", tab.input.draft)
 	}
 	if tab.inspecting {
 		t.Error("letters typed while composing scrolled the view")

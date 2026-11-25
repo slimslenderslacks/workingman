@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent for post-office, the agent messaging MCP server
+  (docs/messaging-design.md §4). launchd does not expand ~ or $HOME, so
+  __HOME__ is substituted at install time (`task post-office:install`).
+
+  post-office serves http://127.0.0.1:7077/mcp and reads its bearer token
+  from ~/.workingman/post-office/token; run `post-office setup` once before
+  loading this agent, or it exits at start (and launchd retries every
+  ThrottleInterval). It keeps serving while orch restarts, so it is a
+  separate agent from com.workingman.orch.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.workingman.post-office</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__HOME__/.local/bin/post-office</string>
+		<string>serve</string>
+		<string>--listen</string>
+		<string>127.0.0.1:7077</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__HOME__</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<!-- Blocked tool calls end within the max wait (50s); let them finish so
+	     agents get "status: pending" rather than a dropped connection. -->
+	<key>ExitTimeOut</key>
+	<integer>60</integer>
+
+	<key>StandardOutPath</key>
+	<string>__HOME__/Library/Logs/workingman/post-office.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/Library/Logs/workingman/post-office.log</string>
+</dict>
+</plist>

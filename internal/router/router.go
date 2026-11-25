@@ -118,7 +118,11 @@ type Config struct {
 	// and records the replies the router relays so those can be replied to as
 	// well. May be nil (no reply-to routing).
 	Index channels.ConversationIndex
-	Audit Auditor
+	// PostOffice is the agent-messaging store: replies to a post-office
+	// request (and "#<short> answer" messages) claim the request in it, and
+	// /inbox lists it. May be nil (post-office answers are then refused).
+	PostOffice PostOffice
+	Audit      Auditor
 	// Attach defaults to AttachACP.
 	Attach Attacher
 	// AttachOptions seed every Attach (Root, DiscoverTimeout, …); the router sets
@@ -281,6 +285,9 @@ func (r *Router) Handle(_ context.Context, msg channels.InboundMessage) {
 
 	if name, args, ok := parseCommand(text); ok {
 		r.handleCommand(c, name, args)
+		return
+	}
+	if r.answerPostOffice(c, msg, text) {
 		return
 	}
 	if r.answerPermission(c, text) {

@@ -154,14 +154,32 @@ unattended runs would hang.
 ## Build
 
 ```sh
-task build    # orch, acp-wrapper and op-read
+task build    # orch, acp-wrapper, op-read and post-office
 # or by hand:
 go build -o orch ./cmd/orch
 go build -o acp-wrapper ./cmd/acp-wrapper
 go build -o op-read ./cmd/op-read
+go build -o post-office ./cmd/post-office
 ```
 
-start.sh rebuilds all three on every start.
+start.sh rebuilds the first three on every start.
+
+`post-office` is the agent messaging MCP server (see
+[Agent messaging](#agent-messaging-post-office-inbox-step-up)). It runs on its
+own, not inside orch, so it keeps serving while orch restarts:
+
+```sh
+post-office setup              # once: writes ~/.workingman/post-office/token
+task post-office:install       # macOS: ~/.local/bin + launchd agent com.workingman.post-office
+# or in the foreground:
+post-office serve              # http://127.0.0.1:7077/mcp, bearer token required
+```
+
+Store the token (`post-office setup --print`) as the standalone-codemode
+secret `mcp/post-office/post_office_token`, which the catalog entry sends as
+`Authorization: Bearer ${post_office_token}`. Agents reach post-office only
+through their sandbox's sub-gateway, and only when the gateway was minted with
+it (`static_mcps: [post-office]`).
 
 ## Start the daemon
 
@@ -546,6 +564,36 @@ daemon ignores its own fsnotify events.
   state (live sessions, wolf in flight, failure counters, review polls)
   published as JSON for external readers. See
   [docs/state-snapshot.md](docs/state-snapshot.md).
+- **Inbox** (`I` in the TUI, from any mode where you are not typing):
+  requests and notifications from agents with the `post-office` MCP, with the
+  `✉` badge in every mode. See
+  [Agent messaging](#agent-messaging-post-office-inbox-step-up).
+
+## Agent messaging (post-office, inbox, Step-Up)
+
+Agents can send you **notifications** and **requests** (questions they need
+answered) through the `post-office` MCP server. Full guide, with an
+end-to-end smoke test: [docs/messaging.md](docs/messaging.md). Design:
+[docs/messaging-design.md](docs/messaging-design.md).
+
+- **Enable it per task** with `static_mcps: [post-office]`. The planning
+  agent adds it when a task may need to ask you something. No agent has it by
+  default, and `mcp-add` cannot add it.
+- **Answer in the TUI.** The `✉ 2 ?` badge shows in every mode, and the bell
+  rings on a new request. `I` opens the inbox: `j`/`k` select, `enter` types
+  an answer, `1`–`9` picks an option, `d` dismisses a notification.
+- **Or on a channel.** With channels configured, the daemon also sends each
+  message to Slack, Signal or WhatsApp (topic `post-office`). Reply to it, or
+  send `#<short id> <answer>`. The first answer wins, and every other place
+  shows "✅ Answered via …". `orch slack setup` configures Slack, in your
+  DM-to-self by default ([docs/channels.md § Slack](docs/channels.md#slack)).
+- **Step-Up** (`--step-up-agent`, on by default when `--acp-kit` is set and
+  post-office is running) handles other agents' requests for more sandbox
+  access, such as a network route. Each allow asks you to **approve** one
+  exact `CHANGE:` line. The daemon then applies the change and records it in
+  the task's `policies:`. Limits, the deny list and the kill switch are in
+  [docs/messaging.md § Step-Up](docs/messaging.md#step-up), and the agent is
+  described in [agents.md §9](agents.md#9-step-up-agent).
 
 ## Channels / WhatsApp
 
@@ -763,6 +811,7 @@ the tab's status line:
 | `m` | toggle mouse capture (see [Selecting and copying text](#selecting-and-copying-text)) |
 | `enter` (or `i`) | type a message to a conversational tab (the wolf) |
 | `esc` (or `a`) | back to the main view |
+| `I` | open the [inbox](docs/messaging.md#the-tui-inbox) (not while typing a message) |
 | `q` | quit |
 
 `j`/`k` here are scroll keys, not tab switches — tabs move with `⌥j`/`⌥k`

@@ -152,6 +152,7 @@ func TestEnsureSandboxInstallsExtraCA(t *testing.T) {
 		}},
 		{"reuse", `{"sandboxes":[{"name":"acp-s","workspaces":["/repo"]}]}`, [][]string{
 			{"sbx", "ls", "--json"},
+			{"sbx", "policy", "allow", "network", "--sandbox", "acp-s", "api.github.com"},
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

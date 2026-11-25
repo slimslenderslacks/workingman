@@ -243,6 +243,10 @@ type Observe struct {
 	SnapshotFile string   // the daemon's state snapshot (JSON); empty when publishing is off
 	AuditLog     string   // the audit log file; empty when unknown
 	SessionsRoot string   // ACP sessions root: <root>/<id>/{session.json,stream.log}
+	// StepUpDir is the Step-Up agent's request directory
+	// (~/.workingman/step-up): requests/ is mounted read-write and results/
+	// read-only. Empty for every other agent.
+	StepUpDir string
 }
 
 // WorkingmanAgentSandbox is the sbx sandbox name — and WorkingmanAgentSession the
@@ -260,6 +264,20 @@ const (
 	SleepyHeadSandbox = "sleepy-head"
 	SleepyHeadSession = "sleepy-head"
 )
+
+// StepUpSandbox is the sbx sandbox name — and StepUpSession the ACP session
+// id — of the Step-Up agent. There is exactly one, independent of any project
+// path. post-office identifies it by the sandbox name, so the two must stay in
+// step with mcpserver.DefaultRecipients.
+const (
+	StepUpSandbox = "step-up"
+	StepUpSession = "step-up-agent"
+)
+
+// StepUpMCPs are the Step-Up agent's gateway servers: post-office only, on a
+// static gateway (MCPGatewayDynamic is false for it), so it cannot mcp-add
+// anything else.
+var StepUpMCPs = []string{"post-office"}
 
 // CommandBuilder produces the argv that the launcher runs inside the
 // workspace. Production builds a claude invocation; tests can return
@@ -332,10 +350,10 @@ type SandboxCreator func(ctx context.Context, spec SandboxSpec) error
 //  1. `sbx ls --json` to find the existing sandbox (if any).
 //  2. If it exists with the same set of workspaces → reuse it. We do NOT
 //     inspect policies on an existing sandbox because sbx ls doesn't surface
-//     those details; for per-task sandboxes the name uniquely encodes the
-//     task and its policy set, so a name collision implies a matching set.
-//     (A retry of the same task reuses the same sandbox.) Only the MCP
-//     gateway's allow rules are re-applied, best effort, as acp-wrapper does.
+//     those details. (A retry of the same task reuses the same sandbox.)
+//     spec.Policies and then the MCP gateway's allow rules are re-applied,
+//     best effort, as acp-wrapper does, so rules added to the task since the
+//     sandbox was created hold.
 //     Its MCP gateway, if any, is kept: the caller reuses it when still live,
 //     or mints a new one — MCP_URL is per-exec, so a gone gateway never
 //     forces a recreate.
@@ -376,10 +394,16 @@ func DefaultSandboxCreator(ctx context.Context, spec SandboxSpec) error {
 	}
 	if existing != nil {
 		if sameWorkspaceSet(existing, spec.Workspaces) {
-			// Best-effort, like acp-wrapper's reuse path: a sandbox created
-			// before the gateway was configured can still reach it.
-			if rules, err := spec.MCPGateway.PolicyRules(); err == nil {
-				for _, r := range rules {
+			// Best-effort, like acp-wrapper's reuse path: rules the task
+			// gained since the sandbox was created (Step-Up persists its
+			// changes to policies:) hold, and a sandbox created before the
+			// gateway was configured can still reach it.
+			rules := append([]policy.Rule(nil), spec.Policies...)
+			if gw, err := spec.MCPGateway.PolicyRules(); err == nil {
+				rules = append(rules, gw...)
+			}
+			for _, r := range rules {
+				if r.Validate() == nil {
 					_ = exec.CommandContext(ctx, "sbx", r.CLIArgs(spec.Name)...).Run()
 				}
 			}
@@ -722,6 +746,25 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 			}
 		}
 	}
+	if p.Kind == agent.StepUpAgent {
+		// Same reasoning as the workingman agent: its mounts and its static
+		// post-office gateway only exist on the ACP path.
+		if !r.UsesACP(p.Kind) {
+			return nil, cfg, fmt.Errorf("runner: the step-up agent needs an ACP launcher (--acp-kit)")
+		}
+		if p.SessionName == "" {
+			p.SessionName = StepUpSession
+		}
+		if len(p.StaticMCPs) == 0 {
+			p.StaticMCPs = StepUpMCPs
+		}
+		p.Persistent = true
+		if p.WorkingDir != "" {
+			if err := os.MkdirAll(p.WorkingDir, 0o755); err != nil {
+				return nil, cfg, fmt.Errorf("runner: step-up scratch dir: %w", err)
+			}
+		}
+	}
 	if p.Kind == agent.SleepyHeadAgent && r.UsesACP(p.Kind) {
 		// Conversational like the wolf: the wrapper must outlive the TUI watcher
 		// that drives the opening prompt, since the agent then waits for the
@@ -800,6 +843,7 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		SnapshotFile:            p.Observe.SnapshotFile,
 		AuditLog:                p.Observe.AuditLog,
 		SessionsRoot:            p.Observe.SessionsRoot,
+		StepUpDir:               p.Observe.StepUpDir,
 		BehindProjects:          p.BehindProjects,
 		ReplanInstruction:       p.ReplanInstruction,
 	}
@@ -844,6 +888,7 @@ func (r *Runner) StartConfigured(ctx context.Context, p Plan) (agent.Session, Se
 		SnapshotFile:            p.Observe.SnapshotFile,
 		AuditLog:                p.Observe.AuditLog,
 		SessionsRoot:            p.Observe.SessionsRoot,
+		StepUpDir:               p.Observe.StepUpDir,
 	}
 	if err := setup.Apply(workingDir, ctxFile, instructions, p.Skills); err != nil {
 		return nil, cfg, err
@@ -1129,7 +1174,7 @@ func (r *Runner) startACP(ctx context.Context, p Plan, workingDir, planningWorkt
 	}
 	sessionID := acpSessionID(p)
 	workspaces := sandboxWorkspaces(p, workingDir, planningWorktree)
-	if p.Kind == agent.WorkingmanAgent || p.Kind == agent.SleepyHeadAgent {
+	if p.Kind == agent.WorkingmanAgent || p.Kind == agent.SleepyHeadAgent || p.Kind == agent.StepUpAgent {
 		workspaces = workingmanWorkspaces(workingDir, p.WritableMounts, p.ReadOnlyMounts)
 	}
 
@@ -1317,9 +1362,10 @@ func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRo
 				args = append(args, "--unblock-grace", g.String())
 			}
 		}
-		// The workingman agent is always-on by design — it sits idle for as long as
-		// nobody asks it anything — so it never gets an idle end condition.
-		if kind != agent.WorkingmanAgent.String() {
+		// The workingman and Step-Up agents are always-on by design — they sit
+		// idle for as long as nobody asks them anything — so they never get an
+		// idle end condition.
+		if kind != agent.WorkingmanAgent.String() && kind != agent.StepUpAgent.String() {
 			if t := durationOrDefault(r.PersistentIdleTimeout, DefaultPersistentIdleTimeout); t > 0 {
 				args = append(args, "--idle-timeout", t.String())
 			}
@@ -1370,15 +1416,15 @@ func (r *Runner) acpWrapperCommand(h Harness, sessionID, sandboxName, sessionsRo
 	// sets MCP_URL, allows its port and DELETEs it with the sandbox. Task
 	// static_mcps are NOT sent as `--static-mcp` any more; they name the
 	// gateway's servers (see MCPServersFor).
-	// The workingman agent's sandbox is persistent and reused across daemon
-	// restarts, so it is the one most likely to carry a stale kit; it must
-	// never silently run with the stock mcp-gateway server instead of
-	// okta-gateway. Its gateway is dynamic by default (MCPGatewayDynamic), so
+	// The workingman and Step-Up agents' sandboxes are persistent and reused
+	// across daemon restarts, so they are the most likely to carry a stale
+	// kit; they must never silently run with the stock mcp-gateway server
+	// instead of okta-gateway (for Step-Up, its only way to post-office). Its gateway is dynamic by default (MCPGatewayDynamic), so
 	// it can mcp-find / mcp-add servers beyond the default set; with no
 	// default servers it still gets a dynamic gateway rather than none,
 	// unless --mcp-gateway-static forbids that.
 	withGateway, mcpServers, mcpDynamic := r.acpGateway(kind, mcpServers, mcpDynamic)
-	if withGateway && kind == agent.WorkingmanAgent.String() {
+	if withGateway && (kind == agent.WorkingmanAgent.String() || kind == agent.StepUpAgent.String()) {
 		args = append(args, "--require-okta-gateway")
 	}
 	if withGateway {
@@ -1426,7 +1472,8 @@ func (r *Runner) acpGateway(kind string, mcpServers []string, mcpDynamic bool) (
 // also serves mcp-find and mcp-add over the whole catalog, so the agent can
 // find and attach servers beyond MCPServersFor. On by default for the wolf,
 // task and workingman agents; MCPGatewayStatic turns it off for all of them,
-// WorkingmanAgentMCPStatic for the workingman agent only.
+// WorkingmanAgentMCPStatic for the workingman agent only. Never for the
+// Step-Up agent, whose only server is post-office.
 func (r *Runner) MCPGatewayDynamic(kind agent.Kind) bool {
 	if r.MCPGatewayStatic {
 		return false
@@ -1748,8 +1795,8 @@ func durationOrDefault(v, def time.Duration) time.Duration {
 }
 
 // ACPSandboxNameFor is SandboxNameFor for sessions that run under ACP. It
-// differs in three kinds: the workingman and sleepy-head agents get the fixed,
-// project-independent names WorkingmanAgentSandbox and SleepyHeadSandbox, and the ACP wolf gets "<work-stream>-wolf", a sandbox
+// differs in four kinds: the workingman, sleepy-head and Step-Up agents get the fixed,
+// project-independent names WorkingmanAgentSandbox, SleepyHeadSandbox and StepUpSandbox, and the ACP wolf gets "<work-stream>-wolf", a sandbox
 // of its own (distinct from planning's, which may be live alongside it — the wolf
 // runs in tandem with the project's other agents). SandboxNameFor itself keeps
 // returning "" for the wolf because that is the host terminal-tab path's contract: no
@@ -1763,6 +1810,10 @@ func ACPSandboxNameFor(kind agent.Kind, projectPath, taskName string) string {
 	if kind == agent.SleepyHeadAgent {
 		// Project-independent too: one sleepy-head covers every behind project.
 		return SleepyHeadSandbox
+	}
+	if kind == agent.StepUpAgent {
+		// One Step-Up agent serves every sandbox.
+		return StepUpSandbox
 	}
 	if kind == agent.WolfAgent {
 		if projectPath == "" {

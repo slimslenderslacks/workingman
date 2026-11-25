@@ -73,3 +73,21 @@ type Chunker interface {
 type Typer interface {
 	Typing(ctx context.Context, chatID string) error
 }
+
+// Resolution tells a Resolver how a post-office message it carried was closed.
+type Resolution struct {
+	// Outcome is the terminal state: "answered", "cancelled" or "expired".
+	Outcome string
+	// Via is the channel (or "tui") that answered; empty when none did.
+	Via string
+	// Note is the closing note the Dispatcher would otherwise send as a reply
+	// ("✅ Answered via tui: …"). A Resolver may post it as-is.
+	Note string
+}
+
+// Resolver lets a channel mark a previously sent message as closed. The
+// post-office Dispatcher uses it instead of a plain reply when available
+// (Slack: a thread reply plus a reaction on the original message).
+type Resolver interface {
+	Resolve(ctx context.Context, chatID, messageID string, r Resolution) error
+}

@@ -194,7 +194,7 @@ func TestDefaultSandboxCreatorInstallsExtraCA(t *testing.T) {
 	}{
 		{"create", `{"sandboxes":[]}`, "sbx ls --json\nsbx create claude --name task-x /ws\nsbx policy allow network --sandbox task-x api.github.com\n"},
 		{"repair", `{"sandboxes":[{"name":"task-x","workspaces":["/old"]}]}`, "sbx ls --json\nsbx rm --force task-x\nsbx create claude --name task-x /ws\nsbx policy allow network --sandbox task-x api.github.com\n"},
-		{"reuse", `{"sandboxes":[{"name":"task-x","workspaces":["/ws"]}]}`, "sbx ls --json\n"},
+		{"reuse", `{"sandboxes":[{"name":"task-x","workspaces":["/ws"]}]}`, "sbx ls --json\nsbx policy allow network --sandbox task-x api.github.com\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, ca := range []string{"", caPath} {

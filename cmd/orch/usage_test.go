@@ -23,7 +23,7 @@ func TestUsageListsSubcommandsAndFlags(t *testing.T) {
 	}
 	usage := string(out)
 	for _, want := range []string{
-		"orch tui", "orch status", "orch whatsapp <subcommand>", "orch signal <subcommand>", "signal subcommands:",
+		"orch tui", "orch status", "orch whatsapp <subcommand>", "orch signal <subcommand>", "signal subcommands:", "orch slack <subcommand>", "slack subcommands:",
 		"setup ", "test ", "pair ",
 		"-channels-config", "-workingman-agent", "-wolf-host", "-wolf-unblock-grace", "-wolf-idle-timeout", "-state-file", "-headless", "-acp-kit",
 	} {

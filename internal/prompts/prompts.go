@@ -134,6 +134,12 @@ type Data struct {
 	AuditLog     string   // the audit log file; empty when unknown
 	SessionsRoot string   // ACP sessions root (<id>/session.json, <id>/stream.log)
 
+	// StepUpDir is for the StepUpAgent: its request directory
+	// (~/.workingman/step-up), whose requests/ it may write and results/ it
+	// may read. It also reads SnapshotFile, AuditLog and SessionsRoot, like the
+	// workingman agent, but has no Roots.
+	StepUpDir string
+
 	// The fields below are for the SleepyHeadAgent.
 	BehindProjects []BehindProject // cron projects that missed ticks, in the order to report them
 	// ReplanInstruction says how to trigger a ONE-TIME re-plan of a single

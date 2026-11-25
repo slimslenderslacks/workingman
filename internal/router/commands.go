@@ -24,8 +24,9 @@ const helpText = `Commands:
 /sleepy – talk to sleepy-head, when it is catching up missed schedules
 /agent – talk to the workingman agent again
 /who – who this chat is talking to
+/inbox – open requests from agents, with the ids to answer them by
 
-Anything else goes to the workingman agent, or to the wolf you chose with /wolf. Reply to a wolf's message to talk to that wolf.`
+Anything else goes to the workingman agent, or to the wolf you chose with /wolf. Reply to a wolf's message to talk to that wolf. Reply to an agent's request (❓), or send #<id> <answer>, to answer it.`
 
 // handleCommand answers a router command. Commands never queue behind a running
 // turn and never reach an LLM.
@@ -47,6 +48,8 @@ func (r *Router) handleCommand(c *chat, name, args string) {
 		r.cmdWolf(c, args)
 	case "sleepy":
 		r.cmdSleepy(c)
+	case "inbox":
+		r.cmdInbox(c)
 	default:
 		r.notify(c, fmt.Sprintf("Unknown command /%s. Try /help.", name))
 	}

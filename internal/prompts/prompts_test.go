@@ -454,6 +454,7 @@ func TestRenderAllKinds(t *testing.T) {
 		agent.ReviewAgent,
 		agent.WorkingmanAgent,
 		agent.SleepyHeadAgent,
+		agent.StepUpAgent,
 	} {
 		if _, err := Render(k, Data{Workspace: "/ws"}); err != nil {
 			t.Errorf("Render(%s): %v", k, err)
@@ -670,6 +671,47 @@ func TestRenderWolfMCPGuidance(t *testing.T) {
 		}
 		if strings.Contains(out, "echo $MCP_URL") != sandboxed {
 			t.Errorf("sandboxed=%v: self-check advice present = %v", sandboxed, !sandboxed)
+		}
+	}
+}
+
+// TestRenderStepUp: the Step-Up agent's instructions cover the receive → ask →
+// apply → reply loop with the post-office tools and the request directory,
+// with the request format and the approve/deny approval, and never send it to
+// a blocking wait.
+func TestRenderStepUp(t *testing.T) {
+	out, err := Render(agent.StepUpAgent, Data{
+		Workspace:    "/home/.workingman/step-up-agent",
+		SnapshotFile: "/home/.workingman/state/snapshot.json",
+		SessionsRoot: "/home/.workingman/sessions",
+		StepUpDir:    "/home/.workingman/step-up",
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"Step-Up agent",
+		"next_message", "list_inbox", "reply", "send_request", "check_response", "in_reply_to",
+		"ALWAYS reply to every agent request",
+		"CHANGE: sandbox_network_allow proxy.golang.org → wm-workingman-messaging-fix-ci",
+		`options: ["approve", "deny"]`,
+		"END YOUR TURN",
+		"/home/.workingman/step-up/requests/",
+		"/home/.workingman/step-up/results/",
+		"version: 1", "for_request:", "approval:", "args:", "resource:",
+		"status: applied", "rejected", "failed",
+		"sandbox_filesystem_allow", "sandbox_network_revoke", "list_sandbox_policy",
+		"/home/.workingman/state/snapshot.json",
+		"/home/.workingman/sessions/<session-id>/session.json",
+		"never do the requesting\nagent's work",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("step-up prompt missing %q in:\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{"<no value>", "{{", "CANNOT apply", `"done"`, "run on the host"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("step-up prompt has %q", bad)
 		}
 	}
 }

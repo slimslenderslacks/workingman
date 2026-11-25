@@ -114,6 +114,23 @@ touch notes rather than leaving it off. Example:
   static_mcps:
     - logseq
 
+Messaging (`post-office`). A task can send notifications to, and ask questions
+of, the human operator or another agent (such as `step-up`) only if it lists
+`post-office` in its `static_mcps`. Add it when the task description says the
+agent may need to ask the operator or another agent something before it can
+finish: an approval, a choice between options, missing information or
+credentials, or a request for help (for example extra network access). Also
+add it when the task should tell the operator something as it goes, beyond
+its normal summary. Leave it off every other task. It is the only way to grant
+messaging: `mcp-add` cannot attach `post-office` later, and post-office
+refuses any sandbox whose gateway was not created with it. Because
+`static_mcps` replaces the default server set, also list every other server
+the task needs. Example:
+
+  static_mcps:
+    - post-office
+    - github
+
 A task may also optionally include `policies:` — a YAML list of sandbox
 policy rules applied with `sbx policy ...` immediately after the task's
 sandbox is created and before any tool runs inside it. Each rule has three

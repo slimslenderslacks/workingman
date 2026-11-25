@@ -14,14 +14,15 @@
 // stay in order while unrelated projects proceed in parallel.
 //
 // The transitions themselves are documented in state-machine.md and the
-// eight agent kinds (project, planning, task, commit, wolf, archive, review,
-// workingman) in agents.md; this comment is a map of where each lives.
+// agent kinds (project, planning, task, commit, wolf, archive, review,
+// workingman, sleepy-head, step-up) in agents.md; this comment is a map of
+// where each lives.
 //
 // Each project's session slots are keyed by its project.yaml path: the bare
 // path for its project and review agents, "<path>#task:<name>" for each task
 // agent, "#commit" for its one commit agent, and "#planning", "#wolf" and
-// "#archive" for the others. The workingman agent, which belongs to no
-// project, has a fixed key. A project runs up to max_parallel_tasks tasks at
+// "#archive" for the others. The workingman and Step-Up agents, which
+// belong to no project, have fixed keys. A project runs up to max_parallel_tasks tasks at
 // once (one by default), and integrates them one at a time through its
 // commit queue (docs/parallel-task-worktrees.md). The daemon writes project.yaml and task files
 // itself (status transitions) and ignores the fsnotify events its own writes
@@ -72,12 +73,14 @@
 //     fingerprints and runs the review agent on change, with fix-cycle and
 //     crash limits; merged PRs move the project to merged.
 //   - review_gateway.go: the daemon's own github-only MCP gateway
-//     ([WithReviewGateway]) for the PR fingerprint check: minted at Run (a
-//     stale one a crashed run recorded is deleted first), retried with
-//     backoff on failure, deleted at shutdown.
+//     ([WithReviewGateway]) for the PR fingerprint check, an
+//     mcpgateway.DaemonGateway: minted at Run (a stale one a crashed run
+//     recorded is deleted first), retried with backoff on failure, deleted at
+//     shutdown.
 //   - review_mcp.go: the PR fingerprint probe — github MCP pull_request_read
-//     calls on one lazily opened MCP session over that gateway, recreated
-//     with backoff when lost and closed at shutdown before the gateway.
+//     calls on one lazily opened mcpgateway.DaemonSession over that gateway,
+//     recreated with backoff when lost and closed at shutdown before the
+//     gateway.
 //     The daemon needs no gh CLI or local GitHub auth. The lifecycle, the
 //     fingerprint signals, the agent-recorded fallback, the poll backoff and
 //     the review_gateway_* / review_mcp_* / review_fingerprint_error audit
@@ -95,7 +98,20 @@
 //   - archive_worktrees.go: the archive agent's pre-launch worktree cleanup
 //     and its list of unintegrated task work.
 //   - workingman_agent.go: supervises the always-on workingman agent
-//     ([WithWorkingmanAgent]), restarting it with backoff.
+//     ([WithWorkingmanAgent]), restarting it with backoff (superviseAgent,
+//     shared with the Step-Up agent).
+//   - step_up.go: the always-on Step-Up agent ([WithStepUpAgent]): its plan
+//     (post-office as its only, static MCP server; no orch roots), its
+//     supervision, and the driver that prompts it whenever the post-office
+//     store holds work for it.
+//   - step_up_exec.go, step_up_rules.go: the Step-Up executor, which applies
+//     the agent's change requests (requests/<op-id>.yaml) as `sbx policy`
+//     commands after checking each against the limits of
+//     docs/messaging-design.md §8.4 (target derived from the agent's
+//     post-office request, operator approval with the exact CHANGE line,
+//     resource validation, rate limits, kill switch), persists them to the
+//     task's policies:, and writes results/, audit.jsonl and an operator
+//     notification.
 //   - channels_notify.go: wolf start and end messages on the `wolf` channel
 //     topic ([WithChannels]), with message IDs recorded so replies can find
 //     the wolf again.
@@ -116,7 +132,8 @@
 //     only instance.
 //   - [Option] — functional options for [New]: [WithRunner], [WithScheduler],
 //     [WithNotifier], [WithChannels], [WithStateFile], [WithRuntimeInfo],
-//     [WithWorkingmanAgent], [WithSessionIdleTimeout], [WithReviewGateway].
+//     [WithWorkingmanAgent], [WithStepUpAgent], [WithSessionIdleTimeout],
+//     [WithReviewGateway].
 //   - [ReviewGatewayConfig] — the standalone-codemode root and record
 //     directory ([ReviewGatewayStateDir]) for the daemon's github-only
 //     gateway, given to [WithReviewGateway].
@@ -127,6 +144,8 @@
 //   - [WolfSession], [WorkingmanAgentSession], [SleepyHeadSession] — live
 //     sessions the router can
 //     attach to; cmd/orch adapts them to router.Session.
+//     [StepUpAgentSession] is the Step-Up agent's, which only the daemon's
+//     own driver attaches to.
 //   - [Snapshot] — the JSON state document ([ProjectSnapshot],
 //     [SessionSnapshot], [AuditEvent], ...) behind --state-file and
 //     `orch status`. Built live by [Daemon.Snapshot], from disk alone by
@@ -152,6 +171,7 @@
 // through [github.com/slimslenderslacks/work/internal/workspace]. It also
 // uses internal/audit (event log), internal/notify and internal/channels
 // (wolf alerts), internal/policy (sandbox rules), internal/sbx (sandbox
-// liveness), internal/gitsign (push identity) and internal/terminal (host
-// tabs).
+// liveness), internal/gitsign (push identity), internal/terminal (host
+// tabs), and internal/postoffice and internal/acpchat (the Step-Up driver
+// reads the message store and prompts the agent's session).
 package daemon

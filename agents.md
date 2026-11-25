@@ -14,12 +14,14 @@
 > it by rebasing onto the shared tip and fast-forwarding, as the task and
 > commit agent sections below describe.
 
-The orchestrator launches eight kinds of `claude` sessions. Seven run over a
+The orchestrator launches ten kinds of `claude` sessions. Seven run over a
 project's lifecycle: **project → planning → task → commit**, with **wolf**,
 **archive**, and **review** stepping in for blocks, cleanup, and PR watching
-respectively. The eighth, the **workingman agent**, belongs to no project: it is
+respectively. The other three belong to no project. The **workingman agent** is
 a daemon-owned, always-on observer that answers questions about the orch state
-(§8).
+(§8). The **Step-Up agent** is a daemon-owned, always-on receiver of other
+agents' requests for more sandbox capability (§9). The **sleepy-head** agent
+reports cron ticks missed while the machine slept (`internal/daemon/sleepy_head.go`).
 `design.md` has the original spec; this document describes the agents as
 implemented today, which has moved past that spec in places (most notably: an
 ACP/sandbox launch path superseding the terminal-tab+`sbx exec` path for non-interactive
@@ -192,7 +194,11 @@ nothing else. Finishes by setting `status: working` with `updated_by: agent`.
    per-sandbox MCP gateway — see "MCP gateway" in README.md; no longer sbx
    `--static-mcp` flags) and `policies:`
    (sbx policy rules, `action`/`type`/`resource`, applied in declaration order
-   right after `sbx create`) fields, plus the fixed status enums for both
+   right after `sbx create`) fields. Two paragraphs say when a task must name
+   a server: `logseq` whenever the request mentions Logseq, and
+   `post-office` when the agent may need to ask the operator or another agent
+   something (see [Messaging capability](#messaging-capability-post-office)).
+   The template also carries the fixed status enums for both
    project and task, and `model: default` on every new task. An optional
    per-task `harness:` picks the agent harness; empty (the norm) means the
    daemon's default `claude-acp` (the `--acp-kit` kit on `--acp-image`), the
@@ -258,7 +264,9 @@ branch (or leave the work uncommitted) but must not touch any other ref or
 push. Writes only `status: success|failed` (+ `failure_reason` on failure)
 back to its task file — it must NOT touch `project.yaml`; integrating the
 work is the commit agent's and daemon's job. (On the legacy path it must not
-commit either.)
+commit either.) A task whose `static_mcps` includes `post-office` can also
+message the operator or another agent while it works (see
+[Messaging capability](#messaging-capability-post-office)).
 The agent's `acp-wrapper` also annotates the task file (via `task.Update`,
 `internal/acpwrapper/record.go`): `resolved_harness:` (the sbx template the
 sandbox was created from) once the sandbox exists, and `resolved_model:` (the
@@ -916,3 +924,258 @@ follow the instructions.") and discards the reply, so the agent has read
 while the agent is still booting gets *"The workingman agent is starting up, try
 again in a minute."* rather than a hang. Replies go back to the asking chat
 (a `workingman` topic route is optional); every reply passes `audit.Redact`.
+
+---
+
+## 9. Step-Up agent
+
+**Kind:** `agent.StepUpAgent` (`String()` = `"step-up"`, appended to the iota
+block). **Template:** `step-up.tmpl`. **Interactive:** no. *(Design:
+[docs/messaging-design.md](docs/messaging-design.md) §8. Operator guide —
+turning it on, approving, `config.yaml`, the kill switch and a smoke test:
+[docs/messaging.md § Step-Up](docs/messaging.md#step-up).)*
+
+**What it is.** An always-on agent that other agents ask for more than their
+sandbox gives them, most often a network route ("I need
+`https://proxy.golang.org` for `go mod download`"). It is a post-office
+**recipient**: an agent with the messaging capability sends it a request with
+`send_request(recipient: "step-up", …)` and waits with `wait_for_response`.
+Step-Up takes the request with `next_message`, judges it, asks the operator
+with `send_request` (to the operator, with `in_reply_to` set to the agent's
+request) when the ask is reasonable, and answers the agent with `reply`. It
+always replies, refusals included.
+
+**Applying changes: the executor.** Step-Up never changes a sandbox itself.
+It writes a change request, `requests/<op-id>.yaml`, into its request
+directory, and the daemon's executor (`internal/daemon/step_up_exec.go`)
+checks it, applies it and writes `results/<op-id>.yaml` (`status: applied |
+rejected | failed`, `detail`, and for `list_sandbox_policy` the `sbx policy
+ls` output). The request format:
+
+```yaml
+version: 1
+id: op_…                  # names the file; op_ + [A-Za-z0-9_-]{1,64}, unique
+op: sandbox_network_allow # or sandbox_network_revoke, sandbox_filesystem_allow,
+                          #    sandbox_filesystem_revoke, list_sandbox_policy
+for_request: msg_…        # the agent's post-office request (always)
+approval: msg_…           # Step-Up's approval request to the operator (allows only)
+args: {resource: proxy.golang.org}
+reason: "…"
+```
+
+Each op runs one `sbx` command on the **derived** sandbox — `policy allow
+<kind> --sandbox <s> <resource>`, `policy rm <kind> --sandbox <s> --resource
+<resource>`, or `policy ls --sandbox <s>` — and an allow or revoke is then
+added to (or removed from) the target task's `policies:`, so the rule
+survives a new sandbox and, because acp-wrapper re-applies a task's
+`policies:` on reuse, a reused one. If the task file cannot be updated, the
+`sbx` change is undone. The checks, all in the daemon (design §8.4):
+
+- strict YAML: unknown fields, a second document, a bad `version`, an `id`
+  that differs from the file name, an op outside the five, a missing
+  `for_request`, a missing or superfluous `approval` or `args` → `rejected`;
+- **target**: `from.sandbox` of `for_request`, which must be a request
+  addressed to `step-up`, open or closed less than an hour ago; the sandbox
+  must have a live `task` or `commit` session still running the task that
+  asked; never `step-up`, `workingman-agent`, `sleepy-head` or a daemon
+  gateway;
+- **approval** (allows only): a request from Step-Up to the operator with
+  `in_reply_to == for_request`, answered by the operator with option
+  `approve` less than 24 h ago, whose body has the line `CHANGE: <op>
+  <resource> → <sandbox>` exactly (`daemon.StepUpChangeLine`), and not used by
+  an earlier applied op;
+- **resources**: network — a lower-case hostname, or `*.` and a domain of two
+  or more labels, optional `:port`; no IPs, `localhost`, `*.docker.internal`,
+  local TLDs or config denylist matches. Filesystem — an absolute, cleaned
+  path glob (`*`, `**` only) that does not cover `/`, the home directory or
+  an ancestor of it, and does not overlap `~/.ssh`, `~/.aws`, `~/.config/gh`,
+  `~/.workingman`, `~/.gnupg`, `~/.docker`, `~/.kube`, `/etc`, the orch
+  roots, the request and post-office directories, or the config denylist;
+- a revoke only removes a rule whose last applied Step-Up change was an allow;
+- **rate limits**: at most `per_hour` (10) applied allows and revokes in any
+  hour, and `per_sandbox_per_hour` (3) per sandbox;
+- **kill switch**: `<step-up-dir>/disabled` rejects everything.
+
+Every request, rejections included, is appended to
+`<step-up-dir>/audit.jsonl` (the request as written, the target, the approval
+record, the `sbx` argv and output, the outcome) and logged as `step_up_op` in
+the daemon audit log. Each applied change sends the operator a post-office
+notification (`🔓 Step-Up allowed proxy.golang.org for task fix-ci (proj)
+(approved via slack)`; `🔒 … revoked …`). `<step-up-dir>/config.yaml`, read
+by the daemon only, holds `deny: {network: [...], filesystem: [...]}` and
+`limits: {per_hour, per_sandbox_per_hour}`; while it is invalid (an unknown
+key, say) every request is rejected. There is no auto-approve list.
+
+**Launch/identity.** `runner.Plan{Kind: StepUpAgent, WorkingDir: <scratch>,
+SessionName: "step-up-agent", Persistent: true, StaticMCPs: ["post-office"],
+WritableMounts, ReadOnlyMounts, Observe}`, built by `Daemon.stepUpPlan`. Like
+the workingman agent it requires the ACP path (`Runner.Start` refuses
+otherwise), its wrapper is `--persistent` with no `--idle-timeout` and no
+`--unblock-grace`, and it gets `--require-okta-gateway`. The sbx sandbox is
+`step-up` (`runner.StepUpSandbox`, `ACPSandboxNameFor`); post-office identifies
+the caller by that name (its recipient registry, `mcpserver.DefaultRecipients`,
+maps `step-up` → sandbox `step-up`), so the two must stay in step. The ACP
+session id and the daemon's session-map key are `step-up-agent`
+(`runner.StepUpSession`). `session.json` carries `kind: step-up`, no project and
+no task; `ListSessions` labels the row `step-up` and the snapshot gives it no
+work stream.
+
+**MCP.** `post-office` only, on a **static** gateway: `MCPGatewayDynamic`
+returns false for it whatever the flags say, so it has no `mcp-find` /
+`mcp-add`. Its gateway record lists `post-office`, which is what post-office's
+capability check needs (see "Messaging capability" below). No GitHub and no
+other server.
+
+**Mounts.** No orch roots, read-only or read-write: every state change goes
+through the daemon's typed request interface, where it is checked.
+
+- the scratch dir (cwd, `.orch/` handoff), default
+  `<sessions-root>/../step-up-agent`;
+- read-write: `<step-up-dir>/requests/`;
+- read-only: `<step-up-dir>/results/`, the snapshot's directory, the audit
+  log's directory and the ACP sessions root (so it can see which sandboxes,
+  tasks and sessions exist).
+
+The request directory (`StepUpAgentConfig.StepUpDir`) defaults to
+`<sessions-root>/../step-up` (`~/.workingman/step-up`); `stepUpPlan` creates
+`requests/` and `results/`. The scratch dir, the request directory and the
+post-office store must all lie outside every `--root` (`New` rejects an
+overlap).
+
+**Who gives it its turns.** Nobody types into Step-Up, so the daemon drives it
+(`driveStepUp` in `internal/daemon/step_up.go`). The driver attaches to the
+live session with `acpchat` (`CreateIfMissing`, so a headless daemon works;
+with the TUI running, the TUI's watcher creates the ACP session and sends the
+opening prompt) and watches the post-office store (`inbox/` and `done/`,
+fsnotify plus a 10 s poll). It sends `StepUpPrompt` — "serve your post-office
+inbox … and end your turn" — when:
+
+- a message addressed to `step-up` has arrived that it has not taken yet;
+- one of its own requests (its approval requests to the operator) has closed;
+- it holds a request it has not answered, as a reminder every 10 minutes;
+- it created the ACP session itself, once, so the agent reads its
+  instructions.
+
+It never prompts during another client's turn (the TUI's opening prompt, or a
+human typing in the agent's tab), at most once per 5 s, and each turn is
+bounded to 30 minutes. The prompt and template tell the agent never to block
+inside a turn: `next_message` with `timeout_seconds: 0`, `check_response`
+rather than `wait_for_response`. Audit events: `step_up_driver_attached`,
+`step_up_prompted`, `step_up_turn_error`, `step_up_driver_detached`.
+
+**Prompt structure (`step-up.tmpl`).** Who it is (it never does the requesting
+agent's work); that the daemon makes changes from its request files and it
+must never say a change was made unless the result says `applied`; the
+post-office tools it has (receiving, asking, replying) and how to use each
+without blocking; the turn loop (`list_inbox`, drain `next_message`,
+`check_response` its open requests, read its results, end the turn); always
+reply; how to decide (specific and justified by the task; the narrowest
+resource; outright refusals for wildcards, IPs, localhost, private ranges,
+other sandboxes and secret paths; anything that is not a sandbox rule goes
+back to the operator, with a notification); the five ops; the approval
+request (`options: ["approve", "deny"]`, the exact `CHANGE:` line, one change
+per approval); what to do for `approve`, `deny`, free text or no answer; the
+request-file format, written under a dot-name and renamed; the result
+statuses and what to reply for each; and the limits the daemon enforces. `prompts.Data.StepUpDir` (mirrored as `step_up_dir` in
+`.orch/context.yaml`), `SnapshotFile` and `SessionsRoot` fill the paths.
+
+**Supervision and lifecycle.** `daemon.WithStepUpAgent(StepUpAgentConfig{…})`
+enables it. `Run` starts it right after the workingman agent: the same
+supervisor (`superviseAgent`, shared with the workingman agent) restarts it with
+the same backoff (5 s doubling to 5 min, reset after 10 min stable), and
+`beginStepUpAgent` starts the driver. Without an ACP launcher it is skipped
+(`step_up_agent_unavailable`), and also without `--mcp-gateway-url`, since its
+only tools come through the gateway. Exactly where the workingman agent has
+them, it has special cases: not `detachable` (it stops with the daemon), adopted
+by `reconcileSessions` under its key when this daemon supervises one, exempt
+from the stranded-session reaper, and labelled by its kind in `ListSessions`
+and the snapshot. `Daemon.StepUpAgentSession()` returns the live session.
+
+**Flag.** `orch --step-up-agent[=auto|on|off]`. `auto` (the default) turns it
+on when `--acp-kit` is set **and** post-office accepts connections on
+`127.0.0.1:7077` (`postoffice.DefaultAddr`) at startup. `--step-up-agent` /
+`=on` forces it on (a startup error without `--acp-kit`); `=off` disables it.
+The decision is audit-logged as `step_up_agent_flag`.
+
+---
+
+## Messaging capability (`post-office`)
+
+Not a kind of agent but a capability any sandboxed agent can be given: the
+**post-office** MCP server (`cmd/post-office`, `internal/postoffice/mcpserver`,
+design in [docs/messaging-design.md](docs/messaging-design.md) §4, operator
+guide in [docs/messaging.md](docs/messaging.md)). With it an
+agent can `send_notification` (one-way) or `send_request` (expects an answer,
+then `wait_for_response` / `check_response` / `cancel_request` /
+`list_requests`) to the human operator or, by `recipient`, to another agent
+such as `step-up`. Without it, those tools do not exist for the agent.
+
+**The capability is the gateway being minted with `post-office`.**
+
+- **Granting it.** A task lists `post-office` in its `static_mcps`. The
+  planning agent adds it when the task description says the agent may need to
+  ask the operator or another agent something, or keep the operator informed
+  (the paragraph in `planning.tmpl`). Because `static_mcps` replaces the
+  default set (`MCPServersFor`), such a task lists every other server it needs
+  too. Agents whose plan the daemon builds itself get it by hard-coding it, as
+  review hard-codes `github`; that is how the Step-Up agent gets it (§9).
+  `post-office` is **never** in `--mcp-gateway-servers`, so no agent has it by
+  default.
+- **The catalog entry** (standalone-codemode `mcp-servers.json` and
+  `mcp-servers-personal.json`): `url: http://127.0.0.1:7077/mcp`,
+  `Authorization: Bearer ${post_office_token}` (the secret
+  `mcp/post-office/post_office_token`, from `post-office setup --print`) and
+  `dynamic_addable: false`.
+- **`mcp-add` cannot grant it.** Task, wolf and workingman gateways are
+  dynamic (`MCPGatewayDynamic`), so their agents can `mcp-add` catalog
+  servers. Two independent checks stop that adding post-office:
+  1. the catalog's `dynamic_addable: false` makes the gateway refuse
+     `mcp-add post-office` (and hides it from `mcp-find`). This is defence in
+     depth;
+  2. the actual check, in post-office: every request carries the calling
+     sub-gateway's id (`X-Codemode-Gateway-Id`, injected by
+     standalone-codemode), and post-office looks it up in
+     `~/.workingman/gateways/<sandbox>.json`. `Record.Servers` is what the
+     gateway was **minted** with, which `mcp-add` never changes. A record
+     without `post-office` gets `post-office is not enabled for this sandbox
+     (add static_mcps: [post-office] to the task)` on `tools/list`,
+     `tools/call` and `resources/read`.
+- **Identity.** The sender (`from`) is never a tool argument: post-office
+  derives it from the gateway record's sandbox and that sandbox's newest live
+  `session.json` (kind, project, task), or from the fixed sandbox name for
+  `workingman-agent`, `sleepy-head` and `step-up`. A sandbox with no live
+  session is refused.
+- **Tested** end to end by `TestStaticMCPsCapabilityEndToEnd`
+  (`internal/postoffice/mcpserver/capability_e2e_test.go`): a task with
+  `static_mcps: [post-office]` calls `send_notification` through its gateway
+  and is attributed correctly; a task without it gets nothing through its
+  gateway, and is refused even after post-office is attached to its dynamic
+  gateway as `mcp-add` would. standalone-codemode's
+  `TestGatewayIDAndDynamicAddableE2E` covers the header and the `mcp-add`
+  refusal on the real gateway, and `TestSampleCatalogLoads` pins the entry in
+  both catalogs.
+- **Receiving (agent recipients).** `recipient` must be `operator` (the
+  default) or a **registered recipient**: a static map in post-office
+  (`mcpserver.DefaultRecipients`, v1 `step-up` → sandbox `step-up`), so a typo
+  is rejected rather than stored. A caller whose sandbox is a registered
+  recipient also gets `next_message` (the oldest open message addressed to it
+  that it has not received; sets `received_at`, waits up to the max wait,
+  `status: empty` otherwise; each message is returned once, even across
+  restarts), `reply` (answers with `responder: {kind: agent, via: step-up}`,
+  or `status: closed` with the outcome that won) and `list_inbox` (open
+  messages addressed to it, received or not). A notification is closed as
+  `dismissed` once received. On `send_request` it gets `in_reply_to`,
+  which links its own request (such as an approval request to the operator)
+  to the request it serves: set automatically when it holds exactly one
+  received, unanswered request, otherwise passed explicitly; the Step-Up
+  executor checks it (design §8.4). Other callers do not see these tools or
+  `in_reply_to` once post-office knows who they are, and are refused if they
+  call them. A gateway that lists tools before workingman saved its record
+  (standalone-codemode attaches post-office during `POST /gateways` and keeps
+  that list) sees them all; see design §4.5.
+- **Where operator messages go.** Not to an agent: post-office writes them
+  under `~/.workingman/post-office/`, the TUI inbox (`I`) reads them, and the
+  daemon's Dispatcher sends them to every configured channel. The first answer
+  wins, wherever it comes from. The end-to-end smoke test (a task asks a
+  question answered in the TUI, one answered in Slack, then asks Step-Up for a
+  network route) is in [docs/messaging.md](docs/messaging.md#end-to-end-smoke-test).

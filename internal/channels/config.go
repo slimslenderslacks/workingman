@@ -133,7 +133,17 @@ type Route struct {
 	Topic   string `yaml:"topic"`
 	Channel string `yaml:"channel"`
 	Chat    string `yaml:"chat"`
+	// Notify, when false, keeps post-office *notifications* off this route;
+	// it still receives requests. Unset means true. Other senders ignore it.
+	Notify *bool `yaml:"notify,omitempty"`
 }
+
+// Key is the route without its options: what identifies it, for comparisons
+// and duplicate checks.
+func (r Route) Key() Route { return Route{Topic: r.Topic, Channel: r.Channel, Chat: r.Chat} }
+
+// Notifies reports whether the route receives post-office notifications.
+func (r Route) Notifies() bool { return r.Notify == nil || *r.Notify }
 
 var (
 	nameRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
@@ -274,10 +284,10 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(r.Chat) == "" {
 			add("%s.chat: required", at)
 		}
-		if prev, dup := seen[r]; dup {
+		if prev, dup := seen[r.Key()]; dup {
 			add("%s: duplicate of routes[%d]", at, prev)
 		} else {
-			seen[r] = i
+			seen[r.Key()] = i
 		}
 	}
 	return errors.Join(errs...)
@@ -313,7 +323,7 @@ func (c *Config) ChannelNames() []string {
 // inboundTypes are the channel types that can receive messages from a human
 // (not just send): every transport's Channel.Start delivers inbound messages
 // to the handler. Anything not listed here is treated as send-only.
-var inboundTypes = map[string]bool{"whatsapp": true, "signal": true}
+var inboundTypes = map[string]bool{"whatsapp": true, "signal": true, "slack": true}
 
 // InboundCapable reports whether the channel is enabled and its transport can
 // receive messages.

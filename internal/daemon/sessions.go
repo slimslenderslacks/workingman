@@ -28,7 +28,8 @@ const (
 type SessionInfo struct {
 	// ID is the daemon's stable key for the session — the absolute path of
 	// the project.yaml driving it (the workingman agent, which has no
-	// project, uses the fixed key "workingman-agent"). Used by the TUI to diff snapshots and
+	// project, uses the fixed key "workingman-agent", and the Step-Up agent
+	// "step-up-agent"). Used by the TUI to diff snapshots and
 	// route clicks.
 	ID string
 	// AgentName is the agent.Kind string ("project", "planning", "task",
@@ -86,10 +87,10 @@ func (d *Daemon) ListSessions() []SessionInfo {
 		if entry.kind == agent.SleepyHeadAgent {
 			project = agent.SleepyHeadAgent.String()
 		}
-		if entry.kind == agent.WorkingmanAgent {
+		if entry.kind == agent.WorkingmanAgent || entry.kind == agent.StepUpAgent {
 			// Not a work stream: its key is not a project path, so Dir/Base of it
 			// would label the row ".". Show the agent's own name instead.
-			project = agent.WorkingmanAgent.String()
+			project = entry.kind.String()
 		}
 		info := SessionInfo{
 			ID:          key,

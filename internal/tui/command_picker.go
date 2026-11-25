@@ -252,7 +252,7 @@ func (m model) renderCommandPickerModal() string {
 	// Labels are padded to a common width so the descriptions line up in a
 	// column, and the modal is sized to its widest row so no command wraps.
 	const sep = "  —  "
-	hint := "j/k: move  •  enter: run  •  esc: cancel"
+	hint := m.withInboxBadge(hintStyle.Render("j/k: move  •  enter: run  •  esc: cancel"))
 	contentWidth := lipgloss.Width(hint)
 	var b strings.Builder
 	b.WriteString(paneTitleStyle.Render("Commands"))
@@ -271,7 +271,7 @@ func (m model) renderCommandPickerModal() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render(hint))
+	b.WriteString(hint)
 
 	// lipgloss's Width includes padding but not the border.
 	width := contentWidth + modalBorder.GetHorizontalPadding()

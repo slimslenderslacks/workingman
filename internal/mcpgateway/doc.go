@@ -49,7 +49,16 @@
 //     SSE responses are both accepted. An error wrapping [ErrSessionLost]
 //     (404, 400 on a known session id, connection refused/reset) means open a
 //     new session; [ToolError] (isError: true) and [RPCError] leave the
-//     session usable. The daemon uses it for its review fingerprint check.
+//     session usable.
+//   - [DaemonGateway] — a long-lived static gateway owned by a host process
+//     rather than a sandbox (the orch daemon's review check): minted over
+//     fixed Servers and recorded under a fixed Key, the stale record of a
+//     crashed run DELETEd first, re-minted with backoff when found gone
+//     ([DaemonGateway.Invalidate]), DELETEd by [DaemonGateway.Close].
+//   - [DaemonSession] — one long-lived MCP session over a [GatewaySource]
+//     (a DaemonGateway): opened lazily, recreated with backoff on
+//     [ErrSessionLost], closed before the gateway. Consumers depend only on
+//     the [ToolCaller] interface it implements.
 //
 // # Collaborators
 //

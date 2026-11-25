@@ -49,6 +49,15 @@ const (
 	// confirmation, triggers exactly one re-plan per approved project. Appended
 	// so the iota values of the existing kinds don't shift.
 	SleepyHeadAgent
+	// StepUpAgent is the always-on receiver of step-up requests: other agents
+	// ask it, through the post-office MCP, for more capability in their
+	// sandbox (a network route, say), and it decides, asks the human operator
+	// for approval and replies. Like the workingman agent it is daemon-owned,
+	// persistent and autonomous (no human drives its prompt), has no project
+	// and no task, and runs in a sandbox of its own. Its only MCP server is
+	// post-office, on a static gateway. Appended so the iota values of the
+	// existing kinds don't shift.
+	StepUpAgent
 )
 
 func (k Kind) String() string {
@@ -71,6 +80,8 @@ func (k Kind) String() string {
 		return "workingman"
 	case SleepyHeadAgent:
 		return "sleepy-head"
+	case StepUpAgent:
+		return "step-up"
 	}
 	return "unknown"
 }
@@ -99,6 +110,8 @@ func ParseKind(s string) (Kind, bool) {
 		return WorkingmanAgent, true
 	case "sleepy-head":
 		return SleepyHeadAgent, true
+	case "step-up":
+		return StepUpAgent, true
 	}
 	return 0, false
 }

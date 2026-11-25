@@ -1,6 +1,7 @@
 // Package tui is the orch terminal UI: a bubbletea program that shows live
-// agent sessions, the work-stream (project) gallery and its tasks, and lets
-// the user steer work streams by writing their project.yaml files.
+// agent sessions, the work-stream (project) gallery and its tasks, and the
+// post-office inbox, and lets the user steer work streams by writing their
+// project.yaml files and answer agents' requests.
 //
 // Role: tui
 //
@@ -31,6 +32,14 @@
 // transcript (prompts, streamed text, tool calls, plans). Conversational
 // sessions such as the wolf accept typed messages there.
 //
+// "I" opens the post-office inbox (inbox.go) from every mode that isn't
+// typing text: the messages agents sent the operator, which can be answered
+// (typed, or 1-9 for an option) or dismissed there, plus read-only rows for
+// messages to other agents. A badge ("✉ 2 ?" while operator requests wait)
+// leads the footer and ends the ACP header and modal hints, and a new
+// operator request rings the terminal bell ($WORKINGMAN_TUI_BELL=0 turns it
+// off). See docs/messaging-design.md §7; for users, docs/messaging.md.
+//
 // The mouse is not captured by default, so the terminal's native click-drag
 // selection can highlight and copy any text. "m" toggles mouse capture (click
 // to focus/select/attach), and "y" copies the focused selection — or, in the
@@ -56,12 +65,15 @@
 //   - acpwatch.go — [WatchACPSessions]: discovers ACP sessions on disk,
 //     dials their sockets, sends the opening prompt and streams events.
 //   - acptabs.go — the ACP tab view's pure state and rendering.
+//   - inbox.go — [WatchInbox], the inbox badge, view and keys.
+//   - lineinput.go — the single-line text field shared by the ACP message
+//     line and the inbox reply line.
 //   - clipboard.go — "m" mouse-capture toggle and "y" OSC 52 copy.
 //   - filetime_*.go — file birth time per platform, for task ages.
 //
 // # Talking to the daemon
 //
-// The TUI holds no handle on the daemon. It uses four channels:
+// The TUI holds no handle on the daemon. It uses five channels:
 //
 //   - Project files, read. [WatchProjects] re-scans the --root directories
 //     for project.yaml and tasks/*.yaml every second and sends a snapshot
@@ -88,11 +100,17 @@
 //     on hung handshakes and silent turns. Before trusting a socket it checks the
 //     sandbox still exists (internal/sbx), and it removes the directories of
 //     dead sessions.
+//   - The post-office store (default ~/.workingman/post-office). [WatchInbox]
+//     polls its inbox/, deliveries/ and outbox/ every second through
+//     internal/postoffice, and an answer or dismissal is a Store.Claim that
+//     post-office then delivers and finalises. No daemon is involved, so the
+//     inbox works in standalone mode too.
 //
 // # Key types
 //
 //   - [Run] — starts the program. Takes the roots, the sessions feed, the ACP
-//     sessions root, an [InteractiveLauncher] and a [TabFocuser].
+//     sessions root, the post-office store root, an [InteractiveLauncher] and
+//     a [TabFocuser].
 //   - [ProjectView] — read-only snapshot of one project.yaml and its tasks;
 //     what the gallery, Tasks pane and detail pane render. Built only by
 //     [ScanProjects].
@@ -105,14 +123,18 @@
 //     OpenWorkspaceDirTab/OpenTaskWorktreeDirTab.
 //   - [TabFocuser] — interface to focus a session's terminal tab; implemented
 //     by terminal.TabLauncher, shared with the daemon by cmd/orch.
-//   - [ScanProjects], [WatchProjects], [WatchACPSessions] — the data sources
-//     behind the panes.
+//   - [InboxStore] and [InboxItem] — the store interface the inbox reads and
+//     claims through (a *postoffice.Store; faked in tests), and one open
+//     message as shown.
+//   - [ScanProjects], [WatchProjects], [WatchACPSessions], [WatchInbox] — the
+//     data sources behind the panes.
 //
 // # Collaborators
 //
 // Uses internal/project and internal/task to read and write work-stream
 // files, internal/policy for task policy rules, internal/session,
-// internal/acpclient and internal/sbx for ACP sessions, internal/terminal
+// internal/acpclient and internal/sbx for ACP sessions, internal/postoffice
+// for the inbox, internal/terminal
 // for tab focus, and internal/workspace (wsp) for :archive. Used only by
 // cmd/orch. See docs/terminal-tabs.md and docs/state-snapshot.md;
 // docs/tui-survey.md is the original design survey and is now partly out of

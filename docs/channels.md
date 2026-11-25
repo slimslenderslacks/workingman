@@ -1,4 +1,4 @@
-# Messaging channels (WhatsApp and Signal)
+# Messaging channels (WhatsApp, Signal and Slack)
 
 With a channel configured, the daemon talks to a human on their phone in both
 directions:
@@ -6,10 +6,15 @@ directions:
 - **Outbound** — a `🐺 wolf is running for <project>` message the moment a wolf
   agent has actually started, and a `🐺 wolf finished` message when it ends
   (see [wolf-notify.md](wolf-notify.md)).
+- **Post-office** — questions and notifications that agents send the operator
+  through the post-office MCP (`❓ [req r1t8w] …`, `📣 [note …] …`), fanned out
+  to every channel by the daemon's **Dispatcher**; see
+  [Post-office messages](#post-office-messages).
 - **Inbound** — everything the owner sends back is handed to the **router**
-  (`internal/router`): a *reply* to a wolf message goes to that wolf, anything
-  else goes to the always-on **workingman agent**, which answers questions about
-  the orch state ([agents.md §8](../agents.md#8-workingman-agent)).
+  (`internal/router`): a *reply* to a wolf message goes to that wolf, a reply
+  to a post-office request answers it, anything else goes to the always-on
+  **workingman agent**, which answers questions about the orch state
+  ([agents.md §8](../agents.md#8-workingman-agent)).
 
 This mirrors hermes-agent's WhatsApp gateway (`gateway/platforms/whatsapp_cloud.py`,
 `whatsapp_common.py`, `scripts/whatsapp-bridge/`) and Signal adapter
@@ -19,11 +24,14 @@ This mirrors hermes-agent's WhatsApp gateway (`gateway/platforms/whatsapp_cloud.
 
 Contents: [Architecture](#architecture) · [Quick start](#quick-start) ·
 [Configuration reference](#configuration-reference) · [Signal](#signal) ·
+[Slack](#slack) ·
 [Routes and topics](#routes-and-topics) ·
-[Routing rules](#routing-rules) · [Security model](#security-model) ·
+[Routing rules](#routing-rules) ·
+[Post-office messages](#post-office-messages) · [Security model](#security-model) ·
 [Tunnel setup](#exposing-the-webhook-tunnel-setup) · [Troubleshooting](#troubleshooting) ·
 [Manual smoke test](#manual-smoke-test-real-meta-test-number) ·
-[Signal smoke test](signal.md#manual-smoke-test)
+[Signal smoke test](signal.md#manual-smoke-test) ·
+[Slack smoke test](#slack-smoke-test)
 
 ## Architecture
 
@@ -109,7 +117,9 @@ orch --root ~/orch --acp-kit <kit> --headless
 use `orch whatsapp pair` instead ([whatsapp-bridge.md](whatsapp-bridge.md)).
 For Signal use `orch signal setup` / `status` / `test` instead (no tunnel, no
 console, no secrets file; it needs a running signal-cli daemon): see
-[Signal](#signal) and [signal.md](signal.md).
+[Signal](#signal) and [signal.md](signal.md). For Slack use `orch slack setup` /
+`status` / `test` (no token at all; it needs the host's standalone-codemode
+gateway with the `slack` server): see [Slack](#slack).
 
 Running with the TUI (no `--headless`) works the same way; the difference is who
 starts a conversation in a new agent session: the TUI's watcher normally sends a
@@ -195,7 +205,7 @@ whatsapp_verify_token: a-long-random-string
 | `…options.access.self_ids`, `reply_prefix`, `forward_owner_messages` | self-chat / owner-message handling (bridge) |
 | `…options.bridge.*` | Baileys bridge supervision: see [whatsapp-bridge.md](whatsapp-bridge.md) |
 | Signal: `…options.http_url`, `account`, `plain_text`, `access.allow_from` / `note_to_self` / `groups` / `group_allow_from` / `allow_all`; `credentials.account` | see [signal.md](signal.md#configuration) |
-| `routes[]` | `{topic, channel, chat}`; see below |
+| `routes[]` | `{topic, channel, chat}`, plus `notify: false` on a `post-office` route to keep notifications off it; see below |
 | `notify.wolf_start_interval` | rate limit for wolf-start messages |
 | `router.*` | inbound router timeouts and queue |
 
@@ -274,6 +284,155 @@ conversation index maps a swipe-reply to a `🐺 wolf is running…` message bac
 that wolf, exactly as WhatsApp's `context.message_id` does. Outbound, the first
 chunk of a reply quotes the message it answers in direct chats (not in groups).
 
+## Slack
+
+Slack is a third transport behind the same registry, routes and router. It
+has no Slack app or token of its own: it talks to the **Slack MCP** behind the
+host's standalone-codemode gateway (`internal/channels/slack`, design:
+[messaging-design.md §6](messaging-design.md#6-slack-channel), research:
+[research/slack-mcp.md](research/slack-mcp.md)). The channel mints its own
+static sub-gateway over the `slack` catalog server (record
+`~/.workingman/gateways/daemon/orch-slack.json`, deleted on shutdown) and the
+gateway's host header script is the authentication. Slack is a **work setup
+only** channel: `mcp-servers-personal.json` has no Slack entry.
+
+```yaml
+# ~/.workingman/channels.yaml
+channels:
+  slack:
+    type: slack
+    options:
+      gateway_url: http://localhost:3333   # default
+      channel: U0CC1K1MFNX                 # a channel id, or your own user id for the DM-to-self
+      allow_from: [U0CC1K1MFNX]            # Slack user ids; empty = nobody
+      poll_interval: 20s                   # default; min 5s
+      watch_ttl: 168h                      # how long a request's thread is watched (default 7 days)
+routes:
+  - {topic: post-office, channel: slack, chat: U0CC1K1MFNX}
+```
+
+Unknown options are rejected, and so is any `credentials:` block.
+
+**What is different about Slack:**
+
+- **Posts are made as you.** The MCP uses your own user token, so every post
+  the daemon makes has your name on it, and Slack will most likely **not
+  push-notify you** about it. Treat Slack as a place to answer, not a place
+  that pings you: keep Signal, WhatsApp or the TUI for alerts. Because the
+  author cannot tell our posts from yours, the channel records the ts of
+  everything it posts (`~/.workingman/slack/sent.json`, 30 days) and treats
+  every other message as yours.
+- **No push: replies are polled.** Every `poll_interval` the channel reads the
+  conversation (`slack_read_channel`). A new top-level message from you goes
+  to the router like any chat message (so `/inbox`, `#r1t8w staging` and
+  questions for the workingman agent all work). A sent post-office request is
+  *watched* (`~/.workingman/slack/watch.json`); when its thread's reply count
+  rises, the thread is read (`slack_read_thread`) and each reply answers the
+  request. If the read text format ever stops parsing, `channels.log` says so
+  loudly and the channel falls back to reading each watched thread.
+- **One call at a time.** The host header script fails under concurrent
+  calls, so every Slack call runs on one worker, and a `header script failed`
+  error is retried (1 s, 2 s, 4 s, 4 s). A send whose response is lost is
+  looked up in Slack rather than posted twice.
+- **"Answered elsewhere"** cannot edit the original message. The channel
+  implements `channels.Resolver`: a thread reply with the closing note, and a
+  reaction on the request — ✅ answered, ⌛ expired, 🚫 cancelled. A later
+  reply in a closed thread gets `This request is already closed (answered via
+  tui).` and goes nowhere.
+- `allow_from` is checked before the router sees a message. In the DM-to-self
+  only you can write; in a shared channel everyone else is dropped and logged
+  (without their text).
+
+### Setting it up: `orch slack`
+
+```sh
+orch slack setup     # gateway URL, conversation (default: your DM-to-self), allow_from; writes the slack section and the post-office route
+orch slack status    # config, gateway serves the slack tools, daemon gateway record, watch list and cursors   (--offline skips the gateway)
+orch slack test [--to <id>] [--wait 3m] [--no-wait] [message]   # post a test message, wait for your reply in its thread
+```
+
+All three reach Slack the way the daemon does, but on a **temporary**
+sub-gateway of their own (`POST /gateways` over `slack`, deleted on exit), so
+they work whether or not the daemon is running and never touch the daemon's
+`orch-slack` gateway. A gateway that comes up serving the slack backend with
+"0 tools" is replaced, up to three times.
+
+- **`setup`** mints the gateway, reads your profile
+  (`slack_read_user_profile`, which is who every post is made as) and lists
+  your conversations (`slack_list_user_channels`, public and private
+  channels and DMs). Pick one by number, type an id, or type text to filter
+  by name; Enter keeps the current value or, for a new channel, takes the
+  **DM-to-self** (your own user id). `allow_from` defaults to you. It then
+  writes `channels.slack` and a `{topic: post-office, channel: slack, chat:
+  <conversation>}` route with the same `yaml.Node` editor as `orch signal
+  setup` (`internal/channels/yamledit`): comments, other channels and routes,
+  and the options it does not manage (`watch_ttl`) are kept, a route that
+  already exists is not added twice, and nothing is written if the result
+  does not validate. Flags: `--gateway-url` (`$WORKINGMAN_MCP_GATEWAY_URL`),
+  `--conversation` (`$SLACK_CHANNEL`), `--allow-from` (`$SLACK_ALLOW_FROM`),
+  `--poll-interval`, `--route-topics` (default `post-office`), `--no-routes`,
+  `--non-interactive`, `--skip-validate` (no gateway; then `--conversation` is
+  required), and `--list`, which only prints the conversations and their ids.
+  `--channel <name>` manages another instance (its daemon gateway is then
+  `orch-slack-<name>`).
+- **`status`** prints the config and warns about an empty `allow_from` or a
+  missing post-office route (a `*` route counts when there is no post-office
+  route at all). Online, it checks the gateway mints with `slack` serving and
+  serves every tool the channel calls (`slack_send_message`,
+  `slack_add_reaction`, `slack_read_channel`, `slack_read_thread`), shows the
+  daemon's own gateway record (`~/.workingman/gateways/daemon/orch-slack.json`)
+  and whether that gateway is still registered, and then the channel state in
+  `~/.workingman/slack/`: the resolved conversation id, the top-level cursor,
+  the size of the sent set, and each watched request with its reply count,
+  thread cursor and open/closed state. It exits 1 when something needs
+  attention. `--sessions-root` locates `~/.workingman` the way the daemon does.
+- **`test`** posts `[orch slack test] …` to the configured conversation (or
+  `--to`) and polls its thread until you reply (default 3 minutes), then adds
+  ✅ to it and checks your reply's author is in `allow_from`. That is the
+  whole round trip the channel depends on: post, read a thread reply, react.
+  The daemon's poll ignores top-level Slack MCP posts starting with
+  `[orch slack test]`, so a running daemon neither forwards the test message
+  to the workingman agent nor watches its thread.
+
+### Slack smoke test
+
+Run once against the real Slack MCP, on the work setup (the gateway's catalog
+must have `slack`). Everything goes to your DM-to-self unless you pick
+another conversation.
+
+1. [ ] `curl http://localhost:3333/healthz` answers 200.
+2. [ ] `orch slack setup --list` prints `U… DM-to-self (you)` and your
+   channels with their ids, and writes nothing.
+3. [ ] `orch slack setup`, pressing Enter at every prompt: it reports
+   `signed in to Slack as <you> (U…)` and saves `channels.slack` with
+   `channel` and `allow_from` set to your user id, and a post-office route.
+   Run it again: nothing changes and no route is added.
+4. [ ] `orch slack status` exits 0: the gateway serves every tool the
+   channel uses, no daemon gateway is recorded yet, and the watch list is
+   empty.
+5. [ ] `orch slack test`. The `[orch slack test]` message appears in Slack;
+   reply to it **in its thread**, from the phone if you can (and note whether
+   the phone notified you about the test post: §6.7 Q1 of
+   messaging-design.md). The command prints your reply and `round trip
+   works`, and the post gets a ✅.
+6. [ ] Start the daemon (`orch --root <dir> --acp-kit <kit>`). `orch slack
+   status` now shows the daemon gateway as still registered, and the
+   conversation id resolved to your `D…` DM.
+7. [ ] Run `orch slack test --no-wait` with the daemon running: the
+   workingman agent does **not** answer the test message.
+8. [ ] Write a top-level message such as `/inbox` in the conversation: within
+   one poll interval (20 s) the router answers it in Slack.
+9. [ ] Have a task with `static_mcps: [post-office]` call `send_request` (or
+   use the TUI-inbox steps in [Post-office messages](#post-office-messages)):
+   the `❓ [req …]` post appears; `orch slack status` lists it as an open
+   watched request. Reply in its thread: the agent gets the answer, the
+   thread gets `✅ Sent to <sender>`, and status shows it closed.
+10. [ ] Answer a second request from the TUI instead: the Slack post gets
+   `✅ Answered via tui: …` in its thread and a ✅ reaction. A later reply in
+   that thread gets `This request is already closed (answered via tui).`
+11. [ ] Stop the daemon: `~/.workingman/gateways/daemon/orch-slack.json` is
+   gone, and `orch slack status` says no daemon gateway is recorded.
+
 ## Routes and topics
 
 A *topic* is a free-form tag on an outbound message. A route says "messages with
@@ -283,6 +442,11 @@ this topic go to this chat on this channel":
   answer (shown as `[wolf <work-stream>]`).
 - `workingman` — reserved for the workingman agent's own messages. Replies to a
   question go back to the chat that asked it, so a route is optional.
+- `post-office` — operator requests and notifications from agents
+  ([Post-office messages](#post-office-messages)). With no `post-office`
+  route they go to the `*` routes, which is what "send to every channel"
+  means in practice. A `post-office` route may set `notify: false` to receive
+  requests but not notifications.
 - `*` — wildcard: receives a message only when its topic has **no** exact route.
   Plain notifications (e.g. "Project blocked", sent alongside the macOS pop-up)
   have no topic and so reach only wildcard routes.
@@ -308,13 +472,20 @@ A message is handled by the first rule that applies.
    | `/sleepy` | bind this chat to the sleepy-head agent while it is catching up missed schedules (ACP only) |
    | `/agent` | bind the chat back to the workingman agent |
    | `/who` | show what the chat is bound to |
+   | `/inbox` | list the open operator requests from agents, oldest first, with their short ids |
 
    Paths such as `/etc/hosts` are not commands; they are ordinary text.
 
-2. **A pending permission request.** If an agent asked this chat for
-   permission (rule 5), the message is the answer.
+2. **An answer to a post-office request.** A reply-to of a request's message
+   (`❓ [req r1t8w] …`, found in the conversation index), or a top-level
+   message starting with `#<short id>` (`#r1t8w staging`), answers that
+   request; see [Post-office messages](#post-office-messages). A `#word` that
+   is not an open request's id is ordinary text.
 
-3. **A reply to a wolf notification.** When the message is a reply-to
+3. **A pending permission request.** If an agent asked this chat for
+   permission ([observe mode](#observe-mode-and-permissions-chat-bound-to-a-wolf)), the message is the answer.
+
+4. **A reply to a wolf notification.** When the message is a reply-to
    (`InboundMessage.ReplyToID`) of a message in the conversation index — the
    "🐺 wolf is running for …" start message, or an answer the router relayed
    from a wolf — the text goes to **that wolf session** as a prompt and the
@@ -325,13 +496,69 @@ A message is handled by the first rule that applies.
    answer relayed from it) goes to the sleepy-head session the same way,
    labelled `[sleepy-head]`.
 
-4. **The chat's binding.** By default the chat is bound to the **workingman
+5. **The chat's binding.** By default the chat is bound to the **workingman
    agent**: the text is sent to it with `Ask` and its reply is sent back. After
    `/wolf` the chat is bound to a wolf and its messages go there (replies are
    labelled `[wolf <work-stream>]`) until `/agent` — or until the wolf session
    ends, at which point the chat falls back to the workingman agent and is told
    so. The message that discovered the ended wolf is *not* forwarded to a
    different agent; resend it.
+
+## Post-office messages
+
+Agents with the `post-office` MCP send the operator **requests** (which
+expect an answer) and **notifications** (which do not). They are files under
+`~/.workingman/post-office/` (design: [messaging-design.md](messaging-design.md)
+§2–§5; operator guide: [messaging.md](messaging.md)). The orch TUI inbox
+reads them directly; when channels are configured, the daemon's
+**Dispatcher** (`internal/postoffice/dispatch.go`, started by
+`daemonChannels.start`) also sends them to the phone.
+
+**Outbound.** Every operator message in `inbox/` without a
+`deliveries/<id>.json` is rendered and sent on topic `post-office`:
+
+```
+❓ [req r1t8w] task fix-ci (workingman-messaging)
+Which bucket for the export?
+
+…body…
+
+Options: 1) staging  2) prod
+Reply to this message, or send #r1t8w <answer>. Expires in 24h.
+```
+
+Notifications start with `📣 [note …]` and have no last two lines. Messages
+to agents (Step-Up) are never sent to channels. Each route's outcome is
+recorded in `deliveries/<id>.json` (which the TUI shows as "sent to signal,
+whatsapp"), and each sent request's message ids are registered in the
+conversation index as kind `post-office`. A failed send is retried after 30 s,
+2 m and 10 m, then recorded as failed; the other routes are not held up. A
+daemon restart mid-send can cause at most one duplicate post per channel. The
+Dispatcher passes over the whole store on startup, and on every change (with
+a 5 s poll as fallback), so nothing sent or closed while it was down is
+missed.
+
+**Answering.** Reply to the request's message, or send `#<short id> <answer>`
+from anywhere in the chat. The router claims the request (`Store.Claim`,
+first answer wins) and replies `✅ Sent to <sender>`. If the request had
+options, `1`, `2` … or the option's text select it; any other text is still a
+valid answer. If someone answered first (in the TUI, or another channel), or
+the request was cancelled or has expired, the reply says so (`Already
+answered via tui.`) and nothing is sent to the agent. `/inbox` lists what is
+still open.
+
+**Closing notes.** When post-office finalises a request (it appears in
+`done/`), every *other* delivery gets a reply to its original message:
+
+- `✅ [req r1t8w] Answered via <tui|signal|…>: <first 200 characters>`
+- `⌛ [req r1t8w] No longer needed — <the sender's reason>`
+- `⌛ [req r1t8w] Expired — the agent stopped waiting`
+
+The chat that answered gets no note. A channel that implements the optional
+`channels.Resolver` interface ([Slack](#slack): a thread reply plus a reaction) is
+resolved through it instead of a plain reply. Notifications get no closing
+note. Once every note is sent, the record is marked `closed_notified`, and it
+is removed 30 days later.
 
 ## Observe mode and permissions (chat bound to a wolf)
 
@@ -402,7 +629,15 @@ sessions through `acpchat.Attach`.
 `router_permission_answered`, `router_permission_timeout`,
 `router_permission_rejected`, `router_reply_unroutable`, `router_send_error`,
 `router_index_error`, `router_attach_error`, `router_primed`,
-`router_prime_error`.
+`router_prime_error`, `router_postoffice_answered`,
+`router_postoffice_already_closed`, `router_postoffice_not_found`,
+`router_postoffice_ambiguous`, `router_postoffice_unavailable`,
+`router_postoffice_error`.
+
+The Dispatcher logs `postoffice_dispatcher_start`, `postoffice_delivered`,
+`postoffice_delivery_error`, `postoffice_closed_notified`,
+`postoffice_close_error`, `postoffice_index_error` and
+`postoffice_dispatch_error` (ids and channel names only, never text).
 
 Each line identifies the chat as `<channel>:<first 8 hex digits of the SHA-256
 of the chat id>` and carries message *lengths*, never the message text or the
@@ -505,6 +740,8 @@ Free tunnels change their URL on restart; re-register the callback when it does.
 | Wolf never starts working under `--headless` | nobody sends a wolf its opening prompt headless; run the TUI |
 | Reply says "I cancelled it" | the turn exceeded `router.turn_timeout` |
 | Signal: `orch signal status` / `test` fails, or no messages arrive | signal-cli daemon not running, `http_url` mismatch, account not registered, sender not on `allow_from`: see [signal.md troubleshooting](signal.md#troubleshooting) |
+| Slack: `orch slack setup` / `status` cannot mint a gateway, or the slack server has 0 tools | standalone-codemode not running at `gateway_url`, the catalog has no `slack` (work setup only), or its backend failed to attach (re-run after a minute) |
+| Slack: requests are posted but answers are ignored | the answer was not a **thread** reply, its author is not in `allow_from` (`channels.log`: `dropped message from a sender not in allow_from`), or the request is older than `watch_ttl`; `orch slack status` shows the watch list |
 | A bridge-mode channel stopped after "logged out" | WhatsApp unlinked the device (exit 78); run `orch whatsapp pair --reset` |
 
 Signal has no tunnel, webhook or 24-hour window to go wrong; its failures are
@@ -512,7 +749,8 @@ signal-cli being down or unregistered and the allowlist.
 
 Logs: the audit log (`router_*`, `wolf_*`, `channel_*` events), `channels.log`
 beside it (webhook and send details, ids masked), `whatsapp-bridge.log` for the
-bridge backend. `orch whatsapp status` is the quickest health check.
+bridge backend. `orch whatsapp status` (or `orch signal status`, `orch slack
+status`) is the quickest health check.
 
 ## Limits
 

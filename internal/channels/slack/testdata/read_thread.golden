@@ -1,0 +1,19 @@
+{
+  "parent": {
+    "ts": "1795141398.745179",
+    "user_id": "U0CC1K1MFNX",
+    "user_name": "Jim Clark",
+    "text": "[workingman research-slack-mcp] test post to self-DM — please ignore. Checking send_message return value.",
+    "reactions": "white_check_mark (1)",
+    "via_mcp": true
+  },
+  "replies": [
+    {
+      "ts": "1795141406.120249",
+      "user_id": "U0CC1K1MFNX",
+      "user_name": "Jim Clark",
+      "text": "[workingman research] thread reply test — please ignore.",
+      "via_mcp": true
+    }
+  ]
+}

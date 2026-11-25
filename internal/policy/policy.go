@@ -75,6 +75,29 @@ func (r Rule) CLIArgs(sandboxName string) []string {
 	}
 }
 
+// RemoveCLIArgs returns the argv that removes this rule's resource from the
+// named sandbox's policy:
+//
+//	["policy", "rm", "<kind>", "--sandbox", <sandboxName>, "--resource", <resource>]
+//
+// The action is not part of the command: sbx removes the rule for that
+// resource whatever its decision. Caller prepends the sbx binary path.
+func (r Rule) RemoveCLIArgs(sandboxName string) []string {
+	return []string{
+		"policy",
+		"rm",
+		string(r.Kind),
+		"--sandbox", sandboxName,
+		"--resource", r.Resource,
+	}
+}
+
+// ListCLIArgs returns the argv that lists the named sandbox's policy rules:
+// ["policy", "ls", "--sandbox", <sandboxName>].
+func ListCLIArgs(sandboxName string) []string {
+	return []string{"policy", "ls", "--sandbox", sandboxName}
+}
+
 // encodeSep separates the three fields when a rule is packed into a single
 // string for repeatable CLI flags. Colon is chosen because it's already
 // reserved inside the action/kind enums (neither contains one) and because
