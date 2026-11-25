@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="860" viewBox="0 0 1280 860" font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <title>workingman GUI wireframe: agents map</title>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+    <marker id="a-helper" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/>
+    </marker>
+    <marker id="a-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c2410c"/>
+    </marker>
+    <style>
+      .frame { fill: #ffffff; stroke: #9ca3af; }
+      .muted { fill: #6b7280; }
+      .h1 { font-size: 18px; font-weight: bold; fill: #111827; }
+      .h2 { font-size: 13px; font-weight: bold; fill: #111827; }
+      .mono { font-family: Menlo, Consolas, monospace; font-size: 10px; }
+      .lane { fill: #f9fafb; stroke: #d1d5db; }
+      .wf { fill: #ffffff; stroke: #374151; }
+      .wf-task { fill: #eff6ff; stroke: #1d4ed8; stroke-width: 2; }
+      .helper { fill: #f5f3ff; stroke: #7c3aed; stroke-width: 2; }
+      .edge { stroke: #374151; stroke-width: 1.5; fill: none; }
+      .hedge { stroke: #7c3aed; stroke-width: 1.5; fill: none; stroke-dasharray: 6 3; }
+      .wedge { stroke: #c2410c; stroke-width: 1.5; fill: none; stroke-dasharray: 2 3; }
+      .gap { fill: #fef2f2; stroke: #b91c1c; stroke-dasharray: 4 3; }
+      .note { fill: #fefce8; stroke: #ca8a04; stroke-dasharray: 4 3; }
+      .chip { fill: #ffffff; stroke: #047857; }
+      .chip-warn { fill: #fffbeb; stroke: #b45309; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1279" height="859" class="frame"/>
+
+  <!-- top bar -->
+  <rect x="0.5" y="0.5" width="1279" height="44" fill="#111827"/>
+  <text x="18" y="28" fill="#ffffff" font-size="16" font-weight="bold">workingman</text>
+  <text x="140" y="28" fill="#d1d5db">Projects</text>
+  <text x="220" y="28" fill="#d1d5db">Sandboxes</text>
+  <text x="310" y="28" fill="#ffffff" font-weight="bold">Agents</text>
+  <rect x="304" y="38" width="54" height="3" fill="#60a5fa"/>
+  <text x="380" y="28" fill="#d1d5db">Inbox</text>
+  <text x="456" y="28" fill="#d1d5db">Timeline</text>
+
+  <text x="24" y="76" class="h1">Agents</text>
+  <text x="104" y="76" class="muted">who builds, runs and polices task-agent workloads · GET /api/v1/agents + sessions?kind=…</text>
+  <rect x="980" y="60" width="284" height="24" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="990" y="77" class="muted" font-size="11">overlay: [✓] capabilities  [ ] mounts  [ ] live</text>
+
+  <!-- HELPER LANE (top) -->
+  <rect x="16" y="96" width="1248" height="214" rx="8" class="lane"/>
+  <text x="30" y="118" class="h2" fill="#7c3aed">Workload helpers (always-on / on-demand, belong to no project)</text>
+
+  <!-- workingman -->
+  <rect x="34" y="132" width="360" height="164" rx="8" class="helper"/>
+  <text x="48" y="154" class="h2">workingman agent</text>
+  <circle cx="370" cy="150" r="6" fill="#22c55e"/>
+  <text x="48" y="172" font-size="11">Front door: turns a request (TUI tab, WhatsApp,</text>
+  <text x="48" y="187" font-size="11">Signal, Slack) into project.md / intake/*.md, or</text>
+  <text x="48" y="202" font-size="11">edits project.yaml / tasks/*.yaml after confirming.</text>
+  <text x="48" y="224" class="muted" font-size="10">sandbox workingman-agent · persistent · interactive</text>
+  <rect x="48" y="232" width="98" height="18" rx="9" class="chip-warn"/><text x="56" y="245" font-size="10" fill="#b45309">orch roots rw</text>
+  <rect x="152" y="232" width="122" height="18" rx="9" class="chip"/><text x="160" y="245" font-size="10">state, audit ro</text>
+  <rect x="278" y="232" width="100" height="18" rx="9" class="chip-warn"/><text x="286" y="245" font-size="10" fill="#b45309">dynamic MCPs</text>
+  <rect x="48" y="258" width="332" height="30" rx="4" class="gap"/>
+  <text x="56" y="271" font-size="10" fill="#b91c1c">GAP: does not choose capabilities for others; its own</text>
+  <text x="56" y="284" font-size="10" fill="#b91c1c">limits on what it edits are by prompt, not by mount.</text>
+
+  <!-- sleepy-head -->
+  <rect x="460" y="132" width="360" height="164" rx="8" class="helper"/>
+  <text x="474" y="154" class="h2">sleepy-head</text>
+  <circle cx="796" cy="150" r="6" fill="#9ca3af"/>
+  <text x="474" y="172" font-size="11">After sleep / downtime: lists cron projects that</text>
+  <text x="474" y="187" font-size="11">missed ticks; with explicit OK triggers exactly one</text>
+  <text x="474" y="202" font-size="11">catch-up each (writes catchup-request).</text>
+  <text x="474" y="224" class="muted" font-size="10">sandbox sleepy-head · interactive · only when behind + on AC</text>
+  <rect x="474" y="232" width="200" height="18" rx="9" class="chip"/><text x="482" y="245" font-size="10">rw: only the behind projects' dirs</text>
+  <rect x="680" y="232" width="100" height="18" rx="9" class="chip"/><text x="688" y="245" font-size="10">default MCPs</text>
+  <rect x="474" y="258" width="332" height="30" rx="4" class="gap"/>
+  <text x="482" y="271" font-size="10" fill="#b91c1c">GAP: a scheduling helper, not a capability one. It</text>
+  <text x="482" y="284" font-size="10" fill="#b91c1c">shapes WHEN workloads run, not what they may do.</text>
+
+  <!-- step-up -->
+  <rect x="886" y="132" width="364" height="164" rx="8" class="helper"/>
+  <text x="900" y="154" class="h2">step-up</text>
+  <circle cx="1226" cy="150" r="6" fill="#22c55e"/>
+  <text x="900" y="172" font-size="11">Runtime escalation: a task/commit agent asks for</text>
+  <text x="900" y="187" font-size="11">more network/filesystem; step-up judges, asks the</text>
+  <text x="900" y="202" font-size="11">operator, files a typed request; daemon executor applies.</text>
+  <text x="900" y="224" class="muted" font-size="10">sandbox step-up · persistent · driven by the daemon</text>
+  <rect x="900" y="232" width="112" height="18" rx="9" class="chip"/><text x="908" y="245" font-size="10">rw: requests/ only</text>
+  <rect x="1018" y="232" width="112" height="18" rx="9" class="chip"/><text x="1026" y="245" font-size="10">post-office, static</text>
+  <rect x="1136" y="232" width="100" height="18" rx="9" class="chip"/><text x="1144" y="245" font-size="10">no orch roots</text>
+  <rect x="900" y="258" width="336" height="30" rx="4" fill="#ecfdf5" stroke="#047857"/>
+  <text x="908" y="271" font-size="10" fill="#047857">The only helper that grants capability — and it</text>
+  <text x="908" y="284" font-size="10" fill="#047857">cannot apply it itself (executor + operator + 10/h).</text>
+
+  <!-- WORKFLOW LANE -->
+  <rect x="16" y="324" width="1248" height="300" rx="8" class="lane"/>
+  <text x="30" y="346" class="h2">Project workflow agents (one sandbox each, per project)</text>
+
+  <!-- project -->
+  <rect x="34" y="372" width="140" height="78" rx="6" class="wf"/>
+  <text x="46" y="392" class="h2">project</text>
+  <text x="46" y="408" font-size="10">project.md → project.yaml</text>
+  <text x="46" y="424" class="mono" fill="#6b7280">&lt;ws&gt;-project</text>
+  <text x="46" y="440" font-size="10" class="muted">default MCPs</text>
+
+  <!-- planning -->
+  <rect x="206" y="372" width="186" height="108" rx="6" class="wf" stroke-width="2"/>
+  <text x="226" y="392" class="h2">planning</text>
+  <text x="226" y="408" font-size="10">writes tasks/*.yaml</text>
+  <text x="226" y="424" class="mono" fill="#6b7280">&lt;ws&gt;</text>
+  <rect x="212" y="432" width="174" height="40" rx="4" fill="#ecfdf5" stroke="#047857"/>
+  <text x="218" y="447" font-size="10" fill="#047857" font-weight="bold">chooses per-task capabilities</text>
+  <text x="218" y="462" class="mono" fill="#047857">static_mcps·policies·model</text>
+
+  <!-- tasks -->
+  <rect x="430" y="364" width="190" height="40" rx="6" class="wf-task"/>
+  <text x="442" y="389" class="h2">task  api-read-endpoints</text>
+  <rect x="430" y="412" width="190" height="40" rx="6" class="wf-task"/>
+  <text x="442" y="437" class="h2">task  sse-events</text>
+  <rect x="430" y="460" width="190" height="40" rx="6" class="wf-task"/>
+  <text x="442" y="485" class="h2">task  session-relay</text>
+  <text x="430" y="518" class="muted" font-size="10">≤ max_parallel_tasks · own worktree + sandbox</text>
+
+  <!-- commit -->
+  <rect x="666" y="400" width="160" height="78" rx="6" class="wf"/>
+  <text x="678" y="420" class="h2">commit</text>
+  <text x="678" y="436" font-size="10">queue head → rebase,</text>
+  <text x="678" y="450" font-size="10">verify, ff-only merge</text>
+  <text x="678" y="468" class="mono" fill="#6b7280">inherits task caps</text>
+
+  <!-- project branch -->
+  <rect x="870" y="412" width="124" height="54" rx="6" fill="#111827"/>
+  <text x="882" y="434" fill="#ffffff" class="h2">project</text>
+  <text x="882" y="452" fill="#ffffff" class="h2">branch</text>
+
+  <!-- review -->
+  <rect x="1040" y="360" width="200" height="78" rx="6" class="wf"/>
+  <text x="1052" y="380" class="h2">review</text>
+  <text x="1052" y="396" font-size="10">PR poll → fix / push tasks</text>
+  <text x="1052" y="412" class="mono" fill="#6b7280">&lt;ws&gt;-review</text>
+  <text x="1052" y="428" font-size="10" fill="#047857">hard-coded: github + 2 hosts</text>
+
+  <!-- archive -->
+  <rect x="1040" y="460" width="200" height="62" rx="6" class="wf"/>
+  <text x="1052" y="480" class="h2">archive</text>
+  <text x="1052" y="496" font-size="10">cleanup: true → ≤1 commit+push</text>
+  <text x="1052" y="512" font-size="10" fill="#047857">hard-coded: push host only</text>
+
+  <!-- wolf -->
+  <rect x="560" y="550" width="300" height="62" rx="6" fill="#fff7ed" stroke="#c2410c" stroke-width="2"/>
+  <text x="572" y="570" class="h2" fill="#c2410c">wolf (interactive)</text>
+  <text x="572" y="586" font-size="10">any block → diagnose, edit project/task files,</text>
+  <text x="572" y="600" font-size="10">re-run tasks · &lt;ws&gt;-wolf · dynamic MCPs</text>
+
+  <!-- workflow edges -->
+  <path d="M174,410 L204,410" class="edge" marker-end="url(#a)"/>
+  <path d="M392,400 L428,384" class="edge" marker-end="url(#a)"/>
+  <path d="M392,426 L428,432" class="edge" marker-end="url(#a)"/>
+  <path d="M392,452 L428,478" class="edge" marker-end="url(#a)"/>
+  <path d="M620,384 L664,426" class="edge" marker-end="url(#a)"/>
+  <path d="M620,432 L664,438" class="edge" marker-end="url(#a)"/>
+  <path d="M620,480 L664,452" class="edge" marker-end="url(#a)"/>
+  <path d="M826,439 L868,439" class="edge" marker-end="url(#a)"/>
+  <path d="M994,430 L1038,404" class="edge" marker-end="url(#a)"/>
+  <path d="M994,452 L1038,488" class="edge" marker-end="url(#a)"/>
+  <!-- review feeds tasks back -->
+  <path d="M1140,360 C1140,334 560,334 525,362" class="edge" stroke-dasharray="5 3" marker-end="url(#a)"/>
+  <text x="790" y="356" font-size="10" class="muted">pr-comment / pr-check / pr-push tasks</text>
+  <!-- wolf edges -->
+  <path d="M525,500 C525,560 540,580 558,580" class="wedge" marker-end="url(#a-warn)"/>
+  <path d="M746,478 L726,548" class="wedge" marker-end="url(#a-warn)"/>
+  <text x="868" y="590" font-size="10" fill="#c2410c">blocked (retries exhausted,</text>
+  <text x="868" y="604" font-size="10" fill="#c2410c">partial integration, :wolf)</text>
+
+  <!-- helper → workflow edges -->
+  <path d="M150,296 C150,330 110,340 104,370" class="hedge" marker-end="url(#a-helper)"/>
+  <text x="160" y="322" font-size="10" fill="#7c3aed">project.md</text>
+  <path d="M260,296 C270,330 290,340 296,370" class="hedge" marker-end="url(#a-helper)"/>
+  <text x="280" y="322" font-size="10" fill="#7c3aed">intake/*.md</text>
+  <path d="M640,296 C640,320 330,330 300,370" class="hedge" marker-end="url(#a-helper)"/>
+  <text x="470" y="322" font-size="10" fill="#7c3aed">catchup-request → cron replan</text>
+  <path d="M1000,296 C1000,330 600,520 622,480" class="hedge" marker-end="url(#a-helper)"/>
+  <path d="M1060,296 C1060,340 780,370 760,398" class="hedge" marker-end="url(#a-helper)"/>
+  <text x="1010" y="318" font-size="10" fill="#7c3aed">sbx policy + persisted policies:</text>
+
+  <!-- bottom: proposal notes -->
+  <rect x="16" y="638" width="612" height="206" rx="8" class="note"/>
+  <text x="30" y="660" class="h2">What this screen shows (today's facts)</text>
+  <text x="30" y="680" font-size="11">• Capability is decided in four places: planning (by prompt), the daemon</text>
+  <text x="30" y="696" font-size="11">  (hard-coded review/archive/step-up grants), the runner (mounts, which</text>
+  <text x="30" y="712" font-size="11">  kinds get a dynamic gateway) and step-up (runtime, operator-approved).</text>
+  <text x="30" y="728" font-size="11">• Tool permissions inside a sandbox are bypassed; the sandbox, its</text>
+  <text x="30" y="744" font-size="11">  policies and the MCP gateway are the only boundary.</text>
+  <text x="30" y="760" font-size="11">• Clicking any box opens its sandbox card (inputs → capabilities → output).</text>
+  <text x="30" y="776" font-size="11">• Green = granted by a narrow rule; amber = open-ended (rw roots, mcp-add).</text>
+  <text x="30" y="792" font-size="11">• Helpers that write files (purple dashed) go through the same file</text>
+  <text x="30" y="808" font-size="11">  contract as the GUI: project.md, intake/, catchup-request.</text>
+  <text x="30" y="830" font-size="10" class="muted">Source: survey §7.1–7.4, §10, §11.</text>
+
+  <rect x="652" y="638" width="612" height="206" rx="8" class="gap"/>
+  <text x="666" y="660" class="h2" fill="#b91c1c">Gaps the GUI should show honestly (not hide)</text>
+  <text x="666" y="680" font-size="11">• None of workingman / sleepy-head / step-up shapes a task's INITIAL</text>
+  <text x="666" y="696" font-size="11">  capabilities; planning does, by prompt, with no review step.</text>
+  <text x="666" y="712" font-size="11">• Task agents get a dynamic gateway by default (mcp-add over the whole</text>
+  <text x="666" y="728" font-size="11">  catalog), so static_mcps is a floor, not a ceiling, unless --mcp-gateway-static.</text>
+  <text x="666" y="744" font-size="11">• Skills: Plan.Skills exists but nothing sets it; the card shows "none".</text>
+  <text x="666" y="760" font-size="11">• Only claude-acp harness exists; "harness choice" is one value today.</text>
+  <text x="666" y="776" font-size="11">• Step-up only reaches sandboxes granted post-office at planning time.</text>
+  <text x="666" y="798" font-size="11" font-weight="bold">Possible future (not today): a "capability review" step where</text>
+  <text x="666" y="814" font-size="11" font-weight="bold">workingman or step-up checks the planner's grants before launch,</text>
+  <text x="666" y="830" font-size="11" font-weight="bold">shown here as a gate between planning and task.</text>
+</svg>

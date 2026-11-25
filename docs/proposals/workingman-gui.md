@@ -13,7 +13,6 @@ code directly. Code references were checked against `193a052`.
 
 <!-- Sections to be added by later tasks:
   - TUI vs GUI
-  - GUI design (screens, wireframes)
   - Pros, cons, risks and open questions
   - Suggested incremental path
 -->
@@ -1161,3 +1160,334 @@ TUI changes become cheap once the API exists, and each is optional:
 What the TUI should keep doing itself: keyboard flow, rendering, OSC 52
 copy, terminal-tab focus (`tab_attach.go`) and, until §A.5.4 lands, priming
 sessions.
+
+---
+
+## GUI design
+
+This section describes the screens of a local web GUI built on the API above.
+It is a design sketch: wireframes and the data behind each screen. It does not
+specify an implementation. Each screen names the endpoints and events it reads
+(§A.2, §A.3) and the actions it can take (§A.4), so a reader can check that it
+needs nothing the API does not already offer.
+
+### G.0 Principles
+
+1. **The project is the unit of attention, and the sandbox is the unit of
+   work.** Every screen is anchored on one of these. A task is shown as the
+   link between them: a node in its project's graph, and the workload that
+   runs in exactly one sandbox at a time (survey §5, §8.3).
+2. **Show the workload, not only the status.** The TUI already shows a task's
+   model, MCPs and rule count in its Tasks list (survey §12.1). The GUI goes
+   further: each sandbox gets a card with its inputs, its capabilities and its
+   output, and the card is one click from everywhere (§G.3).
+3. **Make absence visible.** Least privilege is about what a sandbox *cannot*
+   do. A list of grants alone does not show that, so the GUI also draws what
+   was left out: catalog MCP servers that were not granted, host paths that
+   are not mounted, and a `deny **` network baseline. Open-ended grants, such
+   as a dynamic gateway (`mcp-add`) or a writable orch root, are marked amber.
+4. **Same verbs as the TUI.** Buttons map one-to-one onto §A.4.7. A disabled
+   button shows the TUI's own refusal text, which the API returns as
+   `invalid_state` (§A.4.1). The GUI adds no action the TUI cannot express,
+   except task retry (§A.4.4), which closes a known gap (survey §17.3).
+5. **Live by default.** One SSE connection (`GET /api/v1/events`, §A.3)
+   drives every screen. Lists are fetched once with their `cursor` and then
+   patched by id from events. A status pill in the header shows daemon state,
+   stream health and the current `seq`.
+
+Global layout: a top bar with **Projects · Sandboxes · Agents · Inbox ·
+Timeline**, an inbox badge (open operator requests), and the daemon/stream
+status pill. The Projects screen has a left rail of work streams, like the
+TUI's gallery, with the same `hidden` filter.
+
+### G.1 Project view: task graph, status and commit queue
+
+![Project view wireframe](workingman-gui/project-graph.svg)
+
+*Wireframe: [`workingman-gui/project-graph.svg`](workingman-gui/project-graph.svg)*
+
+**Purpose.** Answers "how is this project doing, what is running, and in
+what order will the work land?". This is the screen the user cares about
+most for tracking how tasks relate to their project.
+
+**Layout.**
+
+- **Work-stream rail (left).** One card per project, with a status pill, a
+  stacked progress bar from `task_counts`, and the badges the TUI draws as
+  border colours: cron, PR watch, archive-ready, load error (survey §12.1).
+  A blocked project shows "wolf in flight · join ▸" when
+  `live.wolf_in_flight` is set. The rail is fed by `GET /projects` and
+  `project.*` events.
+- **Header.** Name, status, branch, repos, `max_parallel_tasks`, `verify`,
+  then the project actions: Stop/Start, Wolf…, Review, Queue intake, Open
+  shell (§A.4.2, §A.4.6). A greyed button explains itself. For example,
+  Review is enabled only on `idle`.
+- **Task graph (centre).** It is drawn from `GET /projects/{id}/graph`, which
+  is the scheduler's own `taskgraph.Load` / `Ready()` / `Runnable()` /
+  `Queued()` output (§A.2), so the GUI never re-derives dependency or
+  readiness rules. Nodes are laid out left to right by dependency depth.
+  Edges are `depends_on`. Node colour is task status. **`success` is drawn as
+  "queued for integration", not as done**, because the survey points out
+  that people misread it (survey §4.3). Each node shows a second line with
+  the most useful derived fact: `queue_position`, `waiting_on`, attempt
+  `n/3`, "sandbox retained", or a conflict re-run badge from `integration`.
+  An edge out of a failed dependency is drawn dashed red, so a stuck
+  subgraph can be seen at a glance. `deferred{overlap,cap,power}` from
+  `live` appears as a dashed outline with a tooltip ("deferred: overlaps
+  `snapshot-model` on `internal/api`"). Graph errors (`taskgraph_error`,
+  repairs) appear as a banner above the graph.
+- **Commit queue lane (right).** A vertical line for the project branch.
+  Above it, the queue in `Queued()` order (by `succeeded_at`). The head
+  shows the commit agent's progress (rebase → verify → ff-only) while
+  `live.integrating` names it. Below the line, the landed commits, newest
+  first, from each committed task's `commits[]`, down to the project's base.
+  Integration failures show here with `integration.result`, `files` and the
+  redacted `output` tail, and the task they send back to `ready`. The lane
+  is fed by `queue.updated`, `task.status` and `session.*` events.
+- **Selected-task strip (bottom).** Clicking a node shows a mini sandbox card
+  (image, model, MCPs, network rules, output branch) and a live transcript
+  preview. Buttons: **Watch (ACP)**, **Open in my terminal**, **Full sandbox
+  card ▸**, and **Retry** for `failed`/`blocked` tasks (§A.4.4, option R1).
+  For one-shot kinds the prompt box is disabled with the reason ("persistent
+  sessions only"), the same rule as the TUI (survey §9.1).
+
+**Why a graph plus a lane.** The graph answers *what can run*; the lane
+answers *what lands, and in what order*. These are different orderings: the
+scheduler runs tasks in `Runnable()` order (re-runs first, then most
+transitive dependents), but they land in `succeeded_at` order (survey §4.4,
+§5). The TUI draws a dependency tree above its task list (`taskDepTree`) and
+a one-line "running … · integrating … · queued …" summary in the project
+detail (`tui/project_detail.go:182-215`), but it does not show the landed
+commits or the integration steps. Seeing the graph and the lane side by side
+explains, for example, why a finished task is not yet on the branch.
+
+### G.2 Task → sandbox mapping: watch, join, interact
+
+Every task node, every sandbox card and every session row has the same three
+ways in, ordered from least to most capability:
+
+| Control | What it does | API | Available for |
+|---|---|---|---|
+| **Watch** | Live ACP transcript, replayed from `stream.log`, observe only | `GET /sessions/{sid}/acp?mode=observe` (§A.5.2) | every live ACP session |
+| **Prompt** | Send a message into the conversation; cancel a turn | `mode=interactive`, `{"t":"prompt"}` | persistent kinds only: wolf, workingman, sleepy-head (survey §9.1) |
+| **Open in my terminal** | `:session` / `:workspace` equivalent: a host tab running the sandbox's interactive claude, or a shell in the worktree | `POST …/actions/open-session`, `open-shell` (§A.4.6) | integrated daemon mode |
+| **Shell in sandbox** | In-browser PTY, `sbx exec -it` equivalent | `GET /sandboxes/{name}/pty` (§A.5.3) | only with `--api-pty` and the `pty` scope; never for `workingman-agent` or `step-up` |
+
+The mapping itself has to be visible both ways. From a task you reach its
+sandbox through the task's `session` and `sandbox` back-links (§A.1.2). From a
+sandbox you reach its task through the session's `task_path`. The
+**Sandboxes** screen is a flat list of `GET /sandboxes`: live sessions and
+retained sandboxes. Each row shows kind, project, task, liveness (`sbx ls`),
+age and grant count. It answers questions the project view cannot, such as
+"which sandboxes are still around after failures?" and "which `:session`
+sandboxes did nothing remove?" (survey §9.3).
+
+A transcript is lost when its session ends, because the wrapper deletes the
+session directory (survey §8.2). The GUI therefore labels a live transcript
+"live — not kept after the session ends" and offers **Save transcript**,
+which saves what the browser has rendered. Whether the server should keep
+transcripts is an open question (§A.5.2).
+
+### G.3 Sandbox card: inputs → capabilities → output
+
+![Sandbox card wireframe](workingman-gui/sandbox-card.svg)
+
+*Wireframe: [`workingman-gui/sandbox-card.svg`](workingman-gui/sandbox-card.svg)*
+
+**Purpose.** Makes it obvious that each sandbox is a distinct workload with
+its own capability set and one intended output. The card reads left to
+right, like a function signature: what went in, what it was allowed to use,
+and what came out. The data is today split across the task file,
+`session.json`, the gateway record and the harness record (survey §17.7).
+The card is where it comes together, through `GET /projects/{id}/tasks/{name}`
+(`capabilities`, `output`), `GET /sessions/{sid}` (`sandbox`, `gateway`)
+and `GET /sessions/{sid}/prompt`.
+
+**① Inputs** (read-only on the card):
+
+- **Input prompt.** The rendered `.orch/instructions.md` and
+  `.orch/context.yaml`. The opening prompt is always "Read
+  .orch/instructions.md and .orch/context.yaml…" (survey §7.1), so these two
+  files *are* the workload's input.
+- **Task metadata.** Project, status and attempts, `depends_on` (with each
+  dependency's state), `touches`, `areas`, `source` (for PR fix tasks: which
+  comment or check), `base`, worktree, and the full description. The card
+  also says **who chose these values**. For a task that is the planning
+  agent. For review fix tasks it is the review agent.
+- **Mounts.** What the sandbox sees of the host: the task worktree,
+  read-write. It also lists the sensitive paths that are *not* mounted (orch
+  roots, `~/.ssh`, `~/.workingman`), so their absence is visible.
+- A note on how to change inputs: queue an intake (the planner re-plans), or
+  `PATCH` `description`/`depends_on`/`touches`/`areas` while the task is not
+  running (§A.4.4).
+
+**② Capabilities** (inside a green "sandbox boundary" frame):
+
+| Row | Source | Notes |
+|---|---|---|
+| Harness | `harness` → `resolved_harness`, kit | only `claude-acp` exists today (survey §7.1) |
+| Model | `model` → `resolved_model` | LLM credentials stay on the host (survey §8.5) |
+| MCP servers | `gateway.servers`, `gateway.dynamic` | granted servers as solid chips; well-known catalog servers that were *not* granted (`post-office`, `logseq`, …) as hatched chips; a **dynamic** gateway as an amber "mcp-add" chip, because task gateways are dynamic by default and `static_mcps` is then a floor, not a ceiling (`MCPGatewayDynamic`, `runner.go`; survey §10) |
+| Skills | `Plan.Skills` | shows "none". The field exists, but nothing sets it today (survey §8.5). |
+| Network policy | `policies[]` + gateway rules | rules in application order. `deny` in red, `allow` in green, a broad `allow **` in amber. |
+| Filesystem policy | `policies[]` of type `filesystem` | |
+| Runtime changes | `step_up_op` audit events for this sandbox, plus the inbox message that approved each one | a step-up grant persisted into `policies:` is tagged "added at runtime by step-up, approved 08:59 via whatsapp" |
+
+The card header has a **grant count**: the number of grants beyond the
+baseline (harness, model, gateway port, LLM proxy), and how many of them are
+open-ended. It is not a score. It exists so that two cards can be compared
+quickly, and so that a task with `deny **` + one allow looks different from a
+task on the default "balanced" policy (`planning.tmpl`).
+
+**③ Output:**
+
+- **Task branch** `wm/<project-branch>/<task>`, with commits ahead of `base`.
+- **Result.** The task agent's status (`success` means "enters the commit
+  queue").
+- **Integration.** The commit agent's steps (queued → rebase → verify →
+  ff-only), shown as a small stepper with any `integration` failure. The
+  commit agent runs in a separate sandbox (`<ws>-<task>-commit`) that
+  inherits this task's capabilities (survey §7.2). The card links to it.
+- **Lands on.** The project branch, with `commits[]`, `summary` and
+  `created_files` once `committed`.
+- **Sandbox after exit.** Removed on success, kept on `failed`/`blocked`, or
+  kept by `save_sandbox` (a checkbox, §A.4.4).
+- `touches_actual` against `touches`: a `touches_exceeded` warning appears
+  here, because it means the workload wrote outside its declared area.
+
+The arrows between the columns are deliberate. The user's mental model
+should be "a prompt and metadata go in, a commit comes out, and the green box
+is everything it could touch in between".
+
+### G.4 Agents view: who builds least-privilege workloads
+
+![Agents map wireframe](workingman-gui/agents-map.svg)
+
+*Wireframe: [`workingman-gui/agents-map.svg`](workingman-gui/agents-map.svg)*
+
+**Purpose.** Shows all ten agent kinds (survey §7.1) as one system. It
+separates the agents that *do project work* from the three that *shape and
+police the workloads*, and shows where each capability decision is made.
+Data: `GET /agents` (§A.1.7) and `GET /sessions?kind=…`, plus each kind's
+capability facts from the survey, which are static and shipped with the GUI.
+
+**Top lane: workload helpers** (purple, project-less):
+
+- **workingman agent.** The front door. It turns a request from the TUI tab or
+  a channel (WhatsApp, Signal, Slack) into `project.md` or `intake/*.md`, or
+  edits `project.yaml` / `tasks/*.yaml` after it confirms with the human. Its
+  own chips show the truth: **orch roots read-write** (amber), state, audit
+  and sessions read-only, and a dynamic gateway (survey §7.3).
+- **sleepy-head.** Detects missed cron ticks and, with an explicit OK, writes
+  one `catchup-request` per project. Its writable mounts are only the
+  projects that are behind.
+- **step-up.** Runtime escalation. A task or commit agent asks for more
+  network or filesystem access through post-office. Step-up judges the
+  request and asks the operator. A daemon-side executor applies the change
+  after it validates it, after the operator approves the exact change line,
+  and within rate limits. Step-up's own sandbox holds only `requests/`
+  (writable) and a static `post-office` gateway (survey §7.3). It is drawn
+  green because it is the one helper that *grants* capability and cannot
+  apply the grant itself.
+
+**Middle lane: project workflow agents.** project → planning → task ×N →
+commit → project branch, with review and archive after the branch, and the
+wolf below, reachable from any block. Review feeds fix and push tasks back
+into the task column. Each box shows its sandbox name (`<ws>-…`) and where
+its capabilities come from. Planning is the box that **chooses each task's
+`static_mcps`, `policies`, `model` and `harness`**, so it is highlighted as
+the place where least privilege is decided first (survey §7.4). Review and
+archive are tagged "hard-coded" (github + two hosts; the push host only).
+
+**Edges from helpers to the workflow** (purple dashed) are file writes:
+`project.md` → project agent, `intake/*.md` → planning, `catchup-request` →
+cron replan, and step-up's `sbx policy` + persisted `policies:` → a live task
+or commit sandbox. The same file contract the GUI uses (§A.4) is drawn as the
+helpers' interface, which makes the point that the GUI is one more client of
+it.
+
+**Gaps.** The brief asks to present workingman, sleepy-head and step-up as
+agents that help *create* good, minimal task workloads. The survey found that
+this is only partly true today, and the GUI should say so on this screen,
+not hide it:
+
+- None of the three shapes a task's *initial* capabilities. The planning
+  agent does that, by prompt, and no step reviews its choices (survey §7.4).
+  The workingman agent only edits files on request. Sleepy-head is a
+  scheduling helper: it shapes *when* workloads run, not what they may do.
+- Step-up is the only real least-privilege component. It lets tasks start
+  narrow and escalate on demand. But it reaches only sandboxes that were
+  granted `post-office` at planning time (survey §11).
+- Task and wolf gateways are dynamic by default, so a task can `mcp-add` any
+  catalog server unless `--mcp-gateway-static` is set (survey §10). On the
+  card this is the amber chip.
+- `Plan.Skills` exists, but nothing sets it, and only one harness exists.
+  Skills and harness choice are therefore placeholders in the workload model.
+
+The wireframe sketches one possible future in a red note: a **capability
+review gate** between planning and task. There, the workingman agent or a
+step-up-style check would compare the planner's grants with the task
+description before launch, and the operator would see a diff on the sandbox
+card. That is a new behaviour and an open question for the next section, not
+part of this design.
+
+### G.5 Secondary views: inbox, intake, timeline, PRs, notifications
+
+![Secondary views wireframe](workingman-gui/secondary-views.svg)
+
+*Wireframe: [`workingman-gui/secondary-views.svg`](workingman-gui/secondary-views.svg)*
+
+- **Inbox.** Operator messages from post-office (`GET /messages`,
+  `message.*` events), in the same order as the TUI inbox (`I`). Step-up
+  requests show the **exact change line verbatim** in a monospace block,
+  the requesting sandbox (linked to its card) and the expiry. They offer
+  Approve / Deny / Reply. There is no "approve all", because the executor has
+  no auto-approve list on purpose (§A.4.5). If another channel answered
+  first, the GUI shows that answer (`409` with the winning resolution).
+  Closed items show who answered and through which channel.
+- **Intake.** A markdown box per project that writes `intake/<name>.md`
+  (`POST /projects/{id}/intake`, §A.4.3). It shows a hint about what the
+  daemon will do with it given the project's current status (plan alongside a
+  `working` project, flip an `idle` one to `ready`, stay pending while
+  `stopped`). Below it, pending requests (with a best-effort Withdraw) and
+  processed ones. The link from a processed request to the tasks it produced
+  is *inferred* from the planning run that renamed the file, because intake
+  files carry no back-reference today. The same form at root level creates
+  a new project by writing `project.md` (`POST /projects`).
+- **Timeline.** The audit stream (`GET /audit?since=`, SSE `types=audit`),
+  filterable by project and event family (survey §13). The events that
+  §A.3.3 lists as highlight-worthy (`project_blocked`,
+  `task_retry_exhausted`, `integration_conflicted`, …) are drawn orange. Each
+  row links to the project, task or sandbox named in its fields. `api_write`
+  lines appear here too, so GUI actions are as auditable as agent ones.
+  Before the SSE ring, history is paged from `audit.TailFile`. Task history
+  that is older is not reconstructed (§A.3.4).
+- **Pull requests.** Per project, from `pull_requests[]` and
+  `live.review_poll` (`GET /projects/{id}/pulls`). It shows the PR, its
+  state, the poll ladder with the current rung and the next poll time, the
+  fix tasks sourced from it (`source.pr`), and the budgets
+  `review_fix_cycles` (of 10) and `review_errors` (of 5) that block the
+  project when exceeded (survey §14). "Poll now" is `:review`. The GUI never
+  calls GitHub itself; it links out.
+- **Notifications.** Optional browser notifications for an operator request,
+  `project_blocked`, and PR merged. They add to the existing channel fan-out
+  (osascript, WhatsApp, Signal, Slack) and do not replace it. The GUI is a
+  tab that may be closed, so it must not become the only place a request
+  shows up.
+
+### G.6 Screen inventory
+
+| Screen | Main question | Reads | Writes |
+|---|---|---|---|
+| Projects / project view (§G.1) | how is this project doing; what lands next? | `/projects`, `/projects/{id}`, `/graph`, `/tasks`, `project.* task.* queue.*` | stop, start, wolf, review, cleanup, hide/show, catchup, task retry, intake |
+| Sandbox card (§G.3) | what is this workload allowed to do, and what will it produce? | `/tasks/{name}`, `/sessions/{sid}`, `/prompt`, `step_up_op` audit | save-sandbox, PATCH task (not running) |
+| Session watch (§G.2) | what is the agent doing right now? | `/sessions/{sid}/acp` (WS), `/transcript` | prompt / cancel (persistent kinds only) |
+| Sandboxes (§G.2) | what is running or left over? | `/sandboxes`, `session.*` | open-session, open-shell, pty (opt-in) |
+| Agents (§G.4) | who decides capabilities, and where? | `/agents`, `/sessions?kind=…` | none (links to inbox and cards) |
+| Inbox (§G.5) | what is waiting for me? | `/messages`, `message.*` | answer, dismiss |
+| Intake / new project (§G.5) | ask for work | `/intake` | `POST /projects`, `POST …/intake`, withdraw |
+| Timeline (§G.5) | what happened, and why? | `/audit`, SSE `audit` | none |
+| Pull requests (§G.5) | where is the PR loop? | `/pulls`, `pr.updated` | review (poll now) |
+
+Archive (§A.4.2) is left out of the first GUI on purpose. It is the only
+destructive action, and the TUI's y/n flow is adequate for it.

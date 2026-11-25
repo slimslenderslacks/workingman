@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="860" viewBox="0 0 1280 860" font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <title>workingman GUI wireframe: sandbox card (inputs, capabilities, output)</title>
+  <defs>
+    <marker id="flow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#374151"/>
+    </marker>
+    <pattern id="denied" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="8" height="8" fill="#f9fafb"/>
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#e5e7eb" stroke-width="3"/>
+    </pattern>
+    <style>
+      .frame { fill: #ffffff; stroke: #9ca3af; }
+      .muted { fill: #6b7280; }
+      .h1 { font-size: 18px; font-weight: bold; fill: #111827; }
+      .h2 { font-size: 14px; font-weight: bold; fill: #111827; }
+      .h3 { font-size: 12px; font-weight: bold; fill: #111827; }
+      .mono { font-family: Menlo, Consolas, monospace; font-size: 11px; }
+      .col { fill: #f9fafb; stroke: #d1d5db; }
+      .granted { fill: #ecfdf5; stroke: #047857; }
+      .chip { fill: #ffffff; stroke: #047857; }
+      .chip-warn { fill: #fffbeb; stroke: #b45309; }
+      .chip-off { fill: url(#denied); stroke: #d1d5db; stroke-dasharray: 3 2; }
+      .btn { fill: #ffffff; stroke: #6b7280; }
+      .note { fill: #fefce8; stroke: #ca8a04; stroke-dasharray: 4 3; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1279" height="859" class="frame"/>
+
+  <!-- top bar -->
+  <rect x="0.5" y="0.5" width="1279" height="44" fill="#111827"/>
+  <text x="18" y="28" fill="#ffffff" font-size="16" font-weight="bold">workingman</text>
+  <text x="140" y="28" fill="#d1d5db">Projects</text>
+  <text x="220" y="28" fill="#ffffff" font-weight="bold">Sandboxes</text>
+  <rect x="214" y="38" width="80" height="3" fill="#60a5fa"/>
+  <text x="310" y="28" fill="#d1d5db">Agents</text>
+  <text x="380" y="28" fill="#d1d5db">Inbox</text>
+  <text x="456" y="28" fill="#d1d5db">Timeline</text>
+
+  <!-- breadcrumb + header -->
+  <text x="24" y="70" class="muted">Projects / gui-api / tasks / session-relay /</text>
+  <text x="292" y="70" font-weight="bold">sandbox</text>
+
+  <!-- the card -->
+  <rect x="16" y="82" width="1248" height="764" rx="10" fill="#ffffff" stroke="#1d4ed8" stroke-width="2"/>
+  <rect x="16" y="82" width="1248" height="56" rx="10" fill="#eff6ff"/>
+  <rect x="16" y="128" width="1248" height="10" fill="#eff6ff"/>
+  <text x="36" y="110" class="h1">gui-api-session-relay</text>
+  <text x="36" y="128" class="muted" font-size="11">kind task · session task-session-relay · started 09:24 · acp-wrapper pid 48211</text>
+  <circle cx="300" cy="105" r="6" fill="#22c55e"/>
+  <text x="312" y="110" font-size="12">live (sbx ls)</text>
+  <rect x="402" y="94" width="244" height="22" rx="11" fill="#ffffff" stroke="#047857"/>
+  <text x="414" y="109" font-size="11" fill="#047857">4 grants beyond baseline · 1 open-ended</text>
+
+  <rect x="834" y="94" width="96" height="28" rx="4" fill="#1d4ed8"/>
+  <text x="849" y="112" fill="#ffffff">Watch (ACP)</text>
+  <rect x="938" y="94" width="134" height="28" rx="4" class="btn"/>
+  <text x="950" y="112">Open in my terminal</text>
+  <rect x="1082" y="94" width="172" height="28" rx="4" class="btn" stroke-dasharray="3 2"/>
+  <text x="1088" y="112" class="muted">Shell in sandbox (pty scope)</text>
+
+  <!-- three columns -->
+  <text x="36" y="166" class="h2">① INPUTS</text>
+  <text x="36" y="182" class="muted" font-size="11">what the workload was asked to do</text>
+  <text x="448" y="166" class="h2">② CAPABILITIES</text>
+  <text x="448" y="182" class="muted" font-size="11">everything this sandbox can reach — nothing else</text>
+  <text x="900" y="166" class="h2">③ OUTPUT</text>
+  <text x="900" y="182" class="muted" font-size="11">what leaves the sandbox</text>
+
+  <!-- INPUTS column -->
+  <rect x="32" y="192" width="380" height="560" rx="8" class="col"/>
+
+  <text x="46" y="216" class="h3">Input prompt</text>
+  <text x="250" y="216" class="muted" font-size="10">GET …/sessions/{sid}/prompt</text>
+  <rect x="46" y="224" width="352" height="132" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="56" y="242" class="mono" fill="#374151">.orch/instructions.md</text>
+  <text x="56" y="260" font-size="11">You are a task agent for the orchestrator.</text>
+  <text x="56" y="276" font-size="11">Your task: session-relay</text>
+  <text x="56" y="292" font-size="11">Implement the WS relay described in …</text>
+  <text x="56" y="308" font-size="11" class="muted">…</text>
+  <text x="56" y="330" class="mono" fill="#374151">.orch/context.yaml</text>
+  <text x="56" y="346" class="mono" fill="#6b7280">task_base: workingman@8be04d1</text>
+
+  <text x="46" y="384" class="h3">Task metadata</text>
+  <text x="270" y="384" class="muted" font-size="10">tasks/session-relay.yaml</text>
+  <rect x="46" y="392" width="352" height="196" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="56" y="412" class="muted" font-size="11">project</text><text x="150" y="412" class="mono">gui-api</text>
+  <text x="56" y="430" class="muted" font-size="11">status</text><text x="150" y="430" class="mono">running · attempts 0/3</text>
+  <text x="56" y="448" class="muted" font-size="11">depends_on</text><text x="150" y="448" class="mono">snapshot-model ✓</text>
+  <text x="56" y="466" class="muted" font-size="11">touches</text><text x="150" y="466" class="mono">internal/api/relay.go</text>
+  <text x="56" y="484" class="muted" font-size="11">areas</text><text x="150" y="484" class="mono">internal/api</text>
+  <text x="56" y="502" class="muted" font-size="11">source</text><text x="150" y="502" class="mono">— (planned, not a PR fix)</text>
+  <text x="56" y="520" class="muted" font-size="11">base</text><text x="150" y="520" class="mono">workingman 8be04d1</text>
+  <text x="56" y="538" class="muted" font-size="11">worktree</text><text x="150" y="538" class="mono">…/.worktrees/session-relay</text>
+  <text x="56" y="556" class="muted" font-size="11">chosen by</text><text x="150" y="556" font-size="11">planning agent (planning.tmpl)</text>
+  <text x="56" y="574" class="muted" font-size="11">description</text><text x="150" y="574" font-size="11">expand ▾</text>
+
+  <text x="46" y="616" class="h3">Mounts</text>
+  <rect x="46" y="624" width="352" height="64" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="56" y="644" class="mono">rw  …/.worktrees/session-relay</text>
+  <text x="56" y="662" class="mono" fill="#6b7280">—   orch roots, ~/.ssh, ~/.workingman</text>
+  <text x="56" y="678" class="muted" font-size="10">(nothing else from the host is visible)</text>
+
+  <text x="46" y="712" class="muted" font-size="10">Inputs are read-only in the GUI. To change them,</text>
+  <text x="46" y="726" class="muted" font-size="10">queue intake (planner) or edit description/depends_on</text>
+  <text x="46" y="740" class="muted" font-size="10">via PATCH while the task is not running (§A.4.4).</text>
+
+  <!-- CAPABILITIES column -->
+  <rect x="440" y="192" width="420" height="560" rx="8" fill="#ffffff" stroke="#047857" stroke-width="2"/>
+  <text x="454" y="212" font-size="10" fill="#047857" font-weight="bold">SANDBOX BOUNDARY — sbx microVM</text>
+
+  <!-- harness -->
+  <text x="454" y="236" class="h3">Harness</text>
+  <rect x="454" y="244" width="392" height="44" rx="4" class="granted"/>
+  <text x="466" y="262" class="mono">slimslenderslacks/claude-code-acp:0.90.0</text>
+  <text x="466" y="279" class="muted" font-size="10">harness: claude-acp (only one exists) · kit: acp · resolved_harness</text>
+
+  <!-- model -->
+  <text x="454" y="310" class="h3">Model</text>
+  <rect x="454" y="318" width="392" height="44" rx="4" class="granted"/>
+  <text x="466" y="336" class="mono">default → claude-opus-5-5</text>
+  <text x="466" y="353" class="muted" font-size="10">model → resolved_model · LLM creds stay on host (sbx secret)</text>
+
+  <!-- MCPs -->
+  <text x="454" y="384" class="h3">MCP servers (via gateway)</text>
+  <text x="700" y="384" class="muted" font-size="10">gateway URL never shown</text>
+  <rect x="454" y="392" width="392" height="74" rx="4" fill="#f9fafb" stroke="#d1d5db"/>
+  <rect x="464" y="402" width="66" height="22" rx="11" class="chip"/>
+  <text x="478" y="417" font-size="11">github</text>
+  <rect x="538" y="402" width="86" height="22" rx="11" class="chip-off"/>
+  <text x="550" y="417" font-size="11" class="muted">post-office</text>
+  <rect x="632" y="402" width="66" height="22" rx="11" class="chip-off"/>
+  <text x="645" y="417" font-size="11" class="muted">logseq</text>
+  <rect x="706" y="402" width="130" height="22" rx="11" class="chip-warn"/>
+  <text x="716" y="417" font-size="11" fill="#b45309">⚠ dynamic: mcp-add</text>
+  <text x="464" y="444" class="muted" font-size="10">static_mcps: [github] · solid = granted · hatched = not granted</text>
+  <text x="464" y="458" font-size="10" fill="#b45309">dynamic gateway lets the agent add any catalog server at runtime</text>
+
+  <!-- skills -->
+  <text x="454" y="488" class="h3">Skills</text>
+  <rect x="454" y="496" width="392" height="30" rx="4" class="chip-off"/>
+  <text x="466" y="515" class="muted" font-size="11">none · Plan.Skills exists, nothing sets it today</text>
+
+  <!-- network -->
+  <text x="454" y="550" class="h3">Network policy</text>
+  <text x="700" y="550" class="muted" font-size="10">task policies + gateway rules</text>
+  <rect x="454" y="558" width="392" height="80" rx="4" fill="#f9fafb" stroke="#d1d5db"/>
+  <text x="466" y="578" class="mono" fill="#b91c1c">deny   network  **</text>
+  <text x="466" y="596" class="mono" fill="#047857">allow  network  api.github.com</text>
+  <text x="466" y="614" class="mono" fill="#047857">allow  network  host.docker.internal:3333  (gateway)</text>
+  <text x="466" y="630" class="mono" fill="#047857">allow  network  llm proxy  (model traffic)</text>
+
+  <!-- filesystem -->
+  <text x="454" y="660" class="h3">Filesystem policy</text>
+  <rect x="454" y="668" width="392" height="30" rx="4" fill="#f9fafb" stroke="#d1d5db"/>
+  <text x="466" y="688" class="muted" font-size="11">default (mounts only)</text>
+
+  <!-- step-up history -->
+  <rect x="454" y="708" width="392" height="34" rx="4" class="note"/>
+  <text x="466" y="722" font-size="10">Runtime changes: none. Step-up grants would appear here,</text>
+  <text x="466" y="736" font-size="10">with the approving inbox message and the persisted policies: rule.</text>
+
+  <!-- OUTPUT column -->
+  <rect x="888" y="192" width="360" height="560" rx="8" class="col"/>
+
+  <text x="902" y="216" class="h3">Task branch</text>
+  <rect x="902" y="224" width="332" height="52" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="914" y="244" class="mono">wm/gui-api/session-relay</text>
+  <text x="914" y="264" class="muted" font-size="11">2 commits ahead of base · +318 −12</text>
+
+  <text x="902" y="300" class="h3">Result</text>
+  <rect x="902" y="308" width="332" height="44" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="914" y="327" font-size="11">status running → success | failed | blocked</text>
+  <text x="914" y="343" class="muted" font-size="10">set by the task agent; success = enters commit queue</text>
+
+  <text x="902" y="376" class="h3">Integration (commit agent)</text>
+  <rect x="902" y="384" width="332" height="150" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <circle cx="922" cy="406" r="7" fill="#e5e7eb" stroke="#6b7280"/><text x="936" y="410" font-size="11">queued (succeeded_at)</text>
+  <line x1="922" y1="413" x2="922" y2="431" stroke="#9ca3af"/>
+  <circle cx="922" cy="438" r="7" fill="#e5e7eb" stroke="#6b7280"/><text x="936" y="442" font-size="11">rebase onto gui-api tip</text>
+  <line x1="922" y1="445" x2="922" y2="463" stroke="#9ca3af"/>
+  <circle cx="922" cy="470" r="7" fill="#e5e7eb" stroke="#6b7280"/><text x="936" y="474" font-size="11">verify: go build ./...</text>
+  <line x1="922" y1="477" x2="922" y2="495" stroke="#9ca3af"/>
+  <circle cx="922" cy="502" r="7" fill="#e5e7eb" stroke="#6b7280"/><text x="936" y="506" font-size="11">ff-only merge → committed</text>
+  <text x="914" y="526" class="muted" font-size="10">own sandbox: gui-api-session-relay-commit</text>
+
+  <text x="902" y="558" class="h3">Lands on</text>
+  <rect x="902" y="566" width="332" height="58" rx="4" fill="#111827"/>
+  <text x="914" y="588" fill="#ffffff" class="mono">gui-api  (project branch)</text>
+  <text x="914" y="608" fill="#9ca3af" font-size="11">commits[] · summary · created_files</text>
+
+  <text x="902" y="648" class="h3">Sandbox after exit</text>
+  <rect x="902" y="656" width="332" height="44" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="914" y="674" font-size="11">removed on success; kept on failed/blocked</text>
+  <text x="914" y="690" class="muted" font-size="10">or save_sandbox: true  [ Keep sandbox ☐ ]</text>
+
+  <text x="902" y="726" class="muted" font-size="10">touches_actual is compared to touches →</text>
+  <text x="902" y="740" class="muted" font-size="10">touches_exceeded shown as a warning here</text>
+
+  <!-- flow arrows -->
+  <path d="M412,470 L436,470" stroke="#374151" stroke-width="3" marker-end="url(#flow)"/>
+  <path d="M860,470 L884,470" stroke="#374151" stroke-width="3" marker-end="url(#flow)"/>
+
+  <!-- footer legend -->
+  <rect x="32" y="766" width="1216" height="66" rx="6" fill="#f9fafb" stroke="#e5e7eb"/>
+  <text x="46" y="788" class="h3">Least privilege, visually</text>
+  <rect x="46" y="798" width="18" height="18" rx="9" class="chip"/><text x="72" y="812" font-size="11">granted capability</text>
+  <rect x="200" y="798" width="18" height="18" rx="9" class="chip-off"/><text x="226" y="812" font-size="11">available in the catalog but NOT granted (shown so absence is visible)</text>
+  <rect x="660" y="798" width="18" height="18" rx="9" class="chip-warn"/><text x="686" y="812" font-size="11">open-ended grant (dynamic gateway, allow **): flagged amber</text>
+  <text x="46" y="828" font-size="10" class="muted">baseline = harness, model, gateway port, LLM proxy. Grants here: github MCP, mcp-add, api.github.com, rw worktree mount.</text>
+</svg>
