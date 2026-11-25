@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/pathlock"
 	"github.com/slimslenderslacks/work/internal/policy"
 	"github.com/slimslenderslacks/work/internal/sbx"
 	"gopkg.in/yaml.v3"
@@ -441,7 +442,13 @@ func Load(path string) (*Task, error) {
 // changed something, saves the result back. It is how processes other than the
 // task's agent (the acp-wrapper recording the resolved model and harness)
 // annotate a task file without clobbering fields they don't own.
+//
+// The load, fn and the save all run under the in-process write lock for path
+// (see internal/pathlock), so two writers in the same process updating one
+// task file can't lose each other's change. fn must not save or update the
+// same path itself: the lock is not reentrant.
 func Update(path string, fn func(*Task) bool) error {
+	defer pathlock.Lock(path)()
 	t, err := Load(path)
 	if err != nil {
 		return err
@@ -449,7 +456,7 @@ func Update(path string, fn func(*Task) bool) error {
 	if !fn(t) {
 		return nil
 	}
-	return Save(path, t)
+	return saveLocked(path, t)
 }
 
 // Save writes t to path as YAML. It is the single choke point every Go writer
@@ -464,7 +471,18 @@ func Update(path string, fn func(*Task) bool) error {
 // bug, and this error surfaces it (daemon: audit task_save_error; TUI: returned
 // to the caller) instead of corrupting the file. An empty Name is allowed — it
 // is the "human-added seed" signal the planning agent fills in later.
+//
+// The write holds the in-process write lock for path, so it never interleaves
+// with another Save or Update of the same file in this process. A caller that
+// loads, mutates and saves should use Update so the whole read-modify-write
+// runs under the lock.
 func Save(path string, t *Task) error {
+	defer pathlock.Lock(path)()
+	return saveLocked(path, t)
+}
+
+// saveLocked is Save for a caller that already holds the write lock for path.
+func saveLocked(path string, t *Task) error {
 	if len(t.Name) > MaxNameLen {
 		return fmt.Errorf("task name %q is %d chars, exceeds MaxNameLen %d", t.Name, len(t.Name), MaxNameLen)
 	}

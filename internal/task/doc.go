@@ -18,6 +18,8 @@
 // [MaxNameLenFor] for a name inside a known work stream. [ValidNameFor] and
 // [SlugifyFor] use the per-project limit. [Save] refuses (and does not
 // truncate) an over-long name; repairing names is taskgraph.Load's job.
+// [Save] and [Update] hold the in-process write lock for the file's path
+// (internal/pathlock), so in-process writers of one task file are serialized.
 //
 // # Key types
 //
@@ -34,9 +36,10 @@
 //
 // # Collaborators
 //
-// Uses internal/policy for the per-task sandbox [policy.Rule] list and
-// internal/sbx for the sandbox-name budget. Used by internal/taskgraph (builds
-// the DAG from these files), internal/daemon and internal/runner (dispatch,
-// status transitions, sandbox setup), internal/tui (Tasks pane, adding seeds)
-// and internal/acpwrapper (whether to keep a sandbox based on task status).
+// Uses internal/pathlock for the per-path write lock, internal/policy for the
+// per-task sandbox [policy.Rule] list and internal/sbx for the sandbox-name
+// budget. Used by internal/taskgraph (builds the DAG from these files),
+// internal/daemon and internal/runner (dispatch, status transitions, sandbox
+// setup), internal/tui (Tasks pane, adding seeds) and internal/acpwrapper
+// (whether to keep a sandbox based on task status).
 package task

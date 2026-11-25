@@ -12,7 +12,10 @@
 // writes. A write that must be seen by the daemon (a TUI request flag such as
 // Cleanup or ReviewNow) goes through [SaveAs] with [WriterAgent]. Saves are
 // atomic (temp file + rename), because an empty project.yaml means
-// "unpopulated" and would dispatch a project agent.
+// "unpopulated" and would dispatch a project agent. Every save holds the
+// in-process write lock for its path (internal/pathlock), and [Update] holds it
+// across a whole load-mutate-save, so writers inside the orch process (the
+// daemon, the TUI, later the API) don't lose each other's changes.
 //
 // [Project] also holds the predicates the daemon routes on, so their rules
 // live in one place: Unpopulated, CronStopReason/CronUnbounded (cron stop
@@ -25,7 +28,8 @@
 //
 //   - [Project] — the parsed project.yaml: description, repos, branch, status,
 //     cron settings, request flags (Cleanup, Replan, ReviewNow) and the PRs
-//     being watched. [Load] reads one; [Save] and [SaveAs] write one.
+//     being watched. [Load] reads one; [Save] and [SaveAs] write one;
+//     [Update] does a locked read-modify-write.
 //   - [Status] — the project lifecycle (ready, working, blocked, idle,
 //     stopped, merged). The state machine is in state-machine.md.
 //   - [Writer] — who last wrote the file (agent or daemon); the daemon's
@@ -46,8 +50,8 @@
 //
 // # Collaborators
 //
-// No internal imports. internal/daemon watches, routes on and rewrites
-// project files and keeps the sidecars. internal/tui loads projects for the
+// Uses internal/pathlock for the per-path write lock. internal/daemon watches,
+// routes on and rewrites project files and keeps the sidecars. internal/tui loads projects for the
 // gallery and writes the request flags (`:cleanup`, `:review`, `:hide`,
 // `:stop`). internal/acpwrapper loads project.yaml to end a persistent wolf
 // session once the project leaves blocked. See state-machine.md and

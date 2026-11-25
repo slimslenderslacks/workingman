@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/pathlock"
 	"gopkg.in/yaml.v3"
 )
 
@@ -140,9 +141,11 @@ type Project struct {
 	// between the daemon's Load and Save is lost, and symmetrically an agent
 	// saving a copy it read before the increment rolls this counter backwards.
 	// The daemon narrows the window by re-reading immediately before the counter
-	// save (see the daemon's countCronRun), but does not close it — doing that
-	// needs either field-level merging or a lock in the project writer, which is
-	// a broader change than the counter warrants. A lost increment costs at most
+	// save (see the daemon's countCronRun), but does not close it. The
+	// in-process write lock taken by Save and Update (internal/pathlock) only
+	// orders writers inside the orch process; agents in sandboxes don't take it,
+	// so closing the window for them needs field-level merging, a broader change
+	// than the counter warrants. A lost increment costs at most
 	// one extra cycle; the schedule still ends, via this counter or CronUntil.
 	CronRuns int `yaml:"cron_runs,omitempty"`
 	// BlockedReason is set by the daemon when transitioning a project to
@@ -530,10 +533,45 @@ func Save(path string, p *Project) error {
 // SaveAs atomically writes p to path with UpdatedBy set to by. Use
 // WriterAgent for a write the daemon must notice (for example a TUI request
 // flag); Save is SaveAs with WriterDaemon.
+//
+// The write holds the in-process write lock for path (see
+// internal/pathlock), so it never interleaves with another Save, SaveAs or
+// Update of the same file in this process. The lock covers only the write; a
+// caller that loads, mutates and saves should use Update so the whole
+// read-modify-write runs under it.
 func SaveAs(path string, p *Project, by Writer) error {
 	if !by.Valid() {
 		return fmt.Errorf("invalid writer %q", by)
 	}
+	defer pathlock.Lock(path)()
+	return saveLocked(path, p, by)
+}
+
+// Update loads the project at path, applies fn and, when fn reports that it
+// changed something, saves the result with UpdatedBy set to by. The load, fn
+// and the save all run under the in-process write lock for path, so two
+// in-process writers (the daemon, the TUI, later the API) updating the same
+// file can't lose each other's change. Writers outside the process (agents,
+// editors) don't take the lock and can still race it. fn must not save or
+// update the same path itself: the lock is not reentrant.
+func Update(path string, by Writer, fn func(*Project) bool) error {
+	if !by.Valid() {
+		return fmt.Errorf("invalid writer %q", by)
+	}
+	defer pathlock.Lock(path)()
+	p, err := Load(path)
+	if err != nil {
+		return err
+	}
+	if !fn(p) {
+		return nil
+	}
+	return saveLocked(path, p, by)
+}
+
+// saveLocked is SaveAs for a caller that already holds the write lock for
+// path and has validated by.
+func saveLocked(path string, p *Project, by Writer) error {
 	out := *p
 	out.UpdatedBy = by
 	data, err := yaml.Marshal(&out)

@@ -36,6 +36,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/mcpgateway` | shared | Package mcpgateway gives every sandbox workingman creates its own MCP gateway: a sub-gateway of the host's standalone-codemode gateway, minted with POST /gateways and torn down with DELETE /gateways/{id}. | `GatewayAPI`, `GatewaySource`, `SessionConn`, `ToolCaller`, `ToolLister` | `Client`, `Content`, `DaemonGateway`, `DaemonSession`, `Gateway`, `Manager`, `RPCError`, `Record`, `ServerState`, `Session`, `SessionOptions`, `Store`, `Tool`, `ToolError`, `ToolResult`, `UnknownServersError` |
 | `internal/notify` | daemon | Package notify is the daemon's user-notification interface: how an agent that needs human attention reaches a person. | `Sender`, `TopicSender` | `Async`, `Call`, `Multi`, `Noop`, `Osascript`, `Recorder` |
 | `internal/onepassword` | daemon | Package onepassword reads secrets from 1Password through the 1Password Go SDK (github.com/1password/onepassword-sdk-go), authenticated as a service account, so nothing in workingman needs the `op` CLI, `op signin` or a biometric unlock. | `Resolver` | `KeychainItem`, `KeychainLookup`, `TokenSource` |
+| `internal/pathlock` | shared | Package pathlock serializes in-process writers of the same file with one mutex per path. | — | — |
 | `internal/policy` | shared | Package policy defines the per-task sandbox policy rules (allow or deny one network or filesystem resource pattern) and turns them into `sbx policy` commands. | — | `Action`, `Kind`, `Rule` |
 | `internal/postoffice` | shared | Package postoffice is the agent messaging store: the message model and the file-backed Store under ~/.workingman/post-office/ that post-office, the orch daemon and the TUI share. | `Auditor`, `Outbound` | `Delivery`, `DeliveryRecord`, `Dispatcher`, `DispatcherConfig`, `DoneRecord`, `Draft`, `Kind`, `Lock`, `Message`, `Outcome`, `Resolution`, `Responder`, `Sender`, `Store`, `Waiters` |
 | `internal/postoffice/mcpserver` | daemon | Package mcpserver is the post-office MCP server: the sender tools agents use to notify and ask the operator or another agent, and the receiver tools agent recipients such as Step-Up answer them with, over the shared postoffice.Store. | — | `Caller`, `Config`, `Resolver`, `Server` |
@@ -103,6 +104,7 @@ graph LR
     internal_acpclient["acpclient"]
     internal_gitsign["gitsign"]
     internal_mcpgateway["mcpgateway"]
+    internal_pathlock["pathlock"]
     internal_policy["policy"]
     internal_postoffice["postoffice"]
     internal_project["project"]
@@ -204,6 +206,7 @@ graph LR
   internal_postoffice_mcpserver --> internal_postoffice
   internal_postoffice_mcpserver --> internal_session
   internal_postoffice_mcpserver --> internal_task
+  internal_project --> internal_pathlock
   internal_prompts --> internal_agent
   internal_prompts --> internal_sbx
   internal_router --> internal_acpchat
@@ -222,6 +225,7 @@ graph LR
   internal_runner --> internal_task
   internal_runner --> internal_terminal
   internal_runner --> internal_workspace
+  internal_task --> internal_pathlock
   internal_task --> internal_policy
   internal_task --> internal_sbx
   internal_taskgraph --> internal_task
@@ -245,7 +249,7 @@ graph LR
   classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
   class internal_tui tui
   classDef shared fill:#fff1cc,stroke:#c99a06,color:#000
-  class internal_acpclient,internal_gitsign,internal_mcpgateway,internal_policy,internal_postoffice,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace,internal_worktree shared
+  class internal_acpclient,internal_gitsign,internal_mcpgateway,internal_pathlock,internal_policy,internal_postoffice,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace,internal_worktree shared
   classDef wrapper fill:#f3e2fb,stroke:#8e44ad,color:#000
   class internal_acpwrapper wrapper
 ```
@@ -280,11 +284,12 @@ The same graph as text: each package's internal imports and importers.
 | `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `cmd/orch`, `cmd/post-office`, `acpwrapper`, `channels/slack`, `daemon`, `postoffice/mcpserver`, `runner` |
 | `internal/notify` | — | `cmd/orch`, `channels`, `daemon` |
 | `internal/onepassword` | — | `cmd/op-read` |
+| `internal/pathlock` | — | `project`, `task` |
 | `internal/policy` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `mcpgateway`, `runner`, `task`, `tui` |
 | `internal/postoffice` | `audit`, `channels` | `cmd/orch`, `cmd/post-office`, `daemon`, `postoffice/mcpserver`, `router`, `tui` |
 | `internal/postoffice/mcpserver` | `mcpgateway`, `postoffice`, `session`, `task` | `cmd/post-office` |
 | `internal/power` | — | `cmd/orch`, `daemon` |
-| `internal/project` | — | `acpwrapper`, `daemon`, `tui` |
+| `internal/project` | `pathlock` | `acpwrapper`, `daemon`, `tui` |
 | `internal/prompts` | `agent`, `sbx` | `daemon`, `runner` |
 | `internal/router` | `acpchat`, `audit`, `channels`, `postoffice` | `cmd/orch` |
 | `internal/runner` | `agent`, `audit`, `gitsign`, `mcpgateway`, `policy`, `prompts`, `sbx`, `session`, `setup`, `task`, `terminal`, `workspace` | `cmd/orch`, `daemon` |
@@ -293,7 +298,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/service` | — | `cmd/orch` |
 | `internal/session` | — | `cmd/orch`, `cmd/post-office`, `acpchat`, `acpwrapper`, `daemon`, `postoffice/mcpserver`, `runner`, `tui` |
 | `internal/setup` | — | `runner` |
-| `internal/task` | `policy`, `sbx` | `acpwrapper`, `daemon`, `postoffice/mcpserver`, `runner`, `taskgraph`, `tui` |
+| `internal/task` | `pathlock`, `policy`, `sbx` | `acpwrapper`, `daemon`, `postoffice/mcpserver`, `runner`, `taskgraph`, `tui` |
 | `internal/taskgraph` | `task` | `daemon`, `tui` |
 | `internal/terminal` | `agent` | `cmd/orch`, `daemon`, `runner`, `tui` |
 | `internal/tui` | `acpclient`, `policy`, `postoffice`, `project`, `sbx`, `session`, `task`, `taskgraph`, `terminal`, `workspace`, `worktree` | `cmd/orch` |
