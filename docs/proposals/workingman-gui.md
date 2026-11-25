@@ -89,12 +89,13 @@ names next to them are the stable anchor.
   - [R.4 Open questions](#r4-open-questions)
 - [Suggested incremental path](#suggested-incremental-path)
   - [P.0 Groundwork (no user-visible change)](#p0-groundwork-no-user-visible-change)
-  - [P.1 Read-only API and event stream](#p1-read-only-api-and-event-stream)
-  - [P.2 Read-only GUI](#p2-read-only-gui)
-  - [P.3 Write actions](#p3-write-actions)
-  - [P.4 Session attach and daemon-side priming](#p4-session-attach-and-daemon-side-priming)
-  - [P.5 Optional follow-ups](#p5-optional-follow-ups)
-  - [P.6 Phase summary](#p6-phase-summary)
+  - [P.1 Daemon-side priming](#p1-daemon-side-priming)
+  - [P.2 Read-only API and event stream](#p2-read-only-api-and-event-stream)
+  - [P.3 Read-only GUI](#p3-read-only-gui)
+  - [P.4 Write actions](#p4-write-actions)
+  - [P.5 Session attach](#p5-session-attach)
+  - [P.6 Optional follow-ups](#p6-optional-follow-ups)
+  - [P.7 Phase summary](#p7-phase-summary)
 - [References](#references)
 
 ---
@@ -158,12 +159,12 @@ form. The section that designs it is in brackets.
 | Retry one task | no task-level control at all; it goes through the wolf (survey §17.3) | a Retry button that performs the wolf's documented "re-run it" edit (§A.4.4) |
 | Several things at once | one terminal, overlays are full-screen | several windows or tabs, e.g. a graph on one screen and two transcripts on another |
 | Discoverability | keys and chords must be learned; the footer shows hints | visible buttons, with the TUI's refusal text on disabled ones (§G.0) |
-| Use while headless | the launchd service runs `orch --headless`; standalone `orch tui` has no ACP tabs, no `:session` and no live state (survey §16, §18) | a GUI attached to the running service, once priming moves into the daemon (§A.5.4, §P.4) |
+| Use while headless | the launchd service runs `orch --headless`; standalone `orch tui` has no ACP tabs, no `:session` and no live state (survey §16, §18) | a GUI attached to the running service, once priming moves into the daemon (§A.5.4, §P.1) |
 
 ### T.3 Who would use which
 
 - The **keyboard operator** who lives in the terminal keeps the TUI. Nothing
-  in this proposal takes anything away from it. Phase P.5 offers it live state
+  in this proposal takes anything away from it. Phase P.6 offers it live state
   and the timeline through the same event bus if wanted.
 - Someone **reviewing or supervising** a project (what is running, what lands
   next, what did this sandbox have access to) is better served by the graph,
@@ -929,7 +930,7 @@ workspace `.orch`, runs `wsp rm --force`, and moves the directory to
 synchronously, and returns `200` with the backup path. It requires
 `{"confirm": "<work_stream>"}` in the body, the GUI's equivalent of the y/n
 modal. This is the only destructive endpoint. It should be left out of the
-first write phase (§P.3; open question R.4 Q11).
+first write phase (§P.4; open question R.4 Q11).
 
 #### A.4.3 New project and intake
 
@@ -1231,16 +1232,15 @@ Today the integrated TUI sends each session's opening prompt. Without a TUI
 watching (`--headless`), planning, task, commit and wolf sessions launch and
 then sit idle (survey §17.5). A GUI cannot take over that job reliably: a
 browser tab may be closed, and two browser tabs would race each other.
-**Priming should move into the daemon** before the GUI is used without a TUI.
-It would sit next to `driveStepUpSession`, which already attaches with
-`acpchat` and prompts. The daemon would send the prompt when `prompt_count == 0`,
-bump `prompt_count`, and disconnect at end of turn for one-shot kinds. The TUI
-already checks `prompt_count` before it sends (`acpwatch.go:494`), so the two
-would coexist, provided the bump is atomic on `session.json` (a compare-and-set
-on `prompt_count`). This is a behaviour change for headless mode, which is
-broken in this respect today. It is listed here because the relay design
-depends on it. It is the first step of phase P.4 (§P.4; open question
-R.4 Q3).
+**Priming moves into the daemon**, so it never depends on a TUI being
+attached. It sits next to `driveStepUpSession`, which already attaches with
+`acpchat` and prompts. The daemon sends the prompt when `prompt_count == 0`,
+bumps `prompt_count`, and disconnects at end of turn for one-shot kinds. The
+TUI already checks `prompt_count` before it sends (`acpwatch.go:494`), so the
+two coexist, provided the bump is atomic on `session.json` (a compare-and-set
+on `prompt_count`). This fixes headless mode, which today launches sessions
+but never prompts them. It is listed here because the relay design depends on
+it. It is phase P.1 (§P.1; resolved in R.4 Q3).
 
 #### A.5.5 Relation to the TUI's path
 
@@ -1263,10 +1263,9 @@ The TUI could switch to the relay later (§A.7), but it does not have to.
 - **Default: a unix socket**, `~/.workingman/api.sock`, in a 0700 directory,
   socket mode 0600. Filesystem permissions are the first auth layer, the same
   model as `agent.sock` but stricter (session dirs are 0755,
-  `acpwrapper.go:1070`). Browsers cannot dial unix sockets, so a GUI on this
-  binding is either (a) served by a tiny loopback shim (below), (b) a native
-  wrapper (Tauri/Electron/WebView) that dials the socket, or (c) a CLI such as
-  `curl --unix-socket`.
+  `acpwrapper.go:1070`). Browsers cannot dial unix sockets, so this binding
+  serves scripts and CLIs such as `curl --unix-socket` and `orch status --api`.
+  The browser GUI uses loopback TCP (below; R.4 Q5).
 - **Optional: loopback TCP**, `--api-listen 127.0.0.1:7078` (and `[::1]`).
   The server refuses non-loopback addresses unless `--api-listen-unsafe` is
   passed, and logs a warning even then. The WhatsApp webhook warns in the
@@ -1300,8 +1299,8 @@ The TUI could switch to the relay later (§A.7), but it does not have to.
   `/api/v1/session`, which sets a `wm_session` cookie (`HttpOnly`,
   `SameSite=Strict`, `Path=/`; not `Secure`, because the origin is plain-http
   loopback). The cookie holds a session secret that is distinct from the token
-  and expires after 12 h idle. Native wrappers and scripts use the bearer
-  token directly.
+  and expires after 12 h idle. Scripts use the bearer token
+  directly.
 - **Scopes.** Tokens and sessions carry scopes: `read`, `write` (project and
   task actions, intake, new project), `answer` (post-office), `attach`
   (observe), `interact` (prompt into persistent sessions), `pty`, `archive`.
@@ -1765,7 +1764,7 @@ destructive action, and the TUI's y/n flow is adequate for it.
 | **Event stream gaps or storms** | Diff-based events depend on the snapshot model staying cheap to rebuild | per-project rebuild with the existing mtime/size cache, short coalescing, a bounded ring with `reset` (§A.3.2, §A.3.4) |
 | **Misreading status** | `success` means "queued for integration", not done (survey §4.3) | the GUI draws `success` as queued and shows the lane (§G.1) |
 | **A closed tab hides a request** | Step-up approvals expire after 24 h (survey §7.3) | browser notifications are additive only; channel fan-out is unchanged (§G.5) |
-| **Scope creep** | Archive, PTY, transcript retention and a capability gate all look small and are not | each is a separate, later phase or an open question (§P.5) |
+| **Scope creep** | Archive, PTY, transcript retention and a capability gate all look small and are not | each is a separate, later phase or an open question (§P.6) |
 
 ### R.4 Open questions
 
@@ -1776,24 +1775,28 @@ Other sections cite them as `R.4 Qn`.
   viewer enough?** A read-only GUI could poll the snapshot. It would then
   lack task capabilities, descriptions and commits (survey §6.2), would get
   no events, and could not attach to sessions. The recommendation is the API,
-  but P.1 is cheap enough to try and abandon.
+  but P.2 is cheap enough to try and abandon.
 - **Q2. Task retry: R1 (file contract) or R2 (`Daemon.RetryTask`)?** (§A.4.4)
   R1 maps onto today's files but needs a project-file nudge and a careful
   rule about clearing `blocked_reason`. R2 is cleaner but is a new daemon
-  behaviour. Recommendation: R1 in P.3, revisit after use.
-- **Q3. Who primes sessions without a TUI?** (§A.5.4) Recommendation: the
-  daemon, next to `driveStepUpSession`, with a compare-and-set on
-  `prompt_count`. This changes headless behaviour, which is broken in this
-  respect today, and should land before P.4.
+  behaviour. Recommendation: R1 in P.4, revisit after use.
+- **Q3. Who primes sessions without a TUI?** (§A.5.4) **Resolved: the
+  daemon.** Priming must not depend on a TUI being attached. The daemon sends
+  the opening prompt next to `driveStepUpSession`, with a compare-and-set on
+  `prompt_count` so an attached TUI does not send it a second time. This fixes
+  headless mode, where sessions launch today but are never prompted, and it
+  lands as phase P.1, before the API.
 - **Q4. Should transcripts outlive their sessions?** The wrapper deletes the
   session dir on exit (survey §8.2). Options: keep a redacted copy under
   `~/.workingman/transcripts/` with a retention limit, keep only failed or
   blocked ones, or keep none and rely on "save transcript" in the browser
   (§A.5.2, §G.2).
-- **Q5. Native wrapper or browser?** A unix-socket-only API needs a native shell
-  (Tauri, Electron, WebView) or a loopback shim (§A.6.1). A browser on
-  loopback is the simplest start; a native wrapper removes the CSRF and
-  rebinding classes entirely.
+- **Q5. Native wrapper or browser?** **Resolved: browser.** The GUI is a
+  browser client on loopback TCP, served by the daemon's own listener
+  (§A.6.1), so the §A.6.3 defences (CSRF, `Host` allowlist, `Origin` checks,
+  login code and cookie) are required. A native wrapper is not planned. The
+  unix socket stays the default for scripts and `orch status --api`, and
+  loopback is only enabled from P.3 on, when the GUI is served.
 - **Q6. A `rev:` counter in `project.yaml`?** It would close the residual
   lost-update window for writers outside the orch process, but agents edit
   the file with plain text tools and would have to bump it (§A.4.1, §A.6.3).
@@ -1869,7 +1872,26 @@ code and tests, not the GUI's visual polish.
 `internal/project`, `internal/audit`. **Done when:** the TUI's behaviour and
 tests are unchanged, and the control package has its own tests.
 
-### P.1 Read-only API and event stream
+### P.1 Daemon-side priming
+
+**Scope: S–M.**
+
+- The daemon sends each session's opening prompt when `prompt_count == 0`,
+  next to `driveStepUpSession` in `step_up.go`, bumps `prompt_count` with a
+  compare-and-set on `session.json`, and disconnects one-shot kinds at end of
+  turn (§A.5.4, R.4 Q3). The TUI's existing `prompt_count` check
+  (`acpwatch.go:494`) keeps the two compatible.
+- It needs no API and no GUI. It comes first because it fixes headless mode
+  on its own, and the session relay (§P.5) depends on it.
+
+**Touches:** `internal/daemon` (priming next to `driveStepUpSession`),
+`internal/session` (atomic `prompt_count` bump), `internal/acpchat` (reuse),
+`internal/tui/acpwatch.go` (only if its priming path needs to defer to the
+daemon). **Done when:** a `--headless` daemon runs a project end to end with
+nobody watching, and a TUI attached to the same daemon never sends an opening
+prompt a second time.
+
+### P.2 Read-only API and event stream
 
 **Scope: M.**
 
@@ -1894,7 +1916,7 @@ when:** `curl --unix-socket … /api/v1/events` shows `task.status` and
 `queue.updated` events during a real project run, and a reconnect with
 `Last-Event-ID` resumes without a gap.
 
-### P.2 Read-only GUI
+### P.3 Read-only GUI
 
 **Scope: M–L**, most of it front-end work.
 
@@ -1916,7 +1938,7 @@ when:** `curl --unix-socket … /api/v1/events` shows `task.status` and
 (§A.7 item 4). **Done when:** the four wireframes can be reproduced from live
 data with no write scope granted.
 
-### P.3 Write actions
+### P.4 Write actions
 
 **Scope: M.**
 
@@ -1940,17 +1962,11 @@ is unchanged apart from emitting `api_write`. **Done when:** every row of
 §A.4.7 except `archive` works from the GUI, and a concurrent TUI write
 produces a `412` instead of a lost update.
 
-### P.4 Session attach and daemon-side priming
+### P.5 Session attach
 
-**Scope: M–L.**
+**Scope: M.**
 
-- **First, priming moves into the daemon** (§A.5.4): the daemon sends the
-  opening prompt when `prompt_count == 0`, bumps it with a compare-and-set on
-  `session.json`, and disconnects one-shot kinds at end of turn. The TUI's
-  existing `prompt_count` check (`acpwatch.go:494`) keeps the two compatible.
-  This fixes headless mode on its own and is worth shipping even without the
-  GUI.
-- Then the WebSocket session relay, `GET /api/v1/sessions/{sid}/acp` (§A.5.2):
+- The WebSocket session relay, `GET /api/v1/sessions/{sid}/acp` (§A.5.2):
   one upstream connection per session via `acpchat`/`acpclient.Adopt`,
   replay from `stream.log`, a per-session ring, `observe` for every kind,
   `interactive` (prompt and cancel) for persistent kinds only, lifetime parity
@@ -1959,15 +1975,12 @@ produces a `412` instead of a lost update.
 - GUI: the Watch and Prompt controls in §G.2, and live transcripts in the
   project view's selected-task strip and on the sandbox card.
 
-**Touches:** `internal/daemon` (priming next to `driveStepUpSession` in
-`step_up.go`), `internal/session` (atomic `prompt_count` bump),
-`internal/acpchat` and `internal/acpclient` (reuse), `internal/api` (relay),
-`internal/tui/acpwatch.go` (only if its priming path needs to defer to the
-daemon). **Done when:** a `--headless` daemon runs a project end to end with
-nobody watching, and a browser can watch a task session from start to finish
+**Touches:** `internal/acpchat` and `internal/acpclient` (reuse),
+`internal/api` (relay). It relies on the daemon-side priming of §P.1.
+**Done when:** a browser can watch a task session from start to finish
 without changing when it ends.
 
-### P.5 Optional follow-ups
+### P.6 Optional follow-ups
 
 Each of these is independent and needs its own decision:
 
@@ -1982,16 +1995,17 @@ Each of these is independent and needs its own decision:
 - **Capability review gate** (R.4 Q7). This is the largest one
   and is a change to how workloads are created, not to the GUI.
 
-### P.6 Phase summary
+### P.7 Phase summary
 
 | Phase | Ships | Scope | Main code touched | New risk |
 |---|---|---|---|---|
 | P.0 (**done**) | shared control package, save lock, audit `seq` | S–M | `internal/tui`, `internal/control`, `internal/pathlock`, `internal/project`, `internal/task`, `internal/audit` | none |
-| P.1 | read API + SSE on a unix socket | M | `internal/daemon` (snapshot), `internal/api`, `cmd/orch` | a listener (read-only, token) |
-| P.2 | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
-| P.3 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |
-| P.4 | daemon priming, then session relay | M–L | `internal/daemon`, `internal/session`, `internal/api` relay | session lifetime; prompting into live agents |
-| P.5 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |
+| P.1 | daemon-side priming | S–M | `internal/daemon`, `internal/session` | the daemon prompts agents; a double prompt is guarded by the `prompt_count` compare-and-set |
+| P.2 | read API + SSE on a unix socket | M | `internal/daemon` (snapshot), `internal/api`, `cmd/orch` | a listener (read-only, token) |
+| P.3 | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
+| P.4 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |
+| P.5 | session relay | M | `internal/api` relay, `internal/acpchat` | session lifetime; prompting into live agents |
+| P.6 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |
 
 ---
 
