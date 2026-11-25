@@ -12,8 +12,11 @@
 // It also keeps the last 500 lines in memory ([Logger.Recent]), preloaded
 // after a restart with [Logger.Seed] from [TailFile]. The daemon's state
 // snapshot reads that buffer instead of the file, and [Logger.OnLog] tells
-// the snapshot when to refresh. Logger is safe for concurrent use.
-// [ParseLine] turns a line back into an [Event]. [Redact] masks credential
+// the snapshot when to refresh. Every line in that buffer carries a
+// monotonically increasing sequence number ([Line], [Logger.RecentLines],
+// [Logger.Since], [Logger.LastSeq]) so a consumer can resume from where it
+// left off; the seq is not written to the file. Logger is safe for
+// concurrent use. [ParseLine] turns a line back into an [Event]. [Redact] masks credential
 // patterns (tokens, API keys, bearer headers, URL userinfo, PEM keys) without
 // touching git SHAs. The snapshot and the channel router use it before text
 // leaves the process.
