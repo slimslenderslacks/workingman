@@ -855,7 +855,7 @@ re-plan, and a planning run mid-cleanup would dirty the workspace the archive
 agent is trying to leave clean.
 
 **"Archived" is not a project status, on purpose.** `:archive`
-(`internal/tui/archive.go: archiveProject`) only ever runs once `archive:
+(`internal/control/archive.go: Archive`, called by the TUI) only ever runs once `archive:
 true` is set, and what it does is `os.Rename` the whole project directory out
 of the watched `--root` into a sibling `<root>.backup/` tree. There is no
 resting "archived" state to represent in the enum because an archived project
@@ -867,13 +867,13 @@ archiving itself is removal, not a state transition.
 
 ## 4. `stopped`: a pause, not a normal transition
 
-`status: stopped` (`internal/daemon/stop.go`, `internal/tui/stop.go`) is a
+`status: stopped` (`internal/daemon/stop.go`, `internal/control/stop.go`) is a
 human-requested pause layered on top of whatever the project was doing, set
 by `:stop` and lifted by `:start`. Unlike every status covered above, it is a
 **dead end** for `dispatchProject`'s normal routing — no case in the status
 switch launches anything for `stopped`, by design.
 
-- **`:stop` → `requestStop`** loads the project, stashes the current
+- **`:stop` → `control.Stop`** loads the project, stashes the current
   `Status` into `StoppedFrom` (so `:start` knows what to restore), sets
   `Status = stopped`, and saves as `WriterAgent`. The daemon's
   `enforceStopped` (`internal/daemon/stop.go`) is what actually makes the
@@ -889,7 +889,7 @@ switch launches anything for `stopped`, by design.
   stopped`) rather than reading the kill as a crash to retry or escalate —
   otherwise a deliberate stop would look like a task failure or a review-agent
   crash to the very code paths it's trying to pause.
-- **`:start` → `requestStart`** restores `Status` from `StoppedFrom` (falling
+- **`:start` → `control.Start`** restores `Status` from `StoppedFrom` (falling
   back to `idle` if that field is somehow empty — a hand-edited file, say —
   since restoring to `""` would misroute to the project agent as an
   unpopulated seed) and clears `StoppedFrom`, then saves as `WriterAgent`.

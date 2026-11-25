@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/slimslenderslacks/work/internal/control"
 	"github.com/slimslenderslacks/work/internal/project"
 )
 
@@ -124,7 +125,7 @@ func (m model) dispatchProjectCommand(cmd string) (tea.Model, tea.Cmd) {
 		// Only a cleaned-up work stream can be archived. Check before opening
 		// the confirm modal: a dialog whose only possible answer is "no" is a
 		// poor affordance, so the refusal lands directly on the status line.
-		if _, err := loadArchivable(m.projSel); err != nil {
+		if _, err := control.LoadArchivable(m.projSel); err != nil {
 			m.statusMsg = "archive: " + err.Error()
 			return m, nil
 		}

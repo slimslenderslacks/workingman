@@ -1,6 +1,8 @@
 # workingman GUI: a local web app driving the daemon through an API
 
-Status: **draft proposal**. Nothing here is implemented.
+Status: **draft proposal**. Phase P.0 (groundwork, no user-visible change) is
+implemented; see [P.0](#p0-groundwork-no-user-visible-change). Nothing from P.1
+on is.
 
 ## Summary
 
@@ -823,8 +825,8 @@ data: {"seq":18242,…,"type":"session.started","cause":"session","data":{"id":"
   through the same function. The TUI helpers (`requestStop`, `requestStart`,
   `summonWolf`, `requestReview`, `requestCleanup` in `internal/tui/*.go`) are
   small `Load → mutate → SaveAs(WriterAgent)` functions, and most also check a
-  precondition. They should move into a shared package (e.g.
-  `internal/control`) that both the TUI and the API call. Then the API
+  precondition. They now live in a shared package,
+  `internal/control` (P.0), that the TUI calls and the API will call. Then the API
   cannot drift from the TUI, and the TUI's own code path is unchanged.
 - **The response is the file state after the write, not the outcome.** Writes
   return `202 Accepted` with the new resource and its new etag. The daemon's
@@ -1830,6 +1832,25 @@ code and tests, not the GUI's visual polish.
 
 ### P.0 Groundwork (no user-visible change)
 
+**Status: implemented.** What was built:
+
+- **`internal/control`** holds the write actions with their preconditions and
+  refusal text: `Stop`, `Start`, `SummonWolf`, `Review`, `Cleanup`, `Hide`,
+  `Show`, plus `LoadArchivable` and `Archive` for `:archive`. Each file write
+  is one `project.Update` (load, mutate and save under the write lock); a
+  refusal leaves the file untouched. `internal/tui/control.go` keeps the TUI's
+  old helper names (`requestStop`, `summonWolf`, `archiveProject`, …) as
+  one-line wrappers, so the TUI's call sites and tests did not change.
+  `internal/control/control_test.go` covers each action's write and refusals.
+- **The save lock** is `internal/pathlock` (one in-process mutex per cleaned
+  absolute path). `project.Save` / `SaveAs` take it around the write, and the
+  new `project.Update` holds it across the whole read-modify-write
+  (`internal/project/project.go`); `task.Save` / `task.Update` do the same.
+- **The audit `seq`**: each line in the `Recent` ring of
+  `internal/audit/audit.go` carries a `Seq`, read through `RecentLines`,
+  `Since(seq)` (which reports when the cursor has fallen out of the ring) and
+  `LastSeq`. The line format on disk is unchanged.
+
 **Scope: S–M.**
 
 - Move the TUI's write helpers (`requestStop`, `requestStart`, `summonWolf`,
@@ -1965,7 +1986,7 @@ Each of these is independent and needs its own decision:
 
 | Phase | Ships | Scope | Main code touched | New risk |
 |---|---|---|---|---|
-| P.0 | shared control package, save lock, audit `seq` | S–M | `internal/tui`, `internal/control`, `internal/project`, `internal/audit` | none |
+| P.0 (**done**) | shared control package, save lock, audit `seq` | S–M | `internal/tui`, `internal/control`, `internal/pathlock`, `internal/project`, `internal/task`, `internal/audit` | none |
 | P.1 | read API + SSE on a unix socket | M | `internal/daemon` (snapshot), `internal/api`, `cmd/orch` | a listener (read-only, token) |
 | P.2 | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
 | P.3 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |

@@ -2,7 +2,7 @@
 // project's task agents work in, each on its own task branch cut from the
 // project's shared branch.
 //
-// Role: shared (daemon, and the TUI's :archive)
+// Role: shared (daemon, and the TUI's :archive through internal/control)
 //
 // A task worktree is a directory, <shared>/.worktrees/<task>/, holding one
 // `git worktree` per project repo ([Root], [Path]). Every repo's worktree is

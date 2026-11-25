@@ -52,8 +52,8 @@
 //
 // Uses internal/pathlock for the per-path write lock. internal/daemon watches,
 // routes on and rewrites project files and keeps the sidecars. internal/tui loads projects for the
-// gallery and writes the request flags (`:cleanup`, `:review`, `:hide`,
-// `:stop`). internal/acpwrapper loads project.yaml to end a persistent wolf
+// gallery, and internal/control writes the request flags behind its commands
+// (`:cleanup`, `:review`, `:hide`, `:stop`). internal/acpwrapper loads project.yaml to end a persistent wolf
 // session once the project leaves blocked. See state-machine.md and
 // design.md.
 package project

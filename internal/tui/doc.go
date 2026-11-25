@@ -54,11 +54,12 @@
 //   - sessions.go — [SessionView] and sessions-pane selection.
 //   - project_detail.go — the right-column dashboard.
 //   - command_picker.go — the ":" menu and dispatch of each command.
-//   - wolf.go, review.go, cleanup.go, stop.go, hide.go — the project-file
-//     writes behind :wolf, :review, :cleanup, :stop/:start and :hide/:show.
-//   - archive.go — :archive: removes the project's task worktrees and wm/
-//     refs (internal/worktree), then the wsp workspace, then moves the
-//     project directory to the sibling <root>.backup directory.
+//   - control.go — thin wrappers over internal/control, which holds the
+//     project-file writes behind :wolf, :review, :cleanup, :stop/:start,
+//     :hide/:show and :archive, with their preconditions and refusal text.
+//   - archive.go — the :archive confirm modal; the teardown itself (task
+//     worktrees and wm/ refs, then the wsp workspace, then the move to the
+//     sibling <root>.backup directory) is control.Archive.
 //   - interactive.go — :session, :orch and :workspace through [InteractiveLauncher];
 //     from the Tasks pane, :session and :workspace open the selected task's worktree.
 //   - tab_attach.go — attaching to non-ACP sessions through [TabFocuser].
@@ -131,8 +132,8 @@
 //
 // # Collaborators
 //
-// Uses internal/project and internal/task to read and write work-stream
-// files, internal/policy for task policy rules, internal/session,
+// Uses internal/project and internal/task to read work-stream files and
+// internal/control to write them, internal/policy for task policy rules, internal/session,
 // internal/acpclient and internal/sbx for ACP sessions, internal/postoffice
 // for the inbox, internal/terminal
 // for tab focus, and internal/workspace (wsp) for :archive. Used only by

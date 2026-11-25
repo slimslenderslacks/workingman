@@ -20,7 +20,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/acpclient` | shared | Package acpclient is the client side of an ACP session: it dials a session's agent.sock, speaks the Agent Client Protocol over it, and decodes the streamed agent output into Events. | — | `Client`, `ConfigOption`, `ConfigValue`, `Event`, `EventKind`, `Options`, `PlanEntry`, `RequestHandler`, `State` |
 | `internal/acpwrapper` | wrapper | Package acpwrapper is the core of the acp-wrapper binary: it runs a Claude ACP agent inside an sbx sandbox and serves it to clients over a per-session unix socket, agent.sock. | — | `Config` |
 | `internal/agent` | daemon | Package agent defines the process model for orch's claude-code sessions: agent kinds, the launch spec, and the Launcher and Session interfaces. | `Launcher`, `Session` | `Kind`, `ProcessLauncher`, `Spec` |
-| `internal/audit` | daemon | Package audit writes and reads the daemon's append-only audit log of timestamped key=value events, and redacts secrets from text before it is published. | — | `Event`, `Logger` |
+| `internal/audit` | daemon | Package audit writes and reads the daemon's append-only audit log of timestamped key=value events, and redacts secrets from text before it is published. | — | `Event`, `Line`, `Logger` |
 | `internal/channels` | daemon | Package channels is the messaging-channel foundation for the workingman daemon: the Channel interface transports implement, the Registry that runs them, and the channels.yaml config they are built from. | `Channel`, `Chunker`, `ConversationIndex`, `Resolver`, `Typer` | `ChannelConfig`, `Config`, `ConversationTarget`, `CredentialRef`, `Credentials`, `Factory`, `FileConversationIndex`, `InboundHandler`, `InboundMessage`, `Notifier`, `NotifyConfig`, `OutboundMessage`, `Registry`, `Resolution`, `Route`, `RouterConfig`, `Secret`, `SendResult` |
 | `internal/channels/channeltest` | daemon | Package channeltest provides an in-memory fake channels.Channel for tests of code that sends to, or receives from, a channel. | — | `Fake` |
 | `internal/channels/signal` | daemon | Package signal is the Signal channel: a channels.Channel that talks to a signal-cli daemon running in HTTP mode. | — | `AccessConfig`, `AccessPolicy`, `Channel`, `Config`, `Decision`, `Inbound`, `Info`, `Options`, `Reason` |
@@ -31,6 +31,7 @@ no doc.go or no valid `Role:` line yet.
 | `internal/channels/whatsapp/bridge` | daemon | Package bridge runs and talks to the vendored Baileys WhatsApp bridge: the "personal number, QR pairing, no public webhook" WhatsApp backend. | `Process` | `APIError`, `Backoff`, `Client`, `Event`, `Health`, `Launch`, `ReadKey`, `SendResult`, `Starter`, `Supervisor`, `SupervisorStatus` |
 | `internal/channels/whatsapp/setup` | daemon | Package setup holds the non-interactive core of `orch whatsapp setup`, `status` and `test`. | — | `Cred`, `Current`, `Guide`, `SaveResult`, `Store`, `Update`, `WebhookSettings` |
 | `internal/channels/yamledit` | daemon | Package yamledit edits channels.yaml as a yaml.Node tree, so the `orch signal` and `orch slack` setup commands can rewrite their own section while comments and everything else in the file survive. | — | — |
+| `internal/control` | shared | Package control holds the write actions that steer a work stream through its project.yaml: stop/start, summon the wolf, review, cleanup, hide/show and archive, each with its precondition and its user-facing refusal text. | `WorkspaceRemover` | — |
 | `internal/daemon` | daemon | Package daemon is the orch control loop: it watches the orch roots, drives each project and task through its state machine, and launches the agent sessions that do the work. | `ChannelSender`, `StepUpConversation` | `ACPInfo`, `AuditEvent`, `ChannelOption`, `Daemon`, `DaemonInfo`, `DeferredInfo`, `IntegrationSnapshot`, `MissedSchedule`, `OfflineOptions`, `Option`, `ProjectLive`, `ProjectSnapshot`, `PullRequestSummary`, `RepoCommit`, `ReviewGatewayConfig`, `ReviewPollInfo`, `RuntimeInfo`, `SessionInfo`, `SessionSnapshot`, `SessionStatus`, `SleepyHeadSession`, `Snapshot`, `StepUpAgentConfig`, `StepUpAgentSession`, `TaskSnapshot`, `VerifyChecks`, `WolfSession`, `WorkingmanAgentConfig`, `WorkingmanAgentSession` |
 | `internal/gitsign` | shared | Package gitsign makes a sandboxed agent commit as the host user, SSH-sign those commits, and check that the SSH agent forwarded into the sandbox can sign and push. | — | `Config`, `PushResult`, `RunFunc` |
 | `internal/mcpgateway` | shared | Package mcpgateway gives every sandbox workingman creates its own MCP gateway: a sub-gateway of the host's standalone-codemode gateway, minted with POST /gateways and torn down with DELETE /gateways/{id}. | `GatewayAPI`, `GatewaySource`, `SessionConn`, `ToolCaller`, `ToolLister` | `Client`, `Content`, `DaemonGateway`, `DaemonSession`, `Gateway`, `Manager`, `RPCError`, `Record`, `ServerState`, `Session`, `SessionOptions`, `Store`, `Tool`, `ToolError`, `ToolResult`, `UnknownServersError` |
@@ -102,6 +103,7 @@ graph LR
   end
   subgraph grp_shared["shared"]
     internal_acpclient["acpclient"]
+    internal_control["control"]
     internal_gitsign["gitsign"]
     internal_mcpgateway["mcpgateway"]
     internal_pathlock["pathlock"]
@@ -178,6 +180,8 @@ graph LR
   internal_channels_whatsapp_setup --> internal_channels
   internal_channels_whatsapp_setup --> internal_channels_whatsapp
   internal_channels_yamledit --> internal_channels
+  internal_control --> internal_project
+  internal_control --> internal_worktree
   internal_daemon --> internal_acpchat
   internal_daemon --> internal_agent
   internal_daemon --> internal_audit
@@ -231,6 +235,7 @@ graph LR
   internal_taskgraph --> internal_task
   internal_terminal --> internal_agent
   internal_tui --> internal_acpclient
+  internal_tui --> internal_control
   internal_tui --> internal_policy
   internal_tui --> internal_postoffice
   internal_tui --> internal_project
@@ -240,7 +245,6 @@ graph LR
   internal_tui --> internal_taskgraph
   internal_tui --> internal_terminal
   internal_tui --> internal_workspace
-  internal_tui --> internal_worktree
 
   classDef entry fill:#e8e8e8,stroke:#555,stroke-width:2px,color:#000
   class cmd_acp_wrapper,cmd_op_read,cmd_orch,cmd_post_office entry
@@ -249,7 +253,7 @@ graph LR
   classDef tui fill:#e4f6df,stroke:#3c9a2c,color:#000
   class internal_tui tui
   classDef shared fill:#fff1cc,stroke:#c99a06,color:#000
-  class internal_acpclient,internal_gitsign,internal_mcpgateway,internal_pathlock,internal_policy,internal_postoffice,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace,internal_worktree shared
+  class internal_acpclient,internal_control,internal_gitsign,internal_mcpgateway,internal_pathlock,internal_policy,internal_postoffice,internal_project,internal_sbx,internal_session,internal_task,internal_terminal,internal_workspace,internal_worktree shared
   classDef wrapper fill:#f3e2fb,stroke:#8e44ad,color:#000
   class internal_acpwrapper wrapper
 ```
@@ -279,6 +283,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/channels/whatsapp/bridge` | — | `channels/whatsapp` |
 | `internal/channels/whatsapp/setup` | `channels`, `channels/whatsapp` | `cmd/orch` |
 | `internal/channels/yamledit` | `channels` | `channels/signal/setup`, `channels/slack/setup` |
+| `internal/control` | `project`, `worktree` | `tui` |
 | `internal/daemon` | `acpchat`, `agent`, `audit`, `channels`, `gitsign`, `mcpgateway`, `notify`, `policy`, `postoffice`, `power`, `project`, `prompts`, `runner`, `sbx`, `scheduler`, `session`, `task`, `taskgraph`, `terminal`, `workspace`, `worktree` | `cmd/orch` |
 | `internal/gitsign` | — | `cmd/acp-wrapper`, `acpwrapper`, `daemon`, `runner` |
 | `internal/mcpgateway` | `policy` | `cmd/acp-wrapper`, `cmd/orch`, `cmd/post-office`, `acpwrapper`, `channels/slack`, `daemon`, `postoffice/mcpserver`, `runner` |
@@ -289,7 +294,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/postoffice` | `audit`, `channels` | `cmd/orch`, `cmd/post-office`, `daemon`, `postoffice/mcpserver`, `router`, `tui` |
 | `internal/postoffice/mcpserver` | `mcpgateway`, `postoffice`, `session`, `task` | `cmd/post-office` |
 | `internal/power` | — | `cmd/orch`, `daemon` |
-| `internal/project` | `pathlock` | `acpwrapper`, `daemon`, `tui` |
+| `internal/project` | `pathlock` | `acpwrapper`, `control`, `daemon`, `tui` |
 | `internal/prompts` | `agent`, `sbx` | `daemon`, `runner` |
 | `internal/router` | `acpchat`, `audit`, `channels`, `postoffice` | `cmd/orch` |
 | `internal/runner` | `agent`, `audit`, `gitsign`, `mcpgateway`, `policy`, `prompts`, `sbx`, `session`, `setup`, `task`, `terminal`, `workspace` | `cmd/orch`, `daemon` |
@@ -301,6 +306,6 @@ The same graph as text: each package's internal imports and importers.
 | `internal/task` | `pathlock`, `policy`, `sbx` | `acpwrapper`, `daemon`, `postoffice/mcpserver`, `runner`, `taskgraph`, `tui` |
 | `internal/taskgraph` | `task` | `daemon`, `tui` |
 | `internal/terminal` | `agent` | `cmd/orch`, `daemon`, `runner`, `tui` |
-| `internal/tui` | `acpclient`, `policy`, `postoffice`, `project`, `sbx`, `session`, `task`, `taskgraph`, `terminal`, `workspace`, `worktree` | `cmd/orch` |
+| `internal/tui` | `acpclient`, `control`, `policy`, `postoffice`, `project`, `sbx`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |
 | `internal/workspace` | — | `cmd/orch`, `daemon`, `runner`, `tui` |
-| `internal/worktree` | — | `daemon`, `tui` |
+| `internal/worktree` | — | `control`, `daemon` |

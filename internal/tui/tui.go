@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/slimslenderslacks/work/internal/control"
 	"github.com/slimslenderslacks/work/internal/postoffice"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/session"
@@ -129,7 +130,7 @@ type model struct {
 	// `:archive`. Defaulted to the real wsp manager by newModel; tests swap in
 	// a fake. A nil remover means "no workspace manager wired in" and archive
 	// skips the removal.
-	wspRemover workspaceRemover
+	wspRemover control.WorkspaceRemover
 
 	// acp holds the ACP-session tab view: one tab per live non-interactive ACP
 	// session, fed by acpCh. showACP toggles the full-window tab view on top of
