@@ -1,7 +1,7 @@
 # workingman today: a grounding survey for the GUI proposal
 
 Status: research / reference. This document describes how workingman (`orch`)
-works **today**, so that the GUI proposal (`docs/proposals/workingman-gui.md`)
+works **today**, so that the GUI proposal ([`docs/proposals/workingman-gui.md`](../workingman-gui.md))
 can cite it. It proposes nothing. Every `path:line` reference was read against
 the tree at `1b049b3`. Line numbers drift; the function names next to them are
 the stable anchor.

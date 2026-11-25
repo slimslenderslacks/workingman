@@ -2,20 +2,226 @@
 
 Status: **draft proposal**. Nothing here is implemented.
 
-> _Intro and summary: to be written (see the `finalize-gui-proposal` task)._
-> _It will state the goal (a local GUI as an alternative or companion to the
-> TUI), the guiding constraint (files stay the source of truth; the API is a
-> thin reader/writer over them) and a one-paragraph summary of each section._
+## Summary
 
-Grounding: every claim about current behaviour cites
+**Goal.** Give workingman (`orch`) a local web GUI as a *companion* to the
+TUI, and possibly an alternative to it for some people. Both front ends drive
+the same daemon through one small HTTP API that the daemon serves on a unix
+socket or on loopback. The TUI stays as it is. It can move onto the API later
+if that turns out to be useful.
+
+**Guiding constraint: files remain the source of truth.** Today the control
+plane is the filesystem. Every human action that changes daemon behaviour is a
+`project.yaml` write stamped `updated_by: agent`, or a new `project.md` /
+`intake/*.md` / `catchup-request` file, and the fsnotify-driven daemon reacts
+to it (survey §3, §17.1). The API keeps that contract. A read is the same
+merged model that `snapshot.json` is built from, plus the task-file fields the
+snapshot leaves out. A write is exactly the file write the TUI or a human makes
+today, done through the same helpers, after which the daemon reacts as it
+always has. The API adds no new control path into the scheduler and no
+capability that a local user editing files does not already have.
+
+**What each section covers.**
+
+- **[TUI vs GUI](#tui-vs-gui)** covers what the TUI does well (keyboard flow,
+  `:` commands, one process with no listener), what a GUI would add (a
+  dependency graph with the commit queue, a "sandbox card" per workload, a
+  timeline, mouse-driven intake and retry), and how both coexist on one API.
+- **[API for driving a GUI](#api-for-driving-a-gui)** defines the resources
+  (projects, tasks, sessions with their sandboxes, intake, audit events, PRs,
+  post-office messages, agents), the `GET` endpoints, an SSE event stream
+  whose state comes from diffing the model (not from parsing audit lines),
+  write actions that map one-to-one onto today's file writes (with etags,
+  idempotency keys and a shared control package), a WebSocket relay for
+  joining live ACP sessions, and the binding, auth and browser-threat model.
+- **[GUI design](#gui-design)** describes the screens: a project view with the
+  task graph and the commit-queue lane; the task → sandbox mapping with watch,
+  prompt and shell controls; the sandbox card (inputs → capabilities →
+  output); an agents map that places workingman, sleepy-head and step-up next
+  to the project workflow agents; and the inbox, intake, timeline and PR views.
+  It includes four SVG wireframes.
+- **[Pros, cons, risks and open questions](#pros-cons-risks-and-open-questions)**
+  weighs the cost of a second front end and the first HTTP listener in `orch`,
+  and collects every open question raised elsewhere in the document.
+- **[Suggested incremental path](#suggested-incremental-path)** orders the
+  work in phases: read-only API and event stream, then a read-only GUI, then
+  write actions, then session attach (with daemon-side priming). Each phase
+  lists its rough scope and the code it touches.
+
+**Grounding.** Every claim about current behaviour cites
 [the grounding survey](research/workingman-gui-survey.md) (`survey §N`) or the
-code directly. Code references were checked against `193a052`.
+code directly. The survey was read against `1b049b3`. The code references in
+this document were re-checked against `193a052`, the commit that added the
+survey; no code changed between the two. Line numbers drift, and the function
+names next to them are the stable anchor.
 
-<!-- Sections to be added by later tasks:
-  - TUI vs GUI
-  - Pros, cons, risks and open questions
-  - Suggested incremental path
--->
+## Contents
+
+- [Summary](#summary)
+- [TUI vs GUI](#tui-vs-gui)
+  - [T.1 What the TUI does well](#t1-what-the-tui-does-well)
+  - [T.2 What a GUI would add](#t2-what-a-gui-would-add)
+  - [T.3 Who would use which](#t3-who-would-use-which)
+  - [T.4 Coexistence on one API, with files as the source of truth](#t4-coexistence-on-one-api-with-files-as-the-source-of-truth)
+- [API for driving a GUI](#api-for-driving-a-gui)
+  - [A.0 Design principles](#a0-design-principles)
+  - [A.1 Resources](#a1-resources)
+  - [A.2 Read endpoints](#a2-read-endpoints)
+  - [A.3 Live event stream](#a3-live-event-stream)
+  - [A.4 Write actions](#a4-write-actions)
+  - [A.5 Joining a live sandbox session](#a5-joining-a-live-sandbox-session)
+  - [A.6 Binding, auth and security](#a6-binding-auth-and-security)
+  - [A.7 Coexistence: the TUI on the same API](#a7-coexistence-the-tui-on-the-same-api)
+- [GUI design](#gui-design)
+  - [G.0 Principles](#g0-principles)
+  - [G.1 Project view: task graph, status and commit queue](#g1-project-view-task-graph-status-and-commit-queue)
+  - [G.2 Task → sandbox mapping: watch, join, interact](#g2-task--sandbox-mapping-watch-join-interact)
+  - [G.3 Sandbox card: inputs → capabilities → output](#g3-sandbox-card-inputs--capabilities--output)
+  - [G.4 Agents view: who builds least-privilege workloads](#g4-agents-view-who-builds-least-privilege-workloads)
+  - [G.5 Secondary views: inbox, intake, timeline, PRs, notifications](#g5-secondary-views-inbox-intake-timeline-prs-notifications)
+  - [G.6 Screen inventory](#g6-screen-inventory)
+- [Pros, cons, risks and open questions](#pros-cons-risks-and-open-questions)
+  - [R.1 Pros](#r1-pros)
+  - [R.2 Cons](#r2-cons)
+  - [R.3 Risks and mitigations](#r3-risks-and-mitigations)
+  - [R.4 Open questions](#r4-open-questions)
+- [Suggested incremental path](#suggested-incremental-path)
+  - [P.0 Groundwork (no user-visible change)](#p0-groundwork-no-user-visible-change)
+  - [P.1 Read-only API and event stream](#p1-read-only-api-and-event-stream)
+  - [P.2 Read-only GUI](#p2-read-only-gui)
+  - [P.3 Write actions](#p3-write-actions)
+  - [P.4 Session attach and daemon-side priming](#p4-session-attach-and-daemon-side-priming)
+  - [P.5 Optional follow-ups](#p5-optional-follow-ups)
+  - [P.6 Phase summary](#p6-phase-summary)
+- [References](#references)
+
+---
+
+## TUI vs GUI
+
+The question is not "replace the TUI". The TUI is a good tool for the person
+who wrote it, and the API design below deliberately leaves it unchanged. The
+question is which jobs a GUI does better, and how to add one without creating
+a second control plane.
+
+### T.1 What the TUI does well
+
+- **Keyboard-driven flow.** Everything is a key or a chord: `h`/`j`/`k`/`l`
+  to move, `alt+h`/`alt+l` across columns, `tl`/`tr`/`tp` to toggle the
+  left column, the right column and hidden streams, `z` to zoom, `y` to copy
+  (OSC 52), `Enter` to attach to a session, `a` for ACP tabs, `I` for the inbox
+  (survey §12.2). An operator who knows the keys never leaves the home row.
+- **`:` commands that are exactly the control plane.** The picker has eleven
+  commands: `:session`, `:wolf`, `:orch`, `:workspace`, `:review`,
+  `:cleanup`, `:archive`, `:stop`, `:start`, `:hide`, `:show` (survey §12.3).
+  None takes an argument; each acts on the selected work stream or task. Most
+  are a `project.Load` → one field → `project.SaveAs` write (survey §12.4).
+  The command list is therefore also an honest list of what a human can do,
+  and its refusal messages ("review starts on an idle work stream…") state the
+  daemon's rules.
+- **Low overhead and a small attack surface.** In integrated mode the TUI runs
+  in the daemon's process (`orch` without `--headless`, survey §1). It opens
+  no listener of its own; `orch` exposes no HTTP port at all apart from the
+  optional WhatsApp webhook (survey §15). It reads the files, an in-process
+  session channel, the ACP sockets and the post-office store directly
+  (survey §6.5). It works over ssh, in tmux and in any terminal, and it
+  starts instantly.
+- **It sits next to the agents.** ACP tabs render the live transcript, and
+  typing goes into persistent sessions (wolf, workingman, sleepy-head; survey
+  §9.1). `:session`, `:orch` and `:workspace` open a terminal tab right where
+  the user already works (Ghostty, WezTerm, kitty; survey §9.3), and `Enter`
+  on a non-ACP row focuses that tab.
+- **It does a job, not just a view.** The integrated TUI sends every ACP
+  session's opening prompt (survey §17.5). Any replacement has to take over
+  that job (§A.5.4).
+- **Dense, and dense enough.** The Agent Sessions column already shows
+  harness, model, mounts, MCPs and sandbox per session. The Tasks list shows
+  model, MCPs and a rule count, with a dependency tree above it. The project
+  detail shows a "parallel: N (running … · integrating … · queued …)" line
+  (survey §12.1; `tui/project_detail.go:182-215`).
+
+### T.2 What a GUI would add
+
+Each item is something the TUI does not do today, or does only in a cramped
+form. The section that designs it is in brackets.
+
+| Need | TUI today | GUI addition |
+|---|---|---|
+| See how tasks relate to their project | an indented dependency tree and a one-line pipeline summary | a laid-out graph from the scheduler's own `taskgraph` output, with deferral reasons, failed-dependency edges, and `success` drawn as "queued" rather than "done" (§G.1) |
+| See the integration order | the `queued …` names | a commit-queue lane: queue in `succeeded_at` order, the commit agent's rebase → verify → ff-only steps, and the landed commits (§G.1) |
+| See a task as a workload | model, MCP names and a rule *count* | a sandbox card that brings together the task file, `session.json`, the gateway record and the harness record, which are four places today (survey §17.7): input prompt and metadata → capabilities, including what was *not* granted → output commit (§G.3) |
+| See who decides capabilities | not shown | an agents map that places workingman, sleepy-head and step-up next to the project, planning, task, commit, review, archive and wolf agents, and says where each capability decision is made (§G.4) |
+| History: why did this happen? | the TUI does not read the audit log (survey §6.5) | a filterable timeline over the audit stream, with links into projects, tasks and sandboxes (§G.5) |
+| Ask for work | no TUI command for intake or a new project (survey §4.5): the user writes files by hand or asks the workingman agent | an intake form and a new-project form that write the same files (§A.4.3) |
+| Retry one task | no task-level control at all; it goes through the wolf (survey §17.3) | a Retry button that performs the wolf's documented "re-run it" edit (§A.4.4) |
+| Several things at once | one terminal, overlays are full-screen | several windows or tabs, e.g. a graph on one screen and two transcripts on another |
+| Discoverability | keys and chords must be learned; the footer shows hints | visible buttons, with the TUI's refusal text on disabled ones (§G.0) |
+| Use while headless | the launchd service runs `orch --headless`; standalone `orch tui` has no ACP tabs, no `:session` and no live state (survey §16, §18) | a GUI attached to the running service, once priming moves into the daemon (§A.5.4, §P.4) |
+
+### T.3 Who would use which
+
+- The **keyboard operator** who lives in the terminal keeps the TUI. Nothing
+  in this proposal takes anything away from it. Phase P.5 offers it live state
+  and the timeline through the same event bus if wanted.
+- Someone **reviewing or supervising** a project (what is running, what lands
+  next, what did this sandbox have access to) is better served by the graph,
+  the lane and the sandbox card.
+- Someone **new to workingman** learns the system faster from the agents map
+  and the sandbox card than from the key list.
+- **Scripts and dashboards** get a typed read API and an event stream instead
+  of polling `snapshot.json` (survey §6.4). The API pays off even if the GUI
+  is never built.
+
+### T.4 Coexistence on one API, with files as the source of truth
+
+```
+        human (keys)            human (mouse)             scripts / curl
+             │                        │                          │
+        ┌────▼─────┐           ┌──────▼──────┐                   │
+        │   TUI    │           │  web GUI    │                   │
+        └────┬─────┘           └──────┬──────┘                   │
+   (today: direct file writes,        │ HTTP + SSE + WS          │
+    later optionally the API)         ▼                          │
+             │              ┌──────────────────┐                 │
+             ├─────────────▶│ orch API (in the │◀────────────────┘
+             │              │ daemon process)  │
+             │              └────────┬─────────┘
+             │      internal/control │ (same Load → mutate → SaveAs helpers)
+             ▼                       ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ files under the roots: project.yaml, tasks/*.yaml,      │◀── agents, editors,
+   │ project.md, intake/*.md, catchup-request; post-office/  │    the workingman agent
+   └──────────────────────────┬──────────────────────────────┘
+                              │ fsnotify
+                        ┌─────▼──────┐
+                        │   daemon   │── sessions, sandboxes, commit queue
+                        └────────────┘
+```
+
+The rules that make this work are set out in §A.0, §A.4.1 and §A.7. In short:
+
+1. **One write path.** The TUI helpers (`requestStop`, `requestStart`,
+   `summonWolf`, `requestReview`, `requestCleanup`, `archiveProject` in
+   `internal/tui/*.go`) move into a shared `internal/control` package. The TUI
+   and the API call the same functions, with the same preconditions and the
+   same refusal text, so the two front ends cannot drift.
+2. **The daemon cannot tell them apart.** Both produce the same file write
+   with the same `updated_by` stamp. The daemon's only signal is the file, as
+   today. The API adds an `api_write` audit line so GUI actions show up in the
+   timeline.
+3. **Reads are views over the same state.** The API serves the model that the
+   snapshot is built from (§A.0 principle 2). The TUI keeps polling files
+   (survey §6.5) until, optionally, it subscribes to the same in-process event
+   bus (§A.7 item 2).
+4. **Agents and humans keep editing files.** A wolf, the workingman agent or a
+   human in an editor stay first-class writers. The GUI sees their writes as
+   events, because events come from diffing the model, not from API calls
+   (§A.3.2). Etags guard the GUI against overwriting a change it has not seen
+   (§A.4.1).
+5. **Nothing depends on the GUI.** The API is optional and off by default.
+   If it fails to bind, the daemon keeps running (§A.6.4). A closed browser tab
+   changes nothing, because notifications still fan out through osascript and
+   the channels (§G.5).
 
 ---
 
@@ -392,6 +598,9 @@ their enablement, so the GUI can place them (survey §7.3):
 
 ### A.2 Read endpoints
 
+Elsewhere in this document paths are often written without the `/api/v1`
+prefix (`GET /projects/{id}/graph`); every path lives under `/api/v1`.
+
 All endpoints are `GET` and return `application/json`, with
 `ETag`/`If-None-Match` support (§A.4.1). Lists return
 `{"items": [...], "generated_at": "...", "cursor": <seq>}`. The `cursor` is the
@@ -707,7 +916,7 @@ HTTP/1.1 412 Precondition Failed
 {"error": {"code": "precondition_failed",
   "message": "project.yaml changed since you loaded it (now status=blocked, updated_by=daemon)",
   "current": {"id": "p_0.workingman-tui", "status": "blocked",
-              "blocked_reason": "task draft-api-design: retry budget exhausted", "etag": "\"pj-51aa02f0\"", …}}}
+              "blocked_reason": "task \"draft-api-design\" failed after 3 attempts: go test failed", "etag": "\"pj-51aa02f0\"", …}}}
 ```
 
 **`archive` is the exception.** Today it is not a file write that the daemon
@@ -718,7 +927,7 @@ workspace `.orch`, runs `wsp rm --force`, and moves the directory to
 synchronously, and returns `200` with the backup path. It requires
 `{"confirm": "<work_stream>"}` in the body, the GUI's equivalent of the y/n
 modal. This is the only destructive endpoint. It should be left out of the
-first write phase.
+first write phase (§P.3; open question R.4 Q11).
 
 #### A.4.3 New project and intake
 
@@ -755,7 +964,7 @@ first write phase.
 ```
 
 - `name` is optional; the default is `gui-<UTC timestamp>-<4 hex>`. It is
-  validated as a single segment ending in `.md`. Body must be non-blank
+  validated as a single kebab-case segment, and the server appends `.md`. Body must be non-blank
   (blank → `400`: the daemon would only log `intake_empty`).
 - **Write:** `<project>/intake/<name>.md`, using temp+rename **inside
   `intake/`**. `mkdir -p intake/` comes first. A rename **into** the watched
@@ -819,8 +1028,8 @@ with `If-Match: <task etag>` and body `{"reset_attempts": true, "note": "optiona
 `Daemon.RetryTask(path)`. That function does `resetForRetry` (with an optional
 attempt reset) and `revisitProject`, which bypasses the self-write filter
 without a fake project write. This is cleaner, but it is a new daemon
-behaviour rather than a mapping of an existing one. It is listed as an open
-question for the next section.
+behaviour rather than a mapping of an existing one. It is listed as open
+question R.4 Q2.
 
 Other task endpoints:
 
@@ -902,8 +1111,8 @@ frames into the agent's stdin, and tees agent frames to `stream.log`
 log, and **sends the opening prompt** of every session whose
 `prompt_count == 0` (survey §9.1, §17.5). A second client can join an existing
 conversation with `acpclient.Adopt`, which binds to the session id and uses
-its own request-id range (`nextID` is randomized per client,
-`acpclient.go:272`). The channel router and the step-up driver already do this.
+its own request-id range (`nextID` is randomized per client when
+`DistinctIDs` is set, `acpclient.go:268-272`). The channel router and the step-up driver already do this.
 
 Two hub behaviours shape any new observer:
 
@@ -977,7 +1186,8 @@ Rules for the relay:
   closes the WS. `session.ended` arrives on the SSE stream at the same time.
   The wrapper deletes the session dir on exit (survey §8.2), so the transcript
   is gone after that. The GUI keeps what it rendered in memory and offers
-  "save transcript". Retaining transcripts on the server is an open question.
+  "save transcript". Retaining transcripts on the server is open question
+  R.4 Q4.
 
 WS message summary:
 
@@ -1027,7 +1237,8 @@ already checks `prompt_count` before it sends (`acpwatch.go:494`), so the two
 would coexist, provided the bump is atomic on `session.json` (a compare-and-set
 on `prompt_count`). This is a behaviour change for headless mode, which is
 broken in this respect today. It is listed here because the relay design
-depends on it. It belongs in the incremental-path section.
+depends on it. It is the first step of phase P.4 (§P.4; open question
+R.4 Q3).
 
 #### A.5.5 Relation to the TUI's path
 
@@ -1108,7 +1319,7 @@ The TUI could switch to the relay later (§A.7), but it does not have to.
 | **Clickjacking** of destructive buttons | `X-Frame-Options: DENY` / `frame-ancestors 'none'`; a strict CSP (`default-src 'self'`); no third-party scripts or CDN fonts. The GUI is bundled. |
 | **Request smuggling through paths** | Ids are parsed and checked against the in-memory project/task index. User input is never joined into a filesystem path, except new project and intake names, which are validated as single segments and then `filepath.Rel`-checked against the root. |
 | **Turning the API into an escalation path** | Capability fields are not writable (§A.4.4). Step-up answers need `answer` scope and the exact-line UI. PTY is opt-in and excluded for the workingman and step-up sandboxes. |
-| **Concurrent writers outside orch** (agents, editors) | `If-Match` on every read-modify-write. The residual race is the same one the TUI has today (§A.4.1). A stronger fix, a `rev:` counter in `project.yaml` that the daemon and the API bump, would let agents check it too. It is an open question, because agents write the file with plain text tools. |
+| **Concurrent writers outside orch** (agents, editors) | `If-Match` on every read-modify-write. The residual race is the same one the TUI has today (§A.4.1). A stronger fix, a `rev:` counter in `project.yaml` that the daemon and the API bump, would let agents check it too. It is open question R.4 Q6, because agents write the file with plain text tools. |
 | **Audit** | Every write and attach is logged with the token or session id: `api_write`, `api_attach mode=…`, `api_prompt session=…` (prompt text is not logged), `api_pty_open`, `api_login`. |
 
 #### A.6.4 Failure modes
@@ -1286,7 +1497,7 @@ A transcript is lost when its session ends, because the wrapper deletes the
 session directory (survey §8.2). The GUI therefore labels a live transcript
 "live — not kept after the session ends" and offers **Save transcript**,
 which saves what the browser has rendered. Whether the server should keep
-transcripts is an open question (§A.5.2).
+transcripts is open question R.4 Q4 (§A.5.2).
 
 ### G.3 Sandbox card: inputs → capabilities → output
 
@@ -1428,8 +1639,8 @@ The wireframe sketches one possible future in a red note: a **capability
 review gate** between planning and task. There, the workingman agent or a
 step-up-style check would compare the planner's grants with the task
 description before launch, and the operator would see a diff on the sandbox
-card. That is a new behaviour and an open question for the next section, not
-part of this design.
+card. That is a new behaviour and open question R.4 Q7, not part of this
+design.
 
 ### G.5 Secondary views: inbox, intake, timeline, PRs, notifications
 
@@ -1491,3 +1702,293 @@ part of this design.
 
 Archive (§A.4.2) is left out of the first GUI on purpose. It is the only
 destructive action, and the TUI's y/n flow is adequate for it.
+
+---
+
+## Pros, cons, risks and open questions
+
+### R.1 Pros
+
+- **It shows what the user cares about most.** The dependency graph next to
+  the commit-queue lane (§G.1) and the sandbox card (§G.3) present
+  information that exists today but is spread across the snapshot, four
+  per-sandbox files and the TUI's one-line summaries (survey §17.4, §17.7).
+- **Least privilege becomes visible.** The card shows what a workload was
+  *not* given, and marks open-ended grants such as a dynamic gateway in amber
+  (§G.0 principle 3). Today a reader has to open the task YAML, the gateway
+  record and the planner prompt to work this out. Seeing it may also lead to
+  better planning prompts.
+- **It closes real gaps.** It adds task retry (survey §17.3), a timeline over
+  the audit log that the TUI never reads (survey §6.5), and intake and
+  new-project forms, which have no TUI command (survey §4.5).
+- **The API is useful without the GUI.** Scripts, dashboards and
+  `orch tui --api` (§A.7 item 3) get typed reads and an event stream in place
+  of polling `snapshot.json`.
+- **It costs the daemon little.** Reads reuse the snapshot builder and its
+  per-project cache. Events reuse the existing `markSnapshotDirty` kicks.
+  Writes reuse the TUI helpers. There is no new scheduling logic and no new
+  file format (§A.0).
+- **It strengthens headless use.** Moving priming into the daemon (§A.5.4),
+  which a GUI forces, fixes a gap that exists today: a `--headless` daemon,
+  which is how the launchd service runs, leaves planning, task, commit and wolf
+  sessions unprompted (survey §17.5).
+
+### R.2 Cons
+
+- **A second front end to maintain.** Every new `:` command or schema field
+  now has two renderings. The shared control package (§A.4.1) keeps the
+  *rules* in one place, but not the *presentation*.
+- **A web toolchain in a Go repo.** Bundled static assets (§A.6.1) mean a JS
+  build, or a deliberately small vanilla-JS GUI. Either way it is a new kind
+  of code to review and keep up to date.
+- **`orch` gets its first general HTTP listener.** Today `orch` opens no port
+  apart from the optional WhatsApp webhook (survey §15). Even loopback-only
+  with tokens, CSRF, DNS-rebinding and Origin checks (§A.6), this is new
+  attack surface on a process that holds the orch roots writable.
+- **It can duplicate the channels.** The inbox and notifications overlap with
+  WhatsApp, Signal, Slack and osascript. The GUI must stay additive (§G.5).
+- **The TUI is already good.** For its main user the TUI may simply be
+  enough, and the GUI then serves a smaller audience.
+
+### R.3 Risks and mitigations
+
+| Risk | Why it matters | Mitigation |
+|---|---|---|
+| **The GUI drifts into a second control plane** | A "convenient" endpoint that calls the scheduler directly, or writes a field nobody else writes, would split the source of truth | §A.0 principles 1 and 5; one endpoint, one file write (§A.4.1); capability fields are not writable (§A.4.4); every new daemon behaviour (R2 retry, capability gate) is an explicit open question, not a quiet addition |
+| **Lost updates between writers** | Agents and editors write `project.yaml` and task files outside the orch process | `If-Match` etags, rechecked under the per-path lock (§A.4.1). A residual window remains, the same one the TUI has today; a `rev:` counter is open question R.4 Q6 |
+| **A browser changes session lifetime** | One-shot sessions end when their last client leaves (`--exit-when-empty`), so an observer can end a session before its first prompt or keep a finished one alive (§A.5.1) | the relay connects only while watched, never to an unprimed one-shot session, and disconnects at end of turn (§A.5.2); priming moves into the daemon first (§A.5.4) |
+| **The API becomes an escalation path** | A browser that can edit `policies` or open a shell in `workingman-agent` would bypass planning and step-up | capability fields are read-only; step-up answers need the exact-line UI and `answer` scope; PTY is opt-in, scoped and excluded for `workingman-agent` and `step-up` (§A.5.3, §A.6.3) |
+| **Sandboxes reach the API** | Sandboxes reach host services via `host.docker.internal` (survey §15) | never allow the API port in a sandbox policy; reject `Host: host.docker.internal`; unix socket by default (§A.6.1) |
+| **Secrets leak into a browser** | Transcripts and verify output can contain tokens | `audit.Redact` on every string, as the snapshot does; gateway URLs and ids are never returned (§A.1.3, §A.6.3). Redaction is best-effort (`docs/state-snapshot.md`) |
+| **Event stream gaps or storms** | Diff-based events depend on the snapshot model staying cheap to rebuild | per-project rebuild with the existing mtime/size cache, short coalescing, a bounded ring with `reset` (§A.3.2, §A.3.4) |
+| **Misreading status** | `success` means "queued for integration", not done (survey §4.3) | the GUI draws `success` as queued and shows the lane (§G.1) |
+| **A closed tab hides a request** | Step-up approvals expire after 24 h (survey §7.3) | browser notifications are additive only; channel fan-out is unchanged (§G.5) |
+| **Scope creep** | Archive, PTY, transcript retention and a capability gate all look small and are not | each is a separate, later phase or an open question (§P.5) |
+
+### R.4 Open questions
+
+Every open question raised elsewhere in this document, in one list.
+Other sections cite them as `R.4 Qn`.
+
+- **Q1. Should the API exist at all, or is `snapshot.json` plus a static
+  viewer enough?** A read-only GUI could poll the snapshot. It would then
+  lack task capabilities, descriptions and commits (survey §6.2), would get
+  no events, and could not attach to sessions. The recommendation is the API,
+  but P.1 is cheap enough to try and abandon.
+- **Q2. Task retry: R1 (file contract) or R2 (`Daemon.RetryTask`)?** (§A.4.4)
+  R1 maps onto today's files but needs a project-file nudge and a careful
+  rule about clearing `blocked_reason`. R2 is cleaner but is a new daemon
+  behaviour. Recommendation: R1 in P.3, revisit after use.
+- **Q3. Who primes sessions without a TUI?** (§A.5.4) Recommendation: the
+  daemon, next to `driveStepUpSession`, with a compare-and-set on
+  `prompt_count`. This changes headless behaviour, which is broken in this
+  respect today, and should land before P.4.
+- **Q4. Should transcripts outlive their sessions?** The wrapper deletes the
+  session dir on exit (survey §8.2). Options: keep a redacted copy under
+  `~/.workingman/transcripts/` with a retention limit, keep only failed or
+  blocked ones, or keep none and rely on "save transcript" in the browser
+  (§A.5.2, §G.2).
+- **Q5. Native wrapper or browser?** A unix-socket-only API needs a native shell
+  (Tauri, Electron, WebView) or a loopback shim (§A.6.1). A browser on
+  loopback is the simplest start; a native wrapper removes the CSRF and
+  rebinding classes entirely.
+- **Q6. A `rev:` counter in `project.yaml`?** It would close the residual
+  lost-update window for writers outside the orch process, but agents edit
+  the file with plain text tools and would have to bump it (§A.4.1, §A.6.3).
+- **Q7. A capability review gate between planning and task?** (§G.4) Today no
+  step reviews the planner's `static_mcps`/`policies` choices (survey §7.4).
+  A gate, run by the workingman agent or a step-up-style check, with a diff on
+  the sandbox card, would be a new behaviour. It is the most direct way to make
+  the helpers "create good, minimal task workloads", which they only partly do
+  today.
+- **Q8. Should task gateways stay dynamic by default?** (§G.3, §G.4) A dynamic
+  gateway makes `static_mcps` a floor, not a ceiling (survey §10). The GUI
+  makes this visible; whether to change the default is a separate decision.
+- **Q9. Should the TUI move onto the event bus?** (§A.7 item 2) It would remove
+  three polling loops and give the TUI `live` state, at the cost of touching
+  working code. It is optional.
+- **Q10. Standalone `orch api --root …` without a daemon?** (§A.6.4) Useful for
+  browsing, confusing for writes. Recommendation: read-only if built at all.
+- **Q11. Where does `archive` belong?** It runs inline in the TUI today (survey
+  §17.2). Moving `archiveProject` into the control package lets the API
+  call it, but it remains the one destructive, multi-step action. The GUI
+  leaves it out at first (§G.6).
+- **Q12. Intake back-references.** A processed intake file does not say which
+  tasks it produced (§G.5). Should the planner record that, for example as
+  a `source: {kind: intake, ref: <file>}` on tasks? That is a schema
+  addition and a planning-prompt change.
+
+---
+
+## Suggested incremental path
+
+Each phase ships on its own and is useful even if the next one never happens.
+The phases are ordered so that read access, which is safe, comes well before
+write access and session attach, which are not. Scope estimates are rough
+(S ≈ days, M ≈ a week or two, L ≈ several weeks for one person) and cover
+code and tests, not the GUI's visual polish.
+
+### P.0 Groundwork (no user-visible change)
+
+**Scope: S–M.**
+
+- Move the TUI's write helpers (`requestStop`, `requestStart`, `summonWolf`,
+  `requestReview`, `requestCleanup`, `hide`/`show`, and later
+  `archiveProject`) from `internal/tui/*.go` into a new `internal/control`
+  package, with their preconditions and refusal text. The TUI calls them
+  unchanged (§A.4.1, §A.7 item 1).
+- Add the per-path write lock inside `project.Save` / `SaveAs`
+  (`internal/project/project.go`), so the daemon and later the API serialize
+  their read-modify-writes (§A.4.1).
+- Add a monotonically increasing `seq` next to the audit logger's 500-line
+  `Recent` ring (`internal/audit/audit.go`). The line format is unchanged
+  (§A.1.5).
+
+**Touches:** `internal/tui` (call sites only), new `internal/control`,
+`internal/project`, `internal/audit`. **Done when:** the TUI's behaviour and
+tests are unchanged, and the control package has its own tests.
+
+### P.1 Read-only API and event stream
+
+**Scope: M.**
+
+- An optional HTTP listener in the daemon process, off by default
+  (`--api=unix|loopback|off`, `--api-listen`), unix socket
+  `~/.workingman/api.sock` first (§A.0 principle 3, §A.6.1).
+- Token file `~/.workingman/api/token` and `orch api token` (§A.6.2), the
+  `Host` allowlist, and the `api_listen_error` failure mode (§A.6.4).
+- All `GET` endpoints in §A.2, served from the snapshot builder's model in
+  `internal/daemon/snapshot.go`, plus the task-file fields it omits, cached on
+  mtime and size. `/api/v1/snapshot` returns the existing document as is.
+- `GET /api/v1/events` (SSE): the publisher hooks `markSnapshotDirty`,
+  rebuilds affected projects, diffs per resource, and emits the event types of
+  §A.3.3, with the ring and the `hello`/`reset` resume rules of §A.3.4.
+- `orch status --api` as a first client, useful for testing.
+
+**Touches:** `internal/daemon` (`snapshot.go`, `snapshot_live.go`,
+`daemon.go` for the listener's lifecycle), a new `internal/api` package,
+`cmd/orch/main.go` (flags, `orch api` subcommand), `internal/audit` (the
+`seq` from P.0), `internal/sbx` (cached `sbx ls`). **No writes.** **Done
+when:** `curl --unix-socket … /api/v1/events` shows `task.status` and
+`queue.updated` events during a real project run, and a reconnect with
+`Last-Event-ID` resumes without a gap.
+
+### P.2 Read-only GUI
+
+**Scope: M–L**, most of it front-end work.
+
+- The static bundle served at `/` on the same listener (§A.6.1), loopback TCP
+  binding (`--api-listen 127.0.0.1:7078`), `orch gui` with the one-time login
+  code and the session cookie (§A.6.2). Browser hardening: strict CSP,
+  `frame-ancestors 'none'`, Origin checks (§A.6.3).
+- Screens: project view with graph and commit-queue lane (§G.1), sandbox card
+  (§G.3), Sandboxes list (§G.2), agents map (§G.4), timeline and PR view
+  (§G.5). Every action button is present but disabled, labelled with the
+  `:` command that does it today. That makes the read-only phase useful on its
+  own and shows which writes people actually miss.
+- Transcript view via `GET /sessions/{sid}/transcript` (NDJSON polling of
+  `stream.log`); no WebSocket yet.
+
+**Touches:** new web assets (e.g. `internal/api/web/`, embedded with
+`embed.FS`), `internal/api` (login, cookie, CSRF token issue),
+`cmd/orch` (`orch gui`), optionally `internal/tui` for a `:gui` command
+(§A.7 item 4). **Done when:** the four wireframes can be reproduced from live
+data with no write scope granted.
+
+### P.3 Write actions
+
+**Scope: M.**
+
+- In this order, from least to most risky: intake and new project
+  (create-only, §A.4.3); inbox answers with `ViaGUI` (§A.4.5); `hide`/`show`,
+  `review`, `cleanup`, `catchup`; `stop`/`start`/`wolf` (§A.4.2); task retry R1
+  and `save-sandbox` (§A.4.4); then `PATCH` task with the `taskgraph.Load`
+  check. The host-tab helpers (`open-session`, `open-shell`, §A.4.6) can come
+  at any point; they need no new security surface.
+- `If-Match` etags, `Idempotency-Key`, the error shape, `api_write` audit
+  lines, and the `write`/`answer` scopes (§A.4.1, §A.6.2).
+- The CSRF double-submit header and `Content-Type: application/json`
+  enforcement on every non-`GET` request (§A.6.3).
+- Not in this phase: `archive` (destructive, multi-step; R.4 Q11),
+  the in-browser PTY, and task worktree reset.
+
+**Touches:** `internal/api` (handlers), `internal/control` (from P.0, plus
+retry and intake/new-project writers), `internal/postoffice` (the `ViaGUI`
+constant), `internal/taskgraph` (validation reuse only). The daemon itself
+is unchanged apart from emitting `api_write`. **Done when:** every row of
+§A.4.7 except `archive` works from the GUI, and a concurrent TUI write
+produces a `412` instead of a lost update.
+
+### P.4 Session attach and daemon-side priming
+
+**Scope: M–L.**
+
+- **First, priming moves into the daemon** (§A.5.4): the daemon sends the
+  opening prompt when `prompt_count == 0`, bumps it with a compare-and-set on
+  `session.json`, and disconnects one-shot kinds at end of turn. The TUI's
+  existing `prompt_count` check (`acpwatch.go:494`) keeps the two compatible.
+  This fixes headless mode on its own and is worth shipping even without the
+  GUI.
+- Then the WebSocket session relay, `GET /api/v1/sessions/{sid}/acp` (§A.5.2):
+  one upstream connection per session via `acpchat`/`acpclient.Adopt`,
+  replay from `stream.log`, a per-session ring, `observe` for every kind,
+  `interactive` (prompt and cancel) for persistent kinds only, lifetime parity
+  with the TUI. Scopes `attach` and `interact`; `api_attach` and `api_prompt`
+  audit lines.
+- GUI: the Watch and Prompt controls in §G.2, and live transcripts in the
+  project view's selected-task strip and on the sandbox card.
+
+**Touches:** `internal/daemon` (priming next to `driveStepUpSession` in
+`step_up.go`), `internal/session` (atomic `prompt_count` bump),
+`internal/acpchat` and `internal/acpclient` (reuse), `internal/api` (relay),
+`internal/tui/acpwatch.go` (only if its priming path needs to defer to the
+daemon). **Done when:** a `--headless` daemon runs a project end to end with
+nobody watching, and a browser can watch a task session from start to finish
+without changing when it ends.
+
+### P.5 Optional follow-ups
+
+Each of these is independent and needs its own decision:
+
+- **In-browser PTY** (`/sandboxes/{name}/pty`, `--api-pty`, `pty` scope;
+  §A.5.3).
+- **`archive` from the GUI** (`archive` scope and a typed confirmation;
+  §A.4.2).
+- **TUI on the event bus** (§A.7 item 2) and **`orch tui --api`** (§A.7 item
+  3), which make "launchd daemon + TUI or GUI on demand" a first-class setup.
+- **Transcript retention** (R.4 Q4), **intake back-references** (R.4 Q12),
+  **`rev:` counter** (R.4 Q6).
+- **Capability review gate** (R.4 Q7). This is the largest one
+  and is a change to how workloads are created, not to the GUI.
+
+### P.6 Phase summary
+
+| Phase | Ships | Scope | Main code touched | New risk |
+|---|---|---|---|---|
+| P.0 | shared control package, save lock, audit `seq` | S–M | `internal/tui`, `internal/control`, `internal/project`, `internal/audit` | none |
+| P.1 | read API + SSE on a unix socket | M | `internal/daemon` (snapshot), `internal/api`, `cmd/orch` | a listener (read-only, token) |
+| P.2 | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
+| P.3 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |
+| P.4 | daemon priming, then session relay | M–L | `internal/daemon`, `internal/session`, `internal/api` relay | session lifetime; prompting into live agents |
+| P.5 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |
+
+---
+
+## References
+
+- [Grounding survey](research/workingman-gui-survey.md): how workingman works
+  today, cited throughout as `survey §N`.
+- Wireframes: [project view](workingman-gui/project-graph.svg),
+  [sandbox card](workingman-gui/sandbox-card.svg),
+  [agents map](workingman-gui/agents-map.svg),
+  [secondary views](workingman-gui/secondary-views.svg).
+- Existing docs: [README](../../README.md) (daemon, TUI keys, `:` commands),
+  [agents.md](../../agents.md) (agent roles, headless priming),
+  [state-machine.md](../../state-machine.md),
+  [state-snapshot.md](../state-snapshot.md) (the snapshot schema the read API
+  extends), [parallel-task-worktrees.md](../parallel-task-worktrees.md) (commit
+  queue and integration), [mcp-gateway.md](../mcp-gateway.md),
+  [messaging.md](../messaging.md) and
+  [messaging-design.md](../messaging-design.md) (post-office, inbox, step-up),
+  [channels.md](../channels.md), [terminal-tabs.md](../terminal-tabs.md),
+  [packages.md](../packages.md) (package map).

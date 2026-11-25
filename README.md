@@ -11,6 +11,12 @@ macOS notification and a wolf-agent session to drop into.
 > around the code; [docs/package-docs.md](docs/package-docs.md) explains the
 > `doc.go` convention that feeds it.
 
+> **Proposals:** [docs/proposals/workingman-gui.md](docs/proposals/workingman-gui.md)
+> is a draft design for a local web GUI next to the TUI, driven by a daemon
+> API, with files remaining the source of truth. It is not implemented. Its
+> grounding survey of how orch works today is
+> [docs/proposals/research/workingman-gui-survey.md](docs/proposals/research/workingman-gui-survey.md).
+
 ```
 status: ready    → planning agent (writes tasks/*.yaml, sets status: working)
 status: working  → task agent → commit agent → next task → ... → status: done
