@@ -34,6 +34,7 @@ type fakeACPConn struct {
 	mu          sync.Mutex
 	closed      bool
 	connectCWD  string
+	adopted     string
 	promptsSent []string
 }
 
@@ -51,6 +52,16 @@ func (f *fakeACPConn) Connect(ctx context.Context, cwd string) error {
 	}
 	f.mu.Lock()
 	f.connectCWD = cwd
+	f.mu.Unlock()
+	f.events <- acpclient.Event{State: acpclient.StateConnected}
+	return nil
+}
+
+// Adopt joins an existing ACP session, as the real client does: no wire
+// traffic, just the StateConnected event.
+func (f *fakeACPConn) Adopt(sessionID string) error {
+	f.mu.Lock()
+	f.adopted = sessionID
 	f.mu.Unlock()
 	f.events <- acpclient.Event{State: acpclient.StateConnected}
 	return nil

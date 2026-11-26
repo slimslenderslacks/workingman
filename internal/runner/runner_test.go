@@ -75,7 +75,7 @@ func TestDefaultCommandBuilderModes(t *testing.T) {
 			if !contains(cmd, "--dangerously-skip-permissions") {
 				t.Errorf("missing --dangerously-skip-permissions: %v", cmd)
 			}
-			if !contains(cmd, initialPrompt) {
+			if !contains(cmd, OpeningPrompt) {
 				t.Errorf("missing initial prompt: %v", cmd)
 			}
 		})

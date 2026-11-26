@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -62,6 +63,7 @@ type acpTabEvent struct {
 // interface so tests can substitute an in-memory fake without a real socket.
 type acpConn interface {
 	Connect(ctx context.Context, cwd string) error
+	Adopt(sessionID string) error
 	Prompt(ctx context.Context, text string) (stopReason string, err error)
 	Events() <-chan acpclient.Event
 	Close() error
@@ -86,11 +88,15 @@ type acpDialer func(ctx context.Context, socketPath string) (acpConn, error)
 // letting the connection's own behavior decide.
 type sandboxProbe func(ctx context.Context, sandboxName string) (alive bool, err error)
 
-// realDialer is the production dialer. It wraps acpclient.Dial so a dial failure
-// yields a genuinely nil interface (returning a typed-nil *Client would make the
-// interface non-nil and defeat the caller's err check).
+// realDialer is the production dialer. It wraps acpclient.DialWith so a dial
+// failure yields a genuinely nil interface (returning a typed-nil *Client would
+// make the interface non-nil and defeat the caller's err check).
+//
+// ObserveResponses surfaces other clients' responses as EventResponse. The
+// watcher needs them to see the end of a turn the daemon started (its
+// session/prompt response carries the stopReason); see watchOneACPSession.
 func realDialer(ctx context.Context, socketPath string) (acpConn, error) {
-	c, err := acpclient.Dial(ctx, socketPath)
+	c, err := acpclient.DialWith(ctx, socketPath, acpclient.Options{ObserveResponses: true})
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +104,9 @@ func realDialer(ctx context.Context, socketPath string) (acpConn, error) {
 }
 
 // defaultACPPrompt is the opening turn the TUI sends to a freshly-connected ACP
-// session — the same instruction the host terminal-tab path bakes into claude's argv.
+// session, unless the daemon claimed it first (the daemon sends the same text;
+// see watchOneACPSession) — the same instruction the host terminal-tab path
+// bakes into claude's argv.
 // The sandboxed agent reads .orch/instructions.md + context.yaml from its mounted
 // workspace and proceeds. Recording it as a prompt entry is what makes the tab's
 // "prompts sent" half real.
@@ -368,15 +376,25 @@ func watchACPSessions(ctx context.Context, root string, interval time.Duration, 
 // watchOneACPSession watches a single session for its lifetime: it announces the
 // tab, replays any prior context, dials the socket, pumps every acpclient.Event
 // back as an acpTabStream, completes the ACP handshake, and — for a brand-new
-// session only — sends the opening prompt. It then blocks until ctx is cancelled
-// (the session's directory was reaped) so the connection and the event pump stay
-// alive while the agent streams.
+// session only, and only if it wins the claim — sends the opening prompt. It
+// then stays connected while the agent streams: a persistent session until ctx
+// is cancelled (the session's directory was reaped), a one-shot session until
+// its single turn ends.
 //
 // Reconnect is the crux: when the TUI restarts it rediscovers ongoing sessions
 // here. Such a session has already been prompted (PromptCount>0), so we must NOT
 // re-send the opening prompt — that would restart the agent and duplicate the
 // turn — and we replay its recorded scrollback so the tab comes back with its
 // prior prompts/output.
+//
+// The daemon primes sessions too (internal/daemon/priming.go), so a brand-new
+// session is not ours to prompt by default. Both sides claim the opening prompt
+// with session.Store.ClaimOpeningPrompt (a compare-and-set of PromptCount from
+// 0 to 1) before sending it, and only the winner sends. When the daemon wins,
+// the watcher only observes: it shows the prompt block, and for a one-shot
+// session it disconnects once the daemon's turn ends, as it would after its
+// own. Otherwise the TUI would be the last client holding the session open,
+// and the wrapper's exit-when-empty would never fire.
 //
 // A dead session is distinguished from a live one and routed to cleanup three
 // ways, in order:
@@ -437,7 +455,13 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 	// late emit can never race the parent's close of out. Every frame also pulses
 	// activity (non-blocking) so the idle-turn watchdog below can tell a turn
 	// that is still working (frames arriving) from one that has gone silent.
+	//
+	// Other clients' responses (EventResponse) are not shown. The one that
+	// matters is the answer to a session/prompt another client (the daemon)
+	// sent: it ends that turn, so it is shown as the turn's StateCompleted and
+	// signals turnEnded.
 	activity := make(chan struct{}, 1)
+	turnEnded := make(chan struct{}, 1)
 	pumpDone := make(chan struct{})
 	go func() {
 		defer close(pumpDone)
@@ -445,6 +469,17 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 			select {
 			case activity <- struct{}{}:
 			default:
+			}
+			if ev.Kind == acpclient.EventResponse {
+				stop, ok := turnStopReason(ev.Result)
+				if !ok {
+					continue
+				}
+				ev = acpclient.Event{State: acpclient.StateCompleted, StopReason: stop}
+				select {
+				case turnEnded <- struct{}{}:
+				default:
+				}
 			}
 			emitACP(ctx, out, acpTabEvent{kind: acpTabStream, id: s.ID, ev: ev})
 		}
@@ -462,13 +497,25 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 	if len(s.Workspaces) > 0 {
 		cwd = s.Workspaces[0]
 	}
-	// Bound the handshake so a wedged agent that accepts the socket connection
-	// but never answers initialize cannot hang the watcher indefinitely (see
-	// acpHandshakeTimeout). The turn that follows (conn.Prompt) keeps the
-	// unbounded session ctx — only the handshake is capped.
-	connectCtx, cancelHandshake := context.WithTimeout(ctx, handshakeTimeout)
-	err = conn.Connect(connectCtx, cwd)
-	cancelHandshake()
+	// Join the conversation the session already has, if any: the daemon (or a
+	// previous TUI run) created it, and its stream log records the id. Running
+	// session/new instead would start a second, empty conversation beside it,
+	// and what a human types into the wolf would reach an agent that never read
+	// its instructions. The log is read after the dial, so a session/new that
+	// lands in between arrives live and is merely duplicated, never lost.
+	acpSession, turnDone := scanStreamLog(s.LogPath)
+	if acpSession != "" {
+		err = conn.Adopt(acpSession)
+	} else {
+		// Bound the handshake so a wedged agent that accepts the socket
+		// connection but never answers initialize cannot hang the watcher
+		// indefinitely (see acpHandshakeTimeout). The turn that follows
+		// (conn.Prompt) keeps the unbounded session ctx — only the handshake is
+		// capped.
+		connectCtx, cancelHandshake := context.WithTimeout(ctx, handshakeTimeout)
+		err = conn.Connect(connectCtx, cwd)
+		cancelHandshake()
+	}
 	if err != nil {
 		// Either the bridge closed the connection because the sandbox is gone,
 		// or the handshake timed out against a wedged agent. Both are dead
@@ -488,19 +535,19 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 		defer acpInputs.unregister(s.ID, pendingInput)
 	}
 
-	// Drive the opening prompt only for a brand-new session. A reconnected session
-	// (PromptCount>0) was prompted in a prior TUI run; we already replayed it and
-	// re-sending would restart the agent.
+	// Drive the opening prompt only for a brand-new session, and only after
+	// claiming it. A reconnected session (PromptCount>0) was prompted in a prior
+	// run; we already replayed it and re-sending would restart the agent. A lost
+	// claim means the daemon (or another TUI) is sending it right now.
+	// The prompt block is shown either way: the winner sends the same text.
 	if prompt != "" && s.PromptCount == 0 {
 		emitACP(ctx, out, acpTabEvent{kind: acpTabPrompt, id: s.ID, text: prompt})
+	}
+	if prompt != "" && s.PromptCount == 0 && claimOpeningPrompt(store, s.ID) {
+		// Claimed before the turn, so a TUI restarted mid-turn reconnects
+		// (replays) instead of re-prompting, and the daemon never sends it too.
+		_ = promptWithIdleWatchdog(ctx, conn, activity, prompt, turnIdleTimeout)
 
-		err = promptWithIdleWatchdog(ctx, conn, activity, prompt, turnIdleTimeout)
-
-		if err == nil {
-			// Record that the opening prompt was sent so a future restart reconnects
-			// (replays) instead of re-prompting.
-			markPrompted(store, s.ID)
-		}
 		if !s.Persistent {
 			// Orch's non-interactive agents (planning/task/commit) are single-turn:
 			// the turn finishing IS the agent's exit signal. Return — whether the
@@ -524,7 +571,39 @@ func watchOneACPSession(ctx context.Context, out chan<- acpTabEvent, dial acpDia
 		return
 	}
 
-	<-ctx.Done()
+	// A one-shot session someone else prompted has one turn, and it is not
+	// ours. Stay until it ends, then disconnect like the prompting client does.
+	// It may already be over (the log holds its stopReason), as when this
+	// watcher dialed just before the daemon left. The log was read after the
+	// dial, so a turn ending in between still arrives on turnEnded.
+	if turnDone {
+		return
+	}
+	select {
+	case <-ctx.Done():
+	case <-turnEnded:
+	case <-pumpDone:
+	}
+}
+
+// claimOpeningPrompt takes the right to send a session's opening prompt
+// (session.Store.ClaimOpeningPrompt). An error counts as a lost claim: the
+// record is gone or unreadable, so it is not a session to prompt.
+func claimOpeningPrompt(store session.Store, id string) bool {
+	won, err := store.ClaimOpeningPrompt(id)
+	return err == nil && won
+}
+
+// turnStopReason reports whether a JSON-RPC result is a session/prompt
+// response, the end of a turn, and its stopReason.
+func turnStopReason(result json.RawMessage) (string, bool) {
+	var r struct {
+		StopReason string `json:"stopReason"`
+	}
+	if len(result) == 0 || json.Unmarshal(result, &r) != nil || r.StopReason == "" {
+		return "", false
+	}
+	return r.StopReason, true
 }
 
 // promptWithIdleWatchdog runs one prompt turn on conn, bounded by IDLE time
@@ -622,25 +701,53 @@ func replayPriorContext(ctx context.Context, out chan<- acpTabEvent, s session.S
 	}
 }
 
-// markPrompted records that a session's opening prompt has been sent by bumping
-// PromptCount in session.json, so a later TUI restart reconnects-and-replays
-// rather than re-prompting. It is best-effort: a read/write failure just means a
-// future restart might re-send the opening prompt, which is recoverable, so we
-// never fail the live session over it. The acp-wrapper writes session.json only
-// up to "running" (before the TUI ever prompts) and then not again until it
-// removes the directory on exit, so this read-modify-write does not race a
-// concurrent wrapper update.
-func markPrompted(store session.Store, id string) {
-	rec, err := store.Read(id)
+// scanStreamLog reads a session's stream log for two things: the newest ACP
+// session id it records (on a session/update, or a session/new response), and
+// whether a turn has ended (a response carrying a stopReason) — for a one-shot
+// session, which has exactly one turn, that means its work is over. A missing
+// log yields "" and false.
+func scanStreamLog(path string) (sessionID string, turnEnded bool) {
+	if path == "" {
+		return "", false
+	}
+	f, err := os.Open(path)
 	if err != nil {
-		return
+		return "", false
 	}
-	if rec.PromptCount > 0 {
-		return
+	defer f.Close()
+	br := bufio.NewReader(f)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			var fr struct {
+				ID     *json.RawMessage `json:"id"`
+				Method string           `json:"method"`
+				Params struct {
+					SessionID string `json:"sessionId"`
+				} `json:"params"`
+				Result json.RawMessage `json:"result"`
+			}
+			if json.Unmarshal(line, &fr) == nil {
+				var res struct {
+					SessionID string `json:"sessionId"`
+				}
+				switch {
+				case fr.Params.SessionID != "":
+					sessionID = fr.Params.SessionID
+				case fr.ID != nil && fr.Method == "" && json.Unmarshal(fr.Result, &res) == nil && res.SessionID != "":
+					sessionID = res.SessionID
+				}
+				if fr.ID != nil && fr.Method == "" {
+					if _, ok := turnStopReason(fr.Result); ok {
+						turnEnded = true
+					}
+				}
+			}
+		}
+		if err != nil {
+			return sessionID, turnEnded
+		}
 	}
-	rec.PromptCount = 1
-	rec.UpdatedAt = time.Now()
-	_ = store.Write(rec)
 }
 
 // startingSessionStale reports whether a session.StatusStarting session s has

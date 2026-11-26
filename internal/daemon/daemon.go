@@ -213,6 +213,14 @@ type Daemon struct {
 	// WithStepUpAgent. See step_up.go.
 	stepUp *stepUpAgent
 
+	// primeAttach joins a session to give it its opening prompt (nil means
+	// acpchat.Attach), primePoll is how often the primer re-reads a starting
+	// session and primeDiscover how long it waits for a TUI to create the ACP
+	// session (<= 0 means the defaults). Test seams; see priming.go.
+	primeAttach   primeAttachFunc
+	primePoll     time.Duration
+	primeDiscover time.Duration
+
 	// reviewGW is the daemon's own github-only MCP gateway for the PR
 	// fingerprint check; nil unless WithReviewGateway. See review_gateway.go.
 	// reviewGatewaySrc, when set, replaces it as what reviewGateway() returns
@@ -626,6 +634,8 @@ func (d *Daemon) trackConfiguredSession(key string, sess agent.Session, kind age
 	}
 	d.sessionsMu.Unlock()
 	d.markSnapshotDirty()
+	// Nobody else may be watching (--headless): give it its opening prompt.
+	d.primeSession(key, sess, kind)
 
 	// Detachable (ACP-backed) sessions must not be waited on under d.ctx:
 	// processSession.Wait itself closes the session (SIGTERM) the moment its

@@ -377,8 +377,8 @@ func TestChannelsEndToEnd(t *testing.T) {
 		t.Errorf("wolf answer = %q", answer.Body)
 	}
 	wolf := env.launcher.ofKind(agent.WolfAgent)
-	if got := wolf.promptsSeen(); len(got) != 1 || got[0] != "what is blocking you?" {
-		t.Errorf("the wolf saw prompts %q, want only the owner's question", got)
+	if got := wolf.promptsSeen(); !onlyAfterOpening(got, "what is blocking you?") {
+		t.Errorf("the wolf saw prompts %q, want the daemon's opening prompt at most once and then only the owner's question", got)
 	}
 	if got := env.launcher.ofKind(agent.WorkingmanAgent).promptsSeen(); len(got) != 0 {
 		t.Errorf("a reply to the wolf must not reach the workingman agent, which saw %q", got)
@@ -454,4 +454,14 @@ func TestChannelsEndToEnd(t *testing.T) {
 	if leaked := leakedGoroutines(before, 5*time.Second); len(leaked) > 0 {
 		t.Errorf("%d goroutine(s) outlived the daemon:\n\n%s", len(leaked), strings.Join(leaked, "\n\n"))
 	}
+}
+
+// onlyAfterOpening reports whether prompts is want, optionally preceded by
+// the opening prompt the daemon primes every ACP session with (one-shot and
+// persistent alike, so a --headless daemon runs on its own).
+func onlyAfterOpening(prompts []string, want string) bool {
+	if len(prompts) > 0 && prompts[0] == runner.OpeningPrompt {
+		prompts = prompts[1:]
+	}
+	return len(prompts) == 1 && prompts[0] == want
 }

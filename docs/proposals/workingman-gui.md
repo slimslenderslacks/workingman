@@ -1,8 +1,9 @@
 # workingman GUI: a local web app driving the daemon through an API
 
-Status: **draft proposal**. Phase P.0 (groundwork, no user-visible change) is
-implemented; see [P.0](#p0-groundwork-no-user-visible-change). Nothing from P.1
-on is.
+Status: **draft proposal**. Phases P.0 (groundwork, no user-visible change)
+and P.1 (daemon-side priming) are implemented; see
+[P.0](#p0-groundwork-no-user-visible-change) and
+[P.1](#p1-daemon-side-priming). Nothing from P.2 on is.
 
 ## Summary
 
@@ -1874,6 +1875,43 @@ tests are unchanged, and the control package has its own tests.
 
 ### P.1 Daemon-side priming
 
+**Status: implemented.** What was built:
+
+- **The claim on the opening prompt** is
+  `session.Store.CompareAndSwapPromptCount` and its 0→1 form
+  `ClaimOpeningPrompt` (`internal/session/session.go`). The read, compare and
+  write of `session.json` run under an exclusive `flock` on a `session.lock`
+  file beside it, so the daemon and a TUI, in one process or two, never both
+  win. Whoever claims sends; claiming happens before the turn, not after it.
+  `internal/session/session_test.go` covers the race (many concurrent
+  claimers, exactly one winner), the lock being released, and a missing
+  session.
+- **The daemon primer** is `internal/daemon/priming.go`. `trackConfiguredSession`
+  (`daemon.go`) calls `primeSession` for every ACP-backed lifecycle kind it
+  tracks, launched or adopted after a restart (the workingman, Step-Up and
+  sleepy-head agents keep their own drivers). The primer waits for the
+  wrapper to mark the session `running`, attaches with `acpchat`
+  (`CreateIfMissing`, after a short wait for a TUI to create the ACP session),
+  claims, sends `runner.OpeningPrompt` (the runner's `initialPrompt`, now
+  exported), and disconnects when the turn ends. For a one-shot kind that
+  disconnect is what ends the session, through the wrapper's
+  `--exit-when-empty`; a persistent wolf stays up for the TUI and channels.
+  Audit events: `session_primed`, `session_prime_skipped`,
+  `session_prime_turn_ended`, `session_prime_error`, `session_prime_turn_error`.
+  `internal/daemon/priming_test.go` covers priming exactly once after the
+  session is running, skipping when the TUI holds the claim or the session
+  was already prompted, and the end-of-turn disconnect.
+- **The TUI watcher** (`internal/tui/acpwatch.go`) claims the same way before
+  it prompts (replacing the old after-the-turn `markPrompted`). When the daemon
+  wins it adopts the existing ACP session (read from the stream log) instead
+  of opening a second one, shows the prompt block, and for a one-shot session
+  disconnects once the daemon's turn ends (seen through
+  `acpclient.Options.ObserveResponses`), so it is never the last client
+  holding a finished session open.
+- The channel end-to-end tests (`cmd/orch/channels_e2e_test.go`,
+  `channels_signal_e2e_test.go`) now expect the wolf to receive the opening
+  prompt before the owner's question.
+
 **Scope: S–M.**
 
 - The daemon sends each session's opening prompt when `prompt_count == 0`,
@@ -2000,7 +2038,7 @@ Each of these is independent and needs its own decision:
 | Phase | Ships | Scope | Main code touched | New risk |
 |---|---|---|---|---|
 | P.0 (**done**) | shared control package, save lock, audit `seq` | S–M | `internal/tui`, `internal/control`, `internal/pathlock`, `internal/project`, `internal/task`, `internal/audit` | none |
-| P.1 | daemon-side priming | S–M | `internal/daemon`, `internal/session` | the daemon prompts agents; a double prompt is guarded by the `prompt_count` compare-and-set |
+| P.1 (**done**) | daemon-side priming | S–M | `internal/daemon` (`priming.go`), `internal/session`, `internal/tui` (`acpwatch.go`), `internal/runner` | the daemon prompts agents; a double prompt is guarded by the `prompt_count` compare-and-set |
 | P.2 | read API + SSE on a unix socket | M | `internal/daemon` (snapshot), `internal/api`, `cmd/orch` | a listener (read-only, token) |
 | P.3 | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
 | P.4 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |

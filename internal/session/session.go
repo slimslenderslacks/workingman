@@ -9,11 +9,16 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
 // FileName is the metadata file written inside each session directory.
 const FileName = "session.json"
+
+// LockName is the lock file beside session.json that serializes
+// read-modify-writes of the record (see Store.CompareAndSwapPromptCount).
+const LockName = "session.lock"
 
 // SocketName is the unix-domain socket the acp-wrapper exposes inside each
 // session directory and that the TUI dials to reconnect over ACP. It lives here
@@ -92,7 +97,9 @@ type Session struct {
 
 	// PromptCount is how many prompts have been sent to the agent so far — a
 	// cheap pointer into the prompt history for the TUI to show without parsing
-	// the whole log.
+	// the whole log. Going from 0 to 1 is the claim on the opening prompt: the
+	// daemon and the TUI both take it with ClaimOpeningPrompt before they send,
+	// so only one of them ever does.
 	PromptCount int `json:"prompt_count,omitempty"`
 
 	// ProjectPath is the absolute path to the project.yaml driving this
@@ -282,6 +289,67 @@ func readFile(path string) (Session, error) {
 		return Session{}, fmt.Errorf("session: decode %s: %w", path, err)
 	}
 	return sess, nil
+}
+
+// CompareAndSwapPromptCount sets the session's PromptCount to new if it is
+// old, and reports whether it did. The read, compare and write happen under an
+// exclusive flock on the session's LockName file, so two callers — in one
+// process or in two (the daemon and a TUI) — never both see old and both
+// write. A missing session is reported with an error satisfying
+// errors.Is(err, fs.ErrNotExist); the session directory is never created.
+//
+// Only callers of this method take the lock. That is enough because the other
+// writer, acp-wrapper, writes session.json only up to StatusRunning (or
+// StatusFailed), before any client is connected, and callers wait for
+// StatusRunning before they claim a prompt.
+func (s Store) CompareAndSwapPromptCount(id string, old, new int) (bool, error) {
+	if err := validID(id); err != nil {
+		return false, err
+	}
+	unlock, err := s.lock(id)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
+	rec, err := readFile(s.Path(id))
+	if err != nil {
+		return false, err
+	}
+	if rec.PromptCount != old {
+		return false, nil
+	}
+	rec.PromptCount = new
+	rec.UpdatedAt = time.Now()
+	if err := s.Write(rec); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ClaimOpeningPrompt takes the right to send a session's opening prompt by
+// moving PromptCount from 0 to 1. It reports false when someone else already
+// took it (or the session was prompted before), in which case the caller must
+// not send the opening prompt. Claim first, then send: claiming after the turn
+// would let two clients both see 0 and both prompt.
+func (s Store) ClaimOpeningPrompt(id string) (bool, error) {
+	return s.CompareAndSwapPromptCount(id, 0, 1)
+}
+
+// lock takes the exclusive flock on the session's lock file and returns the
+// function that releases it. flock locks belong to the open file, so two opens
+// in one process exclude each other just as two processes do.
+func (s Store) lock(id string) (func(), error) {
+	path := filepath.Join(s.Dir(id), LockName)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("session: open lock %s: %w", path, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("session: lock %s: %w", path, err)
+	}
+	return func() { f.Close() }, nil // closing the descriptor releases the flock
 }
 
 // List discovers every session under the store's root and returns the ones with

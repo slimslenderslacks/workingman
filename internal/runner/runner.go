@@ -284,7 +284,7 @@ var StepUpMCPs = []string{"post-office"}
 // `sleep 1` or similar.
 type CommandBuilder func(kind agent.Kind, workingDir string) []string
 
-const initialPrompt = "Read .orch/instructions.md and .orch/context.yaml, then follow the instructions."
+const OpeningPrompt = "Read .orch/instructions.md and .orch/context.yaml, then follow the instructions."
 
 // DefaultCommandBuilder returns the production command: claude-code, told to
 // read the instructions and context the orchestrator just wrote.
@@ -307,7 +307,7 @@ func DefaultCommandBuilder(kind agent.Kind, _ string) []string {
 	if !kind.Interactive() {
 		cmd = append(cmd, "--print")
 	}
-	cmd = append(cmd, initialPrompt)
+	cmd = append(cmd, OpeningPrompt)
 	return cmd
 }
 

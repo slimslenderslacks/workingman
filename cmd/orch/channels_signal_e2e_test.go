@@ -227,8 +227,8 @@ func TestSignalChannelEndToEnd(t *testing.T) {
 	if !strings.Contains(answer.Body, "wolf heard: what is blocking you?") {
 		t.Errorf("wolf answer = %q", answer.Body)
 	}
-	if got := wolf.promptsSeen(); len(got) != 1 || got[0] != "what is blocking you?" {
-		t.Errorf("the wolf saw prompts %q, want only the owner's question", got)
+	if got := wolf.promptsSeen(); !onlyAfterOpening(got, "what is blocking you?") {
+		t.Errorf("the wolf saw prompts %q, want the daemon's opening prompt at most once and then only the owner's question", got)
 	}
 	wm := env.launcher.ofKind(agent.WorkingmanAgent)
 	if got := wm.promptsSeen(); len(got) != 0 {

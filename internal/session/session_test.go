@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -306,5 +308,106 @@ func TestWrittenJSONIsIndentedWithTrailingNewline(t *testing.T) {
 	}
 	if !strings.HasSuffix(string(data), "}\n") {
 		t.Errorf("expected trailing newline, got: %q", string(data[len(data)-3:]))
+	}
+}
+
+func TestClaimOpeningPromptOnlyOnce(t *testing.T) {
+	s := Store{Root: t.TempDir()}
+	rec := sampleSession("claim", time.Now())
+	rec.PromptCount = 0
+	if err := s.Write(rec); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := s.ClaimOpeningPrompt("claim")
+	if err != nil || !ok {
+		t.Fatalf("first claim = %v, %v; want true, nil", ok, err)
+	}
+	ok, err = s.ClaimOpeningPrompt("claim")
+	if err != nil || ok {
+		t.Fatalf("second claim = %v, %v; want false, nil", ok, err)
+	}
+	got, err := s.Read("claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PromptCount != 1 {
+		t.Errorf("PromptCount = %d, want 1", got.PromptCount)
+	}
+	// The rest of the record survives the read-modify-write.
+	if got.SandboxName != rec.SandboxName || got.Status != rec.Status || got.Kit != rec.Kit {
+		t.Errorf("record changed: %+v", got)
+	}
+}
+
+// Many claimers racing on one session — goroutines here, the daemon and a TUI
+// process in production — must produce exactly one winner. Each claim opens
+// the lock file afresh, so this exercises the flock, not a shared mutex.
+func TestClaimOpeningPromptRace(t *testing.T) {
+	s := Store{Root: t.TempDir()}
+	rec := sampleSession("race", time.Now())
+	rec.PromptCount = 0
+	if err := s.Write(rec); err != nil {
+		t.Fatal(err)
+	}
+	const claimers = 32
+	var wg sync.WaitGroup
+	var wins atomic.Int32
+	start := make(chan struct{})
+	for range claimers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ok, err := s.ClaimOpeningPrompt("race")
+			if err != nil {
+				t.Errorf("claim: %v", err)
+			}
+			if ok {
+				wins.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if n := wins.Load(); n != 1 {
+		t.Fatalf("%d claimers won, want exactly 1", n)
+	}
+}
+
+func TestCompareAndSwapPromptCountReleasesClaim(t *testing.T) {
+	s := Store{Root: t.TempDir()}
+	rec := sampleSession("release", time.Now())
+	rec.PromptCount = 0
+	if err := s.Write(rec); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.ClaimOpeningPrompt("release"); !ok {
+		t.Fatal("claim failed")
+	}
+	if ok, err := s.CompareAndSwapPromptCount("release", 0, 1); ok || err != nil {
+		t.Fatalf("stale swap = %v, %v; want false, nil", ok, err)
+	}
+	if ok, err := s.CompareAndSwapPromptCount("release", 1, 0); !ok || err != nil {
+		t.Fatalf("release = %v, %v; want true, nil", ok, err)
+	}
+	if ok, _ := s.ClaimOpeningPrompt("release"); !ok {
+		t.Error("claim after release failed")
+	}
+}
+
+func TestClaimOpeningPromptMissingSession(t *testing.T) {
+	s := Store{Root: t.TempDir()}
+	if err := os.MkdirAll(s.Dir("gone"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.ClaimOpeningPrompt("gone")
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("err = %v, want fs.ErrNotExist", err)
+	}
+	if _, err := s.ClaimOpeningPrompt("never-existed"); err == nil {
+		t.Fatal("claim on a missing session dir succeeded")
+	}
+	if _, err := os.Stat(s.Dir("never-existed")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("claim created the session dir: %v", err)
 	}
 }
