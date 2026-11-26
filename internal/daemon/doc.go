@@ -124,6 +124,10 @@
 //     and the offline builder; snapshot_live.go publishes it to --state-file;
 //     snapshot_text.go renders it and reads it back. See
 //     docs/state-snapshot.md.
+//   - api.go: the optional read-only HTTP API ([WithAPI]). Run starts the
+//     internal/api listener after the startup scan and shutdown closes it; a
+//     bind failure is logged as api_listen_error and the daemon runs on. The
+//     API's reads come from the snapshot builder.
 //
 // # Key types
 //

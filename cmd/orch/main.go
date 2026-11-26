@@ -46,6 +46,7 @@ func (r *rootsFlag) Set(s string) error {
 const usageHeader = `usage: orch --root <dir> [flags]        run the daemon, with the TUI unless --headless
        orch tui --root <dir>            run only the TUI over a directory
        orch status [--json]             print the running daemon's state snapshot
+       orch api token [--rotate]        create or rotate the API's bearer token (see --api)
        orch catchup <project-path>      fire a behind project's schedule once, now (used by sleepy-head)
        orch whatsapp <subcommand>       set up and check the WhatsApp channel (see docs/channels.md)
        orch signal <subcommand>         set up and check the Signal channel (see docs/channels.md)
@@ -80,6 +81,9 @@ func main() {
 	}
 	if len(args) > 0 && args[0] == "status" {
 		os.Exit(runStatus(args[1:], os.Stdout, os.Stderr))
+	}
+	if len(args) > 0 && args[0] == "api" {
+		os.Exit(runAPI(args[1:], os.Stdout, os.Stderr))
 	}
 	if len(args) > 0 && args[0] == "catchup" {
 		os.Exit(runCatchup(args[1:], os.Stdout, os.Stderr))
@@ -138,6 +142,8 @@ func runDaemon(args []string) {
 	mcpGatewayServers := fs.String("mcp-gateway-servers", os.Getenv("WORKINGMAN_MCP_GATEWAY_SERVERS"), "comma-separated catalog server names requested for a sandbox's gateway when its task has no static_mcps (default $WORKINGMAN_MCP_GATEWAY_SERVERS). Empty means such sandboxes get no gateway")
 	stateFile := fs.String("state-file", "", `where the daemon publishes its runtime-state snapshot (JSON, atomic writes) for external readers such as the workingman agent. Must be outside every --root. Default: <sessions-root>/../state/snapshot.json; "off" disables`)
 	maxParallelTasks := fs.Int("max-parallel-tasks", 0, "cap on task agents running at once across all projects (each is a sandbox plus a model session); a project still runs at most its own max_parallel_tasks. Commit, planning, review and wolf agents do not count. 0 means no cap")
+	apiMode := fs.String("api", "off", `serve the read-only HTTP API from the daemon process: "unix" (a socket, ~/.workingman/api.sock, mode 0600), "loopback" (TCP, 127.0.0.1:7078) or "off" (default). Requests need the bearer token from ~/.workingman/api/token (see orch api token). A failure to listen is logged as api_listen_error and the daemon runs on without the API. See docs/proposals/workingman-gui.md §A.6`)
+	apiListen := fs.String("api-listen", "", `where the API listens: a socket path with --api=unix, or a loopback host:port with --api=loopback (non-loopback addresses are refused; port 0 picks one and records it in ~/.workingman/api.json)`)
 	requireAC := fs.Bool("require-ac", false, "pause dispatching new work and cron firings while the laptop is on battery (macOS, via pmset), resuming on AC; skipped cron ticks are recorded as missed. No-op off macOS. `orch service install` turns it on")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
@@ -146,6 +152,11 @@ func runDaemon(args []string) {
 	if len(roots) == 0 {
 		fmt.Fprintln(os.Stderr, "at least one --root is required")
 		fs.Usage()
+		os.Exit(2)
+	}
+	apiCfg, err := apiConfigFor(*apiMode, *apiListen, *sessionsRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "orch: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -281,6 +292,9 @@ func runDaemon(args []string) {
 		daemon.WithCronState(filepath.Join(stateDir, "cron_state.json")),
 		daemon.WithMaxParallelTasks(*maxParallelTasks),
 	}
+	if apiCfg.Enabled() {
+		dopts = append(dopts, daemon.WithAPI(apiCfg))
+	}
 	if *requireAC {
 		dopts = append(dopts, daemon.WithPowerSource(power.New(), 0))
 	}
@@ -360,6 +374,7 @@ func runDaemon(args []string) {
 		"wolf_host", fmt.Sprintf("%t", *wolfHost),
 		"require_ac", fmt.Sprintf("%t", *requireAC),
 		"state_file", stateFilePath,
+		"api", string(apiCfg.Mode),
 	)
 
 	if *headless {

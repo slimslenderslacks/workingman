@@ -284,7 +284,12 @@ func (d *Daemon) Snapshot() *Snapshot { return d.buildSnapshot(true) }
 // in-memory session tracking and counters; with live=false it falls back to
 // disk-discovered ACP sessions and omits the live blocks.
 func (d *Daemon) buildSnapshot(live bool) *Snapshot {
-	n := d.snapshot.auditEvents
+	return d.buildSnapshotN(live, d.snapshot.auditEvents)
+}
+
+// buildSnapshotN is buildSnapshot with n trailing audit events (n <= 0: the
+// default), for the API's ?audit_events=.
+func (d *Daemon) buildSnapshotN(live bool, n int) *Snapshot {
 	if n <= 0 {
 		n = defaultAuditEvents
 	}

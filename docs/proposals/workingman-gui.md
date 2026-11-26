@@ -1931,6 +1931,41 @@ prompt a second time.
 
 ### P.2 Read-only API and event stream
 
+**Status: first slice implemented** (the listener, its lifecycle and auth).
+What was built:
+
+- **`internal/api`** holds the listener. `orch --api=unix|loopback|off`
+  (default `off`) and `--api-listen` choose it: a unix socket,
+  `~/.workingman/api.sock` (0600, in a 0700 directory when it creates one),
+  or loopback TCP, `127.0.0.1:7078` by default. Non-loopback addresses are
+  refused; `--api-listen-unsafe` is not implemented. `--api-listen
+  127.0.0.1:0` picks a port and records it in `~/.workingman/api.json`. A
+  stale socket from a crashed daemon is replaced; a live one (a second
+  daemon) is not.
+- **Lifecycle** (`internal/daemon/api.go`): `Run` starts the listener after
+  the startup scan and `shutdown` closes it and removes the socket. A failure
+  to bind is logged as `api_listen_error` and the daemon runs on. Audit
+  events: `api_listen`, `api_listen_error`, `api_stop`, `api_serve_error`.
+- **Auth**: every request needs an allowed `Host` (`localhost`, `127.0.0.1`
+  or `[::1]`, with the listener's port on TCP; otherwise `421`) and then
+  `Authorization: Bearer <token>` (otherwise `401`), on the socket too
+  (`--api-unix-trust` is not implemented). The token is
+  `~/.workingman/api/token` (0600, 32 random bytes, base64url), created on
+  first start and managed with `orch api token [--rotate] [--print]`; a
+  rotated token takes effect on the next request. Scopes, the login code and
+  the cookie belong to P.3/P.4.
+- **Endpoints**: `GET /api/v1/status` (`{version, generated_at, daemon,
+  api{version, binding, listen}, cursor}`; `cursor` is the audit `seq` until
+  the event stream has its own) and `GET /api/v1/snapshot[?audit_events=N]`
+  (the `snapshot.json` document, built on demand). Only `GET`/`HEAD`
+  (otherwise `405`). Responses carry an `ETag` (a hash of the body without
+  its top-level `generated_at`) and honour `If-None-Match` with `304`. The
+  list envelope (`api.List`) and the error shape are in place for the other
+  endpoints.
+
+Still to do in P.2: the other `GET` endpoints of §A.2, the event stream and
+`orch status --api`.
+
 **Scope: M.**
 
 - An optional HTTP listener in the daemon process, off by default

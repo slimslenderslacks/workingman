@@ -10,6 +10,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/slimslenderslacks/work/internal/agent"
+	"github.com/slimslenderslacks/work/internal/api"
 	"github.com/slimslenderslacks/work/internal/audit"
 	"github.com/slimslenderslacks/work/internal/mcpgateway"
 	"github.com/slimslenderslacks/work/internal/notify"
@@ -204,6 +205,8 @@ type Daemon struct {
 	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
 	// unless WithStateFile configured a path.
 	snapshot snapshotState
+	// api is the optional HTTP API (WithAPI); nil when it is off.
+	api *api.Server
 
 	// workingman is the workingman-agent supervision state; nil unless
 	// WithWorkingmanAgent. See workingman_agent.go.
@@ -471,6 +474,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.startupScan()
 	d.launchSleepyHead()
 	go d.reapLoop(ctx)
+	// After the scan, so the first request sees the projects; the API never
+	// holds up the daemon.
+	d.startAPI()
 	if d.snapshot.path != "" {
 		// Publish immediately so a reader never sees a stale file from a
 		// previous run once we're up, then keep it fresh.
@@ -548,6 +554,7 @@ func (d *Daemon) dispatchEvent(ev fsnotify.Event) {
 // dropped from local tracking, exactly like a deliberate detach.
 func (d *Daemon) shutdown() {
 	defer d.writeFinalSnapshot()
+	d.stopAPI()
 	d.watcher.Close()
 	// d.ctx is done, so a launch a handler still attempts fails fast.
 	d.endHandlers()
