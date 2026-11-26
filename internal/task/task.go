@@ -427,6 +427,12 @@ func Load(path string) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	return Parse(path, data)
+}
+
+// Parse is Load for a file already read: it parses data as the task file at
+// path, records path in Task.Path and backfills an empty Model.
+func Parse(path string, data []byte) (*Task, error) {
 	var t Task
 	if err := yaml.Unmarshal(data, &t); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)

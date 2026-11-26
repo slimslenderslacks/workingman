@@ -46,6 +46,8 @@ type Source interface {
 	// Cursor is the position the state just returned is consistent with:
 	// the latest audit seq until the event stream has its own.
 	Cursor() uint64
+	// Resources serves every other read endpoint.
+	Resources
 }
 
 // Server is the API's HTTP listener. Create it with [New], then [Server.Start]
@@ -256,6 +258,7 @@ func (s *Server) Handler(port string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(Prefix+"/status", s.get(s.handleStatus))
 	mux.HandleFunc(Prefix+"/snapshot", s.get(s.handleSnapshot))
+	s.routes(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "no such endpoint: "+r.URL.Path)
 	})
@@ -346,9 +349,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// maxAuditEvents caps ?audit_events=, the size of the in-memory audit ring.
-const maxAuditEvents = 500
-
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	n := 0
 	if v := r.URL.Query().Get("audit_events"); v != "" {
@@ -358,7 +358,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, CodeBadRequest, "audit_events must be a non-negative integer")
 			return
 		}
-		n = min(n, maxAuditEvents)
+		n = min(n, MaxAuditLimit)
 	}
 	writeJSON(w, r, http.StatusOK, s.src.Snapshot(n))
 }

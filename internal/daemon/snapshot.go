@@ -208,6 +208,11 @@ type TaskSnapshot struct {
 	// Integration is the latest failed attempt to land the task (a conflict,
 	// a failed build check, a transient error or a partial publish).
 	Integration *IntegrationSnapshot `json:"integration,omitempty"`
+
+	// path is the task file, which the API reads for the fields a snapshot
+	// leaves out (task filenames may carry sort prefixes, so it cannot be
+	// rebuilt from Name).
+	path string
 }
 
 // RepoCommit is one repo's commit: a task's base, or a shared tip.
@@ -511,6 +516,7 @@ func loadProjectSnapshot(path, tasksDir string) ProjectSnapshot {
 			CompletedAt:   utcTime(t.CompletedAt),
 			QueuePosition: queuePos[t.Name],
 			WaitingOn:     taskgraph.WaitingOnIntegration(t, tasks),
+			path:          t.Path,
 		}
 		if t.Touches != nil {
 			touches := append([]string{}, (*t.Touches)...)

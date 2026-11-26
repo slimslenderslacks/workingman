@@ -16,9 +16,10 @@ import (
 
 // fakeSource is a Source with fixed content.
 type fakeSource struct {
-	info   any
-	snap   func(n int) any
-	cursor uint64
+	Resources // nil unless a test sets it; the resource endpoints call it
+	info      any
+	snap      func(n int) any
+	cursor    uint64
 }
 
 func (f *fakeSource) DaemonInfo() any { return f.info }
@@ -288,7 +289,7 @@ func TestSnapshotAuditEventsParam(t *testing.T) {
 			t.Errorf("%q: %d", q, rec.Code)
 		}
 	}
-	if want := []int{0, 5, maxAuditEvents}; len(asked) != 3 || asked[0] != want[0] || asked[1] != want[1] || asked[2] != want[2] {
+	if want := []int{0, 5, MaxAuditLimit}; len(asked) != 3 || asked[0] != want[0] || asked[1] != want[1] || asked[2] != want[2] {
 		t.Errorf("Snapshot asked for %v, want %v", asked, want)
 	}
 	for _, q := range []string{"?audit_events=-1", "?audit_events=x"} {

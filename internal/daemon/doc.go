@@ -128,6 +128,14 @@
 //     internal/api listener after the startup scan and shutdown closes it; a
 //     bind failure is logged as api_listen_error and the daemon runs on. The
 //     API's reads come from the snapshot builder.
+//   - api_projects.go, api_sessions.go, api_audit.go: the API's resources
+//     (docs/proposals/workingman-gui.md §A.1): projects, tasks, the task
+//     graph, intake and PRs; sessions with their sandbox and gateway,
+//     transcripts, prompt files, sandboxes and the daemon-owned agents; the
+//     audit ring by seq and the operator's post-office messages. Each is the
+//     snapshot model plus the file fields the snapshot leaves out, read
+//     through api_files.go's caches (keyed on mtime and size), and the
+//     sandboxes come from a cached `sbx ls` (sbx.ListCache).
 //
 // # Key types
 //

@@ -23,15 +23,26 @@
 // Responses are JSON. Each carries an ETag, and a request whose
 // If-None-Match matches gets 304. Lists use the envelope
 // {"items": [...], "generated_at": ..., "cursor": <seq>} ([List]), and errors
-// the shape {"error": {"code": ..., "message": ...}}. The endpoints served
-// today are GET /api/v1/status and GET /api/v1/snapshot.
+// the shape {"error": {"code": ..., "message": ...}}. A list's cursor is
+// read before its items are built, so the items are at least as new as it.
+//
+// Endpoints, all GET (and HEAD): /status and /snapshot; /projects,
+// /projects/{id} and, under it, /tasks, /tasks/{name}, /graph, /intake,
+// /intake/{name}, /pulls and /audit; /sessions, /sessions/{sid} and its
+// /transcript (NDJSON, paged by byte offset) and /prompt; /sandboxes;
+// /audit; /messages; /agents. The server parses and checks the query
+// parameters (400 on a bad one) and maps [ErrNotFound] to 404 and
+// [ErrUnavailable] to 503; the resources themselves come from [Resources].
 //
 // # Key types
 //
 //   - [Config] and [ParseConfig] — the --api / --api-listen flags.
 //   - [Server] — the listener and its handlers, run by the daemon with
 //     [Server.Start] and [Server.Close].
-//   - [Source] — what the server reads; implemented by internal/daemon.
+//   - [Source] — what the server reads, [Resources] included; implemented
+//     by internal/daemon.
+//   - [ProjectQuery], [AuditQuery], [SessionQuery], ... — the parsed query
+//     parameters handed to [Resources].
 //   - [EnsureToken], [ReadToken], [TokenPath] — the token file.
 //   - [List] — the list envelope.
 //

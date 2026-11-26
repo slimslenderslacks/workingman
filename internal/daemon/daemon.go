@@ -17,6 +17,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/power"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
+	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/scheduler"
 	"github.com/slimslenderslacks/work/internal/worktree"
 )
@@ -205,8 +206,13 @@ type Daemon struct {
 	// snapshot is the state-snapshot publisher (see snapshot_live.go); inert
 	// unless WithStateFile configured a path.
 	snapshot snapshotState
-	// api is the optional HTTP API (WithAPI); nil when it is off.
-	api *api.Server
+	// api is the optional HTTP API (WithAPI); nil when it is off. apiFiles
+	// caches the files it reads beside the snapshot model, and sbxList is its
+	// cached `sbx ls`, made on first use (sbxOnce) unless a test set it.
+	api      *api.Server
+	apiFiles *apiFiles
+	sbxOnce  sync.Once
+	sbxList  *sbx.ListCache
 
 	// workingman is the workingman-agent supervision state; nil unless
 	// WithWorkingmanAgent. See workingman_agent.go.
@@ -387,6 +393,7 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 	d.snapshot.startedAt = time.Now()
 	d.snapshot.pid = os.Getpid()
 	d.snapshot.collector = newSnapshotCollector()
+	d.apiFiles = newAPIFiles()
 	d.snapshot.kick = make(chan struct{}, 1)
 	for _, opt := range opts {
 		opt(d)

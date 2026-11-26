@@ -1931,8 +1931,8 @@ prompt a second time.
 
 ### P.2 Read-only API and event stream
 
-**Status: first slice implemented** (the listener, its lifecycle and auth).
-What was built:
+**Status: first two slices implemented** (the listener, its lifecycle and
+auth; the read endpoints). What was built:
 
 - **`internal/api`** holds the listener. `orch --api=unix|loopback|off`
   (default `off`) and `--api-listen` choose it: a unix socket,
@@ -1963,8 +1963,34 @@ What was built:
   list envelope (`api.List`) and the error shape are in place for the other
   endpoints.
 
-Still to do in P.2: the other `GET` endpoints of §A.2, the event stream and
-`orch status --api`.
+- **The read endpoints** (second slice): every other `GET` of §A.2. The
+  routing, query parsing (`400` on a bad parameter), the list envelope and
+  the `404`/`503` mapping are in `internal/api/handlers.go`; the server reads
+  through the `api.Resources` interface (`internal/api/resources.go`). The
+  daemon implements it in `internal/daemon/api_projects.go` (projects,
+  tasks, graph, intake, pulls), `api_sessions.go` (sessions, transcript,
+  prompt, sandboxes, agents) and `api_audit.go` (audit, messages). Each
+  resource is the snapshot model (`buildSnapshotN`) plus the file fields the
+  snapshot omits, read through per-file caches keyed on mtime and size
+  (`api_files.go`), and is redacted as a whole. Resource etags are hashes of
+  the file's bytes (`"pj-…"`, `"tk-…"`, `"in-…"`). The graph comes from
+  `taskgraph.Load` (cached on the collector's signature); `runnable` is what
+  a pass would admit by the graph and the project's slot limit alone, and the
+  global cap and power gate show in `deferred`. Session resources join
+  `session.json`, the gateway record (without its URLs or id) and the
+  harness record; `sandbox.live` and `/sandboxes` come from
+  `sbx.ListCache`, `sbx ls` cached for 5 s (`internal/sbx/listcache.go`;
+  `null`, or `503` on `/sandboxes`, when sbx fails). Transcript frames are
+  redacted field by field, so they stay valid JSON, and paged by byte offset
+  (`X-Transcript-Next`); a partial last line waits for the next read.
+  `/audit` pages the in-memory ring by `seq` (`since`, `limit` ≤ 500); the
+  file tail beyond the ring is not served, because the file carries no seq.
+  `/messages` reads the post-office store without creating it and hides
+  claim ids. A list's `cursor` is still the audit `seq` (`Source.Cursor`),
+  read before its items are built, so the items are at least as new as it;
+  the event stream replaces it with its own seq.
+
+Still to do in P.2: the event stream and `orch status --api`.
 
 **Scope: M.**
 

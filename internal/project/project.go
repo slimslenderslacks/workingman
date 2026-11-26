@@ -513,6 +513,12 @@ func Load(path string) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	return Parse(path, data)
+}
+
+// Parse is Load for a file already read: it parses data as the project file
+// at path (path only labels a parse error).
+func Parse(path string, data []byte) (*Project, error) {
 	if len(data) == 0 {
 		return &Project{}, nil
 	}

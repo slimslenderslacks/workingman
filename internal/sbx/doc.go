@@ -32,7 +32,9 @@
 // Liveness: [Alive] runs `sbx ls --json` through a [Client] and reports
 // whether a named sandbox exists. A non-nil error means the check was
 // inconclusive, not that the sandbox is gone. [DecodeList] accepts both the
-// old {"sandboxes": [...]} and the newer bare-array output.
+// old {"sandboxes": [...]} and the newer bare-array output. [ListCache]
+// reuses one `sbx ls` answer for a few seconds ([DefaultListTTL]), for a
+// reader that asks often: the daemon's API.
 //
 // LLM gateway secret: [Client.GatewayConfigured] tells acp-wrapper and
 // `:session` launches whether to set ANTHROPIC_BASE_URL ([DecodeSecretList]
@@ -54,6 +56,7 @@
 //
 //   - [Sandbox] — one `sbx ls --json` entry (name and workspaces).
 //   - [Client] — the retrying, serialized runner for sbx JSON commands.
+//   - [ListCache] — `sbx ls` cached for a TTL, shared by concurrent callers.
 //   - [Alive] — existence check used by the TUI's ACP watcher and the
 //     daemon's session reconciliation.
 //   - [SanitizeName], [FitNameTo], [NameBudget], [CheckName] — the naming
@@ -67,7 +70,8 @@
 // internal/prompts (quotes that budget to agents), internal/runner and
 // internal/acpwrapper (sandbox names; acpwrapper also re-validates the extra
 // CA per launch), cmd/orch (the extra CA at startup), internal/daemon
-// (reconciling sessions against live sandboxes) and internal/tui (ACP
+// (reconciling sessions against live sandboxes, and the API's sandbox
+// liveness) and internal/tui (ACP
 // watcher). Most other sbx calls
 // are still made directly by those callers; docs/sandbox-provider-design.md
 // proposes moving them all behind one sandbox.Provider interface.
