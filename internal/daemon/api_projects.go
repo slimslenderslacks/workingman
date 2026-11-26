@@ -585,7 +585,9 @@ type GraphEdge struct {
 // and the overlap rules, without the global task cap or the power gate,
 // whose effect is in Deferred). Errors holds the load error when the graph
 // does not load (the nodes then come from the lenient per-file read the
-// snapshot uses) and taskgraph's repair warnings.
+// snapshot uses) and taskgraph's repair warnings. MaxAttempts is the retry
+// budget the daemon enforces against a task's attempts (task.MaxAttempts),
+// so a client can show "attempt n/m" without hard-coding it.
 type Graph struct {
 	Project     string        `json:"project"`
 	Nodes       []GraphNode   `json:"nodes"`
@@ -595,6 +597,7 @@ type Graph struct {
 	Deferred    *DeferredInfo `json:"deferred"`
 	CommitQueue []string      `json:"commit_queue"`
 	Errors      []string      `json:"errors"`
+	MaxAttempts int           `json:"max_attempts"`
 }
 
 func (s apiSource) Graph(_ context.Context, id string) (any, error) {
@@ -605,7 +608,7 @@ func (s apiSource) Graph(_ context.Context, id string) (any, error) {
 	}
 	g := Graph{
 		Project: id, Nodes: []GraphNode{}, Edges: []GraphEdge{}, Ready: []string{}, Runnable: []string{},
-		CommitQueue: cloneOrEmpty(p.CommitQueue), Errors: []string{},
+		CommitQueue: cloneOrEmpty(p.CommitQueue), Errors: []string{}, MaxAttempts: task.MaxAttempts,
 	}
 	if p.Live != nil {
 		g.Deferred = p.Live.Deferred

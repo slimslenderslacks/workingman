@@ -1,8 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"io/fs"
 	"net/http"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -75,6 +80,8 @@ func TestStaticBundleIsSelfContained(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		// The SVG namespace is a name, not a fetch: createElementNS needs it.
+		b = bytes.ReplaceAll(b, []byte(`"http://www.w3.org/2000/svg"`), nil)
 		if m := external.Find(b); m != nil {
 			t.Errorf("%s refers to another origin: %q", p, m)
 		}
@@ -94,5 +101,72 @@ func TestStaticBundleIsSelfContained(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The project view's model (web/graph.js) has its own tests,
+// testdata/graph_test.js, which run under node when it is installed. Every
+// script in the bundle must at least parse.
+func TestProjectViewModel(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed: the GUI's JS tests need it")
+	}
+	dir := t.TempDir()
+	err = fs.WalkDir(webFS, "web", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".js") {
+			return err
+		}
+		b, err := fs.ReadFile(webFS, p)
+		if err != nil {
+			return err
+		}
+		out := filepath.Join(dir, path.Base(p))
+		if err := os.WriteFile(out, b, 0o644); err != nil {
+			return err
+		}
+		if msg, err := exec.Command(node, "--check", out).CombinedOutput(); err != nil {
+			t.Errorf("%s does not parse: %v\n%s", p, err, msg)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range [][]string{
+		{"graph_test.js", filepath.Join(dir, "graph.js")},
+		// The project view itself, in a fake DOM over a fake API and
+		// stream: it renders the wireframe's parts and follows events.
+		{"projects_dom_test.js", dir},
+	} {
+		out, err := exec.Command(node, filepath.Join("testdata", tc[0]), tc[1]).CombinedOutput()
+		if err != nil {
+			t.Errorf("%s: %v\n%s", tc[0], err, out)
+			continue
+		}
+		t.Logf("%s:\n%s", tc[0], out)
+	}
+}
+
+// The disabled Review button shows the TUI's own refusal text: keep
+// graph.js's copy in step with internal/control.
+func TestProjectViewRefusalText(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "control", "review.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, err := fs.ReadFile(webFS, "web/graph.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const refusal = "review starts on an idle work stream or kicks one already watching a PR (this one is "
+	if !bytes.Contains(src, []byte(refusal)) {
+		t.Fatalf("internal/control/review.go no longer refuses with %q: update graph.js and this test", refusal)
+	}
+	if !bytes.Contains(js, []byte(refusal)) {
+		t.Errorf("graph.js does not show the :review refusal %q", refusal)
+	}
+	if !bytes.Contains(js, []byte("has no status yet to stop")) {
+		t.Errorf("graph.js does not show the :stop refusal")
 	}
 }

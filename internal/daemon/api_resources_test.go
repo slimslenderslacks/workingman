@@ -23,6 +23,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/sbx"
 	"github.com/slimslenderslacks/work/internal/session"
+	"github.com/slimslenderslacks/work/internal/task"
 )
 
 // apiFixture is a daemon over writeFixtureRoot plus what the resource
@@ -393,6 +394,9 @@ func TestAPIGraph(t *testing.T) {
 	// build failed, so ship is not ready; nothing runs.
 	if len(g.Ready) != 0 || len(g.Runnable) != 0 || len(g.Errors) != 0 || g.Project != alphaID {
 		t.Errorf("ready=%v runnable=%v errors=%v", g.Ready, g.Runnable, g.Errors)
+	}
+	if g.MaxAttempts != task.MaxAttempts {
+		t.Errorf("max_attempts = %d, want %d", g.MaxAttempts, task.MaxAttempts)
 	}
 
 	tasks := filepath.Join(filepath.Dir(f.alpha), "tasks")

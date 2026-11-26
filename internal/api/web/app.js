@@ -41,9 +41,20 @@
   wm.status = (s) => h("span", { class: "status status-" + (s || "unknown") }, s || "—");
 
   // disabledAction is a write action the read-only GUI shows but cannot do
-  // yet, labelled with the TUI command that does it today (P.3).
-  wm.disabledAction = (label, tuiCommand) =>
-    h("button", { class: "action", disabled: true, title: "read-only for now; in the TUI: " + tuiCommand }, label);
+  // yet, labelled with the TUI command that does it today (P.3). refusal,
+  // when set, is the TUI's own text for why that command would refuse right
+  // now; danger marks an action that interrupts work (the wolf).
+  wm.disabledAction = (label, tuiCommand, refusal, danger) =>
+    h(
+      "button",
+      {
+        class: "action" + (refusal ? " refused" : "") + (danger ? " danger" : ""),
+        disabled: true,
+        title: (refusal ? refusal + "\n" : "") + "read-only for now; in the TUI: " + tuiCommand,
+      },
+      label,
+      h("span", { class: "cmd" }, tuiCommand)
+    );
 
   // ---- API client --------------------------------------------------------
 
@@ -58,7 +69,7 @@
 
   let csrf = "";
 
-  async function request(method, path, body) {
+  async function request(method, path, body, raw) {
     const headers = { Accept: "application/json" };
     const init = { method, headers, credentials: "same-origin", cache: "no-cache" };
     if (method !== "GET" && method !== "HEAD") {
@@ -68,10 +79,12 @@
         init.body = JSON.stringify(body);
       }
     }
+    if (raw) headers.Accept = "*/*";
     const resp = await fetch(PREFIX + path, init);
     if (resp.status === 204) return null;
     let data = null;
     const text = await resp.text();
+    if (raw && resp.ok) return { text, headers: resp.headers };
     if (text) {
       try {
         data = JSON.parse(text);
@@ -92,6 +105,9 @@
     // list fetches a list endpoint and returns its envelope
     // {items, generated_at, cursor}.
     list: (path) => request("GET", path),
+    // text fetches a non-JSON body (a transcript's NDJSON) and returns
+    // {text, headers}.
+    text: (path) => request("GET", path, undefined, true),
     session: () => request("GET", "/session"),
     login: (code) => request("POST", "/session", { code }),
     logout: () => request("DELETE", "/session"),
@@ -330,7 +346,7 @@
 
   // ---- placeholder screens -----------------------------------------------
   // Minimal list screens over the read endpoints. The P.3 screens (§G.1–G.5)
-  // replace them.
+  // replace them; the Projects screens (§G.1) are in projects.js.
 
   // liveList renders a list endpoint as a table and refetches it when one
   // of the given event types arrives (debounced).
@@ -369,35 +385,6 @@
     };
   }
   wm.liveList = liveList;
-
-  wm.screen("/", () => navigate("/projects", true));
-
-  wm.screen("/projects", (_, main) =>
-    liveList(main, "Projects", "/projects", ["project.created", "project.updated", "project.status", "project.removed", "project.live"], [
-      ["work stream", (p) => wm.link("/projects/" + encodeURIComponent(p.id), p.work_stream)],
-      ["status", (p) => wm.status(p.status)],
-      ["tasks", (p) => String(p.task_total ?? "")],
-      ["branch", (p) => h("code", {}, p.branch || "")],
-      ["", () => [wm.disabledAction("stop", ":stop"), " ", wm.disabledAction("wolf", ":wolf")]],
-    ])
-  );
-
-  wm.screen("/projects/:id", async (params, main) => {
-    const id = encodeURIComponent(params.id);
-    const p = await wm.api.get("/projects/" + id);
-    main.append(
-      h("h1", {}, p.work_stream, " ", wm.status(p.status)),
-      p.description ? h("p", {}, p.description) : null,
-      p.blocked_reason ? h("p", { class: "notice error" }, p.blocked_reason) : null
-    );
-    return liveList(main, "Tasks", "/projects/" + id + "/tasks", ["task.created", "task.updated", "task.status", "task.removed", "queue.updated"], [
-      ["task", (t) => t.name],
-      ["status", (t) => wm.status(t.status)],
-      ["depends on", (t) => (t.depends_on || []).join(", ")],
-      ["model", (t) => h("code", {}, (t.capabilities && (t.capabilities.resolved_model || t.capabilities.model)) || "")],
-      ["queue", (t) => (t.queue_position ? "#" + t.queue_position : "")],
-    ]);
-  });
 
   wm.screen("/sandboxes", (_, main) =>
     liveList(main, "Sessions", "/sessions", ["session.started", "session.updated", "session.ended"], [
@@ -477,6 +464,8 @@
     route();
   }
 
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
-  else boot();
+  // The screens' scripts (projects.js, ...) are deferred after this one, and
+  // register on wm before DOMContentLoaded: boot only then.
+  if (document.readyState === "complete") boot();
+  else document.addEventListener("DOMContentLoaded", boot);
 })();

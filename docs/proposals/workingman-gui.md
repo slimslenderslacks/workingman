@@ -2096,8 +2096,8 @@ when:** `curl --unix-socket … /api/v1/events` shows `task.status` and
 
 ### P.3 Read-only GUI
 
-**Status: first slice implemented** (serving the GUI and browser security).
-What was built:
+**Status: two slices implemented** (serving the GUI and browser security;
+then the projects list and project view of §G.1). What the first built:
 
 - **Toolchain (R.2): a dependency-free vanilla JS/CSS bundle**, checked in
   under `internal/api/web/` (`index.html`, `app.js`, `app.css`) and embedded
@@ -2163,6 +2163,55 @@ What was built:
   bundle, app routes, missing assets, `Host` on the bundle, the
   self-contained check), and `cmd/orch/gui_test.go` (`orch gui` against a
   port-0 listener, through the browser's exchange to a cookie).
+
+The second slice, **the projects list and project view (§G.1)**:
+
+- **`web/graph.js`** (`wm.pv`) is the view's model, pure functions with no
+  DOM: the layout (columns by dependency depth, rows ordered by the mean
+  row of a node's dependencies), each node's status line and detail
+  (`success` is "queue #n" or "integrating", never done; `attempt n/m`;
+  "sandbox retained"; running time and turn; `waiting_on`; a conflict
+  re-run; `deferred` as a dashed outline), the commit-queue lane (the queue
+  in `Queued()` order with the integrating head, the landed commits newest
+  first down to the base, and each failed integration with its result,
+  files, redacted output tail and where it sent the task), the action
+  lists, the transcript preview, the rail card facts, and `apply`, which
+  patches the view's state from a stream event. It also runs under node
+  for its tests.
+- **`web/projects.js`** draws `/projects` and `/projects/{id}` from
+  `GET /projects`, `/projects/{id}`, `/tasks`, `/graph` and
+  `/sessions?project=`. It subscribes before loading and applies, after
+  the lists arrive, only the events newer than their cursor. Each event
+  patches the state and redraws, and a debounced refetch of the graph keeps
+  `ready`/`runnable`/`deferred`/`errors` in step. A `reset` reloads
+  everything. The graph is an SVG; an edge out of a `failed`/`blocked`
+  task is dashed red. Clicking a node (or `?task=`) opens the selected-task
+  strip: a mini sandbox card (image, model, MCPs from the gateway with the
+  dynamic-gateway warning, `deny **` plus the task's network grants, output
+  branch) and a transcript preview that polls `/sessions/{sid}/transcript`
+  from near the end of `stream.log`.
+- **Every action button is present and disabled**, labelled with the TUI
+  command that does it today (`:stop`/`:start`, `:wolf`, `:review`,
+  intake by file, `:orch`/`:workspace`, the ACP tabs, `:session`). When the
+  command would refuse right now, the tooltip gives the TUI's own refusal
+  text (Review on a non-idle project), and the button is drawn dashed.
+  Retry appears on `failed`/`blocked` tasks as "`:wolf`, then ask it to
+  re-run".
+- **Go side**: `/projects/{id}/graph` gained `max_attempts`
+  (`task.MaxAttempts`), so "attempt n/m" is not hard-coded in the GUI.
+- **Not in this slice**: the sandbox card (§G.3), Sandboxes list (§G.2),
+  agents map (§G.4) and §G.5 screens, which are still placeholders.
+- **Tests**: `internal/api/testdata/graph_test.js` (layout, node labels,
+  lane, actions and refusals, `apply`, the transcript preview, rail facts)
+  and `projects_dom_test.js`, which loads the real bundle into a fake DOM
+  over a fake API and `EventSource`, checks the wireframe's parts render
+  with every button disabled and no write sent, then feeds `task.updated`,
+  `queue.updated` and `session.ended` and checks the view follows. Both
+  run from `TestProjectViewModel` (`internal/api/web_test.go`), which also
+  checks that every bundle script parses; it is skipped when node is not
+  installed, since `go build` stays the only required build. A Go test
+  keeps the copied `:review` refusal text in step with `internal/control`,
+  and `TestAPIGraph` covers `max_attempts`.
 
 **Scope: M–L**, most of it front-end work.
 
