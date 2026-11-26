@@ -608,12 +608,12 @@ func (p *eventPublisher) auditEvents() []api.Event {
 			continue
 		}
 		p.noteSessionEnd(ev)
-		e := APIAuditEvent{Seq: ln.Seq, Time: ev.Time.UTC(), Event: ev.Name, Fields: ev.Fields}
+		e := APIAuditEvent{Seq: ln.Seq, Time: ev.Time.UTC(), Event: ev.Name, Project: auditProject(ev.Fields, dirs), Fields: ev.Fields}
 		if len(e.Fields) == 0 {
 			e.Fields = nil
 		}
 		redactStrings(&e)
-		out = append(out, api.NewEvent(api.EventAudit, auditProject(ev.Fields, dirs), api.CauseAudit, e))
+		out = append(out, api.NewEvent(api.EventAudit, e.Project, api.CauseAudit, e))
 	}
 	return out
 }

@@ -128,7 +128,11 @@
     "session.started", "session.updated", "session.ended",
     "intake.created", "intake.updated", "intake.processed", "intake.removed",
     "pr.updated", "message.created", "message.closed",
+    "audit",
   ];
+  // The server's default subscription leaves audit out; the timeline
+  // (§G.5) needs it, and one stream serves every screen.
+  const STREAM_URL = PREFIX + "/events?types=" + encodeURIComponent("project.*,task.*,queue.*,session.*,intake.*,pr.*,message.*,audit");
 
   const stream = {
     source: null,
@@ -156,7 +160,7 @@
     start() {
       this.stop();
       this.setState("connecting");
-      const src = new EventSource(PREFIX + "/events");
+      const src = new EventSource(STREAM_URL);
       this.source = src;
       const handle = (msg) => {
         let ev;
@@ -346,9 +350,11 @@
 
   // ---- placeholder screens -----------------------------------------------
   // Minimal list screens over the read endpoints. The P.3 screens (§G.1–G.5)
-  // replace them; the Projects screens (§G.1) are in projects.js, the
-  // Sandboxes list and sandbox card (§G.2, §G.3) in sandboxes.js and the
-  // agents map (§G.4) in agents.js.
+  // are elsewhere: the Projects screens (§G.1) in projects.js, the Sandboxes
+  // list and sandbox card (§G.2, §G.3) in sandboxes.js, the agents map
+  // (§G.4) in agents.js, the transcript view and session watch (§G.2) in
+  // watch.js, the timeline and pull requests (§G.5) in timeline.js and
+  // pulls.js. The inbox stays a placeholder until its answers arrive (P.4).
 
   // liveList renders a list endpoint as a table and refetches it when one
   // of the given event types arrives (debounced).
@@ -396,20 +402,6 @@
       ["", () => wm.disabledAction("answer", "the TUI inbox")],
     ])
   );
-
-  wm.screen("/timeline", (_, main) => {
-    const list = h("tbody");
-    main.append(
-      h("h1", {}, "Timeline"),
-      h("p", { class: "muted" }, "Events since this page opened."),
-      h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "seq"), h("th", {}, "type"), h("th", {}, "project"), h("th", {}, "cause"))), list)
-    );
-    return stream.on("*", (ev) => {
-      if (ev.type === "heartbeat" || ev.type === "hello") return;
-      list.prepend(h("tr", {}, h("td", { class: "mono" }, ev.seq), h("td", {}, ev.type), h("td", {}, ev.project || ""), h("td", {}, ev.cause || "")));
-      while (list.childElementCount > 500) list.lastElementChild.remove();
-    });
-  });
 
   // Inbox badge: open operator requests.
   async function refreshInbox() {

@@ -227,3 +227,24 @@ func TestRearmThenUnregister(t *testing.T) {
 func TestRearmEmpty(t *testing.T) {
 	New().Rearm()
 }
+
+func TestNext(t *testing.T) {
+	s := New()
+	if !s.Next("k").IsZero() {
+		t.Error("Next of an unregistered key is not zero")
+	}
+	if err := s.Register("k", "@every 1h", func() {}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	s.Start()
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
+	before := time.Now()
+	next := s.Next("k")
+	if next.Before(before.Add(59*time.Minute)) || next.After(before.Add(61*time.Minute)) {
+		t.Errorf("Next = %v, want about an hour from %v", next, before)
+	}
+	s.Unregister("k")
+	if !s.Next("k").IsZero() {
+		t.Error("Next of an unregistered key is not zero")
+	}
+}

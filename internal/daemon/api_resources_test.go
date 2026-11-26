@@ -22,6 +22,7 @@ import (
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/runner"
 	"github.com/slimslenderslacks/work/internal/sbx"
+	"github.com/slimslenderslacks/work/internal/scheduler"
 	"github.com/slimslenderslacks/work/internal/session"
 	"github.com/slimslenderslacks/work/internal/task"
 )
@@ -460,6 +461,41 @@ func TestAPIPulls(t *testing.T) {
 	if pr.Number != 7 || pr.HeadSHA != "deadbeef" || pr.Watching || strings.Join(pr.FixTasks, ",") != "build" {
 		t.Errorf("pr = %+v", pr)
 	}
+	// No poll armed: no next poll, but the ladder and budgets are there.
+	if pr.ReviewPoll != nil || pr.NextPollAt != nil {
+		t.Errorf("review_poll = %+v, next_poll_at = %v", pr.ReviewPoll, pr.NextPollAt)
+	}
+	if strings.Join(pr.PollLadder, ",") != strings.Join(reviewPollSpecs, ",") {
+		t.Errorf("poll_ladder = %v", pr.PollLadder)
+	}
+	if pr.Budgets != (ReviewBudgets{MaxReviewFixCycles: maxReviewFixCycles, MaxReviewErrors: maxReviewErrors}) {
+		t.Errorf("budgets = %+v", pr.Budgets)
+	}
+
+	// An armed poll on a started scheduler: the rung, the next poll time
+	// and the counters.
+	alpha := f.alpha
+	f.d.scheduler = scheduler.New()
+	f.d.scheduler.Start()
+	t.Cleanup(func() { _ = f.d.scheduler.Stop(context.Background()) })
+	if err := f.d.scheduler.Register(reviewPollKey(alpha), reviewPollSpecs[2], func() {}); err != nil {
+		t.Fatal(err)
+	}
+	f.d.reviewMu.Lock()
+	f.d.reviewBackoff[alpha] = 2
+	f.d.reviewFixCycles[alpha] = 1
+	f.d.reviewMu.Unlock()
+	f.get(t, api.Prefix+"/projects/"+alphaID+"/pulls", &l)
+	pr = l.Items[0]
+	if pr.ReviewPoll == nil || pr.ReviewPoll.BackoffIndex != 2 || pr.ReviewPoll.Schedule != "@every 8m" {
+		t.Errorf("review_poll = %+v", pr.ReviewPoll)
+	}
+	if pr.NextPollAt == nil || time.Until(*pr.NextPollAt) > 8*time.Minute || time.Until(*pr.NextPollAt) < 7*time.Minute {
+		t.Errorf("next_poll_at = %v", pr.NextPollAt)
+	}
+	if pr.Budgets.ReviewFixCycles != 1 || pr.Budgets.ReviewErrors != 0 {
+		t.Errorf("budgets = %+v", pr.Budgets)
+	}
 }
 
 func TestAPIAudit(t *testing.T) {
@@ -482,7 +518,7 @@ func TestAPIAudit(t *testing.T) {
 	var proj listOf[APIAuditEvent]
 	f.get(t, api.Prefix+"/projects/"+alphaID+"/audit", &proj)
 	for _, e := range proj.Items {
-		if !auditInProject(e.Fields, filepath.Dir(f.alpha)) {
+		if !auditInProject(e.Fields, filepath.Dir(f.alpha)) || e.Project != alphaID {
 			t.Errorf("project audit has %+v", e)
 		}
 	}
@@ -491,7 +527,7 @@ func TestAPIAudit(t *testing.T) {
 	}
 	var byName listOf[APIAuditEvent]
 	f.get(t, api.Prefix+"/audit?event=project_blocked&project=p_0.bravo", &byName)
-	if len(byName.Items) != 1 || byName.Items[0].Fields["reason"] != "password="+audit.Redacted {
+	if len(byName.Items) != 1 || byName.Items[0].Fields["reason"] != "password="+audit.Redacted || byName.Items[0].Project != "p_0.bravo" {
 		t.Errorf("event filter = %+v", byName.Items)
 	}
 

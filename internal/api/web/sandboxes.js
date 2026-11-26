@@ -202,10 +202,24 @@
       return { c, task, project, session };
     };
 
+    // The transcript outlives the card's redraws: it keeps polling its
+    // session, and keeps what it loaded, labelled lost, once that ends.
+    let transcript = null;
+    const transcriptFor = (session) => {
+      if (session && (!transcript || transcript.sid !== session.id)) {
+        if (transcript) transcript.stop();
+        transcript = wm.transcriptView({ sid: session.id, session, mode: "preview" });
+      } else if (session) {
+        transcript.setSession(session);
+      } else if (transcript) {
+        transcript.end();
+      }
+      return transcript;
+    };
     const draw = async () => {
       try {
         const r = await load();
-        box.replaceChildren(drawCard(r));
+        box.replaceChildren(drawCard(r, transcriptFor(r.session)));
       } catch (e) {
         box.replaceChildren(wm.errorNotice(e));
       }
@@ -215,10 +229,11 @@
     return () => {
       main.classList.remove("wide");
       stop();
+      if (transcript) transcript.stop();
     };
   }
 
-  function drawCard({ c, task, project, session }) {
+  function drawCard({ c, task, project, session }, transcript) {
     const name = c.name || c.sandboxFallback;
     const crumbs = [wm.link("/projects", "Projects"), " / "];
     if (project) crumbs.push(wm.link("/projects/" + enc(project.id), project.work_stream), " / ");
@@ -247,7 +262,12 @@
       h("div", { class: "card-arrow", "aria-hidden": "true" }, "→"),
       column("out", "③ OUTPUT", "what leaves the sandbox", output(c, task, project))
     );
-    return h("div", {}, head, cols, legend(c));
+    const tr = h("section", { class: "card-transcript" },
+      h("h2", {}, "Transcript"),
+      transcript
+        ? transcript.el
+        : h("p", { class: "muted small" }, "No live session in this sandbox. A transcript is lost when its session ends: the wrapper deletes the session directory with its stream.log (R.4 Q4)."));
+    return h("div", {}, head, cols, tr, legend(c));
   }
 
   function column(cls, title, sub, body) {

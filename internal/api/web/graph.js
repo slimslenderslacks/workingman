@@ -1,7 +1,7 @@
 // workingman GUI: the project view's model (docs/proposals/workingman-gui.md
 // §G.1). Pure functions over the API's resources, with no DOM: the task
 // graph's layout and node labels, the commit-queue lane, the project's
-// action buttons, the transcript preview and the patching of state from
+// action buttons, the transcript preview lines and the patching of state from
 // stream events. projects.js draws what these return.
 //
 // The file runs in the browser, where it becomes wm.pv, and under node for
@@ -408,21 +408,6 @@
     return out.slice(-max).map((l) => (l.text.length > width ? { kind: l.kind, text: l.text.slice(0, width - 1) + "…" } : l));
   }
 
-  // parseNDJSON parses a transcript page; lines that are not JSON are
-  // skipped.
-  function parseNDJSON(text) {
-    const out = [];
-    for (const line of String(text).split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        out.push(JSON.parse(line));
-      } catch (e) {
-        // a redacted non-JSON line: nothing to show
-      }
-    }
-    return out;
-  }
-
   // ---- live state ----------------------------------------------------------
 
   // newState is the project view's state: the project (detail), its tasks
@@ -564,7 +549,6 @@
     taskActions,
     policySummary,
     transcriptLines,
-    parseNDJSON,
     newState,
     apply,
     railFacts,

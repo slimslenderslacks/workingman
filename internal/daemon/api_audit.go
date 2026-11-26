@@ -12,12 +12,15 @@ import (
 	"github.com/slimslenderslacks/work/internal/postoffice"
 )
 
-// APIAuditEvent is an audit event with its seq (§A.1.5).
+// APIAuditEvent is an audit event with its seq (§A.1.5). Project is the id
+// of the project one of its path fields lies under, if any, so a timeline
+// row can link to it.
 type APIAuditEvent struct {
-	Seq    uint64            `json:"seq"`
-	Time   time.Time         `json:"time"`
-	Event  string            `json:"event"`
-	Fields map[string]string `json:"fields,omitempty"`
+	Seq     uint64            `json:"seq"`
+	Time    time.Time         `json:"time"`
+	Event   string            `json:"event"`
+	Project string            `json:"project,omitempty"`
+	Fields  map[string]string `json:"fields,omitempty"`
 }
 
 // auditPathFields are the fields that tie an audit event to a project: an
@@ -27,14 +30,16 @@ type APIAuditEvent struct {
 var auditPathFields = []string{"path", "key", "project", "project_path", "task_path"}
 
 func (s apiSource) Audit(_ context.Context, q api.AuditQuery) ([]any, error) {
+	m := s.d.model()
 	projectDir := ""
 	if q.Project != "" {
-		p, err := s.d.model().project(q.Project)
+		p, err := m.project(q.Project)
 		if err != nil {
 			return nil, err
 		}
 		projectDir = filepath.Dir(p.Path)
 	}
+	dirs := m.projectDirs()
 	// The ring holds the last 500 lines. A since older than the ring returns
 	// what it still holds: the client sees the gap in the first seq, and the
 	// older lines are only in the audit log, which carries no seq.
@@ -56,7 +61,7 @@ func (s apiSource) Audit(_ context.Context, q api.AuditQuery) ([]any, error) {
 		if projectDir != "" && !auditInProject(ev.Fields, projectDir) {
 			continue
 		}
-		events = append(events, APIAuditEvent{Seq: ln.Seq, Time: ev.Time.UTC(), Event: ev.Name, Fields: ev.Fields})
+		events = append(events, APIAuditEvent{Seq: ln.Seq, Time: ev.Time.UTC(), Event: ev.Name, Project: auditProject(ev.Fields, dirs), Fields: ev.Fields})
 	}
 	if len(events) > q.Limit {
 		if q.HasSince {
@@ -74,6 +79,18 @@ func (s apiSource) Audit(_ context.Context, q api.AuditQuery) ([]any, error) {
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+// projectDirs maps each project's directory to its id (the project that
+// keeps the id, when two share one).
+func (m *apiModel) projectDirs() map[string]string {
+	dirs := make(map[string]string, len(m.projects))
+	for i, p := range m.projects {
+		if id := m.id(p); m.ids[id] == i {
+			dirs[filepath.Dir(p.Path)] = id
+		}
+	}
+	return dirs
 }
 
 func auditInProject(fields map[string]string, dir string) bool {

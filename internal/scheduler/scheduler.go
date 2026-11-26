@@ -109,6 +109,19 @@ func (s *Scheduler) Spec(key string) string {
 	return s.specs[key]
 }
 
+// Next returns when key's schedule fires next, or the zero time when key is
+// not registered or the scheduler has not been started (robfig/cron computes
+// an entry's next run only once it runs).
+func (s *Scheduler) Next(key string) time.Time {
+	s.mu.Lock()
+	id, ok := s.entries[key]
+	s.mu.Unlock()
+	if !ok {
+		return time.Time{}
+	}
+	return s.cron.Entry(id).Next
+}
+
 // Start begins firing schedules. Calling Start multiple times is safe.
 func (s *Scheduler) Start() { s.cron.Start() }
 

@@ -262,9 +262,15 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
   };
 }
 
-// buttons lists el's buttons; label is a button's own label, without the
-// command line under it.
-const buttons = (el) => el.findAll((e) => e.tagName === "BUTTON");
+// SCRIPTS is the bundle in index.html's order.
+const SCRIPTS = ["app.js", "graph.js", "projects.js", "workload.js", "sandboxes.js", "agents.js", "transcript.js", "watch.js", "secondary.js", "timeline.js", "pulls.js"];
+
+// buttons lists el's buttons that stand for a write action (every one but
+// the local ones, such as Save transcript, which only save in the
+// browser); label is a button's own label, without the command line under
+// it.
+const buttons = (el) => el.findAll((e) => e.tagName === "BUTTON" && e.getAttribute("data-local") === null);
+const localButtons = (el) => el.findAll((e) => e.tagName === "BUTTON" && e.getAttribute("data-local") !== null);
 const label = (b) => b.childNodes[0].textContent;
 
-module.exports = { Node, Text, Element, byClass, boot, buttons, label };
+module.exports = { Node, Text, Element, byClass, boot, buttons, localButtons, label, SCRIPTS };

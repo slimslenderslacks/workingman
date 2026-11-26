@@ -202,12 +202,14 @@
         repos ? ["repos", repos] : null,
         ["max_parallel_tasks", String(p.max_parallel_tasks || 1)],
         p.verify ? ["verify", h("code", {}, p.verify)] : null,
+        (p.pull_requests || []).length || (p.flags && p.flags.review) ? ["", wm.link("/projects/" + enc(p.id) + "/pulls", pullsLabel(p))] : null,
+        ["", wm.link("/timeline?project=" + enc(p.id), "timeline ▸")],
       ].filter(Boolean);
       header.replaceChildren(
         h("div", { class: "pv-title" },
           h("h1", {}, p.work_stream),
           wm.status(p.status),
-          h("span", { class: "muted small meta" }, meta.map(([k, v], i) => [i ? " · " : "", k, " ", v]))
+          h("span", { class: "muted small meta" }, meta.map(([k, v], i) => [i ? " · " : "", k ? [k, " "] : null, v]))
         ),
         h("div", { class: "actions" }, pv.projectActions(p).map((a) => wm.disabledAction(a.label, a.command, a.refusal, a.danger)))
       );
@@ -376,51 +378,30 @@
       );
     }
 
-    // transcriptPanel is the live transcript preview: the tail of the
-    // session's stream.log, polled while the task stays selected.
+    // transcriptPanel is the live transcript preview (wm.transcriptView):
+    // the tail of the session's stream.log, polled while the task stays
+    // selected. When the session ends the panel stays, labelled lost, until
+    // another task is selected.
     function transcriptPanel(t, sess) {
-      if (!sess) {
+      if (sess && (!transcript || transcript.sid !== sess.id)) {
         stopTranscript();
-        return h("div", { class: "transcript" }, h("div", { class: "t-head" }, "transcript"), h("div", { class: "t-line muted" }, "no live session: the transcript is not kept after a session ends"));
-      }
-      if (!transcript || transcript.sid !== sess.id) {
+        transcript = wm.transcriptView({ sid: sess.id, session: sess, mode: "preview" });
+        transcript.task = t.name;
+      } else if (sess) {
+        transcript.setSession(sess);
+      } else if (transcript && transcript.task === t.name) {
+        transcript.end();
+      } else {
         stopTranscript();
-        transcript = { sid: sess.id, frames: [], next: -1, timer: 0, el: h("div", { class: "t-lines" }) };
-        pollTranscript(transcript);
       }
+      if (transcript) return transcript.el;
       return h("div", { class: "transcript" },
-        h("div", { class: "t-head" }, "transcript (observe, replayed from stream.log)"),
-        transcript.el,
-        h("div", { class: "t-foot" }, sess.persistent ? "persistent session" : "read-only: one-shot " + sess.kind + " session · not kept after it ends")
-      );
-    }
-
-    async function pollTranscript(tr) {
-      if (transcript !== tr) return;
-      try {
-        if (tr.next < 0) {
-          // Start near the end: the preview shows only the tail. A first
-          // line cut in half is not JSON and is skipped.
-          const head = await wm.api.text("/sessions/" + enc(tr.sid) + "/transcript?limit=1");
-          const size = Number(head.headers.get("X-Transcript-Size")) || 0;
-          tr.next = Math.max(0, size - 200000);
-        }
-        const page = await wm.api.text("/sessions/" + enc(tr.sid) + "/transcript?after=" + tr.next + "&limit=2000");
-        const next = Number(page.headers.get("X-Transcript-Next"));
-        if (isFinite(next)) tr.next = next;
-        tr.frames.push(...pv.parseNDJSON(page.text));
-        if (tr.frames.length > 4000) tr.frames.splice(0, tr.frames.length - 4000);
-        const lines = pv.transcriptLines(tr.frames, 12, 90);
-        tr.el.replaceChildren(...(lines.length ? lines.map((l) => h("div", { class: "t-line t-" + l.kind }, l.text)) : [h("div", { class: "t-line muted" }, "waiting for output…")]));
-      } catch (e) {
-        tr.el.replaceChildren(h("div", { class: "t-line muted" }, e.status === 404 ? "the session's stream log is gone" : String(e.message || e)));
-        if (e.status === 404) return;
-      }
-      if (transcript === tr) tr.timer = setTimeout(() => pollTranscript(tr), 2000);
+        h("div", { class: "t-head" }, "transcript ", h("span", { class: "t-state t-lost" }, "no live session")),
+        h("div", { class: "t-line muted" }, "a transcript is lost when its session ends: the wrapper deletes the session directory with its stream.log"));
     }
 
     function stopTranscript() {
-      if (transcript) clearTimeout(transcript.timer);
+      if (transcript) transcript.stop();
       transcript = null;
     }
 
@@ -487,6 +468,14 @@
       item("st-blocked", "blocked"),
       h("span", { class: "lg muted" }, "red dashed edge = dependency failed · dashed outline = deferred")
     );
+  }
+
+  // pullsLabel is the header's link to the project's PRs.
+  function pullsLabel(p) {
+    const prs = p.pull_requests || [];
+    const open = prs.filter((x) => x.state !== "merged" && x.state !== "closed");
+    if (!prs.length) return "pull requests ▸";
+    return (open.length ? open.map((x) => "PR #" + x.number).join(", ") : prs.length + " PR" + (prs.length === 1 ? "" : "s")) + " ▸";
   }
 
   function clip(text, n) {

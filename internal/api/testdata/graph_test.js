@@ -226,7 +226,6 @@ test("transcript preview: tool calls, text and plan from ACP frames", () => {
   ]);
   assert.equal(pv.transcriptLines(frames, 2, 200).length, 2);
   assert.ok(pv.transcriptLines(frames, 10, 12)[0].text.endsWith("…"));
-  assert.equal(pv.parseNDJSON('{"a":1}\nnot json\n\n{"b":2}\n').length, 2);
 });
 
 test("rail facts: counts, progress bar and badges", () => {

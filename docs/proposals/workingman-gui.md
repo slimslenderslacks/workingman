@@ -560,6 +560,9 @@ to `url`.
   "state": "open",
   "watching": true,
   "review_poll": {"schedule": "@every 8m", "backoff_index": 2, "has_baseline": true, "baseline_source": "mcp"},
+  "next_poll_at": "2026-11-25T09:43:00Z",
+  "poll_ladder": ["@every 2m", "@every 4m", "@every 8m", "@every 16m", "@every 32m", "@every 1h"],
+  "budgets": {"review_fix_cycles": 1, "max_review_fix_cycles": 10, "review_errors": 0, "max_review_errors": 5},
   "fix_tasks": ["fix-pr-34-comment-1201"]
 }
 ```
@@ -2097,9 +2100,20 @@ when:** `curl --unix-socket … /api/v1/events` shows `task.status` and
 
 ### P.3 Read-only GUI
 
-**Status: three slices implemented** (serving the GUI and browser security;
-the projects list and project view of §G.1; the sandbox card, Sandboxes
-list and agents map of §G.2–§G.4). What the first built:
+**Status: implemented.** What was built, in four slices (serving the GUI
+and browser security; the projects list and project view of §G.1; the
+sandbox card, Sandboxes list and agents map of §G.2–§G.4; the timeline,
+pull requests and the read-only transcript view of §G.2 and §G.5). The GUI
+is `internal/api/web/` (`app.js` shell; models `graph.js`, `workload.js`,
+`transcript.js`, `secondary.js`; screens `projects.js`, `sandboxes.js`,
+`agents.js`, `watch.js`, `timeline.js`, `pulls.js`), served by
+`internal/api/web.go` with the login of `internal/api/login.go` and
+`cmd/orch/gui.go`. The project view, sandbox card and agents map
+wireframes, and the timeline and PR panes of the secondary-views
+wireframe, are drawn from live data with the `read` scope only; the inbox
+and intake panes are P.4 work (their only content beyond a list is the
+answer and queue actions), and the inbox stays a placeholder list. What
+the first slice built:
 
 - **Toolchain (R.2): a dependency-free vanilla JS/CSS bundle**, checked in
   under `internal/api/web/` (`index.html`, `app.js`, `app.css`) and embedded
@@ -2293,6 +2307,73 @@ the agents map (§G.4)**:
   keeps the copied `:review` refusal text in step with `internal/control`,
   and `TestAPIGraph` covers `max_attempts`.
 
+The fourth slice, **the timeline and pull requests (§G.5) and the
+read-only transcript view (§G.2)**:
+
+- **`web/transcript.js`** (`wm.tx`) is the transcript's model:
+  `entries` turns `stream.log` frames into the view's entries (the
+  opening prompt for a primed session, as the TUI's replay adds it, since
+  `stream.log` holds only agent frames; agent text and thoughts with their
+  chunks joined; each tool call once, updated by its `tool_call_update`s,
+  with its output; plans; permission requests; turn ends), `asText` the
+  plain text "Save transcript" writes, and `label` the live / lost label.
+- **`web/watch.js`** has `wm.transcriptView`, the one transcript panel the
+  project view's selected-task strip, the sandbox card and the session
+  watch page (`/sessions/{sid}`, §G.6) all use. It polls
+  `GET /sessions/{sid}/transcript` every 2 s from its byte offset
+  (`X-Transcript-Next`), reading on while pages come back full; a preview
+  starts 200 kB before the end, the watch page at 0. No WebSocket and
+  nothing sent to the session (P.5). It is labelled "live — not kept
+  after the session ends" while the session runs. On `session.ended` for
+  its session (or a `404` once the log is gone) it reads once more, keeps
+  what it loaded and says **"session ended — transcript lost"**; a page
+  opened after the end says "transcript lost". **Save transcript** saves
+  that copy as a text file from the browser; it is the one enabled button,
+  marked local because it sends nothing to the daemon (R.4 Q4 is still
+  open). The panel outlives the strip's and the card's redraws, so a
+  transcript survives the event that ends its session.
+- **`web/secondary.js`** (`wm.sv`) is the timeline and PR model. A
+  timeline row has its event family (survey §13), the §A.3.3 highlight,
+  a one-line summary of the fields, the long fields (`failure_reason`,
+  `err`, `detail`, …) as a detail line, and links to the project, task,
+  sandbox and session the event names. `Timeline` holds the events by
+  seq, so the list and the stream may overlap. `pullCard` is a PR card:
+  state, head, watching, the poll ladder with the current rung, the next
+  poll time and the baseline source, each fix task with its source kind
+  and where it is (committed, queue position, failure), and the budgets.
+  An agent-written PR URL becomes a link only when it is `https:`.
+- **`web/timeline.js`** draws `/timeline` from `GET /audit?limit=500`,
+  then the stream's `audit` events, newest first; filters for project
+  (also `?project=`), event family (`?family=`), highlighted only, and
+  text. The one `EventSource` in `app.js` now subscribes with
+  `?types=…,audit`, since the server's default leaves audit out. The page
+  says when older lines have left the ring: the API does not serve the
+  audit file's tail, which carries no seq, so history older than the
+  daemon's last 500 lines is only in `--audit-log`.
+- **`web/pulls.js`** draws `/projects/{id}/pulls`; it refetches on
+  `pr.updated`, `project.live` and task events of the project, and every
+  30 s for "next poll in …". "Poll now" is disabled as `:review`, with
+  the project view's refusal text. The project header links to it and to
+  the project's timeline.
+- **Go side**: a PR resource gains `next_poll_at` (from the new
+  `scheduler.Scheduler.Next`, `internal/scheduler/scheduler.go`),
+  `poll_ladder` (`reviewPollSpecs`) and `budgets` (`review_fix_cycles` of
+  `maxReviewFixCycles`, `review_errors` of `maxReviewErrors`), so the GUI
+  copies none of them (`internal/daemon/api_projects.go`). An audit event,
+  from `/audit` and in the stream alike, gains `project`, the project its
+  path fields lie under, so a row links to it
+  (`internal/daemon/api_audit.go`).
+- **Tests**: `testdata/transcript_test.js` (entries, the opening prompt,
+  the text form, the labels), `testdata/secondary_test.js` (families,
+  rows and their links, the timeline's filters and dedupe, the
+  wireframe's PR card, an unsafe URL), and `secondary_dom_test.js`, which
+  renders the timeline and feeds it an audit event, the PR page, the
+  transcript in the strip, on the card and on the watch page, then ends
+  the session and checks the transcript is kept and labelled lost, with
+  no write sent. `TestAPIPulls` covers the new PR fields with an armed
+  poll, `TestAPIAudit` the `project` field, and `TestNext` the
+  scheduler's next run.
+
 **Scope: M–L**, most of it front-end work.
 
 - The static bundle served at `/` on the same listener (§A.6.1), loopback TCP
@@ -2377,7 +2458,7 @@ Each of these is independent and needs its own decision:
 | P.0 (**done**) | shared control package, save lock, audit `seq` | S–M | `internal/tui`, `internal/control`, `internal/pathlock`, `internal/project`, `internal/task`, `internal/audit` | none |
 | P.1 (**done**) | daemon-side priming | S–M | `internal/daemon` (`priming.go`), `internal/session`, `internal/tui` (`acpwatch.go`), `internal/runner` | the daemon prompts agents; a double prompt is guarded by the `prompt_count` compare-and-set |
 | P.2 (**done**) | read API + SSE on a unix socket, `orch status --api` | M | `internal/api` (listener, handlers, `events.go` hub, `client.go`), `internal/daemon` (`api*.go`, `api_events.go` publisher), `internal/sbx` (`listcache.go`), `cmd/orch` (`api.go`, `status.go`) | a listener (read-only, token) |
-| P.3 (three slices **done**; §G.5 next) | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
+| P.3 (**done**) | read-only GUI on loopback: project view, sandbox card, Sandboxes, agents map, timeline, PRs, transcripts | M–L | `internal/api/web/` (bundle), `internal/api` (`web.go`, `login.go`), `cmd/orch` (`gui.go`), `internal/daemon` (`api_projects.go`, `api_sessions.go`, `api_audit.go`), `internal/scheduler` (`Next`) | browser threats (§A.6.3) |
 | P.4 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |
 | P.5 | session relay | M | `internal/api` relay, `internal/acpchat` | session lifetime; prompting into live agents |
 | P.6 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |

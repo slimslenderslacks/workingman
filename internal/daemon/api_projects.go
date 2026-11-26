@@ -761,8 +761,25 @@ type PullRequest struct {
 	State      string          `json:"state,omitempty"`
 	Watching   bool            `json:"watching"`
 	ReviewPoll *ReviewPollInfo `json:"review_poll"`
+	// NextPollAt is when the review poll fires next; nil when no poll is
+	// armed (or the scheduler is not running).
+	NextPollAt *time.Time `json:"next_poll_at"`
+	// PollLadder is the poll's cadence ladder; review_poll.backoff_index is
+	// the rung it is on.
+	PollLadder []string `json:"poll_ladder"`
+	// Budgets are the project's consecutive review counters and the limits
+	// that block it when exceeded (survey §14).
+	Budgets ReviewBudgets `json:"budgets"`
 	// FixTasks are the project's tasks whose source is this PR.
 	FixTasks []string `json:"fix_tasks"`
+}
+
+// ReviewBudgets are a project's review-loop counters against their limits.
+type ReviewBudgets struct {
+	ReviewFixCycles    int `json:"review_fix_cycles"`
+	MaxReviewFixCycles int `json:"max_review_fix_cycles"`
+	ReviewErrors       int `json:"review_errors"`
+	MaxReviewErrors    int `json:"max_review_errors"`
 }
 
 func (s apiSource) Pulls(_ context.Context, id string) ([]any, error) {
@@ -782,16 +799,29 @@ func (s apiSource) Pulls(_ context.Context, id string) ([]any, error) {
 func (m *apiModel) pulls(p *ProjectSnapshot) []PullRequest {
 	id := m.id(*p)
 	sum := m.summary(p)
+	var next *time.Time
+	if m.d.scheduler != nil {
+		if t := m.d.scheduler.Next(reviewPollKey(p.Path)); !t.IsZero() {
+			t = t.UTC()
+			next = &t
+		}
+	}
 	var out []PullRequest
 	for _, pr := range sum.PullReqs {
 		r := PullRequest{
 			Project: id, Repo: pr.Repo, Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA, State: pr.State,
-			Watching: p.WatchingPR && pr.State != "merged" && pr.State != "closed",
-			FixTasks: []string{},
+			Watching:   p.WatchingPR && pr.State != "merged" && pr.State != "closed",
+			PollLadder: slices.Clone(reviewPollSpecs),
+			Budgets:    ReviewBudgets{MaxReviewFixCycles: maxReviewFixCycles, MaxReviewErrors: maxReviewErrors},
+			FixTasks:   []string{},
 		}
-		if p.Live != nil && p.Live.ReviewPoll != nil {
-			rp := *p.Live.ReviewPoll
-			r.ReviewPoll = &rp
+		if p.Live != nil {
+			r.Budgets.ReviewFixCycles, r.Budgets.ReviewErrors = p.Live.ReviewFixCycles, p.Live.ReviewErrors
+			if p.Live.ReviewPoll != nil {
+				rp := *p.Live.ReviewPoll
+				r.ReviewPoll = &rp
+				r.NextPollAt = next
+			}
 		}
 		for _, ts := range p.Tasks {
 			tf, _, err := m.d.apiFiles.tasks.get(ts.path)

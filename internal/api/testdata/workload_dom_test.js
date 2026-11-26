@@ -10,7 +10,7 @@
 
 const assert = require("node:assert/strict");
 const path = require("node:path");
-const { boot, buttons, label } = require("./fakedom.js");
+const { boot, buttons, label, SCRIPTS } = require("./fakedom.js");
 
 const webDir = path.resolve(process.argv[2] || path.join(__dirname, "..", "web"));
 
@@ -74,7 +74,7 @@ const routes = {
 
 const page = boot({
   webDir,
-  scripts: ["app.js", "graph.js", "projects.js", "workload.js", "sandboxes.js", "agents.js"],
+  scripts: SCRIPTS,
   url: "http://127.0.0.1:7078/projects/p_0.gui-api/tasks/session-relay",
   routes,
   skip: (fn) => String(fn).includes("pollTranscript(tr)"),

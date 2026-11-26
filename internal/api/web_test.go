@@ -29,6 +29,14 @@ func TestStaticBundleServed(t *testing.T) {
 		{"/agents.js", "javascript", "agents map"},
 		{"/sandboxes/step-up", "text/html", `<script src="/sandboxes.js"`},
 		{"/projects/p_0.demo/tasks/build", "text/html", `<script src="/agents.js"`},
+		{"/transcript.js", "javascript", "wm.tx"},
+		{"/watch.js", "javascript", "transcriptView"},
+		{"/secondary.js", "javascript", "wm.sv"},
+		{"/timeline.js", "javascript", "audit"},
+		{"/pulls.js", "javascript", "pull requests"},
+		{"/timeline", "text/html", `<script src="/timeline.js"`},
+		{"/projects/p_0.demo/pulls", "text/html", `<script src="/pulls.js"`},
+		{"/sessions/task-build", "text/html", `<script src="/watch.js"`},
 	} {
 		// The bundle needs no credentials.
 		rec := do(t, h, "GET", tc.path, "127.0.0.1:7078", "", nil)
@@ -109,8 +117,9 @@ func TestStaticBundleIsSelfContained(t *testing.T) {
 	}
 }
 
-// The GUI's models (web/graph.js, web/workload.js) have their own tests,
-// testdata/graph_test.js and workload_test.js, and the screens DOM tests
+// The GUI's models (web/graph.js, web/workload.js, web/transcript.js,
+// web/secondary.js) have their own tests, testdata/<model>_test.js (graph_test.js
+// for graph.js), and the screens DOM tests
 // over a fake browser (testdata/fakedom.js); all run under node when it is
 // installed. Every script in the bundle must at least parse.
 func TestProjectViewModel(t *testing.T) {
@@ -148,6 +157,13 @@ func TestProjectViewModel(t *testing.T) {
 		// card, Sandboxes list and agents map in the fake DOM.
 		{"workload_test.js", filepath.Join(dir, "workload.js")},
 		{"workload_dom_test.js", dir},
+		// The transcript, timeline and pull-request models
+		// (web/transcript.js, web/secondary.js), and those screens in the
+		// fake DOM, a transcript labelled lost when its session ends
+		// included.
+		{"transcript_test.js", filepath.Join(dir, "transcript.js")},
+		{"secondary_test.js", filepath.Join(dir, "secondary.js")},
+		{"secondary_dom_test.js", dir},
 	} {
 		out, err := exec.Command(node, filepath.Join("testdata", tc[0]), tc[1]).CombinedOutput()
 		if err != nil {
