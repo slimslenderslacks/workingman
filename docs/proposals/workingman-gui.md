@@ -1931,8 +1931,9 @@ prompt a second time.
 
 ### P.2 Read-only API and event stream
 
-**Status: first two slices implemented** (the listener, its lifecycle and
-auth; the read endpoints). What was built:
+**Status: implemented.** What was built, in three slices (the listener,
+its lifecycle and auth; the read endpoints; the event stream and the first
+client):
 
 - **`internal/api`** holds the listener. `orch --api=unix|loopback|off`
   (default `off`) and `--api-listen` choose it: a unix socket,
@@ -1990,7 +1991,82 @@ auth; the read endpoints). What was built:
   read before its items are built, so the items are at least as new as it;
   the event stream replaces it with its own seq.
 
-Still to do in P.2: the event stream and `orch status --api`.
+- **The event stream** (third slice), `GET /api/v1/events` (SSE).
+  `internal/api/events.go` holds the `api.Hub`: the ring (the last 5 000
+  events), the fan-out to each stream, and the `/events` handler. Every event
+  gets a seq from the hub, one counter per daemon process, and its SSE id is
+  `<epoch>.<seq>`, where the epoch is the daemon's start time in Unix ms
+  (§A.3.4). `hello` carries `{cursor, epoch, api_version, daemon, replay}`.
+  A `Last-Event-ID` (or `?since=`, which also takes a bare seq, i.e. a list's
+  `cursor`) still in the ring gets `replay:"delta"` and every missed event.
+  One that is older than the ring, from another epoch, or unreadable gets
+  `replay:"reset"` and a `reset{cursor}` frame. No cursor gets `replay:"full"`
+  and the current state as `project.created`, `task.created`,
+  `session.started`, `intake.created`, `pr.updated` and `message.created`
+  frames. These state frames carry no `id`, so a reconnect partway through
+  the state asks for all of it again. `?project=` and `?types=` (globs; by
+  default every type except `audit`) filter replayed and live events alike. A
+  stream that is quiet for 15 s gets a `heartbeat{cursor}`. A stream that
+  falls 1 024 events behind is closed and resumes from its last id.
+  `Server.Close` ends every stream, so a daemon shutdown is not held up.
+- **The publisher** is `internal/daemon/api_events.go`. `markSnapshotDirty`
+  wakes it, with a 25 ms debounce, and so does a 2 s tick, which catches
+  what changes without a kick (`session.json`, the post-office, `sbx ls`).
+  Before the listener opens, `Run` takes the first state synchronously. Each
+  pass rebuilds the resource model and diffs it per resource against the
+  previous pass. Only changed projects are re-parsed, because the collector
+  and the file caches are keyed on mtime and size. The diff compares each
+  resource's JSON fields, so `changed` lists exactly the fields that differ.
+  A pass then emits the §A.3.3 types:
+  - `project.created` / `updated` / `status` / `removed` / `live`. `live` is
+    diffed apart from the other fields, so a live-only change is `project.live`
+    and never `project.updated`.
+  - `task.created` / `updated` / `status` / `removed`.
+  - `queue.updated`, when `commit_queue`, `live.integrating` or
+    `commit_reserved` changes.
+  - `session.started` / `updated` / `ended`. The `ended` outcome (`reaped`,
+    `stopped`, `detached`, else `ended`, with `err`) is taken from the audit
+    line about that session's key.
+  - `intake.created` / `processed` / `removed`, plus `intake.updated` for an
+    edited request.
+  - `pr.updated` and `message.created` / `closed`.
+  - One `audit` event per new audit line, tied to its project.
+
+  Removals come last, with a project's tasks and intake before the project.
+  The `cause` field (`file`, `session`, `live`, `audit`, `daemon`) says which
+  kind of change produced each event. State is taken only from the diff, so a
+  write made outside the daemon produces its events too. `sbx ls` runs only
+  while a client is connected.
+- **Cursors**: `/status` and every list's `cursor` are now the hub's seq, so
+  "list, then `events?since=cursor`" has no gap. `/status` also returns the
+  `epoch`. `/audit` still pages the audit ring by the audit seq.
+- **`orch status --api`** (`cmd/orch/status.go`) is the first client. It
+  reads `/status` and `/snapshot` through `api.Client`
+  (`internal/api/client.go`; a unix socket or loopback TCP, found with
+  `api.ResolveAddr`) and prints the same text or `--json` as `orch status`.
+  `--follow` then streams events from the status cursor, one line per event,
+  or one JSON object per line with `--json`; `--types` sets the
+  subscription. When the stream ends, `--follow` reconnects with
+  `Last-Event-ID`.
+- **Tests**: `internal/api/events_test.go` covers the ring and `Since`,
+  cursor parsing, filters, full, delta and reset replay over HTTP,
+  heartbeats, dropping a slow client, and `Close` ending streams.
+  `internal/daemon/api_events_test.go` covers the diff: no events on an idle
+  pass; `task.status` / `task.updated` with `changed`; `queue.updated` from a
+  file and from a commit session; project create, remove and status; intake
+  create, process and remove; session start and end with its reaped outcome;
+  audit events; and the full-replay state. `TestDaemonEventStream` runs the
+  daemon on a socket, sees `task.status` and `queue.updated` as task files
+  change, resumes with `Last-Event-ID` without a gap, and gets a reset for an
+  id from another epoch. `cmd/orch/status_test.go` covers `--api` and a
+  `--follow` that survives a listener restart without losing an event.
+- The done-when check was run by hand against a `--headless --api=unix`
+  daemon, with task files edited by hand rather than by agents.
+  `curl -N --unix-socket … /api/v1/events` showed `task.created`,
+  `task.status` and `queue.updated` as a task went running → success. A
+  reconnect with `Last-Event-ID` got `replay:"delta"` and the
+  `task.status` (success → committed) and `queue.updated` that happened
+  while it was disconnected.
 
 **Scope: M.**
 
@@ -2100,7 +2176,7 @@ Each of these is independent and needs its own decision:
 |---|---|---|---|---|
 | P.0 (**done**) | shared control package, save lock, audit `seq` | S–M | `internal/tui`, `internal/control`, `internal/pathlock`, `internal/project`, `internal/task`, `internal/audit` | none |
 | P.1 (**done**) | daemon-side priming | S–M | `internal/daemon` (`priming.go`), `internal/session`, `internal/tui` (`acpwatch.go`), `internal/runner` | the daemon prompts agents; a double prompt is guarded by the `prompt_count` compare-and-set |
-| P.2 | read API + SSE on a unix socket | M | `internal/daemon` (snapshot), `internal/api`, `cmd/orch` | a listener (read-only, token) |
+| P.2 (**done**) | read API + SSE on a unix socket, `orch status --api` | M | `internal/api` (listener, handlers, `events.go` hub, `client.go`), `internal/daemon` (`api*.go`, `api_events.go` publisher), `internal/sbx` (`listcache.go`), `cmd/orch` (`api.go`, `status.go`) | a listener (read-only, token) |
 | P.3 | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
 | P.4 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |
 | P.5 | session relay | M | `internal/api` relay, `internal/acpchat` | session lifetime; prompting into live agents |

@@ -17,9 +17,10 @@ const apiShutdownGrace = 2 * time.Second
 func WithAPI(cfg api.Config) Option {
 	return func(d *Daemon) {
 		if !cfg.Enabled() {
-			d.api = nil
+			d.api, d.events = nil, nil
 			return
 		}
+		d.events = newEventPublisher(d)
 		srv := api.New(cfg, apiSource{d})
 		srv.Log = d.audit.Log
 		d.api = srv
@@ -64,4 +65,19 @@ func (s apiSource) Snapshot(auditEvents int) any {
 	return s.d.buildSnapshotN(true, auditEvents)
 }
 
-func (s apiSource) Cursor() uint64 { return s.d.audit.LastSeq() }
+// Cursor is the event stream's seq. A list read before the first pass (or
+// without a publisher) has cursor 0, which a client resumes from with a
+// reset if the ring has moved past it.
+func (s apiSource) Cursor() uint64 {
+	if s.d.events == nil {
+		return 0
+	}
+	return s.d.events.hub.Cursor()
+}
+
+func (s apiSource) Events() *api.Hub {
+	if s.d.events == nil {
+		return nil
+	}
+	return s.d.events.hub
+}

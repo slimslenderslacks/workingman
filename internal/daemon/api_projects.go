@@ -761,8 +761,18 @@ func (s apiSource) Pulls(_ context.Context, id string) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	sum := m.summary(p)
 	var out []any
+	for _, r := range m.pulls(p) {
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// pulls builds a project's pull-request resources, redacted.
+func (m *apiModel) pulls(p *ProjectSnapshot) []PullRequest {
+	id := m.id(*p)
+	sum := m.summary(p)
+	var out []PullRequest
 	for _, pr := range sum.PullReqs {
 		r := PullRequest{
 			Project: id, Repo: pr.Repo, Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA, State: pr.State,
@@ -774,7 +784,7 @@ func (s apiSource) Pulls(_ context.Context, id string) ([]any, error) {
 			r.ReviewPoll = &rp
 		}
 		for _, ts := range p.Tasks {
-			tf, _, err := s.d.apiFiles.tasks.get(ts.path)
+			tf, _, err := m.d.apiFiles.tasks.get(ts.path)
 			if err != nil || tf.Source == nil || tf.Source.PR != pr.Number {
 				continue
 			}
@@ -786,7 +796,7 @@ func (s apiSource) Pulls(_ context.Context, id string) ([]any, error) {
 		redactStrings(&r)
 		out = append(out, r)
 	}
-	return out, nil
+	return out
 }
 
 // ---------------------------------------------------------------------------

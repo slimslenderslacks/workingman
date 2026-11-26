@@ -101,6 +101,7 @@ func TestDaemonServesAPIOverUnixSocket(t *testing.T) {
 		Daemon DaemonInfo  `json:"daemon"`
 		API    api.APIInfo `json:"api"`
 		Cursor uint64      `json:"cursor"`
+		Epoch  string      `json:"epoch"`
 	}
 	if err := json.Unmarshal(body, &st); err != nil {
 		t.Fatal(err)
@@ -109,8 +110,8 @@ func TestDaemonServesAPIOverUnixSocket(t *testing.T) {
 		len(st.Daemon.Roots) != 1 || st.Daemon.Roots[0] != root {
 		t.Errorf("status daemon = %+v", st.Daemon)
 	}
-	if st.API.Binding != "unix" || st.API.Listen != cfg.Listen || st.Cursor == 0 || st.Cursor > d.audit.LastSeq() {
-		t.Errorf("status api = %+v cursor = %d (last seq %d)", st.API, st.Cursor, d.audit.LastSeq())
+	if st.API.Binding != "unix" || st.API.Listen != cfg.Listen || st.Cursor > d.events.hub.Cursor() || st.Epoch != d.events.hub.Epoch() || st.Epoch == "" {
+		t.Errorf("status api = %+v cursor = %d epoch = %q (event seq %d)", st.API, st.Cursor, st.Epoch, d.events.hub.Cursor())
 	}
 
 	code, body = apiGet(t, cfg.Listen, api.Prefix+"/snapshot?audit_events=3", tok)

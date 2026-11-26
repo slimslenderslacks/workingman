@@ -41,6 +41,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc(p+"/audit", s.get(s.handleAudit))
 	mux.HandleFunc(p+"/messages", s.get(s.handleMessages))
 	mux.HandleFunc(p+"/agents", s.get(s.handleAgents))
+	mux.HandleFunc(p+"/events", s.get(s.handleEvents))
 }
 
 // badQuery is a 400 for a query parameter the endpoint cannot use.

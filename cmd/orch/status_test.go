@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/slimslenderslacks/work/internal/api"
 	"github.com/slimslenderslacks/work/internal/daemon"
 )
 
@@ -168,5 +171,141 @@ func TestResolveStateFile(t *testing.T) {
 	}
 	if p, err := resolveStateFile("/tmp/x/s.json", "/ignored"); err != nil || p != "/tmp/x/s.json" {
 		t.Errorf("explicit -> %q, %v", p, err)
+	}
+}
+
+// statusAPISource serves a fixed snapshot and a hub the test publishes into.
+type statusAPISource struct {
+	api.Resources // unused by orch status
+	snap          *daemon.Snapshot
+	hub           *api.Hub
+}
+
+func (s *statusAPISource) DaemonInfo() any  { return s.snap.Daemon }
+func (s *statusAPISource) Snapshot(int) any { return s.snap }
+func (s *statusAPISource) Cursor() uint64   { return s.hub.Cursor() }
+func (s *statusAPISource) Events() *api.Hub { return s.hub }
+
+// syncBuf is a bytes.Buffer safe for a writer and a polling reader.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+func waitOutput(t *testing.T, b *syncBuf, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(b.String(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("output never had %q:\n%s", want, b.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// `orch status --api` prints the snapshot from the API; with --follow it
+// then prints the events after it, and after the server goes away and comes
+// back it resumes from the last id without missing the events in between.
+func TestStatusAPIFollow(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "wmst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	cfg, err := api.ParseConfig("unix", "", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub := api.NewHub("77", 100)
+	hub.Publish([]api.Event{api.NewEvent(api.EventTaskUpdated, "p_0.demo", api.CauseFile, map[string]any{"name": "one"})}, nil)
+	src := &statusAPISource{hub: hub, snap: &daemon.Snapshot{
+		Version: daemon.SnapshotVersion, GeneratedAt: time.Now().UTC(), Source: daemon.SnapshotSourceDaemon, LiveStateAvailable: true,
+		Daemon:   &daemon.DaemonInfo{State: daemon.DaemonStateRunning, PID: 4242},
+		Projects: []daemon.ProjectSnapshot{{WorkStream: "demo", Status: "working", TaskCounts: map[string]int{}}},
+	}}
+	start := func() *api.Server {
+		s := api.New(cfg, src)
+		if err := s.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	srv := start()
+
+	sessions := filepath.Join(dir, "sessions")
+	var out, errb bytes.Buffer
+	if code := runStatusCtx(context.Background(), []string{"--api", "--sessions-root", sessions}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "daemon: running pid=4242") || !strings.Contains(out.String(), "demo") {
+		t.Errorf("status --api output:\n%s", out.String())
+	}
+
+	old := followRetry
+	followRetry = 10 * time.Millisecond
+	defer func() { followRetry = old }()
+	ctx, cancel := context.WithCancel(context.Background())
+	fout, ferr := &syncBuf{}, &syncBuf{}
+	done := make(chan int, 1)
+	go func() {
+		done <- runStatusCtx(ctx, []string{"--api", "--follow", "--json", "--sessions-root", sessions, "--types", "task.*,queue.*"}, fout, ferr)
+	}()
+	waitOutput(t, fout, `"type":"hello"`)
+	if strings.Contains(fout.String(), `"seq":1,`) && strings.Contains(fout.String(), `"type":"task.updated"`) {
+		t.Errorf("--follow replayed an event the snapshot already covers:\n%s", fout.String())
+	}
+	if !strings.Contains(fout.String(), `"replay":"delta"`) {
+		t.Errorf("--follow did not resume from the status cursor:\n%s", fout.String())
+	}
+	hub.Publish([]api.Event{api.NewEvent(api.EventTaskStatus, "p_0.demo", api.CauseFile, map[string]any{"name": "one", "from": "ready", "to": "running"})}, nil)
+	waitOutput(t, fout, `"type":"task.status"`)
+
+	// The daemon restarts its listener; an event lands while it is down.
+	ctxc, cancelc := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelc()
+	if err := srv.Close(ctxc); err != nil {
+		t.Fatal(err)
+	}
+	hub.Publish([]api.Event{api.NewEvent(api.EventQueueUpdated, "p_0.demo", api.CauseFile, map[string]any{"commit_queue": []string{"one"}})}, nil)
+	srv = start()
+	defer srv.Close(context.Background())
+	waitOutput(t, fout, `"type":"queue.updated"`)
+	waitOutput(t, ferr, "reconnecting from 77.2")
+	cancel()
+	if code := <-done; code != 0 {
+		t.Errorf("--follow exit %d: %s", code, ferr.String())
+	}
+
+	// Text mode formats one line per event.
+	line := formatEvent(api.Event{Seq: 9, Type: api.EventTaskStatus, Project: "p_0.demo", Data: []byte(`{"name":"one","from":"ready","to":"running"}`)})
+	if !strings.Contains(line, "task.status") || !strings.Contains(line, "p_0.demo one: ready -> running") {
+		t.Errorf("formatEvent = %q", line)
+	}
+}
+
+func TestStatusAPIErrors(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := runStatus([]string{"--follow"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "--follow needs --api") {
+		t.Errorf("--follow alone: %d %q", code, errb.String())
+	}
+	errb.Reset()
+	if code := runStatus([]string{"--api", "--root", t.TempDir()}, &out, &errb); code != 2 {
+		t.Errorf("--api --root: %d %q", code, errb.String())
+	}
+	errb.Reset()
+	if code := runStatus([]string{"--api", "--sessions-root", filepath.Join(t.TempDir(), "sessions")}, &out, &errb); code != 1 || !strings.Contains(errb.String(), "no API token") {
+		t.Errorf("no token: %d %q", code, errb.String())
 	}
 }

@@ -211,8 +211,10 @@ type Daemon struct {
 	// cached `sbx ls`, made on first use (sbxOnce) unless a test set it.
 	api      *api.Server
 	apiFiles *apiFiles
-	sbxOnce  sync.Once
-	sbxList  *sbx.ListCache
+	// events is the API's event-stream publisher; nil when the API is off.
+	events  *eventPublisher
+	sbxOnce sync.Once
+	sbxList *sbx.ListCache
 
 	// workingman is the workingman-agent supervision state; nil unless
 	// WithWorkingmanAgent. See workingman_agent.go.
@@ -422,8 +424,11 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 			w.Close()
 			return nil, fmt.Errorf("daemon: %w", err)
 		}
+	}
+	if d.snapshot.path != "" || d.events != nil {
 		// Any audit line is a hint that state moved (session start/stop,
-		// project/task transitions, failures); the loop debounces the burst.
+		// project/task transitions, failures); the snapshot loop and the
+		// event publisher debounce the burst.
 		a.OnLog(d.markSnapshotDirty)
 	}
 	return d, nil
@@ -482,7 +487,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.launchSleepyHead()
 	go d.reapLoop(ctx)
 	// After the scan, so the first request sees the projects; the API never
-	// holds up the daemon.
+	// holds up the daemon. The event stream's first state is taken before
+	// the listener opens, so the first client gets a full replay.
+	d.startEvents(ctx)
 	d.startAPI()
 	if d.snapshot.path != "" {
 		// Publish immediately so a reader never sees a stale file from a

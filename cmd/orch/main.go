@@ -46,6 +46,7 @@ func (r *rootsFlag) Set(s string) error {
 const usageHeader = `usage: orch --root <dir> [flags]        run the daemon, with the TUI unless --headless
        orch tui --root <dir>            run only the TUI over a directory
        orch status [--json]             print the running daemon's state snapshot
+       orch status --api [--follow]     the same through the daemon's API, then (--follow) its live event stream
        orch api token [--rotate]        create or rotate the API's bearer token (see --api)
        orch catchup <project-path>      fire a behind project's schedule once, now (used by sleepy-head)
        orch whatsapp <subcommand>       set up and check the WhatsApp channel (see docs/channels.md)

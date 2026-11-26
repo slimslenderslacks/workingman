@@ -146,22 +146,9 @@ func (s apiSource) Messages(_ context.Context, q api.MessageQuery) ([]any, error
 	// the store's directories.
 	store := &postoffice.Store{Root: dir}
 	now := time.Now()
-	var out []MessageResource
-	open, err := store.ListOpen()
+	out, err := inboxMessages(store, now)
 	if err != nil {
 		return nil, err
-	}
-	for _, m := range open {
-		if !m.ToOperator() {
-			continue
-		}
-		// A claimed message is closed; it leaves the inbox once post-office
-		// finalises it.
-		var res *postoffice.Resolution
-		if r, ok, err := store.Claimed(m.ID); err == nil && ok {
-			res = &r
-		}
-		out = append(out, messageResource(m, res, now))
 	}
 	if q.State != api.MessagesOpen {
 		done, err := store.ListDone(q.Since)
@@ -189,4 +176,27 @@ func (s apiSource) Messages(_ context.Context, q api.MessageQuery) ([]any, error
 		items = append(items, r)
 	}
 	return items, nil
+}
+
+// inboxMessages lists the operator's messages still in the inbox: open ones,
+// and claimed ones (closed) that post-office has not finalised yet.
+func inboxMessages(store *postoffice.Store, now time.Time) ([]MessageResource, error) {
+	open, err := store.ListOpen()
+	if err != nil {
+		return nil, err
+	}
+	var out []MessageResource
+	for _, m := range open {
+		if !m.ToOperator() {
+			continue
+		}
+		// A claimed message is closed; it leaves the inbox once post-office
+		// finalises it.
+		var res *postoffice.Resolution
+		if r, ok, err := store.Claimed(m.ID); err == nil && ok {
+			res = &r
+		}
+		out = append(out, messageResource(m, res, now))
+	}
+	return out, nil
 }

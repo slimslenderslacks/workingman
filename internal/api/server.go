@@ -43,9 +43,12 @@ type Source interface {
 	// Snapshot is the snapshot.json document, built now, with up to
 	// auditEvents trailing audit events (<= 0: the daemon's default).
 	Snapshot(auditEvents int) any
-	// Cursor is the position the state just returned is consistent with:
-	// the latest audit seq until the event stream has its own.
+	// Cursor is the event-stream position the state just returned is
+	// consistent with: the seq of the latest event the hub has published.
 	Cursor() uint64
+	// Events is the event stream's hub; nil while it is not running (GET
+	// /events is then a 503).
+	Events() *Hub
 	// Resources serves every other read endpoint.
 	Resources
 }
@@ -61,6 +64,13 @@ type Server struct {
 	Log func(event string, kv ...string)
 	// now is the clock for generated_at; tests replace it.
 	now func() time.Time
+	// heartbeat is how long an event stream stays quiet before a
+	// heartbeat frame; tests shorten it.
+	heartbeat time.Duration
+	// stopStreams is closed by Close, which ends every event stream: a
+	// stream never ends on its own, and Shutdown waits for it.
+	stopStreams chan struct{}
+	stopOnce    sync.Once
 
 	mu       sync.Mutex
 	ln       net.Listener
@@ -73,7 +83,10 @@ type Server struct {
 
 // New returns a server for cfg over src. It does not listen yet.
 func New(cfg Config, src Source) *Server {
-	return &Server{cfg: cfg, src: src, tokens: &tokenFile{path: cfg.TokenPath}, now: time.Now}
+	return &Server{
+		cfg: cfg, src: src, tokens: &tokenFile{path: cfg.TokenPath}, now: time.Now,
+		heartbeat: HeartbeatInterval, stopStreams: make(chan struct{}),
+	}
 }
 
 func (s *Server) log(event string, kv ...string) {
@@ -171,6 +184,7 @@ func (s *Server) Close(ctx context.Context) error {
 	if srv == nil {
 		return nil
 	}
+	s.stopOnce.Do(func() { close(s.stopStreams) })
 	err := srv.Shutdown(ctx)
 	if err != nil {
 		srv.Close()
@@ -328,6 +342,9 @@ type Status struct {
 	Daemon      any       `json:"daemon"`
 	API         APIInfo   `json:"api"`
 	Cursor      uint64    `json:"cursor"`
+	// Epoch tells this daemon process's cursors from another's: the
+	// prefix of the event stream's ids ("" when the stream is not running).
+	Epoch string `json:"epoch,omitempty"`
 }
 
 // APIInfo describes the listener in [Status].
@@ -340,13 +357,17 @@ type APIInfo struct {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, r, http.StatusOK, Status{
+	st := Status{
 		Version:     buildVersion(),
 		GeneratedAt: s.now().UTC(),
 		Daemon:      s.src.DaemonInfo(),
 		API:         APIInfo{Version: Version, Binding: string(s.cfg.Mode), Listen: s.Addr()},
 		Cursor:      s.src.Cursor(),
-	})
+	}
+	if hub := s.src.Events(); hub != nil {
+		st.Epoch = hub.Epoch()
+	}
+	writeJSON(w, r, http.StatusOK, st)
 }
 
 func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {

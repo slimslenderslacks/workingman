@@ -20,6 +20,7 @@ type fakeSource struct {
 	info      any
 	snap      func(n int) any
 	cursor    uint64
+	hub       *Hub
 }
 
 func (f *fakeSource) DaemonInfo() any { return f.info }
@@ -30,6 +31,7 @@ func (f *fakeSource) Snapshot(n int) any {
 	return map[string]any{"version": 1, "n": n}
 }
 func (f *fakeSource) Cursor() uint64 { return f.cursor }
+func (f *fakeSource) Events() *Hub   { return f.hub }
 
 // shortTempDir is a temp dir under /tmp: a unix socket path must fit in
 // sun_path (~104 bytes), which macOS's $TMPDIR can exceed.

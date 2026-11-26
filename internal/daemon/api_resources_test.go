@@ -174,6 +174,8 @@ task_branch: wm/alpha-branch/build
 	if err != nil {
 		t.Fatal(err)
 	}
+	d.events = newEventPublisher(d)
+	d.events.prime(context.Background())
 	f.h = api.New(api.Config{Mode: api.ModeUnix, TokenPath: tokPath}, apiSource{d}).Handler("")
 	f.tok = tok
 	return f
@@ -211,8 +213,8 @@ func TestAPIProjects(t *testing.T) {
 	f := newAPIFixture(t)
 	var l listOf[ProjectSummary]
 	f.get(t, api.Prefix+"/projects", &l)
-	if l.Cursor == 0 || l.Cursor > f.d.audit.LastSeq() || l.GeneratedAt.IsZero() {
-		t.Errorf("envelope cursor=%d (last seq %d) generated_at=%v", l.Cursor, f.d.audit.LastSeq(), l.GeneratedAt)
+	if l.Cursor != f.d.events.hub.Cursor() || l.GeneratedAt.IsZero() {
+		t.Errorf("envelope cursor=%d (event seq %d) generated_at=%v", l.Cursor, f.d.events.hub.Cursor(), l.GeneratedAt)
 	}
 	if len(l.Items) != 3 {
 		t.Fatalf("projects = %d, want alpha, bravo and broken", len(l.Items))
@@ -464,7 +466,7 @@ func TestAPIAudit(t *testing.T) {
 		t.Fatalf("audit = %+v", l.Items)
 	}
 	last := l.Items[len(l.Items)-1]
-	if last.Event != "watch_root" || last.Seq != f.d.audit.LastSeq() || l.Cursor != last.Seq {
+	if last.Event != "watch_root" || last.Seq != f.d.audit.LastSeq() || l.Cursor != f.d.events.hub.Cursor() {
 		t.Errorf("last = %+v cursor=%d", last, l.Cursor)
 	}
 	for i := 1; i < len(l.Items); i++ {

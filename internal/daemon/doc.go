@@ -136,6 +136,13 @@
 //     snapshot model plus the file fields the snapshot leaves out, read
 //     through api_files.go's caches (keyed on mtime and size), and the
 //     sandboxes come from a cached `sbx ls` (sbx.ListCache).
+//   - api_events.go: the event stream's publisher (§A.3.2). It hooks
+//     markSnapshotDirty (and a 2 s tick), rebuilds the resource model,
+//     diffs it per resource against the previous pass and publishes
+//     project.*, task.*, queue.updated, session.*, intake.*, pr.updated and
+//     message.* events, plus one audit event per new audit line, on the
+//     internal/api Hub. State always comes from the diff, so writes made
+//     outside the daemon produce events too.
 //
 // # Key types
 //

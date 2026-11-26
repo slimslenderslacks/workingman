@@ -121,9 +121,11 @@ func within(p, root string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-// markSnapshotDirty asks the snapshot loop for a prompt (debounced) refresh.
-// Cheap and non-blocking; a no-op when publishing is disabled.
+// markSnapshotDirty asks the snapshot loop for a prompt (debounced) refresh,
+// and the API's event publisher for a pass. Cheap and non-blocking; a no-op
+// when neither is running.
 func (d *Daemon) markSnapshotDirty() {
+	d.events.poke()
 	if d.snapshot.path == "" {
 		return
 	}
