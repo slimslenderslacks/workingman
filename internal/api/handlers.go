@@ -21,16 +21,26 @@ const (
 	HeaderTranscriptSize = "X-Transcript-Size"
 )
 
-// routes registers the resource endpoints of §A.2 on mux.
+// routes registers the resource endpoints of §A.2 and the write actions of
+// §A.4 on mux.
 func (s *Server) routes(mux *http.ServeMux) {
 	p := Prefix
-	mux.HandleFunc(p+"/projects", s.get(s.handleProjects))
+	mux.HandleFunc(p+"/projects", s.methods(map[string]http.HandlerFunc{
+		http.MethodGet:  s.handleProjects,
+		http.MethodPost: s.write("new_project", ScopeWrite, s.handleNewProject),
+	}))
 	mux.HandleFunc(p+"/projects/{id}", s.get(s.handleProject))
 	mux.HandleFunc(p+"/projects/{id}/tasks", s.get(s.handleTasks))
 	mux.HandleFunc(p+"/projects/{id}/tasks/{name}", s.get(s.handleTask))
 	mux.HandleFunc(p+"/projects/{id}/graph", s.get(s.handleGraph))
-	mux.HandleFunc(p+"/projects/{id}/intake", s.get(s.handleIntake))
-	mux.HandleFunc(p+"/projects/{id}/intake/{name}", s.get(s.handleIntakeRequest))
+	mux.HandleFunc(p+"/projects/{id}/intake", s.methods(map[string]http.HandlerFunc{
+		http.MethodGet:  s.handleIntake,
+		http.MethodPost: s.write("queue_intake", ScopeWrite, s.handleQueueIntake),
+	}))
+	mux.HandleFunc(p+"/projects/{id}/intake/{name}", s.methods(map[string]http.HandlerFunc{
+		http.MethodGet:    s.handleIntakeRequest,
+		http.MethodDelete: s.write("withdraw_intake", ScopeWrite, s.handleWithdrawIntake),
+	}))
 	mux.HandleFunc(p+"/projects/{id}/pulls", s.get(s.handlePulls))
 	mux.HandleFunc(p+"/projects/{id}/audit", s.get(s.handleProjectAudit))
 	mux.HandleFunc(p+"/sessions", s.get(s.handleSessions))

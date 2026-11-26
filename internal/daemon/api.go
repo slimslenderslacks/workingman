@@ -10,7 +10,7 @@ import (
 // apiShutdownGrace is how long shutdown waits for API requests in flight.
 const apiShutdownGrace = 2 * time.Second
 
-// WithAPI enables the optional read-only HTTP API (internal/api) with cfg.
+// WithAPI enables the optional HTTP API (internal/api) with cfg.
 // A disabled cfg (--api=off) leaves the daemon without one. The listener is
 // started by Run and closed by its shutdown; a failure to bind is logged as
 // api_listen_error and never stops the daemon.
@@ -52,7 +52,8 @@ func (d *Daemon) stopAPI() {
 }
 
 // apiSource serves the API's reads from the snapshot builder, so the API
-// and snapshot.json never disagree.
+// and snapshot.json never disagree, and its writes through internal/control
+// (api_writes.go).
 type apiSource struct{ d *Daemon }
 
 func (s apiSource) DaemonInfo() any {

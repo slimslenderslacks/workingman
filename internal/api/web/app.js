@@ -3,12 +3,14 @@
 // A deliberately small, dependency-free script: no build step, no framework,
 // nothing loaded from another origin. It provides what the screens build on:
 //
-//   - wm.api     the API client (cookie session, CSRF header on non-GET)
+//   - wm.api     the API client (cookie session, CSRF header on non-GET,
+//                Idempotency-Key and If-Match on writes)
 //   - wm.stream  one SSE subscription to /api/v1/events, with resume
 //   - wm.route   a history-API router; screens register with wm.screen()
 //   - wm.h       a DOM builder that never parses strings as HTML
 //
-// The GUI is read-only: it sends no write requests yet (P.4).
+// Writes (P.4) are enabled only for a session with the write scope; without
+// it every write control stays disabled, labelled with its TUI command.
 "use strict";
 
 (function () {
@@ -69,8 +71,8 @@
 
   let csrf = "";
 
-  async function request(method, path, body, raw) {
-    const headers = { Accept: "application/json" };
+  async function request(method, path, body, raw, extra) {
+    const headers = Object.assign({ Accept: "application/json" }, extra || {});
     const init = { method, headers, credentials: "same-origin", cache: "no-cache" };
     if (method !== "GET" && method !== "HEAD") {
       if (csrf) headers["X-WM-CSRF"] = csrf;
@@ -95,9 +97,29 @@
     if (!resp.ok) {
       const err = (data && data.error) || {};
       if (resp.status === 401 && path !== "/session") onLoggedOut();
-      throw new APIError(resp.status, err.code, err.message);
+      const e = new APIError(resp.status, err.code, err.message);
+      // A 412 or 409 may carry the resource as it is now (§A.4.1).
+      if (err.current) e.current = err.current;
+      throw e;
     }
     return data;
+  }
+
+  // idemKey is a fresh Idempotency-Key: a write retried with the same key
+  // (a double click, a resend after a dropped response) is done once.
+  function idemKey() {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  }
+
+  // write sends a write action. opts: {ifMatch, key}; a caller that may
+  // resend the same write passes the same key.
+  function write(method, path, body, opts) {
+    const o = opts || {};
+    const extra = { "Idempotency-Key": o.key || idemKey() };
+    if (o.ifMatch) extra["If-Match"] = o.ifMatch;
+    return request(method, path, body, false, extra);
   }
 
   wm.api = {
@@ -111,6 +133,23 @@
     session: () => request("GET", "/session"),
     login: (code) => request("POST", "/session", { code }),
     logout: () => request("DELETE", "/session"),
+    post: (path, body, opts) => write("POST", path, body === undefined ? {} : body, opts),
+    del: (path, opts) => write("DELETE", path, undefined, opts),
+    idemKey,
+  };
+
+  // can reports whether the session holds a scope (§A.6.2): "write" for the
+  // project and task actions, intake and new projects.
+  wm.can = (scope) => !!(wm.session && (wm.session.scopes || []).includes(scope));
+
+  // writeAction is an enabled write control: a button that runs fn, or a
+  // link to the form that does the write when href is set. Without the
+  // write scope it is the disabled button, with its TUI command.
+  wm.writeAction = (label, tuiCommand, opts) => {
+    const o = opts || {};
+    if (!wm.can("write") || o.refusal) return wm.disabledAction(label, tuiCommand, o.refusal, o.danger);
+    if (o.href) return h("a", { href: o.href, "data-link": true, class: "action action-link" + (o.danger ? " danger" : "") }, label);
+    return h("button", { class: "action" + (o.danger ? " danger" : ""), type: "button", title: o.title || "", onclick: o.onclick }, label);
   };
 
   // ---- event stream ------------------------------------------------------

@@ -3,8 +3,9 @@
 // commit-queue lane and selected-task strip. The model is graph.js (wm.pv);
 // this file fetches, subscribes and draws.
 //
-// Read-only: every action button is drawn disabled and names the TUI
-// command that does it today (P.3).
+// Writes: "+ New project" and "Queue intake" open their forms (intake.js)
+// for a session with the write scope (P.4). Every other action button is
+// drawn disabled and names the TUI command that does it today.
 "use strict";
 
 (function () {
@@ -60,7 +61,7 @@
       h("h2", {}, "Work streams"),
       h("div", { class: "rail-filter" }, q, status, h("label", { class: "muted" }, hidden, " hidden")),
       list,
-      h("div", { class: "rail-foot" }, wm.disabledAction("+ New project", "drop project.md under the orch root"))
+      h("div", { class: "rail-foot" }, wm.writeAction("+ New project", "drop project.md under the orch root", { href: "/new-project" }))
     );
     let items = [];
     const draw = () => {
@@ -211,7 +212,7 @@
           wm.status(p.status),
           h("span", { class: "muted small meta" }, meta.map(([k, v], i) => [i ? " · " : "", k ? [k, " "] : null, v]))
         ),
-        h("div", { class: "actions" }, pv.projectActions(p).map((a) => wm.disabledAction(a.label, a.command, a.refusal, a.danger)))
+        h("div", { class: "actions" }, pv.projectActions(p).map((a) => (a.href ? wm.writeAction(a.label, a.command, a) : wm.disabledAction(a.label, a.command, a.refusal, a.danger))))
       );
       const notes = [];
       if (p.blocked_reason) notes.push(h("p", { class: "notice error" }, "blocked: ", p.blocked_reason));

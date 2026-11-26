@@ -60,6 +60,7 @@ type Server struct {
 	src    Source
 	tokens *tokenFile
 	logins *logins
+	idem   *idempotency
 	// Log records lifecycle events (api_listen, api_listen_error, ...) in the
 	// audit log. Its signature is audit.Logger.Log. Nil discards them.
 	Log func(event string, kv ...string)
@@ -85,7 +86,7 @@ type Server struct {
 // New returns a server for cfg over src. It does not listen yet.
 func New(cfg Config, src Source) *Server {
 	return &Server{
-		cfg: cfg, src: src, tokens: &tokenFile{path: cfg.TokenPath}, logins: newLogins(), now: time.Now,
+		cfg: cfg, src: src, tokens: &tokenFile{path: cfg.TokenPath}, logins: newLogins(), idem: newIdempotency(), now: time.Now,
 		heartbeat: HeartbeatInterval, stopStreams: make(chan struct{}),
 	}
 }
@@ -294,8 +295,8 @@ const (
 // guard applies the checks every request goes through, in order: the Host
 // allowlist (421); then, for the API, the Origin check (403), the
 // credentials — the bearer token or the session cookie (401) — and, for a
-// browser session's request that is not GET or HEAD, Origin and the CSRF
-// header (403). The static GUI needs no credentials. guard also sets the
+// request that is not GET or HEAD, Origin and the CSRF header when it comes
+// from a browser session (403), and a JSON Content-Type (415, §A.6.3). The static GUI needs no credentials. guard also sets the
 // headers every response carries.
 func (s *Server) guard(port string, api, web http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -335,9 +336,13 @@ func (s *Server) guard(port string, api, web http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or wrong bearer token or session; see `orch api token` or `orch gui`")
 			return
 		}
-		if a.session != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
-			if r.Header.Get("Origin") == "" || !checkCSRF(r, a.session) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if a.session != nil && (r.Header.Get("Origin") == "" || !checkCSRF(r, a.session)) {
 				writeError(w, http.StatusForbidden, CodeForbidden, "a browser request that is not GET needs Origin and the "+HeaderCSRF+" header")
+				return
+			}
+			if !jsonOrNoBody(r) {
+				writeError(w, http.StatusUnsupportedMediaType, CodeUnsupported, "Content-Type must be application/json")
 				return
 			}
 		}
@@ -450,10 +455,13 @@ type ErrorBody struct {
 	Error ErrorDetail `json:"error"`
 }
 
-// ErrorDetail is the inside of [ErrorBody].
+// ErrorDetail is the inside of [ErrorBody]. Current is set on some write
+// errors (a 412, a 409): the resource as it is now, so the client can show
+// what changed.
 type ErrorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	Current any    `json:"current,omitempty"`
 }
 
 func writeError(w http.ResponseWriter, status int, code, msg string) {

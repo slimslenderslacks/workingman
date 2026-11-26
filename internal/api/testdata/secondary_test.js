@@ -1,4 +1,4 @@
-// Tests for the timeline and pull-request model,
+// Tests for the timeline, pull-request and intake model,
 // internal/api/web/secondary.js. Run by TestProjectViewModel (web_test.go)
 // with node, or by hand:
 //
@@ -132,6 +132,32 @@ test("PR card: no poll, a merged PR, a near budget, an unsafe URL", () => {
   assert.match(nb.poll, /^poll armed \(2m\) · no baseline yet/);
   assert.match(sv.pullsNote({ flags: { review: false } }), /review: false/);
   assert.match(sv.pullsNote({ flags: { review: true } }), /review agent opens the PR/);
+});
+
+test("intake: hints follow the daemon's routing; names are checked as the server does", () => {
+  const hint = (status, sessions) => sv.intakeHint({ status, live: { sessions: sessions || [] } });
+  assert.match(hint("working").text, /planner runs alongside its tasks/);
+  assert.match(hint("idle").text, /flips it to ready and plans this/);
+  assert.ok(hint("blocked").warn && /clearing blocked_reason/.test(hint("blocked").text));
+  assert.match(hint("stopped").refuse, /start it first/);
+  assert.match(hint("").refuse, /project agent has not filled in/);
+  assert.match(hint("working", ["task", "planning"]).text, /follow-up planning run/);
+  assert.equal(sv.intakeNameError(""), "");
+  assert.equal(sv.intakeNameError("add-card"), "");
+  assert.match(sv.intakeNameError("add-card.md"), /leave off \.md/);
+  assert.match(sv.intakeNameError("Add Card"), /lowercase/);
+  assert.match(sv.intakeNameError("../x"), /lowercase/);
+  assert.match(sv.projectNameError(""), /required/);
+  assert.match(sv.projectNameError("gui-api", ["gui-api"]), /already exists/);
+  assert.match(sv.projectNameError("a".repeat(64)), /63/);
+  assert.equal(sv.projectNameError("gui-wireframes", ["gui-api"]), "");
+  const g = sv.intakeGroups([
+    { name: "a", state: "pending", created_at: "2026-11-26T09:00:00Z" },
+    { name: "b", state: "processed", created_at: "2026-11-25T09:00:00Z" },
+    { name: "c", state: "empty", created_at: "2026-11-26T10:00:00Z" },
+  ]);
+  assert.deepEqual(g.pending.map((r) => r.name), ["c", "a"]);
+  assert.deepEqual(g.processed.map((r) => r.name), ["b"]);
 });
 
 let failed = 0;

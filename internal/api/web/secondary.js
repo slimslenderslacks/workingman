@@ -1,9 +1,10 @@
-// workingman GUI: the model of the timeline and pull-request views
+// workingman GUI: the model of the timeline, pull-request and intake views
 // (docs/proposals/workingman-gui.md §G.5). Pure functions over the API's
 // resources, with no DOM: the timeline's rows (event family, highlight,
 // summary, the project / task / sandbox / session each row names) and
-// filters, and a project's PR cards (state, poll ladder and next poll, fix
-// tasks, review budgets). timeline.js and pulls.js draw what these return.
+// filters, a project's PR cards (state, poll ladder and next poll, fix
+// tasks, review budgets), and the intake and new-project forms' hints and
+// name checks. timeline.js, pulls.js and intake.js draw what these return.
 //
 // Like graph.js, the file runs in the browser, where it becomes wm.sv, and
 // under node for its tests (internal/api/testdata/secondary_test.js).
@@ -221,10 +222,71 @@
     return "no pull requests: this project does not run the review loop (review: false).";
   }
 
+  // ---- intake and new project (§A.4.3, §G.5) ------------------------------
+
+  const KEBAB = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+  // intakeHint says what the daemon will do with a request queued now,
+  // given the project (handleIntakeFile, internal/daemon/intake.go). refuse
+  // is set when the GUI should not offer the queue at all.
+  function intakeHint(p) {
+    const status = (p && p.status) || "";
+    const live = (p && p.live) || {};
+    if (!status) return { text: "", refuse: "the project agent has not filled in this project yet; queue intake once it is ready" };
+    if ((live.sessions || []).includes("planning")) {
+      return { text: "a planner is running: it will not see this request, so a follow-up planning run picks it up when this one ends" };
+    }
+    switch (status) {
+      case "working":
+        return { text: "the project is working: a planner runs alongside its tasks and turns this into tasks" };
+      case "stopped":
+        return { text: "", refuse: "the project is stopped, and queuing intake would flip it to ready; start it first" };
+      case "blocked":
+        return { text: "the project is blocked: the daemon flips it to ready (clearing blocked_reason) and plans this", warn: true };
+      default:
+        return { text: "the project is " + status + ": the daemon flips it to ready and plans this" };
+    }
+  }
+
+  // intakeNameError checks an intake name as the server will (one kebab-case
+  // segment, no .md); "" is fine (the server picks one).
+  function intakeNameError(name) {
+    name = String(name || "").trim();
+    if (!name) return "";
+    if (name.endsWith(".md")) return "leave off .md: the server adds it";
+    if (!KEBAB.test(name)) return "lowercase letters, digits and single hyphens only";
+    if (name.length > 100) return "at most 100 characters";
+    return "";
+  }
+
+  // projectNameError checks a new work stream's name as the server will.
+  function projectNameError(name, existing) {
+    name = String(name || "").trim();
+    if (!name) return "a name is required";
+    if (!KEBAB.test(name)) return "lowercase letters, digits and single hyphens only";
+    if (name.length > 63) return "at most 63 characters: it prefixes every sandbox name";
+    if ((existing || []).includes(name)) return name + " already exists";
+    return "";
+  }
+
+  // intakeGroups splits a project's intake list into pending (and blank)
+  // requests, which can be withdrawn, and processed ones, newest first.
+  function intakeGroups(items) {
+    const newest = (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""));
+    const all = (items || []).slice();
+    return {
+      pending: all.filter((r) => r.state === "pending" || r.state === "empty").sort(newest),
+      processed: all.filter((r) => r.state === "processed").sort(newest),
+    };
+  }
+
   function clip(text, n) {
     text = String(text === undefined || text === null ? "" : text);
     return text.length > n ? text.slice(0, n - 1) + "…" : text;
   }
 
-  return { HIGHLIGHT, FAMILIES, family, taskOf, row, matches, Timeline, rung, until, fixTask, safeURL, pullCard, pullsNote };
+  return {
+    HIGHLIGHT, FAMILIES, family, taskOf, row, matches, Timeline, rung, until, fixTask, safeURL, pullCard, pullsNote,
+    intakeHint, intakeNameError, projectNameError, intakeGroups,
+  };
 });

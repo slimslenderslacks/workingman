@@ -425,3 +425,17 @@ pre.prompt, pre.desc { white-space: pre-wrap; font-family: var(--mono); font-siz
   .card-arrow { transform: rotate(90deg); }
   .agent-row, .agents-notes { grid-template-columns: 1fr; }
 }
+
+/* ---- writes (P.4): enabled actions and the intake / new-project forms ---- */
+.action:not([disabled]) { color: var(--fg); border-color: var(--accent); cursor: pointer; }
+.action.primary:not([disabled]) { background: var(--accent); color: #fff; }
+a.action-link { display: inline-block; color: var(--accent); border: 1px solid var(--accent); }
+.error { color: var(--bad); }
+.form { display: flex; flex-direction: column; gap: 10px; max-width: 760px; margin: 12px 0 18px; }
+.field { display: flex; flex-direction: column; gap: 3px; }
+.field-label { font-weight: 600; font-size: 12px; }
+.field input, .field textarea, .field select { font: inherit; padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--fg); }
+.field textarea { font-family: var(--mono); font-size: 12px; }
+.field-error { color: var(--bad); min-height: 0; }
+.intake-list { list-style: none; padding: 0; margin: 4px 0 12px; }
+.intake-row { padding: 4px 0; border-bottom: 1px solid var(--line); }

@@ -34,6 +34,9 @@ func TestStaticBundleServed(t *testing.T) {
 		{"/secondary.js", "javascript", "wm.sv"},
 		{"/timeline.js", "javascript", "audit"},
 		{"/pulls.js", "javascript", "pull requests"},
+		{"/intake.js", "javascript", "Idempotency-Key"},
+		{"/new-project", "text/html", `<script src="/intake.js"`},
+		{"/projects/p_0.demo/intake", "text/html", `<script src="/intake.js"`},
 		{"/timeline", "text/html", `<script src="/timeline.js"`},
 		{"/projects/p_0.demo/pulls", "text/html", `<script src="/pulls.js"`},
 		{"/sessions/task-build", "text/html", `<script src="/watch.js"`},
@@ -164,6 +167,10 @@ func TestProjectViewModel(t *testing.T) {
 		{"transcript_test.js", filepath.Join(dir, "transcript.js")},
 		{"secondary_test.js", filepath.Join(dir, "secondary.js")},
 		{"secondary_dom_test.js", dir},
+		// The first writes (web/intake.js, P.4): intake and new project
+		// from the fake DOM with the write scope, and nothing sent
+		// without it.
+		{"intake_dom_test.js", dir},
 	} {
 		out, err := exec.Command(node, filepath.Join("testdata", tc[0]), tc[1]).CombinedOutput()
 		if err != nil {

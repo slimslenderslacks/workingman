@@ -1,7 +1,7 @@
-// Package api is the daemon's optional, read-only HTTP API: the listener, its
-// lifecycle and authentication, the response conventions every endpoint
-// shares, the live event stream, and the web GUI's static bundle and
-// browser login.
+// Package api is the daemon's optional HTTP API: the listener, its lifecycle
+// and authentication, the response conventions every endpoint shares, the
+// live event stream, the write actions' rules, and the web GUI's static
+// bundle and browser login.
 //
 // Role: daemon
 //
@@ -31,8 +31,11 @@
 // posts the code to /session (Origin and a JSON body required), which sets
 // wm_session (HttpOnly, SameSite=Strict, Path=/), a secret distinct from the
 // token that expires after 12 h idle, and returns the session's scopes
-// (read) and its CSRF token. A browser session's requests other than GET and
-// HEAD need Origin and X-WM-CSRF equal to that token. Sessions live in
+// (read, write, answer) and its CSRF token. A browser session's requests
+// other than GET and HEAD need Origin and X-WM-CSRF equal to that token, and
+// every such request, bearer or browser, needs Content-Type: application/json
+// when it has a body (415 otherwise), so a cross-site form is never a
+// request the server accepts. Sessions live in
 // memory, so a daemon restart logs browsers out. The GUI's pages get a CSP of
 // default-src 'self' with frame-ancestors 'none'; API responses get
 // default-src 'none'; both get X-Frame-Options: DENY.
@@ -58,14 +61,30 @@
 // a list and then follow events from its cursor without a gap. [Client] is a
 // small reader for both, used by `orch status --api`.
 //
-// Endpoints, all GET (and HEAD): /status and /snapshot; /projects,
+// Read endpoints, all GET (and HEAD): /status and /snapshot; /projects,
 // /projects/{id} and, under it, /tasks, /tasks/{name}, /graph, /intake,
 // /intake/{name}, /pulls and /audit; /sessions, /sessions/{sid} and its
 // /transcript (NDJSON, paged by byte offset) and /prompt; /sandboxes;
 // /audit; /messages; /agents; /events. Besides those: GET and DELETE
-// /session, POST /session (login) and POST /login-codes. The server parses and checks the query
-// parameters (400 on a bad one) and maps [ErrNotFound] to 404 and
-// [ErrUnavailable] to 503; the resources themselves come from [Resources].
+// /session, POST /session (login) and POST /login-codes. The server parses
+// and checks the query parameters (400 on a bad one) and maps [ErrNotFound]
+// to 404 and [ErrUnavailable] to 503; the resources themselves come from
+// [Resources].
+//
+// Write endpoints (§A.4.3, the create-only actions): POST /projects (seed a
+// work stream's project.md), POST /projects/{id}/intake (queue an intake
+// request) and DELETE /projects/{id}/intake/{name} (withdraw a pending one).
+// They need the write scope (403 without it; the bearer token has every
+// scope) and are done by the source's [Actions]. Every write follows §A.4.1:
+// a JSON body with no unknown fields; If-Match, checked by the action
+// against the resource's etag ([MatchETag]; 412 with the current resource on
+// a mismatch); an optional Idempotency-Key, under which the first response is
+// kept for 24 h per client and replayed to a retry (422 if the key is reused
+// for another request; a 5xx is not kept); 202 with the written resource and
+// its ETag, or 200 with "noop": true; errors in the shape above plus
+// "current", with codes bad_request, not_found, conflict, invalid_state,
+// precondition_failed, forbidden and unavailable; and an api_write (or
+// api_write_refused) audit line with the action, path, etags and client.
 //
 // # Key types
 //
@@ -74,6 +93,10 @@
 //     [Server.Start] and [Server.Close].
 //   - [Source] — what the server reads, [Resources] included; implemented
 //     by internal/daemon.
+//   - [Actions], [WriteRequest], [WriteResult] — the write actions, which
+//     the daemon's source implements too; [ErrInvalid], [ErrConflict],
+//     [ErrInvalidState], [ErrPreconditionFailed] and [WithCurrent] pick a
+//     write's error response.
 //   - [ProjectQuery], [AuditQuery], [SessionQuery], ... — the parsed query
 //     parameters handed to [Resources].
 //   - [EnsureToken], [ReadToken], [TokenPath] — the token file.
@@ -89,5 +112,5 @@
 // No internal imports. Used by internal/daemon (which implements [Source]
 // over its snapshot builder and publishes the events) and cmd/orch (flags,
 // `orch api token`, `orch status --api`, `orch gui`). See
-// docs/proposals/workingman-gui.md §A.2, §A.3 and §A.6.
+// docs/proposals/workingman-gui.md §A.2, §A.3, §A.4 and §A.6.
 package api

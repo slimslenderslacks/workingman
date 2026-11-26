@@ -309,10 +309,10 @@
 
   // ---- actions ---------------------------------------------------------------
 
-  // projectActions lists the header's buttons (§G.1, §A.4.7). The GUI is
-  // read-only, so every one is disabled; each carries the TUI command that
-  // does it today and, when that command would refuse right now, the TUI's
-  // own refusal text (internal/control).
+  // projectActions lists the header's buttons (§G.1, §A.4.7). Each carries
+  // the TUI command that does it today and, when that command would refuse
+  // right now, the TUI's own refusal text (internal/control). An action
+  // with href is enabled (P.4): a link to its form; the rest are disabled.
   function projectActions(p) {
     const name = p.work_stream;
     const status = p.status || "";
@@ -329,7 +329,12 @@
       command: ":review",
       refusal: status === "idle" ? "" : `review starts on an idle work stream or kicks one already watching a PR (this one is "${status}")`,
     });
-    out.push({ label: "Queue intake", command: "drop a .md file into the project's intake/ directory", refusal: "" });
+    out.push({
+      label: "Queue intake",
+      command: "drop a .md file into the project's intake/ directory",
+      refusal: status === "stopped" ? "the project is stopped, and queuing intake would flip it to ready; start it first" : status === "" ? "the project agent has not filled in this project yet" : "",
+      href: "/projects/" + encodeURIComponent(p.id) + "/intake",
+    });
     out.push({ label: "Open shell ▾", command: ":orch or :workspace", refusal: "" });
     return out;
   }

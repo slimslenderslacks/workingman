@@ -97,6 +97,9 @@ class Element extends Node {
   getAttribute(k) {
     return k in this.attributes ? this.attributes[k] : null;
   }
+  removeAttribute(k) {
+    delete this.attributes[k];
+  }
   addEventListener(t, fn) {
     (this.listeners[t] = this.listeners[t] || []).push(fn);
   }
@@ -184,14 +187,19 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
   const requests = [];
   async function fetch(u, init) {
     const parsed = new URL(u, loc.href);
-    requests.push({ method: (init && init.method) || "GET", path: parsed.pathname + parsed.search });
+    requests.push({
+      method: (init && init.method) || "GET",
+      path: parsed.pathname + parsed.search,
+      headers: (init && init.headers) || {},
+      body: init && init.body !== undefined ? JSON.parse(init.body) : undefined,
+    });
     const r0 = raw && raw(parsed);
     if (r0) return r0;
     const r = routes[parsed.pathname];
     if (!r) return { ok: false, status: 404, headers: new Map(), text: async () => '{"error":{"code":"not_found","message":"no"}}' };
     let v;
     try {
-      v = r(parsed);
+      v = r(parsed, init || {});
     } catch (e) {
       return { ok: false, status: e.status || 500, headers: new Map(), text: async () => JSON.stringify({ error: { code: e.code || "internal", message: e.message } }) };
     }
@@ -222,6 +230,7 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
   const popListeners = [];
   const ctx = vm.createContext({
     document, location, history, fetch, EventSource, URL, URLSearchParams, Node, console, Date, Math, JSON, Promise, Map, Set,
+    Uint8Array, Array, crypto: { getRandomValues: (b) => require("node:crypto").getRandomValues(b) },
     setTimeout: (fn) => (timers.push(fn), timers.length),
     clearTimeout: () => {},
     setInterval: () => 0,
@@ -263,12 +272,12 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
 }
 
 // SCRIPTS is the bundle in index.html's order.
-const SCRIPTS = ["app.js", "graph.js", "projects.js", "workload.js", "sandboxes.js", "agents.js", "transcript.js", "watch.js", "secondary.js", "timeline.js", "pulls.js"];
+const SCRIPTS = ["app.js", "graph.js", "projects.js", "workload.js", "sandboxes.js", "agents.js", "transcript.js", "watch.js", "secondary.js", "timeline.js", "pulls.js", "intake.js"];
 
 // buttons lists el's buttons that stand for a write action (every one but
 // the local ones, such as Save transcript, which only save in the
 // browser); label is a button's own label, without the command line under
-// it.
+// it. Enabled write actions that open a form are links (class action-link).
 const buttons = (el) => el.findAll((e) => e.tagName === "BUTTON" && e.getAttribute("data-local") === null);
 const localButtons = (el) => el.findAll((e) => e.tagName === "BUTTON" && e.getAttribute("data-local") !== null);
 const label = (b) => b.childNodes[0].textContent;

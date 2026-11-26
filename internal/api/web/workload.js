@@ -274,7 +274,7 @@
   function inputActions(t) {
     const running = t.status === "running";
     return [
-      { label: "Queue intake", command: "drop a .md file into the project's intake/ directory", refusal: "" },
+      { label: "Queue intake", command: "drop a .md file into the project's intake/ directory", refusal: "", href: "/projects/" + encodeURIComponent(t.project) + "/intake" },
       { label: "Edit task…", command: "edit tasks/" + t.name + ".yaml (description, depends_on, touches, areas)", refusal: running ? "the task is running: its inputs cannot change now" : "" },
     ];
   }

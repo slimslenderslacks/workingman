@@ -40,9 +40,21 @@ const (
 	maxSessions   = 64
 )
 
-// Scopes (§A.6.2). The API is read-only, so read is the only one yet; write
-// and the others arrive with the endpoints that need them (P.4, P.5).
-const ScopeRead = "read"
+// Scopes (§A.6.2). read covers every GET; write covers the project and task
+// actions, intake and new projects; answer covers post-office answers. The
+// others (attach, interact, pty, archive) arrive with the endpoints that need
+// them (P.4, P.5).
+const (
+	ScopeRead   = "read"
+	ScopeWrite  = "write"
+	ScopeAnswer = "answer"
+)
+
+// BrowserScopes are the scopes a browser login grants.
+var BrowserScopes = []string{ScopeRead, ScopeWrite, ScopeAnswer}
+
+// TokenScopes are the bearer token's scopes: all there are.
+var TokenScopes = []string{ScopeRead, ScopeWrite, ScopeAnswer}
 
 // Error codes of the login flow and the browser checks.
 const (
@@ -141,7 +153,7 @@ func (l *logins) exchange(code string, now time.Time) (string, *browserSession, 
 	secret := randomSecret(32)
 	bs := &browserSession{
 		id: "bs_" + hashSecret(randomSecret(8))[:12], csrf: randomSecret(32),
-		scopes: []string{ScopeRead}, created: now, lastUsed: now,
+		scopes: append([]string(nil), BrowserScopes...), created: now, lastUsed: now,
 	}
 	l.sessions[hashSecret(secret)] = bs
 	return secret, bs, true
@@ -243,6 +255,18 @@ func jsonBody(r *http.Request) bool {
 	return err == nil && mt == "application/json"
 }
 
+// jsonOrNoBody is the Content-Type rule for every API request that is not
+// GET or HEAD (§A.6.3): a declared Content-Type must be application/json,
+// and a request with a body must declare one. A cross-site form always
+// declares a form type, so it is refused; a bodiless call such as `orch gui`
+// minting a login code needs no header.
+func jsonOrNoBody(r *http.Request) bool {
+	if r.Header.Get("Content-Type") != "" {
+		return jsonBody(r)
+	}
+	return r.ContentLength == 0 && len(r.TransferEncoding) == 0
+}
+
 // LoginCode is the POST /api/v1/login-codes body.
 type LoginCode struct {
 	Code      string    `json:"code"`
@@ -292,7 +316,7 @@ type SessionInfo struct {
 
 func sessionInfo(bs *browserSession) SessionInfo {
 	if bs == nil {
-		return SessionInfo{Auth: "bearer", Scopes: []string{ScopeRead}}
+		return SessionInfo{Auth: "bearer", Scopes: TokenScopes}
 	}
 	created := bs.created.UTC()
 	return SessionInfo{

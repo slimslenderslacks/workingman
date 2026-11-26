@@ -3,8 +3,9 @@
 // sandbox side, and the sandbox card, inputs → capabilities → output. The
 // model is workload.js (wm.wl); this file fetches, subscribes and draws.
 //
-// Read-only: every action button is drawn disabled and names the TUI
-// command that does it today (P.3).
+// Writes: "Queue intake" links to the project's intake form (intake.js)
+// for a session with the write scope (P.4). Every other action button is
+// drawn disabled and names the TUI command that does it today.
 "use strict";
 
 (function () {
@@ -36,7 +37,7 @@
   // that may be missing (sbx ls down, a session's prompt files gone).
   const maybe = (p) => p.then((v) => v, () => null);
 
-  const action = (a) => wm.disabledAction(a.label, a.command, a.refusal, a.danger);
+  const action = (a) => (a.href ? wm.writeAction(a.label, a.command, a) : wm.disabledAction(a.label, a.command, a.refusal, a.danger));
 
   function taskHref(project, task) {
     return "/projects/" + enc(project) + "/tasks/" + enc(task);

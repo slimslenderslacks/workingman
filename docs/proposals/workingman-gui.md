@@ -2,11 +2,11 @@
 
 Status: **draft proposal**. Phases P.0 (groundwork, no user-visible change),
 P.1 (daemon-side priming) and P.2 (read-only API and event stream) are
-implemented, and so are the first three slices of P.3 (serving the GUI,
-login and browser hardening; the project view; the sandbox card, Sandboxes
-list and agents map); see [P.0](#p0-groundwork-no-user-visible-change),
-[P.1](#p1-daemon-side-priming), [P.2](#p2-read-only-api-and-event-stream)
-and [P.3](#p3-read-only-gui). Nothing after that is.
+implemented, and so is P.3 (the read-only GUI), and the first slice of P.4
+(the write rules and the create-only actions: intake, intake withdraw and new
+project); see [P.0](#p0-groundwork-no-user-visible-change),
+[P.1](#p1-daemon-side-priming), [P.2](#p2-read-only-api-and-event-stream),
+[P.3](#p3-read-only-gui) and [P.4](#p4-write-actions). Nothing after that is.
 
 ## Summary
 
@@ -989,7 +989,10 @@ first write phase (§P.4; open question R.4 Q11).
   `intake.processed`.
 - `409` if a file with that name exists, pending or `.processed`.
   An intake on a `stopped` project is accepted and stays pending, because the
-  daemon routes `stopped` first (survey §3, routing order).
+  daemon routes `stopped` first (survey §3, routing order). *As built
+  (P.4): `409 invalid_state` instead. `handleIntakeFile` flips every
+  non-`working` project to `ready`, a stopped one included, so the file
+  would un-stop the project; see §P.4.*
 - `DELETE /api/v1/projects/{id}/intake/{name}` withdraws a **pending**
   request (renames it to `<name>.withdrawn`). There is no daemon reaction.
   This races the planner, so it is best-effort: `409` if already processed.
@@ -2395,6 +2398,85 @@ read-only transcript view (§G.2)**:
 data with no write scope granted.
 
 ### P.4 Write actions
+
+**Status: first slice implemented** (the write rules of §A.4.1, the
+`write`/`answer` scopes, CSRF and `Content-Type` on every non-`GET`, and the
+create-only actions of §A.4.3). The rest of the phase, from inbox answers
+on, is not. What was built:
+
+- **Writes go through `internal/control`.** `control.NewProject` makes
+  `<root>/<name>/` and writes `project.md`; `control.QueueIntake` writes
+  `<project>/intake/<name>.md`; `control.WithdrawIntake` renames a pending
+  request to `<name>.withdrawn`, which neither the daemon nor the planner
+  reads. A new file is written to a hidden temp name that no handler
+  matches (it does not end in `.md`) and **hard-linked** into place, not
+  renamed: the watcher sees one complete `Create`, and a name that already
+  exists is refused atomically instead of replaced. `os.Mkdir` is the claim
+  on a new project's name, so of two concurrent creates one gets `409`.
+  The daemon's reaction is unchanged (`handleProjectSeed`,
+  `handleIntakeFile`); the API's `Actions` (`internal/daemon/api_writes.go`)
+  only resolve ids and map refusals to statuses.
+- **Endpoints.** `POST /api/v1/projects` `{"root", "name", "description"}`
+  → `202 {"id", "path", "state": "seeded", "warning"?, "write", "expect"}`.
+  `POST /api/v1/projects/{id}/intake` `{"name"?, "body"}` → `202
+  {"intake", "write", "expect"}` with the request's etag as `ETag`; with no
+  name the server picks `gui-<UTC time>-<4 hex>`. `DELETE
+  /api/v1/projects/{id}/intake/{name}` → `202`, or `200 "noop": true` when it
+  was already withdrawn. Names are one kebab-case segment (a project name at
+  most 63 characters, the sandbox-name limit, and not `.worktrees`; the
+  response warns when a name will be shortened in sandbox names). Bodies are
+  JSON with no unknown fields, so a populated `project.yaml` cannot be sent
+  through `POST /projects`.
+- **Refusals.** `400` for a bad name, a blank body or description, an
+  unknown root or field; `404` for an unknown project or intake request;
+  `409 conflict` for a name in use (pending, `.processed` or `.withdrawn`)
+  and for withdrawing a request the planner already took; `409
+  invalid_state` for intake on a **stopped** project or one the project
+  agent has not filled in yet. This deviates from §A.4.3, which says a
+  stopped project's intake "stays pending": in the code `handleIntakeFile`
+  flips every non-`working` project to `ready`, a stopped one included,
+  which would end the stop and leave `stopped_from` behind. Hand-dropped
+  files still do that; the API refuses rather than un-stop a project as a
+  side effect.
+- **§A.4.1 rules.** `If-Match` is checked by the action against the
+  resource's etag (the same `"in-…"` etag `GET …/intake/{name}` returns),
+  under the per-path lock: a withdraw with a stale etag is `412
+  precondition_failed` with the request as it is now in `error.current`.
+  `If-Match` on a create is a `412`: there is nothing to match. An
+  `Idempotency-Key` keeps the first response for 24 h, per client (the
+  bearer token or a browser session), in memory; a retry with the same
+  method, path, `If-Match` and body gets it again with
+  `Idempotent-Replayed: true`, the same key for a different request is
+  `422`, and a `5xx` is not kept. Errors use one shape, now with an optional
+  `current`. Every write logs `api_write action=… path=… etag_before=…
+  etag_after=… client=<session id | bearer>` (etags bare, `noop=true` when
+  nothing was written), and every refusal `api_write_refused action=…
+  code=…`.
+- **Scopes.** `read`, `write` and `answer` exist. A browser login now gets
+  all three; the bearer token carries every scope. A write without `write`
+  is `403 forbidden` and audited. `answer` is granted but not used until the
+  inbox answers land.
+- **CSRF and `Content-Type`** (§A.6.3), in the guard for every non-`GET`
+  `/api/` request: a browser session needs `Origin` and `X-WM-CSRF` (as
+  before), and any request with a body needs `Content-Type:
+  application/json` (`415` otherwise), bearer included. A bodiless request
+  (`orch gui` minting a login code, a `DELETE`) needs no header.
+- **GUI.** `web/intake.js`: the intake pane at `/projects/{id}/intake` (the
+  markdown box with the daemon-routing hint, pending requests with
+  Withdraw, processed ones) and the new-project form at `/new-project`. The
+  rail's "+ New project", the project header's "Queue intake" and the
+  sandbox card's "Queue intake" are enabled for a session with `write`, and
+  stay disabled with their TUI command otherwise; every other action is
+  still disabled. `wm.api.post`/`del` send an `Idempotency-Key`, kept by a
+  form until its write succeeds so a resend is done once, and `If-Match`
+  where the action reads first (Withdraw). The model (`intakeHint`, the name
+  checks) is in `secondary.js`; `intake_dom_test.js` drives both forms in
+  the fake DOM, including a read-only session that sends nothing.
+
+What the rest of the phase still needs: everything from inbox answers on,
+in the order below. "A concurrent TUI write produces a `412`" can only be
+shown once a read-modify-write action (`stop`, task edits) exists; this
+slice's one If-Match action is withdraw.
 
 **Scope: M.**
 

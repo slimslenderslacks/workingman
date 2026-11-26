@@ -110,7 +110,8 @@ func TestLoginCodeFlow(t *testing.T) {
 	}
 	var si SessionInfo
 	json.Unmarshal(rec.Body.Bytes(), &si)
-	if si.Auth != "cookie" || si.CSRF == "" || si.ID == "" || len(si.Scopes) != 1 || si.Scopes[0] != ScopeRead {
+	// The default browser session reads, writes and answers (§A.6.2).
+	if si.Auth != "cookie" || si.CSRF == "" || si.ID == "" || strings.Join(si.Scopes, ",") != "read,write,answer" {
 		t.Errorf("session = %+v", si)
 	}
 	if rec.Header().Get("Cache-Control") != "no-store" {
