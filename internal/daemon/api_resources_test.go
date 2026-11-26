@@ -334,13 +334,13 @@ func TestAPITasks(t *testing.T) {
 	if b.Output.Summary != "did things" || len(b.Output.Commits) != 1 || b.Output.Commits[0].Hash != "abc123" {
 		t.Errorf("output = %+v", b.Output)
 	}
-	if b.Session != "task-alpha-build" || b.Sandbox != "alpha-build" {
-		t.Errorf("back-links = %q %q", b.Session, b.Sandbox)
+	if b.Session != "task-alpha-build" || b.Sandbox != "alpha-build" || b.CommitSandbox != "alpha-build-commit" {
+		t.Errorf("back-links = %q %q %q", b.Session, b.Sandbox, b.CommitSandbox)
 	}
 	if s := l.Items[1]; s.Name != "ship" || !s.Exclusive || s.Sandbox != "alpha-ship" || s.Session != "" || s.Capabilities.StaticMCPs == nil {
 		t.Errorf("ship = %+v", s)
 	}
-	if seed := l.Items[2]; seed.Name != "zz-seed" || !seed.Seed || seed.Sandbox != "" {
+	if seed := l.Items[2]; seed.Name != "zz-seed" || !seed.Seed || seed.Sandbox != "" || seed.CommitSandbox != "" {
 		t.Errorf("seed = %+v", seed)
 	}
 
@@ -629,10 +629,17 @@ func TestAPISandboxes(t *testing.T) {
 	if b.Name != "alpha-build" || b.Session != "task-alpha-build" || b.Kind != "task" || !b.Managed || b.Retained || b.Gateway == nil || b.Image != "img:1" {
 		t.Errorf("alpha-build = %+v", b)
 	}
+	if b.Project != alphaID || b.Task != "build" || b.Role != "task" || b.TaskStatus != "failed" {
+		t.Errorf("alpha-build owner = %q %q %q %q", b.Project, b.Task, b.Role, b.TaskStatus)
+	}
 	if s.Name != "alpha-ship" || !s.Managed || !s.Retained || s.Session != "" {
 		t.Errorf("alpha-ship = %+v", s)
 	}
-	if o.Name != "someone-elses" || o.Managed || o.Retained {
+	// A retained sandbox maps back to its task by name (§G.2).
+	if s.Project != alphaID || s.Task != "ship" || s.Role != "task" || s.TaskStatus == "" {
+		t.Errorf("alpha-ship owner = %q %q %q %q", s.Project, s.Task, s.Role, s.TaskStatus)
+	}
+	if o.Name != "someone-elses" || o.Managed || o.Retained || o.Project != "" || o.Role != "" {
 		t.Errorf("someone-elses = %+v", o)
 	}
 	f.get(t, api.Prefix+"/sandboxes?retained=true", &l)

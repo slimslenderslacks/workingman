@@ -436,6 +436,10 @@ type TaskResource struct {
 	// can be found).
 	Session string `json:"session,omitempty"`
 	Sandbox string `json:"sandbox,omitempty"`
+	// CommitSandbox is the sandbox the commit agent integrates the task in
+	// (it inherits the task's capabilities), so the sandbox card can link to
+	// it without re-deriving sbx's name sanitizing.
+	CommitSandbox string `json:"commit_sandbox,omitempty"`
 }
 
 // task builds one task resource from its snapshot entry and its file.
@@ -519,8 +523,11 @@ func (m *apiModel) task(p *ProjectSnapshot, ts TaskSnapshot) TaskResource {
 			r.Session, r.Sandbox = sessionID(s), s.SandboxName
 		}
 	}
-	if r.Sandbox == "" && !r.Seed {
-		r.Sandbox = runner.SandboxNameFor(agent.TaskAgent, p.Path, ts.Name)
+	if !r.Seed {
+		if r.Sandbox == "" {
+			r.Sandbox = runner.SandboxNameFor(agent.TaskAgent, p.Path, ts.Name)
+		}
+		r.CommitSandbox = runner.SandboxNameFor(agent.CommitAgent, p.Path, ts.Name)
 	}
 	return r
 }

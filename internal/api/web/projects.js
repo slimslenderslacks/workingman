@@ -362,7 +362,9 @@
           dynamic ? h("span", { class: "warn small" }, " ⚠ dynamic gateway: mcp-find / mcp-add open") : null),
         row("network", h("code", {}, pv.policySummary(c.policies))),
         row("output", h("code", {}, output)),
-        h("div", { class: "actions" }, pv.taskActions(t, sess).map((a) => wm.disabledAction(a.label, a.command, a.refusal)))
+        h("div", { class: "actions" },
+          pv.taskActions(t, sess).map((a) => wm.disabledAction(a.label, a.command, a.refusal)),
+          wm.link("/projects/" + enc(state.project.id) + "/tasks/" + enc(t.name), "Full sandbox card ▸"))
       );
       const reason = t.failure_reason || t.blocked_reason;
       strip.replaceChildren(

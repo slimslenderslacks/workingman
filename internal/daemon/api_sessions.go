@@ -514,6 +514,15 @@ type SandboxResource struct {
 	// Kind that session's agent kind.
 	Session string `json:"session,omitempty"`
 	Kind    string `json:"kind,omitempty"`
+	// Project, Task and Role say whose sandbox it is, from the session
+	// running in it or, for one no session uses, by matching its name
+	// against the names workingman gives (§G.2): Role is the agent kind it
+	// is named for, or "session" for a `:session` sandbox. TaskStatus is
+	// that task's status, so a retained sandbox shows why it was kept.
+	Project    string `json:"project,omitempty"`
+	Task       string `json:"task,omitempty"`
+	Role       string `json:"role,omitempty"`
+	TaskStatus string `json:"task_status,omitempty"`
 	// Managed is true when workingman created it (a harness or gateway
 	// record exists); Retained when it is managed and no session uses it:
 	// a task kept after a terminal failure, save_sandbox, or a :session
@@ -541,12 +550,20 @@ func (s apiSource) Sandboxes(ctx context.Context, q api.SandboxQuery) ([]any, er
 			bySandbox[ss.SandboxName] = ss
 		}
 	}
+	owners := m.sandboxOwners()
 	slices.SortFunc(list, func(a, b sbx.Sandbox) int { return strings.Compare(a.Name, b.Name) })
 	var out []any
 	for _, sb := range list {
 		r := SandboxResource{Name: sb.Name, Workspaces: cloneOrEmpty(sb.Workspaces)}
+		if o, ok := owners[sb.Name]; ok {
+			r.Project, r.Task, r.Role, r.TaskStatus = o.project, o.task, o.role, o.status
+		}
 		if ss, ok := bySandbox[sb.Name]; ok {
 			r.Session, r.Kind = sessionID(ss), ss.Kind
+			r.Project, r.Task, r.Role = m.projectIDOf(ss.ProjectPath), ss.Task, ss.Kind
+			if o, ok := owners[sb.Name]; ok && o.task == ss.Task {
+				r.TaskStatus = o.status
+			}
 		}
 		if h, ok := dirs.harness(sb.Name); ok {
 			r.Managed = true
@@ -566,6 +583,47 @@ func (s apiSource) Sandboxes(ctx context.Context, q api.SandboxQuery) ([]any, er
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// sandboxOwner is whose sandbox a name is (see [SandboxResource]).
+type sandboxOwner struct {
+	project, task, role, status string
+}
+
+// sandboxOwners maps every sandbox name workingman would give an agent of
+// a known project or task (runner.SandboxNameFor, ACPSandboxNameFor and the
+// `:session` names) to its owner. The project-less agents are left out:
+// their sessions name them.
+func (m *apiModel) sandboxOwners() map[string]sandboxOwner {
+	out := map[string]sandboxOwner{}
+	add := func(name string, o sandboxOwner) {
+		if name == "" {
+			return
+		}
+		if _, dup := out[name]; !dup {
+			out[name] = o
+		}
+	}
+	for i := range m.projects {
+		p := &m.projects[i]
+		id := m.id(*p)
+		// The project's own agents first: a task called "project" or
+		// "review" must not take its sandbox name over.
+		for _, kind := range []agent.Kind{agent.ProjectAgent, agent.PlanningAgent, agent.ReviewAgent, agent.ArchiveAgent} {
+			add(runner.SandboxNameFor(kind, p.Path, ""), sandboxOwner{project: id, role: kind.String()})
+		}
+		add(runner.ACPSandboxNameFor(agent.WolfAgent, p.Path, ""), sandboxOwner{project: id, role: agent.WolfAgent.String()})
+		add(sanitizeSandboxName("session-"+p.WorkStream), sandboxOwner{project: id, role: "session"})
+		for _, ts := range p.Tasks {
+			if ts.Name == "" {
+				continue
+			}
+			add(runner.SandboxNameFor(agent.TaskAgent, p.Path, ts.Name), sandboxOwner{project: id, task: ts.Name, role: agent.TaskAgent.String(), status: ts.Status})
+			add(runner.SandboxNameFor(agent.CommitAgent, p.Path, ts.Name), sandboxOwner{project: id, task: ts.Name, role: agent.CommitAgent.String(), status: ts.Status})
+			add(sanitizeSandboxName("session-"+p.WorkStream+"-"+ts.Name), sandboxOwner{project: id, task: ts.Name, role: "session", status: ts.Status})
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

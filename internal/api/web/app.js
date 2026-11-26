@@ -346,7 +346,9 @@
 
   // ---- placeholder screens -----------------------------------------------
   // Minimal list screens over the read endpoints. The P.3 screens (§G.1–G.5)
-  // replace them; the Projects screens (§G.1) are in projects.js.
+  // replace them; the Projects screens (§G.1) are in projects.js, the
+  // Sandboxes list and sandbox card (§G.2, §G.3) in sandboxes.js and the
+  // agents map (§G.4) in agents.js.
 
   // liveList renders a list endpoint as a table and refetches it when one
   // of the given event types arrives (debounced).
@@ -385,24 +387,6 @@
     };
   }
   wm.liveList = liveList;
-
-  wm.screen("/sandboxes", (_, main) =>
-    liveList(main, "Sessions", "/sessions", ["session.started", "session.updated", "session.ended"], [
-      ["session", (s) => h("code", {}, s.id)],
-      ["kind", (s) => s.kind],
-      ["project", (s) => s.project || ""],
-      ["task", (s) => s.task || ""],
-      ["status", (s) => wm.status(s.status)],
-      ["sandbox", (s) => h("code", {}, (s.sandbox && s.sandbox.name) || "")],
-    ])
-  );
-
-  wm.screen("/agents", (_, main) =>
-    liveList(main, "Agents", "/agents", ["session.started", "session.ended"], [
-      ["agent", (a) => a.name || a.kind || ""],
-      ["state", (a) => wm.status(a.status || a.state || "")],
-    ])
-  );
 
   wm.screen("/inbox", (_, main) =>
     liveList(main, "Inbox", "/messages", ["message.created", "message.closed"], [

@@ -24,6 +24,11 @@ func TestStaticBundleServed(t *testing.T) {
 		{"/projects/p_0.demo", "text/html", `<script src="/app.js"`},
 		{"/app.js", "javascript", "wm.stream"},
 		{"/app.css", "text/css", "--accent"},
+		{"/workload.js", "javascript", "wm.wl"},
+		{"/sandboxes.js", "javascript", "sandbox card"},
+		{"/agents.js", "javascript", "agents map"},
+		{"/sandboxes/step-up", "text/html", `<script src="/sandboxes.js"`},
+		{"/projects/p_0.demo/tasks/build", "text/html", `<script src="/agents.js"`},
 	} {
 		// The bundle needs no credentials.
 		rec := do(t, h, "GET", tc.path, "127.0.0.1:7078", "", nil)
@@ -104,9 +109,10 @@ func TestStaticBundleIsSelfContained(t *testing.T) {
 	}
 }
 
-// The project view's model (web/graph.js) has its own tests,
-// testdata/graph_test.js, which run under node when it is installed. Every
-// script in the bundle must at least parse.
+// The GUI's models (web/graph.js, web/workload.js) have their own tests,
+// testdata/graph_test.js and workload_test.js, and the screens DOM tests
+// over a fake browser (testdata/fakedom.js); all run under node when it is
+// installed. Every script in the bundle must at least parse.
 func TestProjectViewModel(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -138,6 +144,10 @@ func TestProjectViewModel(t *testing.T) {
 		// The project view itself, in a fake DOM over a fake API and
 		// stream: it renders the wireframe's parts and follows events.
 		{"projects_dom_test.js", dir},
+		// The workload screens' model (web/workload.js), and the sandbox
+		// card, Sandboxes list and agents map in the fake DOM.
+		{"workload_test.js", filepath.Join(dir, "workload.js")},
+		{"workload_dom_test.js", dir},
 	} {
 		out, err := exec.Command(node, filepath.Join("testdata", tc[0]), tc[1]).CombinedOutput()
 		if err != nil {

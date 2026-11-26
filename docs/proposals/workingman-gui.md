@@ -2,8 +2,9 @@
 
 Status: **draft proposal**. Phases P.0 (groundwork, no user-visible change),
 P.1 (daemon-side priming) and P.2 (read-only API and event stream) are
-implemented, and so is the first slice of P.3 (serving the GUI, login and
-browser hardening); see [P.0](#p0-groundwork-no-user-visible-change),
+implemented, and so are the first three slices of P.3 (serving the GUI,
+login and browser hardening; the project view; the sandbox card, Sandboxes
+list and agents map); see [P.0](#p0-groundwork-no-user-visible-change),
 [P.1](#p1-daemon-side-priming), [P.2](#p2-read-only-api-and-event-stream)
 and [P.3](#p3-read-only-gui). Nothing after that is.
 
@@ -2096,8 +2097,9 @@ when:** `curl --unix-socket … /api/v1/events` shows `task.status` and
 
 ### P.3 Read-only GUI
 
-**Status: two slices implemented** (serving the GUI and browser security;
-then the projects list and project view of §G.1). What the first built:
+**Status: three slices implemented** (serving the GUI and browser security;
+the projects list and project view of §G.1; the sandbox card, Sandboxes
+list and agents map of §G.2–§G.4). What the first built:
 
 - **Toolchain (R.2): a dependency-free vanilla JS/CSS bundle**, checked in
   under `internal/api/web/` (`index.html`, `app.js`, `app.css`) and embedded
@@ -2201,6 +2203,84 @@ The second slice, **the projects list and project view (§G.1)**:
   (`task.MaxAttempts`), so "attempt n/m" is not hard-coded in the GUI.
 - **Not in this slice**: the sandbox card (§G.3), Sandboxes list (§G.2),
   agents map (§G.4) and §G.5 screens, which are still placeholders.
+
+The third slice, **the sandbox card (§G.3), the Sandboxes list (§G.2) and
+the agents map (§G.4)**:
+
+- **`web/workload.js`** (`wm.wl`) is these screens' model, pure functions
+  like `graph.js`. `card` turns a task, its project, its session (or
+  `/sandboxes` row), its prompt files, the `step_up_op` audit events and the
+  daemon's roots into the card's three columns. ① Inputs: the first lines
+  of `.orch/instructions.md` and `.orch/context.yaml`; the task metadata
+  (status and `attempts n/max`, `depends_on` with each dependency's state,
+  `touches`, `areas`, `exclusive`, `source`, `base`, worktree, the
+  description) and who chose it (planning agent, review agent for a PR
+  source, a human for a seed); the mounts (`rw`/`ro`, from the session or
+  `sbx ls`), with the orch roots, `~/.ssh` and `~/.workingman` listed as
+  not mounted when they are not, and a writable mount inside one of them
+  marked open-ended. ② Capabilities: harness image, kit and
+  `resolved_harness`; `model → resolved_model`; MCP chips (granted from the
+  gateway record, else the task's `static_mcps`; `github`, `post-office` and
+  `logseq` hatched when not granted; an amber `mcp-add` chip for a dynamic
+  gateway); skills "none"; the network rules in application order (task
+  rules, then the gateway port and LLM proxy as baseline; no task rules is
+  sbx's "balanced" default, drawn open-ended), filesystem rules, and the
+  runtime changes step-up applied to this sandbox. ③ Output: the task
+  branch, the result, the integration stepper (queued → rebase → verify
+  with the project's `verify` → ff-only → committed; a failed integration
+  marks its step), the commit agent's sandbox, the landed commits, the
+  sandbox-after-exit rule with what is true now, and `touches_exceeded`.
+  The header has the **grant count** beyond the baseline and how many are
+  open-ended. `sandboxRows` joins `/sandboxes` with `/sessions` (a session
+  whose sandbox `sbx ls` no longer shows is a row too) and says why a
+  retained sandbox is kept. `agentsMap` places `/agents` and `/sessions` on
+  the map, and `AGENT_FACTS` holds each kind's static capability facts
+  (survey §7.1–§7.4), shipped with the GUI as §G.4 says.
+- **`web/sandboxes.js`** draws `/sandboxes`, the list (role and retained
+  filters, a row per sandbox with its project/task links both ways, state,
+  age, grant count, image), and the card, at
+  `/projects/{id}/tasks/{name}` (the task's sandbox, or with `?sandbox=` the
+  commit agent's) and at `/sandboxes/{name}` (any sandbox; a task's or
+  commit's resolves to its task). The card refetches on `task.*`,
+  `session.*`, `queue.updated` and `project.live`. "Full sandbox card ▸" in
+  the project view's strip is now a link to it.
+- **`web/agents.js`** draws `/agents`: the helpers lane (workingman,
+  sleepy-head, step-up, with enablement, live session, MCPs, mounts as
+  chips, pending catch-ups, the count of `step_up_op` lines, and each one's
+  gap), the helpers' file-write edges, the workflow lane (project →
+  planning → task → commit → project branch, then review and archive, and
+  the wolf), with planning highlighted as where per-task capabilities are
+  chosen, each box's sandbox name (concrete for a chosen project) and its
+  live sessions linked to their cards, and the facts and gaps panels with
+  the capability-review gate as a possible future (R.4 Q7).
+- **Every action button is present and disabled**, labelled with the TUI
+  command: Watch (`a`), Prompt (persistent only), Open in my terminal
+  (`:session`), Shell in sandbox (`sbx exec -it …`, refused without the
+  `pty` scope, and always for `workingman-agent` and `step-up`), Queue
+  intake, Edit task… (refused while running) and Keep sandbox
+  (`save_sandbox`).
+- **Go side**: a task resource gains `commit_sandbox`
+  (`runner.SandboxNameFor(CommitAgent)`), so the card links to the commit
+  agent's sandbox without re-deriving sbx's name rules. A `/sandboxes` item
+  gains `project`, `task`, `role` and `task_status`: from its session, or
+  for a sandbox no session uses by matching its name against the names
+  workingman gives a project's agents, tasks and `:session` sandboxes, so a
+  retained sandbox maps back to its task (§G.2).
+- **Not in this slice**: the §G.5 screens (inbox, intake, timeline, PRs),
+  which are still placeholders. The card's prompt and transcript need a
+  live session, because the wrapper deletes the session directory on exit
+  (R.4 Q4). The catalog of MCP servers is not in the API, so the hatched
+  "not granted" chips are the three servers `planning.tmpl` names.
+- **Tests**: `testdata/workload_test.js` (the card's columns and grant
+  count against the wireframe's workload, open-ended grants and absences,
+  a card without a session, a helper's card, runtime changes, the stepper,
+  the Sandboxes rows, the agents map) and `workload_dom_test.js`, which
+  renders the card, the list, a retained sandbox's card, step-up's card and
+  the agents map in the fake DOM, checks every button is disabled with its
+  TUI command and no write is sent, and feeds `task.updated` and
+  `session.ended` to the card. The fake DOM moved to `testdata/fakedom.js`,
+  shared with `projects_dom_test.js`. `TestAPITasks` covers
+  `commit_sandbox` and `TestAPISandboxes` the owners.
 - **Tests**: `internal/api/testdata/graph_test.js` (layout, node labels,
   lane, actions and refusals, `apply`, the transcript preview, rail facts)
   and `projects_dom_test.js`, which loads the real bundle into a fake DOM
@@ -2297,7 +2377,7 @@ Each of these is independent and needs its own decision:
 | P.0 (**done**) | shared control package, save lock, audit `seq` | S–M | `internal/tui`, `internal/control`, `internal/pathlock`, `internal/project`, `internal/task`, `internal/audit` | none |
 | P.1 (**done**) | daemon-side priming | S–M | `internal/daemon` (`priming.go`), `internal/session`, `internal/tui` (`acpwatch.go`), `internal/runner` | the daemon prompts agents; a double prompt is guarded by the `prompt_count` compare-and-set |
 | P.2 (**done**) | read API + SSE on a unix socket, `orch status --api` | M | `internal/api` (listener, handlers, `events.go` hub, `client.go`), `internal/daemon` (`api*.go`, `api_events.go` publisher), `internal/sbx` (`listcache.go`), `cmd/orch` (`api.go`, `status.go`) | a listener (read-only, token) |
-| P.3 (first slice **done**) | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
+| P.3 (three slices **done**; §G.5 next) | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
 | P.4 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |
 | P.5 | session relay | M | `internal/api` relay, `internal/acpchat` | session lifetime; prompting into live agents |
 | P.6 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |

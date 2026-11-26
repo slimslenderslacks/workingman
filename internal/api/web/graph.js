@@ -341,7 +341,6 @@
     const out = [
       { label: "Watch (ACP)", command: "a (the TUI's ACP session tabs)", refusal: live ? "" : "no live ACP session for this task" },
       { label: "Open in my terminal", command: ":session (from the Tasks pane)", refusal: "" },
-      { label: "Full sandbox card ▸", command: "the Sessions pane", refusal: "the sandbox card screen (§G.3) is a later slice" },
     ];
     if (session && session.persistent) {
       out.push({ label: "Prompt", command: "a, then i (the TUI's ACP tab)", refusal: "" });
