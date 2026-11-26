@@ -59,6 +59,7 @@ type Server struct {
 	cfg    Config
 	src    Source
 	tokens *tokenFile
+	logins *logins
 	// Log records lifecycle events (api_listen, api_listen_error, ...) in the
 	// audit log. Its signature is audit.Logger.Log. Nil discards them.
 	Log func(event string, kv ...string)
@@ -84,7 +85,7 @@ type Server struct {
 // New returns a server for cfg over src. It does not listen yet.
 func New(cfg Config, src Source) *Server {
 	return &Server{
-		cfg: cfg, src: src, tokens: &tokenFile{path: cfg.TokenPath}, now: time.Now,
+		cfg: cfg, src: src, tokens: &tokenFile{path: cfg.TokenPath}, logins: newLogins(), now: time.Now,
 		heartbeat: HeartbeatInterval, stopStreams: make(chan struct{}),
 	}
 }
@@ -267,38 +268,80 @@ func writeInfo(path, addr string) error {
 
 // Handler returns the API's HTTP handler. port is the TCP port the listener
 // is bound to, which an allowed Host must name; "" for a unix socket, where
-// any port (or none) is accepted.
+// any port (or none) is accepted. Paths under /api/ are the API; every other
+// path is the GUI's static bundle.
 func (s *Server) Handler(port string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(Prefix+"/status", s.get(s.handleStatus))
 	mux.HandleFunc(Prefix+"/snapshot", s.get(s.handleSnapshot))
+	mux.HandleFunc(Prefix+"/login-codes", s.handleLoginCodes)
+	mux.HandleFunc(Prefix+"/session", s.handleBrowserSession)
 	s.routes(mux)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, CodeNotFound, "no such endpoint: "+r.URL.Path)
 	})
-	return s.guard(port, mux)
+	return s.guard(port, mux, webHandler())
 }
 
+// CSP of API responses, which are never rendered as a page, and of the GUI,
+// which loads nothing but its own bundle (§A.6.3).
+const (
+	apiCSP = "default-src 'none'; frame-ancestors 'none'"
+	guiCSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+		"connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+
 // guard applies the checks every request goes through, in order: the Host
-// allowlist (421), then the bearer token (401). It also sets the headers
-// every response carries.
-func (s *Server) guard(port string, next http.Handler) http.Handler {
+// allowlist (421); then, for the API, the Origin check (403), the
+// credentials — the bearer token or the session cookie (401) — and, for a
+// browser session's request that is not GET or HEAD, Origin and the CSRF
+// header (403). The static GUI needs no credentials. guard also sets the
+// headers every response carries.
+func (s *Server) guard(port string, api, web http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
-		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
 		h.Set("Cache-Control", "no-cache")
+		isAPI := r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/")
+		if isAPI {
+			h.Set("Content-Security-Policy", apiCSP)
+		} else {
+			h.Set("Content-Security-Policy", guiCSP)
+		}
 		if !allowedHost(r.Host, port) {
 			writeError(w, http.StatusMisdirectedRequest, CodeMisdirected, "host "+strconv.Quote(r.Host)+" is not allowed; use localhost, 127.0.0.1 or [::1]")
 			return
 		}
-		if !s.tokens.check(r.Header.Get("Authorization")) {
-			h.Set("WWW-Authenticate", `Bearer realm="workingman"`)
-			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or wrong bearer token; see `orch api token`")
+		if !isAPI {
+			web.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		if !sameOrigin(r) {
+			writeError(w, http.StatusForbidden, CodeForbidden, "cross-origin requests are not allowed")
+			return
+		}
+		if r.URL.Path == Prefix+"/session" && r.Method == http.MethodPost {
+			// Login: the login code is the credential.
+			s.handleLogin(w, r)
+			return
+		}
+		a, ok := s.authenticate(r)
+		if !ok {
+			h.Set("WWW-Authenticate", `Bearer realm="workingman"`)
+			writeError(w, http.StatusUnauthorized, CodeUnauthorized, "missing or wrong bearer token or session; see `orch api token` or `orch gui`")
+			return
+		}
+		if a.session != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if r.Header.Get("Origin") == "" || !checkCSRF(r, a.session) {
+				writeError(w, http.StatusForbidden, CodeForbidden, "a browser request that is not GET needs Origin and the "+HeaderCSRF+" header")
+				return
+			}
+		}
+		api.ServeHTTP(w, r.WithContext(withAuth(r.Context(), a)))
 	})
 }
 

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>workingman</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">workingman</a>
+  <nav id="nav" aria-label="Main">
+    <a href="/projects" data-route="projects">Projects</a>
+    <a href="/sandboxes" data-route="sandboxes">Sandboxes</a>
+    <a href="/agents" data-route="agents">Agents</a>
+    <a href="/inbox" data-route="inbox">Inbox <span id="inbox-badge" class="badge" hidden></span></a>
+    <a href="/timeline" data-route="timeline">Timeline</a>
+  </nav>
+  <span id="status-pill" class="pill pill-off" title="daemon and event stream">connecting…</span>
+</header>
+<main id="main" tabindex="-1">
+  <noscript><p class="notice">The workingman GUI needs JavaScript.</p></noscript>
+</main>
+<footer class="footer">read-only · actions are done from the TUI for now</footer>
+</body>
+</html>

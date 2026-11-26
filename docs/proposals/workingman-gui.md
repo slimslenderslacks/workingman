@@ -1,9 +1,11 @@
 # workingman GUI: a local web app driving the daemon through an API
 
-Status: **draft proposal**. Phases P.0 (groundwork, no user-visible change)
-and P.1 (daemon-side priming) are implemented; see
-[P.0](#p0-groundwork-no-user-visible-change) and
-[P.1](#p1-daemon-side-priming). Nothing from P.2 on is.
+Status: **draft proposal**. Phases P.0 (groundwork, no user-visible change),
+P.1 (daemon-side priming) and P.2 (read-only API and event stream) are
+implemented, and so is the first slice of P.3 (serving the GUI, login and
+browser hardening); see [P.0](#p0-groundwork-no-user-visible-change),
+[P.1](#p1-daemon-side-priming), [P.2](#p2-read-only-api-and-event-stream)
+and [P.3](#p3-read-only-gui). Nothing after that is.
 
 ## Summary
 
@@ -1742,7 +1744,8 @@ destructive action, and the TUI's y/n flow is adequate for it.
   *rules* in one place, but not the *presentation*.
 - **A web toolchain in a Go repo.** Bundled static assets (§A.6.1) mean a JS
   build, or a deliberately small vanilla-JS GUI. Either way it is a new kind
-  of code to review and keep up to date.
+  of code to review and keep up to date. P.3 chose the vanilla-JS bundle,
+  embedded with no build step (§P.3).
 - **`orch` gets its first general HTTP listener.** Today `orch` opens no port
   apart from the optional WhatsApp webhook (survey §15). Even loopback-only
   with tokens, CSRF, DNS-rebinding and Origin checks (§A.6), this is new
@@ -2093,6 +2096,74 @@ when:** `curl --unix-socket … /api/v1/events` shows `task.status` and
 
 ### P.3 Read-only GUI
 
+**Status: first slice implemented** (serving the GUI and browser security).
+What was built:
+
+- **Toolchain (R.2): a dependency-free vanilla JS/CSS bundle**, checked in
+  under `internal/api/web/` (`index.html`, `app.js`, `app.css`) and embedded
+  with `embed.FS` (`internal/api/web.go`). There is no npm step: `go build`
+  stays the only build. R.2 left the choice open; this is the smaller of its
+  two options, and it can be revisited if the screens outgrow it.
+- **Serving**: every path outside `/api/` on the same listener is the
+  bundle, served without credentials. Real files are served by name;
+  `/`, `/login` and every other app route get `index.html` (`no-store`), so a
+  reload keeps its page; a missing `.js`/`.css`/... asset is a `404`. The
+  `Host` allowlist covers the bundle too, so a rebinding page cannot load the
+  login page. `--api=loopback` (`127.0.0.1:7078`, or `--api-listen`) is the
+  binding that serves a browser; the bundle is also on the socket, where no
+  browser can reach it.
+- **`orch gui [--project id] [--print] [--api-listen addr]`**
+  (`cmd/orch/gui.go`) finds the loopback listener (flag, else `api.json`,
+  else `127.0.0.1:7078`; a socket path is refused), `POST`s
+  `/api/v1/login-codes` with the bearer token for a one-time code (60 s,
+  single use, at most 32 outstanding; a browser session cannot mint one) and
+  opens `/login[?next=/projects/{id}]#t=<code>`. The page `POST`s the code
+  to `/api/v1/session`, which needs an `Origin` and a JSON body and sets
+  `wm_session` (`HttpOnly`, `SameSite=Strict`, `Path=/`, not `Secure`): a
+  session secret distinct from the token, kept in memory (a daemon restart
+  logs browsers out), expiring after 12 h idle, at most 64 at a time (the
+  least recently used is dropped). `GET /api/v1/session` returns `{auth,
+  id, scopes, csrf, created_at, idle_timeout_s}`; `DELETE` logs out. Audit
+  events: `api_login_code`, `api_login`, `api_login_refused`, `api_logout`.
+- **Scopes and CSRF**: a browser session has the `read` scope only, the only
+  one the API has yet. The CSRF token is issued with the session, and every
+  browser request other than `GET`/`HEAD` must carry it as `X-WM-CSRF` with
+  an `Origin`; today that is only logout. P.4 adds the writes and the
+  `write` scope on top of this check.
+- **Browser hardening (§A.6.3)**: on `/api/`, a foreign `Origin` (another
+  port included) or a `Sec-Fetch-Site` other than `same-origin`/`none` gets
+  `403`, for the bearer token and the cookie alike (scripts send neither
+  header). An `Authorization` header, when present, is the only credential
+  checked, so a wrong token is never rescued by a cookie. GUI pages get
+  `Content-Security-Policy: default-src 'self'; script-src 'self';
+  style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src
+  'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`; API
+  responses keep `default-src 'none'; frame-ancestors 'none'`. Every
+  response carries `X-Frame-Options: DENY`, `nosniff`,
+  `Referrer-Policy: no-referrer` and same-origin COOP/CORP. A test checks
+  that the bundle refers to no other origin, has no inline script or style,
+  and never uses `innerHTML`, `eval` or the like.
+- **App shell** (`app.js`): the top bar of §G.0 (Projects · Sandboxes ·
+  Agents · Inbox · Timeline, the inbox badge and the stream status pill), a
+  history-API router that screens register with (`wm.screen(pattern,
+  render)`), the API client (`wm.api`, cookie plus the CSRF header on
+  non-`GET`), one `EventSource` on `/api/v1/events` with listeners by type
+  (`wm.stream.on`) and backoff when the server refuses, a DOM builder that
+  never parses strings as HTML (`wm.h`), and `wm.disabledAction(label,
+  ":command")` for the read-only buttons. The screens are placeholders,
+  plain tables over `/projects`, `/projects/{id}/tasks`, `/sessions`,
+  `/agents`, `/messages` and the live stream, refetched on their events;
+  the next P.3 slices replace them with §G.1–§G.5.
+- **Not in this slice**: the §G screens, the transcript view, and the
+  optional TUI `:gui` command (§A.7 item 4).
+- **Tests**: `internal/api/login_test.go` (the code flow, single use,
+  expiry, idle timeout, the code and session limits, Origin and
+  `Content-Type` on login, the Origin checks on the API, bearer precedence,
+  logout needing CSRF, the headers), `internal/api/web_test.go` (the
+  bundle, app routes, missing assets, `Host` on the bundle, the
+  self-contained check), and `cmd/orch/gui_test.go` (`orch gui` against a
+  port-0 listener, through the browser's exchange to a cookie).
+
 **Scope: M–L**, most of it front-end work.
 
 - The static bundle served at `/` on the same listener (§A.6.1), loopback TCP
@@ -2177,7 +2248,7 @@ Each of these is independent and needs its own decision:
 | P.0 (**done**) | shared control package, save lock, audit `seq` | S–M | `internal/tui`, `internal/control`, `internal/pathlock`, `internal/project`, `internal/task`, `internal/audit` | none |
 | P.1 (**done**) | daemon-side priming | S–M | `internal/daemon` (`priming.go`), `internal/session`, `internal/tui` (`acpwatch.go`), `internal/runner` | the daemon prompts agents; a double prompt is guarded by the `prompt_count` compare-and-set |
 | P.2 (**done**) | read API + SSE on a unix socket, `orch status --api` | M | `internal/api` (listener, handlers, `events.go` hub, `client.go`), `internal/daemon` (`api*.go`, `api_events.go` publisher), `internal/sbx` (`listcache.go`), `cmd/orch` (`api.go`, `status.go`) | a listener (read-only, token) |
-| P.3 | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
+| P.3 (first slice **done**) | read-only GUI on loopback | M–L | web assets, `internal/api` login/CSRF, `cmd/orch` (`orch gui`) | browser threats (§A.6.3) |
 | P.4 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |
 | P.5 | session relay | M | `internal/api` relay, `internal/acpchat` | session lifetime; prompting into live agents |
 | P.6 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |

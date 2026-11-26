@@ -77,7 +77,11 @@ func (c *Client) url(path string) string {
 }
 
 func (c *Client) request(ctx context.Context, path string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url(path), nil)
+	return c.requestMethod(ctx, http.MethodGet, path)
+}
+
+func (c *Client) requestMethod(ctx context.Context, method, path string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.url(path), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -123,6 +127,26 @@ func (c *Client) Get(ctx context.Context, path string, v any) error {
 		return statusError(resp)
 	}
 	return json.NewDecoder(resp.Body).Decode(v)
+}
+
+// LoginCode mints a one-time browser login code (POST /login-codes), which
+// `orch gui` opens the GUI with. It needs a loopback TCP listener: a browser
+// cannot reach the unix socket.
+func (c *Client) LoginCode(ctx context.Context) (LoginCode, error) {
+	var lc LoginCode
+	req, err := c.requestMethod(ctx, http.MethodPost, Prefix+"/login-codes")
+	if err != nil {
+		return lc, err
+	}
+	resp, err := c.http().Do(req)
+	if err != nil {
+		return lc, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return lc, statusError(resp)
+	}
+	return lc, json.NewDecoder(resp.Body).Decode(&lc)
 }
 
 // StreamEvent is one frame read from the event stream: ID is its SSE id

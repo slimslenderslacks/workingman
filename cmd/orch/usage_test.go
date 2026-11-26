@@ -25,7 +25,7 @@ func TestUsageListsSubcommandsAndFlags(t *testing.T) {
 	for _, want := range []string{
 		"orch tui", "orch status", "orch whatsapp <subcommand>", "orch signal <subcommand>", "signal subcommands:", "orch slack <subcommand>", "slack subcommands:",
 		"setup ", "test ", "pair ",
-		"orch api token", "-api", "-api-listen", "-channels-config", "-workingman-agent", "-wolf-host", "-wolf-unblock-grace", "-wolf-idle-timeout", "-state-file", "-headless", "-acp-kit",
+		"orch api token", "orch gui", "-api", "-api-listen", "-channels-config", "-workingman-agent", "-wolf-host", "-wolf-unblock-grace", "-wolf-idle-timeout", "-state-file", "-headless", "-acp-kit",
 	} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("orch -h does not mention %q:\n%s", want, usage)
