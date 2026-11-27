@@ -266,8 +266,9 @@ type Task struct {
 	// task. It lets a later review poll correlate a live PR signal with a task it
 	// already created — so an unresolved thread that already has an in-flight task
 	// isn't duplicated, and a committed task's thread can be resolved once its fix
-	// has landed. Nil for ordinary planning-created tasks, which carry no external
-	// source. See Source for the field meanings.
+	// has landed. The planning agent sets an intake source (SourceKindIntake) on
+	// the tasks it creates for an intake request; other planned tasks carry none.
+	// See Source for the field meanings.
 	Source *Source `yaml:"source,omitempty"`
 
 	// Touches lists the globs (first segment the repo's workspace dir name)
@@ -358,11 +359,68 @@ type Integration struct {
 // depending on a batch of commit-only fix tasks, whose sole job is to publish
 // those accumulated commits to one repo's PR branch — Repo names that repo. See
 // IsPushTask.
+//
+// Kind may also be "intake" (SourceKindIntake): a back-reference the planning
+// agent records on each task it creates for an intake request, with Ref the
+// request's name (see IntakeRefFor). Repo and PR are unused for it, and it is
+// not a PR signal: see IsPR.
 type Source struct {
 	Kind string `yaml:"kind"`
 	Ref  string `yaml:"ref"`
 	Repo string `yaml:"repo,omitempty"`
 	PR   int    `yaml:"pr"`
+}
+
+// intakeSource is how an intake Source is written: the same keys without the
+// PR fields, so a planner-created task doesn't carry a meaningless `pr: 0`.
+// PR sources keep Source's own layout, `pr: 0` included (a push task has no PR
+// yet), so their files are byte-for-byte what they always were.
+type intakeSource struct {
+	Kind string `yaml:"kind"`
+	Ref  string `yaml:"ref"`
+	Repo string `yaml:"repo,omitempty"`
+	PR   int    `yaml:"pr,omitempty"`
+}
+
+// MarshalYAML writes an intake source without `pr: 0` and every other source
+// unchanged.
+func (s Source) MarshalYAML() (any, error) {
+	if s.Kind == SourceKindIntake {
+		return intakeSource(s), nil
+	}
+	type plain Source
+	return plain(s), nil
+}
+
+// UnmarshalYAML decodes a source leniently. The block is written by agents, a
+// planner may get it wrong, and nothing depends on it being present, so a
+// malformed one (a scalar, a list, a field of the wrong type) must not stop the
+// whole task file from loading: the fields that decode are kept, the rest are
+// left zero, and Parse drops a source that ends up empty.
+func (s *Source) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	type plain Source
+	var p plain
+	if err := n.Decode(&p); err == nil {
+		*s = Source(p)
+		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i].Value, n.Content[i+1]
+		switch k {
+		case "kind":
+			_ = v.Decode(&s.Kind)
+		case "ref":
+			_ = v.Decode(&s.Ref)
+		case "repo":
+			_ = v.Decode(&s.Repo)
+		case "pr":
+			_ = v.Decode(&s.PR)
+		}
+	}
+	return nil
 }
 
 // DisplayModel is the model to show for the task: the concrete model it ran
@@ -404,6 +462,37 @@ func (t *Task) IsPushTask() bool {
 	return t.Source != nil && t.Source.Kind == SourceKindPush
 }
 
+// SourceKindIntake is the Source.Kind the planning agent records on a task it
+// created for an intake request: `source: {kind: intake, ref: <name>}`, with
+// <name> as IntakeRefFor gives it. Best-effort: the planner may leave it out,
+// and nothing in the daemon depends on it.
+const SourceKindIntake = "intake"
+
+// IsPR reports whether the source is a PR signal the review agent created the
+// task for (pr-comment, pr-check or pr-push), as opposed to an intake
+// back-reference or a kind this version doesn't know.
+func (s *Source) IsPR() bool {
+	return s != nil && strings.HasPrefix(s.Kind, "pr-")
+}
+
+// IntakeRef is the name of the intake request this task was planned from, or
+// "" when it records none.
+func (t *Task) IntakeRef() string {
+	if t.Source == nil || t.Source.Kind != SourceKindIntake {
+		return ""
+	}
+	return t.Source.Ref
+}
+
+// IntakeRefFor is the Source.Ref for the intake file at path: its base name
+// without the extension ("intake/foo.md" and "intake/foo.processed" are both
+// "foo"). It is the name the API lists the request under, and it survives the
+// planner's .md → .processed rename.
+func IntakeRefFor(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
 // Exclusive reports whether the task declares no independence hints at all —
 // neither touches nor areas — and so overlaps every other task (H1). An
 // explicit `touches: []` is not exclusive: it means "touches nothing". This is
@@ -438,6 +527,9 @@ func Parse(path string, data []byte) (*Task, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	t.Path = path
+	if t.Source != nil && *t.Source == (Source{}) {
+		t.Source = nil // a malformed source block (see Source.UnmarshalYAML)
+	}
 	if t.Model == "" {
 		t.Model = ModelDefault
 	}

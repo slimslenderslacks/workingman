@@ -62,18 +62,22 @@
   }
 
   // chosenBy says who wrote the task's inputs (§G.3): the review agent for
-  // PR fix and push tasks, a human for a seed, else the planning agent.
+  // PR fix and push tasks, a human for a seed, else the planning agent (from
+  // an intake request when the task records one).
   function chosenBy(t) {
     if (t.seed) return "a human (seed task: the planner names it)";
     const src = t.source;
+    if (src && src.kind === "intake") return `planning agent (planning.tmpl), from intake request ${src.ref || "?"}`;
     if (src && src.kind) return `review agent (review.tmpl), from ${src.kind} ${src.ref || ""}${src.pr ? " on PR #" + src.pr : ""}`.replace(/\s+/g, " ");
     return "planning agent (planning.tmpl)";
   }
 
-  // sourceText is the task's source line: which PR signal it addresses.
+  // sourceText is the task's source line: which PR signal it addresses, or
+  // the intake request it was planned from.
   function sourceText(t) {
     const src = t.source;
     if (!src || !src.kind) return "— (planned, not a PR fix)";
+    if (src.kind === "intake") return "intake " + (src.ref || "?") + " (planned, not a PR fix)";
     return `${src.kind} ${src.ref || ""}${src.repo ? " · " + src.repo : ""}${src.pr ? " #" + src.pr : ""}`.replace(/\s+/g, " ").trim();
   }
 

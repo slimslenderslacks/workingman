@@ -374,7 +374,9 @@ type APIPolicyRule struct {
 	Resource string `json:"resource"`
 }
 
-// APITaskSource is the PR signal a review-created task addresses.
+// APITaskSource is the PR signal a review-created task addresses, or, with
+// kind "intake", the intake request (IntakeRequest.Name) a planned task came
+// from. PR is 0 for an intake source.
 type APITaskSource struct {
 	Kind string `json:"kind"`
 	Ref  string `json:"ref"`
@@ -825,7 +827,7 @@ func (m *apiModel) pulls(p *ProjectSnapshot) []PullRequest {
 		}
 		for _, ts := range p.Tasks {
 			tf, _, err := m.d.apiFiles.tasks.get(ts.path)
-			if err != nil || tf.Source == nil || tf.Source.PR != pr.Number {
+			if err != nil || !tf.Source.IsPR() || tf.Source.PR != pr.Number {
 				continue
 			}
 			if tf.Source.Repo != "" && tf.Source.Repo != pr.Repo {

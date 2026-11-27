@@ -9,6 +9,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/sbx"
+	"github.com/slimslenderslacks/work/internal/task"
 )
 
 //go:embed templates/*.tmpl
@@ -214,8 +215,13 @@ type BehindProject struct {
 // loader accepts produces names that get silently repaired out from under the
 // agent that chose them.
 //
+// `intakeRef` is the `source.ref` a planner records on the tasks it creates
+// for an intake file (task.IntakeRefFor), so the prompt and the API's intake
+// listing agree on the name.
+//
 // `sub` remains for ordinary arithmetic in templates.
 var tmplFuncs = template.FuncMap{
+	"intakeRef":  task.IntakeRefFor,
 	"sub":        func(a, b int) int { return a - b },
 	"nameBudget": sbx.NameBudget,
 	"dir":        filepath.Dir,

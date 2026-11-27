@@ -179,6 +179,8 @@ test("inputs: chosen by, source, touches_exceeded", () => {
   assert.equal(wl.chosenBy({ source: { kind: "pr-comment", ref: "PRRT_1", pr: 7 } }), "review agent (review.tmpl), from pr-comment PRRT_1 on PR #7");
   assert.equal(wl.chosenBy({ seed: true }).startsWith("a human"), true);
   assert.equal(wl.sourceText({ source: { kind: "pr-check", ref: "ci", repo: "o/r", pr: 3 } }), "pr-check ci · o/r #3");
+  assert.equal(wl.chosenBy({ source: { kind: "intake", ref: "add-healthz", pr: 0 } }), "planning agent (planning.tmpl), from intake request add-healthz");
+  assert.equal(wl.sourceText({ source: { kind: "intake", ref: "add-healthz", pr: 0 } }), "intake add-healthz (planned, not a PR fix)");
   assert.equal(wl.touchesWarning({ output: { touches_actual: ["workingman/x.go"] } }), "touches_exceeded: wrote outside its declared area: workingman/x.go");
   assert.deepEqual(wl.depStates({ depends_on: ["a", "b", "c"] }, new Map([["a", { status: "committed" }], ["b", { status: "failed" }]])).map((d) => d.mark), ["✓", "✗", "✗"]);
   assert.deepEqual(wl.promptPreview("a\n\nb\nc\n", 2), { lines: ["a", "b"], more: true, total: 3 });

@@ -222,6 +222,7 @@ graph LR
   internal_project --> internal_pathlock
   internal_prompts --> internal_agent
   internal_prompts --> internal_sbx
+  internal_prompts --> internal_task
   internal_router --> internal_acpchat
   internal_router --> internal_audit
   internal_router --> internal_channels
@@ -305,7 +306,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/postoffice/mcpserver` | `mcpgateway`, `postoffice`, `session`, `task` | `cmd/post-office` |
 | `internal/power` | — | `cmd/orch`, `daemon` |
 | `internal/project` | `pathlock` | `acpwrapper`, `control`, `daemon`, `tui` |
-| `internal/prompts` | `agent`, `sbx` | `daemon`, `runner` |
+| `internal/prompts` | `agent`, `sbx`, `task` | `daemon`, `runner` |
 | `internal/router` | `acpchat`, `audit`, `channels`, `postoffice` | `cmd/orch` |
 | `internal/runner` | `agent`, `audit`, `gitsign`, `mcpgateway`, `policy`, `prompts`, `sbx`, `session`, `setup`, `task`, `terminal`, `workspace` | `cmd/orch`, `daemon` |
 | `internal/sbx` | — | `cmd/orch`, `acpwrapper`, `control`, `daemon`, `prompts`, `runner`, `task`, `tui` |
@@ -313,7 +314,7 @@ The same graph as text: each package's internal imports and importers.
 | `internal/service` | — | `cmd/orch` |
 | `internal/session` | — | `cmd/orch`, `cmd/post-office`, `acpchat`, `acpwrapper`, `daemon`, `postoffice/mcpserver`, `runner`, `tui` |
 | `internal/setup` | — | `runner` |
-| `internal/task` | `pathlock`, `policy`, `sbx` | `acpwrapper`, `control`, `daemon`, `postoffice/mcpserver`, `runner`, `taskgraph`, `tui` |
+| `internal/task` | `pathlock`, `policy`, `sbx` | `acpwrapper`, `control`, `daemon`, `postoffice/mcpserver`, `prompts`, `runner`, `taskgraph`, `tui` |
 | `internal/taskgraph` | `task` | `control`, `daemon`, `tui` |
 | `internal/terminal` | `agent` | `cmd/orch`, `daemon`, `runner`, `tui` |
 | `internal/tui` | `acpclient`, `control`, `policy`, `postoffice`, `project`, `sbx`, `session`, `task`, `taskgraph`, `terminal`, `workspace` | `cmd/orch` |

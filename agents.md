@@ -190,6 +190,12 @@ nothing else. Finishes by setting `status: working` with `updated_by: agent`.
    - **Else** (normal/incremental): if it finds a "seed" task (empty `name`,
      filled `description`, from a human's `:task`), flesh it out without
      touching any other existing task; otherwise do a first plan from scratch.
+     With intake pending, each new task it creates for a request is told to
+     record `source: {kind: intake, ref: <request>}` (`task.SourceKindIntake`),
+     `<request>` being the file's base name without extension
+     (`task.IntakeRefFor`, the API's `IntakeRequest.Name`), so a processed
+     request can be linked to its tasks. Best-effort: nothing depends on it,
+     and a malformed `source:` still loads.
 3. Optional per-task `static_mcps:` (the server names of the sandbox's
    per-sandbox MCP gateway — see "MCP gateway" in README.md; no longer sbx
    `--static-mcp` flags) and `policies:`

@@ -755,3 +755,47 @@ func TestRenderArchiveUnintegratedWork(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderPlanningIntakeBackReference pins the intake back-reference (R.4
+// Q12): with intake pending, the planner is told to tag each task it creates
+// with `source: {kind: intake, ref: <name>}`, and given each file's ref in the
+// form the API lists the request under (base name, no extension).
+func TestRenderPlanningIntakeBackReference(t *testing.T) {
+	out, err := Render(agent.PlanningAgent, Data{
+		Workspace:   "/ws",
+		ProjectPath: "/ws/project.yaml",
+		TasksDir:    "/ws/tasks",
+		IntakeFiles: []string{"/ws/intake/add-healthz.md", "/ws/intake/fix-flaky-test.md"},
+	})
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for _, want := range []string{
+		"kind: intake",
+		"ref: <request>",
+		"/ws/intake/add-healthz.md  (source ref: `add-healthz`)",
+		"/ws/intake/fix-flaky-test.md  (source ref: `fix-flaky-test`)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderPlanningNoIntakeNoBackReference: without pending intake there is
+// nothing to reference, so the instruction stays out of the prompt (first
+// plans, seeds and cron re-plans alike).
+func TestRenderPlanningNoIntakeNoBackReference(t *testing.T) {
+	for _, d := range []Data{
+		{Workspace: "/ws", ProjectPath: "/ws/project.yaml", TasksDir: "/ws/tasks"},
+		{Workspace: "/ws", ProjectPath: "/ws/project.yaml", TasksDir: "/ws/tasks", Replan: true},
+	} {
+		out, err := Render(agent.PlanningAgent, d)
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if strings.Contains(out, "kind: intake") || strings.Contains(out, "source ref") {
+			t.Errorf("intake back-reference leaked into a prompt with no intake (replan=%v):\n%s", d.Replan, out)
+		}
+	}
+}

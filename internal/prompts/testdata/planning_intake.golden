@@ -59,8 +59,8 @@ file complete in one go (a `ready` task can be picked up the moment it lands).
 
 You have pending intake requests waiting right now:
 
-  - /orch/p/intake/a.md
-  - /orch/p/intake/b.md
+  - /orch/p/intake/a.md  (source ref: `a`)
+  - /orch/p/intake/b.md  (source ref: `b`)
 
 For each one:
 
@@ -76,6 +76,18 @@ For each one:
     `name`, and set `status: ready`, `attempts: 0`, `failure_reason: ""`,
     `blocked_reason: ""`, and `model: default`. Preserve the intent of the
     original request; you may refine the wording.
+  - Record on every task you create for the request which request it came
+    from, as a back-reference:
+
+        source:
+          kind: intake
+          ref: <request>
+
+    where `<request>` is the intake file's base name with no extension — the
+    `source ref` shown beside it above (`intake/foo.md` -> `ref: foo`). Use
+    that same name on every task the request produced, and no `repo` or `pr`.
+    Only set `source:` on tasks you create here; never add or change one on an
+    existing task (a `pr-*` source belongs to the review agent).
   - Write each one out as `/orch/p/tasks/<name>.yaml`.
   - Once you have created the task(s) for that intake file, rename the file
     itself by replacing its `.md` extension with `.processed` (e.g.

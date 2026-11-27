@@ -123,7 +123,7 @@ started beside it on the strength of those hints.{{end}}
 {{if .IntakeFiles}}
 You have pending intake requests waiting right now:
 
-{{range .IntakeFiles}}  - {{.}}
+{{range .IntakeFiles}}  - {{.}}  (source ref: `{{intakeRef .}}`)
 {{end}}
 For each one:
 
@@ -139,6 +139,18 @@ For each one:
     `name`, and set `status: ready`, `attempts: 0`, `failure_reason: ""`,
     `blocked_reason: ""`, and `model: default`. Preserve the intent of the
     original request; you may refine the wording.
+  - Record on every task you create for the request which request it came
+    from, as a back-reference:
+
+        source:
+          kind: intake
+          ref: <request>
+
+    where `<request>` is the intake file's base name with no extension — the
+    `source ref` shown beside it above (`intake/foo.md` -> `ref: foo`). Use
+    that same name on every task the request produced, and no `repo` or `pr`.
+    Only set `source:` on tasks you create here; never add or change one on an
+    existing task (a `pr-*` source belongs to the review agent).
   - Write each one out as `{{.TasksDir}}/<name>.yaml`.
   - Once you have created the task(s) for that intake file, rename the file
     itself by replacing its `.md` extension with `.processed` (e.g.

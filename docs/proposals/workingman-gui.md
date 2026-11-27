@@ -1683,8 +1683,10 @@ design.
   `working` project, flip an `idle` one to `ready`, stay pending while
   `stopped`). Below it, pending requests (with a best-effort Withdraw) and
   processed ones. The link from a processed request to the tasks it produced
-  is *inferred* from the planning run that renamed the file, because intake
-  files carry no back-reference today. The same form at root level creates
+  is the tasks' `source: {kind: intake, ref: <name>}` (R.4 Q12), `ref`
+  being the request's `name` here. The planner records it best-effort, so a
+  request with no tagged task falls back to the planning run that renamed
+  the file. The same form at root level creates
   a new project by writing `project.md` (`POST /projects`).
 - **Timeline.** The audit stream (`GET /audit?since=`, SSE `types=audit`),
   filterable by project and event family (survey §13). The events that
@@ -1842,7 +1844,12 @@ Other sections cite them as `R.4 Qn`.
 - **Q12. Intake back-references.** A processed intake file does not say which
   tasks it produced (§G.5). Should the planner record that, for example as
   a `source: {kind: intake, ref: <file>}` on tasks? That is a schema
-  addition and a planning-prompt change.
+  addition and a planning-prompt change. *Decided (P.6):* yes. The planner
+  tags each task it creates for a request with `source: {kind: intake, ref:
+  <name>}`, where `<name>` is the intake file's base name without extension,
+  so the same name is used before and after the `.processed` rename and it
+  matches `IntakeRequest.name`. It is best-effort, and no daemon logic depends
+  on it. Only `pr-*` kinds count as PR fix tasks (`Source.IsPR`).
 
 ---
 

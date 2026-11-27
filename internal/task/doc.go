@@ -33,7 +33,8 @@
 //     → committed. The loader rejects any other value.
 //   - [Source] — the PR comment, failed check or push batch that a
 //     review-agent task was created for. [Task.IsPushTask] identifies push
-//     tasks ([SourceKindPush]).
+//     tasks ([SourceKindPush]); [Source.IsPR] tells those apart from an intake
+//     back-reference ([SourceKindIntake], read with [Task.IntakeRef]).
 //   - [Commit] — one repo/SHA pair the commit agent produced.
 //
 // # Collaborators
