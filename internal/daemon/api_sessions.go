@@ -53,6 +53,8 @@ type SessionACP struct {
 	Status string `json:"status,omitempty"`
 	// Attachable is true while the wrapper is running and its socket exists.
 	Attachable bool `json:"attachable"`
+	// Observers is how many API relay connections watch the session.
+	Observers int `json:"observers"`
 }
 
 // SessionResource is a session with its sandbox (§A.1.3).
@@ -283,6 +285,8 @@ func (d *Daemon) sessionResources(m *apiModel, live map[string]sbx.Sandbox) []Se
 					r.ACP.Attachable = true
 				}
 			}
+			r.ACP.Observers = d.api.Observers(s.ACP.SessionID)
+			r.Links["attach"] = api.Prefix + "/sessions/" + id + "/acp"
 			r.Links["transcript"] = api.Prefix + "/sessions/" + id + "/transcript"
 			r.Links["prompt"] = api.Prefix + "/sessions/" + id + "/prompt"
 		}

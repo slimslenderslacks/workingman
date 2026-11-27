@@ -78,5 +78,9 @@
 // is [github.com/slimslenderslacks/work/internal/acpwrapper]. Used by
 // internal/router, whose Agent interface *Conversation implements; the router
 // relays channel messages (WhatsApp, Signal) to the agent and the agent's
-// output back. See docs/channels.md.
+// output back. See docs/channels.md. The daemon's primer (internal/daemon
+// priming.go) uses it to send a session's opening prompt, and the API's
+// session relay (internal/daemon api_relay.go) to join a session a browser
+// watches: Options.OnFrame wakes the relay on each frame, and
+// [Conversation.Cancel] carries a browser's cancel.
 package acpchat

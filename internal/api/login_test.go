@@ -111,7 +111,7 @@ func TestLoginCodeFlow(t *testing.T) {
 	var si SessionInfo
 	json.Unmarshal(rec.Body.Bytes(), &si)
 	// The default browser session reads, writes and answers (§A.6.2).
-	if si.Auth != "cookie" || si.CSRF == "" || si.ID == "" || strings.Join(si.Scopes, ",") != "read,write,answer" {
+	if si.Auth != "cookie" || si.CSRF == "" || si.ID == "" || strings.Join(si.Scopes, ",") != "read,write,answer,attach,interact" {
 		t.Errorf("session = %+v", si)
 	}
 	if rec.Header().Get("Cache-Control") != "no-store" {

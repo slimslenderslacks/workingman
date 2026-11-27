@@ -56,6 +56,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc(p+"/sessions/{sid}", s.get(s.handleSession))
 	mux.HandleFunc(p+"/sessions/{sid}/transcript", s.get(s.handleTranscript))
 	mux.HandleFunc(p+"/sessions/{sid}/prompt", s.get(s.handlePrompt))
+	mux.HandleFunc(p+"/sessions/{sid}/acp", s.get(s.handleRelay))
 	mux.HandleFunc(p+"/sandboxes", s.get(s.handleSandboxes))
 	mux.HandleFunc(p+"/audit", s.get(s.handleAudit))
 	mux.HandleFunc(p+"/messages", s.get(s.handleMessages))

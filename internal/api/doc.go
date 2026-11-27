@@ -31,7 +31,7 @@
 // posts the code to /session (Origin and a JSON body required), which sets
 // wm_session (HttpOnly, SameSite=Strict, Path=/), a secret distinct from the
 // token that expires after 12 h idle, and returns the session's scopes
-// (read, write, answer) and its CSRF token. A browser session's requests
+// (read, write, answer, attach, interact) and its CSRF token. A browser session's requests
 // other than GET and HEAD need Origin and X-WM-CSRF equal to that token, and
 // every such request, bearer or browser, needs Content-Type: application/json
 // when it has a body (415 otherwise), so a cross-site form is never a
@@ -102,6 +102,27 @@
 // and an api_write (or
 // api_write_refused) audit line with the action, path, etags and client.
 //
+// GET /sessions/{sid}/acp is the session relay (§A.5.2): a WebSocket,
+// subprotocol workingman.acp.v1, that streams one ACP session. The server
+// holds at most one relay per session and the relay at most one upstream
+// connection, however many clients watch; the source's [Relays] resolves the
+// session and joins it. The client gets hello, the session's stream.log from
+// ?replay= (all, none or after:<offset>; redacted) as replay messages, live,
+// the current turn state, then frame and turn messages, and ended when the
+// session ends or the server closes. Frames are read from stream.log, so
+// offsets are stable and replay and live never overlap; a client more than
+// [RelayRingSize] frames behind is dropped by the relay, not by the hub.
+// ?mode=observe (the default, scope attach) accepts only ping;
+// mode=interactive (scope interact) also accepts prompt and cancel, and only
+// for a session whose [RelaySession.Interactive] is set (409 otherwise). For
+// one-shot kinds the relay keeps the TUI's lifetime rules: it connects only
+// once the session has been prompted, only while clients watch, and leaves
+// when the turn ends, so watching never changes when a session ends. A
+// browser's upgrade needs Origin and ?csrf=; a client that cannot set
+// Authorization may offer bearer.<token> as a subprotocol. Audit lines:
+// api_attach, api_detach, api_attach_refused, api_prompt (never the text),
+// api_cancel and api_relay_attach_error.
+//
 // # Key types
 //
 //   - [Config] and [ParseConfig] — the --api / --api-listen flags.
@@ -122,13 +143,18 @@
 //   - [List] — the list envelope.
 //   - [Hub], [Event], [NewEvent] — the event stream's ring, fan-out and
 //     envelope.
+//   - [Relays], [RelaySession], [RelayState], [LogReader], [LogFrame],
+//     [Upstream] — what the session relay needs of the daemon; [RelayHello],
+//     [RelayFrame], [RelayTurn], [RelayEnded], [RelayError] and
+//     [RelayClientMessage] are its WebSocket messages.
 //   - [Client], [ReadSSE] — a client for the API and its event stream;
 //     [Client.LoginCode] mints a browser login code.
 //   - [LoginCode], [SessionInfo] — the login flow's bodies.
 //
 // # Collaborators
 //
-// No internal imports. Used by internal/daemon (which implements [Source]
+// No internal imports; github.com/coder/websocket serves the relay's
+// WebSockets. Used by internal/daemon (which implements [Source]
 // over its snapshot builder and publishes the events) and cmd/orch (flags,
 // `orch api token`, `orch status --api`, `orch gui`). See
 // docs/proposals/workingman-gui.md §A.2, §A.3, §A.4 and §A.6.

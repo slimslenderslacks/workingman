@@ -215,6 +215,9 @@ type Daemon struct {
 	events  *eventPublisher
 	sbxOnce sync.Once
 	sbxList *sbx.ListCache
+	// relayAttach joins a session for the API's session relay
+	// (api_relay.go); nil means acpchat.Attach. Tests replace it.
+	relayAttach relayAttachFunc
 
 	// workingman is the workingman-agent supervision state; nil unless
 	// WithWorkingmanAgent. See workingman_agent.go.

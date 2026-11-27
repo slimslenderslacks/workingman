@@ -2687,6 +2687,46 @@ produces a `412` instead of a lost update.
 
 ### P.5 Session attach
 
+**Status: the relay is implemented; the GUI's Watch and Prompt controls are
+not yet.** What was built:
+
+- **The relay** is `GET /api/v1/sessions/{sid}/acp`
+  (`internal/api/relay.go`, `relay_ws.go`; WebSockets by
+  `github.com/coder/websocket`), subprotocol `workingman.acp.v1`, with
+  `mode=observe|interactive` and `replay=all|none|after:<offset>`. The server
+  keeps one relay per session and the relay one upstream connection,
+  reference-counted over its WebSocket clients. Frames are read from
+  `stream.log` (which the hub writes before it broadcasts), so replay and live
+  come through one reader and every `replay`/`frame` message's `offset` is a
+  resumable log position; the upstream connection carries prompts and cancels
+  and wakes the reader (`acpclient.Options.OnFrame`, via `acpchat`). A
+  per-session ring of `RelayRingSize` frames serves the clients, and one that
+  falls further behind is dropped by the relay. `hello`, `live`, `turn`
+  (derived from `stopReason` responses and agent `session/update`s), `ended`
+  (`exited`, `failed`, `gone`, or `daemon_stopping` on shutdown) and `error`
+  messages follow §A.5.2.
+- **Lifetime parity.** For a one-shot kind the relay connects only while a
+  client watches, only once `prompt_count > 0`, and leaves when the turn's
+  `stopReason` arrives; it never reconnects to a session whose turn ended. A
+  persistent kind keeps the connection while anyone watches. The relay never
+  creates the ACP session and never sends the opening prompt.
+- **Interactive** (`{"t":"prompt"}`, `{"t":"cancel"}`) is refused with 409
+  for anything but a persistent session that a human may type into (wolf,
+  workingman, sleepy-head; not step-up). A prompt while a turn runs is an
+  `error` with code `conflict`.
+- **Auth.** Scopes `attach` (observe) and `interact` (interactive), both in
+  the browser login's scopes. A browser upgrade needs `Origin` and
+  `?csrf=`; a client that cannot set `Authorization` may offer
+  `bearer.<token>` as a subprotocol. Audit lines: `api_attach mode=…`,
+  `api_detach`, `api_attach_refused`, `api_prompt session=…` (the text is
+  never logged), `api_cancel`, `api_relay_attach_error`.
+- The session resource gains `acp.observers` and `links.attach`
+  (`internal/daemon/api_relay.go`, `api_sessions.go`).
+- Tests: `internal/api/relay_test.go` (replay modes, one upstream for many
+  clients, one-shot lifetime, observe and interactive rules, auth, shutdown)
+  and `internal/daemon/api_relay_test.go` (end to end over a unix socket and
+  a fake hub).
+
 **Scope: M.**
 
 - The WebSocket session relay, `GET /api/v1/sessions/{sid}/acp` (§A.5.2):
@@ -2727,7 +2767,7 @@ Each of these is independent and needs its own decision:
 | P.2 (**done**) | read API + SSE on a unix socket, `orch status --api` | M | `internal/api` (listener, handlers, `events.go` hub, `client.go`), `internal/daemon` (`api*.go`, `api_events.go` publisher), `internal/sbx` (`listcache.go`), `cmd/orch` (`api.go`, `status.go`) | a listener (read-only, token) |
 | P.3 (**done**) | read-only GUI on loopback: project view, sandbox card, Sandboxes, agents map, timeline, PRs, transcripts | M–L | `internal/api/web/` (bundle), `internal/api` (`web.go`, `login.go`), `cmd/orch` (`gui.go`), `internal/daemon` (`api_projects.go`, `api_sessions.go`, `api_audit.go`), `internal/scheduler` (`Next`) | browser threats (§A.6.3) |
 | P.4 (**done**) | write actions except archive: intake and new project, project actions, inbox answers, task retry R1, `save-sandbox`, `PATCH` task, host tabs | M | `internal/api` (`writes.go`), `internal/control` (`create.go`, `catchup.go`, `options.go`, `task.go`), `internal/daemon` (`api_writes.go`, `api_tasks.go`), `internal/project` and `internal/task` (`UpdateIf`), `internal/postoffice` (`ViaGUI`), `internal/api/web/` (`intake.js`, `inbox.js`, `taskactions.js`) | writes; lost updates guarded by etags under the per-path lock |
-| P.5 | session relay | M | `internal/api` relay, `internal/acpchat` | session lifetime; prompting into live agents |
+| P.5 (relay **done**; GUI controls pending) | session relay | M | `internal/api` (`relay.go`, `relay_ws.go`), `internal/daemon` (`api_relay.go`), `internal/acpchat`, `internal/acpclient` (`OnFrame`) | session lifetime; prompting into live agents |
 | P.6 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |
 
 ---

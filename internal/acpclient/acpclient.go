@@ -177,10 +177,11 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// onRequest and observe are the optional Options hooks; immutable after
-	// newClient.
+	// onRequest, observe and onFrame are the optional Options hooks;
+	// immutable after newClient.
 	onRequest RequestHandler
 	observe   bool
+	onFrame   func(line []byte)
 }
 
 // ErrMethodNotFound is what an Options.OnRequest handler returns for a method it
@@ -216,6 +217,12 @@ type Options struct {
 	// issue. Off by default: the TUI's tab model would not know what to do with
 	// the extra Events.
 	ObserveResponses bool
+
+	// OnFrame, when set, is shown every inbound line before it is decoded:
+	// the agent's frames as the bridge relays them. It runs on the read loop,
+	// so it must return quickly and must not retain or mutate line. The API's
+	// session relay uses it as a wake-up to read the stream log.
+	OnFrame func(line []byte)
 }
 
 // response is the read loop's delivery to a blocked caller: a decoded result or
@@ -265,6 +272,7 @@ func newClient(conn net.Conn, opts Options) *Client {
 		cancel:    cancel,
 		onRequest: opts.OnRequest,
 		observe:   opts.ObserveResponses,
+		onFrame:   opts.OnFrame,
 	}
 	if opts.DistinctIDs {
 		// 2^20 blocks of 2^20 ids: two such clients collide with probability
@@ -593,6 +601,9 @@ func (c *Client) readLoop() {
 	for {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 {
+			if c.onFrame != nil {
+				c.onFrame(line)
+			}
 			c.dispatch(line)
 		}
 		if err != nil {

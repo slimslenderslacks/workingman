@@ -41,20 +41,23 @@ const (
 )
 
 // Scopes (§A.6.2). read covers every GET; write covers the project and task
-// actions, intake and new projects; answer covers post-office answers. The
-// others (attach, interact, pty, archive) arrive with the endpoints that need
-// them (P.4, P.5).
+// actions, intake and new projects; answer covers post-office answers;
+// attach covers watching a session through the relay (mode=observe), and
+// interact prompting and cancelling one (mode=interactive). The others (pty,
+// archive) arrive with the endpoints that need them (P.6).
 const (
-	ScopeRead   = "read"
-	ScopeWrite  = "write"
-	ScopeAnswer = "answer"
+	ScopeRead     = "read"
+	ScopeWrite    = "write"
+	ScopeAnswer   = "answer"
+	ScopeAttach   = "attach"
+	ScopeInteract = "interact"
 )
 
 // BrowserScopes are the scopes a browser login grants.
-var BrowserScopes = []string{ScopeRead, ScopeWrite, ScopeAnswer}
+var BrowserScopes = []string{ScopeRead, ScopeWrite, ScopeAnswer, ScopeAttach, ScopeInteract}
 
 // TokenScopes are the bearer token's scopes: all there are.
-var TokenScopes = []string{ScopeRead, ScopeWrite, ScopeAnswer}
+var TokenScopes = []string{ScopeRead, ScopeWrite, ScopeAnswer, ScopeAttach, ScopeInteract}
 
 // Error codes of the login flow and the browser checks.
 const (
@@ -208,11 +211,15 @@ func (l *logins) evictOldest() {
 }
 
 // authenticate checks a request's credentials: the bearer token when an
-// Authorization header is present (and then only it), else the session
-// cookie.
+// Authorization header is present (and then only it), else a WebSocket
+// upgrade's "bearer.<token>" subprotocol (a browser's WebSocket cannot set
+// headers, §A.6.3), else the session cookie.
 func (s *Server) authenticate(r *http.Request) (auth, bool) {
 	if h := r.Header.Get("Authorization"); h != "" {
 		return auth{}, s.tokens.check(h)
+	}
+	if tok := bearerFromSubprotocol(r); tok != "" && websocketUpgrade(r) {
+		return auth{}, s.tokens.check("Bearer " + tok)
 	}
 	c, err := r.Cookie(SessionCookie)
 	if err != nil {

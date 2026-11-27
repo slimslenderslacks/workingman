@@ -73,6 +73,8 @@ type Server struct {
 	// stream never ends on its own, and Shutdown waits for it.
 	stopStreams chan struct{}
 	stopOnce    sync.Once
+	// relays are the session relays of GET /sessions/{sid}/acp.
+	relays *relayHub
 
 	mu       sync.Mutex
 	ln       net.Listener
@@ -85,10 +87,21 @@ type Server struct {
 
 // New returns a server for cfg over src. It does not listen yet.
 func New(cfg Config, src Source) *Server {
-	return &Server{
+	s := &Server{
 		cfg: cfg, src: src, tokens: &tokenFile{path: cfg.TokenPath}, logins: newLogins(), idem: newIdempotency(), now: time.Now,
 		heartbeat: HeartbeatInterval, stopStreams: make(chan struct{}),
 	}
+	s.relays = newRelayHub(s.log, s.stopStreams)
+	return s
+}
+
+// Observers is how many relay connections watch the session whose
+// directory id is id.
+func (s *Server) Observers(id string) int {
+	if s == nil {
+		return 0
+	}
+	return s.relays.observers(id)
 }
 
 func (s *Server) log(event string, kv ...string) {
@@ -187,6 +200,9 @@ func (s *Server) Close(ctx context.Context) error {
 		return nil
 	}
 	s.stopOnce.Do(func() { close(s.stopStreams) })
+	// Hijacked connections (the relay's WebSockets) are not Shutdown's to
+	// wait for; give them a moment to send their ended message.
+	s.relays.drain(ctx)
 	err := srv.Shutdown(ctx)
 	if err != nil {
 		srv.Close()

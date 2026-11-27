@@ -70,6 +70,12 @@ type Options struct {
 
 	// RetryInterval is the pause between connect attempts; 0 means 250ms.
 	RetryInterval time.Duration
+
+	// OnFrame, when set, is shown every raw frame read from the socket, on
+	// every connection the conversation makes (acpclient.Options.OnFrame). It
+	// runs on the reader goroutine: keep it quick, and never retain or mutate
+	// the frame.
+	OnFrame func(frame []byte)
 }
 
 func (o Options) permissionTimeout() time.Duration {
@@ -297,6 +303,24 @@ func (c *Conversation) Ask(ctx context.Context, text string, options ...AskOptio
 		return "", ErrRefused
 	}
 	return reply, nil
+}
+
+// Cancel asks the agent to stop the session's in-flight turn
+// (session/cancel), whichever client started it. It is a notification with no
+// answer: the turn's prompt response, carrying stopReason "cancelled", ends
+// it. It fails with the conversation's terminal error once it is over, and
+// with acpclient.ErrConnectionClosed while it is reconnecting.
+func (c *Conversation) Cancel() error {
+	c.mu.Lock()
+	client, gone := c.client, c.gone
+	c.mu.Unlock()
+	if gone != nil {
+		return gone
+	}
+	if client == nil {
+		return acpclient.ErrConnectionClosed
+	}
+	return client.Cancel()
 }
 
 // SetModel switches the attached session's model (acpclient.Client.SetModel):
@@ -700,6 +724,7 @@ func (c *Conversation) dialAndBind(ctx context.Context, rec session.Session, red
 		DistinctIDs:      true,
 		OnRequest:        c.handleRequest,
 		ObserveResponses: true,
+		OnFrame:          c.opts.OnFrame,
 	})
 	if err != nil {
 		return nil, err

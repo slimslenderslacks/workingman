@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -793,5 +794,42 @@ func TestSetModelOnAdoptedSession(t *testing.T) {
 	}
 	if m := conv.Model(); m != "haiku" {
 		t.Errorf("Model = %q, want haiku", m)
+	}
+}
+
+// OnFrame sees every frame the conversation's connection reads, and Cancel
+// sends session/cancel for the adopted session, whoever started the turn.
+func TestOnFrameAndCancel(t *testing.T) {
+	a := newFakeAgent(t)
+	seedSession(t, a)
+	var frames atomic.Int32
+	opts := a.options()
+	opts.OnFrame = func([]byte) { frames.Add(1) }
+	conv, err := Attach(testCtx(t), a.id, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conv.Close()
+	waitFor(t, "the fake to register our client", func() bool { return a.numClients() == 1 })
+	if _, err := conv.Ask(testCtx(t), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if frames.Load() < 2 {
+		t.Errorf("OnFrame saw %d frames, want the chunk and the response", frames.Load())
+	}
+	if err := conv.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case sid := <-a.cancels:
+		if sid != "sess-1" {
+			t.Errorf("cancel for %q, want sess-1", sid)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no session/cancel")
+	}
+	conv.Close()
+	if err := conv.Cancel(); !errors.Is(err, ErrClosed) {
+		t.Errorf("Cancel after Close = %v, want ErrClosed", err)
 	}
 }

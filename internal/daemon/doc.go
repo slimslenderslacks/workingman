@@ -136,6 +136,12 @@
 //     snapshot model plus the file fields the snapshot leaves out, read
 //     through api_files.go's caches (keyed on mtime and size), and the
 //     sandboxes come from a cached `sbx ls` (sbx.ListCache).
+//   - api_relay.go: the session relay's daemon side (§A.5.2): api.Relays
+//     over the tracked ACP sessions. It resolves a session to its record,
+//     reads its stream.log (redacted like the transcript) and joins it with
+//     acpchat, adopting the ACP session and never creating one or sending
+//     the opening prompt. Browsers may prompt persistent kinds other than
+//     Step-Up only.
 //   - api_tasks.go: the API's task writes (§A.4.4) and host tabs
 //     (§A.4.6). Retry (option R1: the task back to ready, then a
 //     project.yaml nudge, or an unblock when the project's blocked_reason

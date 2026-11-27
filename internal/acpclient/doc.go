@@ -40,7 +40,9 @@
 // daemon's calls (or vice versa), Adopt binds to the session id the first
 // client created instead of running session/new, and Options.OnRequest /
 // ObserveResponses expose the agent→client requests and the other clients'
-// response frames that the shared fan-out also delivers here.
+// response frames that the shared fan-out also delivers here. Options.OnFrame
+// shows every raw inbound frame, for a watcher (the API's session relay) that
+// only needs to know when one arrives.
 //
 // # Key types
 //

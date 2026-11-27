@@ -35,6 +35,7 @@ type apiFixture struct {
 	d        *Daemon
 	h        http.Handler
 	tok      string
+	tokPath  string
 	root     string
 	alpha    string // alpha's project.yaml
 	sessRoot string
@@ -179,7 +180,7 @@ task_branch: wm/alpha-branch/build
 	d.events = newEventPublisher(d)
 	d.events.prime(context.Background())
 	f.h = api.New(api.Config{Mode: api.ModeUnix, TokenPath: tokPath}, apiSource{d}).Handler("")
-	f.tok = tok
+	f.tok, f.tokPath = tok, tokPath
 	return f
 }
 
