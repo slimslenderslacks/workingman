@@ -140,7 +140,10 @@ test("card: a helper sandbox shows its kind's facts", () => {
   assert.equal(c.facts.title, "step-up");
   assert.match(c.outputNote, /typed change requests/);
   assert.match(c.caps.policyNote, /stepUpPlan/);
-  assert.equal(c.actions[1].label, "Prompt");
+  // Step-up is persistent but takes no typed turns: the relay refuses it.
+  assert.equal(c.actions[1].label, "Prompt (persistent only)");
+  assert.match(c.actions[1].refusal, /escalation path/);
+  assert.equal(c.actions[0].href, "/sessions/step-up-agent");
   assert.equal(c.actions[3].refusal, "never for workingman-agent or step-up");
 });
 

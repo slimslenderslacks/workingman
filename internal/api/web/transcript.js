@@ -1,14 +1,16 @@
 // workingman GUI: the transcript model (docs/proposals/workingman-gui.md
-// §G.2, P.3). Pure functions over the frames of a session's stream.log, as
-// GET /api/v1/sessions/{sid}/transcript returns them (NDJSON, redacted): the
-// entries of the read-only transcript view, its plain-text form for "Save
-// transcript", and the label that says whether the transcript is live or
-// lost. watch.js draws what these return.
+// §G.2, P.3, P.5). Pure functions over the frames of a session's
+// stream.log, as the session relay (GET /api/v1/sessions/{sid}/acp, P.5)
+// and GET /api/v1/sessions/{sid}/transcript (NDJSON, P.3) return them,
+// redacted: the entries of the transcript view, its plain-text form for
+// "Save transcript", and the label that says whether the transcript is live
+// or lost and how it is read. watch.js draws what these return.
 //
 // stream.log holds what the agent wrote (the wrapper tees agent frames),
 // so the prompts a client sent are not in it. Like the TUI's replay
 // (internal/tui/acpwatch.go: replayPriorContext), a primed session gets the
-// opening prompt as its first entry.
+// opening prompt as its first entry, and a prompt this page sent is kept as
+// a local frame ({wm_local: "prompt", text}) where it was sent.
 //
 // Like graph.js, the file runs in the browser, where it becomes wm.tx, and
 // under node for its tests (internal/api/testdata/transcript_test.js).
@@ -64,6 +66,11 @@
     };
     for (const f of frames) {
       if (!f || typeof f !== "object") continue;
+      if (f.wm_local === "prompt") {
+        out.push({ kind: "prompt", text: String(f.text || ""), note: "you (from this page)" });
+        last = null;
+        continue;
+      }
       if (f.method === "session/update" && f.params && f.params.update) {
         const u = f.params.update;
         switch (u.sessionUpdate) {
@@ -167,8 +174,12 @@
 
   // label says what the transcript is: live and not kept, lost because the
   // session ended (the wrapper deletes the session directory, survey §8.2),
-  // or gone before anything was loaded. state is "live", "lost" or "gone".
-  function label(state, session) {
+  // or gone before anything was loaded. state is "live", "lost" or "gone";
+  // how says how a live one is read: via "relay" (the session relay's
+  // WebSocket, P.5) or "poll" (GET …/transcript, the default), and
+  // interactive when this page may prompt it.
+  function label(state, session, how) {
+    const h = how || {};
     if (state === "lost") {
       return {
         cls: "lost",
@@ -180,11 +191,26 @@
       return { cls: "lost", text: "transcript lost", detail: "the session's stream.log is gone: it is deleted when the session ends." };
     }
     const kind = (session && session.kind) || "";
-    return {
-      cls: "live",
-      text: "live — not kept after the session ends",
-      detail: session && session.persistent ? "persistent " + kind + " session · read-only (observe)" : "one-shot " + (kind || "agent") + " session · read-only (observe), replayed from stream.log",
-    };
+    const what = session && session.persistent ? "persistent " + kind + " session" : "one-shot " + (kind || "agent") + " session";
+    let mode = "read-only (observe), replayed from stream.log";
+    if (h.via === "relay") mode = h.interactive ? "interactive over the session relay: prompts go into the conversation" : "observe over the session relay, live";
+    return { cls: "live", text: "live — not kept after the session ends", detail: what + " · " + mode };
+  }
+
+  // turnText is the turn chip of a relayed transcript: the relay's turn
+  // message ({state, stop_reason}), or "" before one arrived.
+  function turnText(turn) {
+    if (!turn || !turn.state) return "";
+    if (turn.state === "running") return "turn running…";
+    return "idle" + (turn.stop_reason ? " · " + turn.stop_reason : "");
+  }
+
+  // promptable reports whether a human may type into a session (§G.2): the
+  // persistent kinds the TUI lets you type into, wolf, workingman and
+  // sleepy-head. Step-up is persistent too, but it is the escalation path
+  // and takes no typed turns; the relay refuses the same sessions.
+  function promptable(session) {
+    return !!(session && session.persistent && session.kind !== "step-up");
   }
 
   // fileName is "Save transcript"'s file name.
@@ -195,5 +221,5 @@
     return String(sid || "session").replace(/[^A-Za-z0-9._-]+/g, "_") + stamp + ".transcript.txt";
   }
 
-  return { OPENING_PROMPT, MAX_FRAMES, TOOL_MARK, parseNDJSON, entries, toolText, asText, label, fileName };
+  return { OPENING_PROMPT, MAX_FRAMES, TOOL_MARK, parseNDJSON, entries, toolText, asText, label, turnText, promptable, fileName };
 });

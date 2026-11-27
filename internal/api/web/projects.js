@@ -9,9 +9,11 @@
 // (POST /projects/{id}/actions/{action}) sent with the project's etag as
 // If-Match; Open session and the two shells open host tabs (§A.4.6). The
 // selected-task strip's Retry…, Keep sandbox, Edit task… and its host tabs
-// are task actions (taskactions.js), sent with the task's etag. archive, and
-// Watch and Prompt (the session relay, P.5), stay disabled and name the TUI
-// command that does them today.
+// are task actions (taskactions.js), sent with the task's etag. Watch and
+// Prompt (P.5) link to the session's watch page, which attaches over the
+// session relay, and the strip's transcript preview is read live over it
+// (watch.js). archive stays disabled and names the TUI command that does
+// it today.
 "use strict";
 
 (function () {

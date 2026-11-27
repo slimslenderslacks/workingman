@@ -121,7 +121,10 @@
 // browser's upgrade needs Origin and ?csrf=; a client that cannot set
 // Authorization may offer bearer.<token> as a subprotocol. Audit lines:
 // api_attach, api_detach, api_attach_refused, api_prompt (never the text),
-// api_cancel and api_relay_attach_error.
+// api_cancel and api_relay_attach_error. The GUI (web/watch.js) reads every
+// live transcript over the relay, with ?csrf= on the upgrade, and falls
+// back to polling /transcript where it cannot attach; its Prompt control
+// is the interactive mode.
 //
 // # Key types
 //

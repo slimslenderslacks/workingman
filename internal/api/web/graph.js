@@ -391,24 +391,42 @@
   // taskActions lists the selected-task strip's buttons (§G.1, §G.2).
   // session is the task's live session resource, if any; project the
   // task's project. One with `action` is a task action the API serves
-  // (POST …/tasks/{name}/actions/{action}); Watch and Prompt wait for the
-  // session relay (P.5).
+  // (POST …/tasks/{name}/actions/{action}); Watch and Prompt (P.5) are
+  // links to the session's watch page (sessionControls).
   function taskActions(t, session, project) {
-    const live = !!(session && session.acp && session.acp.attachable);
     const noTree = t && !t.worktree ? "the task has no worktree yet; use the project's Open session / Shell: workspace" : "";
+    const [watch, prompt] = sessionControls(session, "for this task");
     const out = [
-      { label: "Watch (ACP)", command: "a (the TUI's ACP session tabs)", refusal: live ? "" : "no live ACP session for this task" },
+      watch,
       { label: "Open in my terminal", command: ":session (from the Tasks pane)", action: "open-session", refusal: noTree, tab: true },
       { label: "Shell: worktree", command: ":workspace (from the Tasks pane)", action: "open-shell", refusal: noTree, tab: true },
+      prompt,
     ];
-    if (session && session.persistent) {
-      out.push({ label: "Prompt", command: "a, then i (the TUI's ACP tab)", refusal: "" });
-    } else {
-      out.push({ label: "Prompt (persistent only)", command: "a, then i (the TUI's ACP tab)", refusal: "persistent sessions only: task sessions are one-shot" });
-    }
     const retry = retryAction(t, project, session);
     if (retry) out.push(retry);
     return out;
+  }
+
+  // sessionControls are the Watch and Prompt controls of §G.2 for a
+  // session (or null), as links to its watch page (/sessions/{sid}, which
+  // attaches over the session relay; ?prompt=1 attaches interactively).
+  // Watch needs a live ACP session and the attach scope; Prompt a
+  // persistent session a human may type into (wolf, workingman,
+  // sleepy-head; not step-up, the escalation path) and the interact scope.
+  // where finishes the "no live session" refusal ("for this task").
+  function sessionControls(session, where) {
+    const live = !!(session && session.acp && session.acp.attachable);
+    const href = session ? "/sessions/" + encodeURIComponent(session.id) : "";
+    const watch = { label: "Watch (ACP)", command: "a (the TUI's ACP session tabs)", refusal: live ? "" : "no live ACP session " + (where || "here"), href: live ? href : "", scope: "attach" };
+    let prompt;
+    if (!session || !session.persistent) {
+      prompt = { label: "Prompt (persistent only)", command: "a, then i (the TUI's ACP tab)", refusal: "persistent sessions only: " + ((session && session.kind) || "task") + " sessions are one-shot" };
+    } else if (session.kind === "step-up") {
+      prompt = { label: "Prompt (persistent only)", command: "a, then i (the TUI's ACP tab)", refusal: "step-up takes no typed turns: it is the escalation path" };
+    } else {
+      prompt = { label: "Prompt", command: "a, then i (the TUI's ACP tab)", refusal: live ? "" : "no live ACP session " + (where || "here"), href: live ? href + "?prompt=1" : "", scope: "interact" };
+    }
+    return [watch, prompt];
   }
 
   // retryAction is the Retry… button for a task that can be retried, else
@@ -678,6 +696,7 @@
     TAB_NOTE,
     policySummary,
     transcriptLines,
+    sessionControls,
     newState,
     apply,
     railFacts,

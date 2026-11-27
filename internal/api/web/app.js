@@ -122,6 +122,12 @@
     return request(method, path, body, false, extra);
   }
 
+  // wsURL is the WebSocket URL of an API path on this origin. A browser's
+  // upgrade carries the cookie but cannot carry X-WM-CSRF, so the CSRF
+  // token goes in ?csrf= (§A.6.3).
+  wm.wsURL = (path, query) =>
+    (location.protocol === "https:" ? "wss://" : "ws://") + location.host + PREFIX + path + "?" + (query ? query + "&" : "") + "csrf=" + encodeURIComponent(csrf);
+
   wm.api = {
     get: (path) => request("GET", path),
     // list fetches a list endpoint and returns its envelope
@@ -141,15 +147,18 @@
 
   // can reports whether the session holds a scope (§A.6.2): "write" for the
   // project and task actions, intake and new projects; "answer" for the
-  // inbox.
+  // inbox; "attach" and "interact" for watching and prompting a session
+  // over the relay (§A.5.2).
   wm.can = (scope) => !!(wm.session && (wm.session.scopes || []).includes(scope));
 
   // writeAction is an enabled write control: a button that runs fn, or a
   // link to the form that does the write when href is set. Without the
-  // write scope it is the disabled button, with its TUI command.
+  // scope it needs (opts.scope, "write" by default; "attach" for Watch and
+  // "interact" for Prompt, P.5) it is the disabled button, with its TUI
+  // command.
   wm.writeAction = (label, tuiCommand, opts) => {
     const o = opts || {};
-    if (!wm.can("write") || o.refusal) return wm.disabledAction(label, tuiCommand, o.refusal, o.danger);
+    if (!wm.can(o.scope || "write") || o.refusal) return wm.disabledAction(label, tuiCommand, o.refusal, o.danger);
     if (o.href) return h("a", { href: o.href, "data-link": true, class: "action action-link" + (o.danger ? " danger" : "") }, label);
     return h("button", { class: "action" + (o.danger ? " danger" : ""), type: "button", title: o.title || "", onclick: o.onclick }, label);
   };

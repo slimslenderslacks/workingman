@@ -453,3 +453,10 @@ a.action-link { display: inline-block; color: var(--accent); border: 1px solid v
 .task-edit { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 0; }
 .task-edit label { display: flex; flex-direction: column; gap: 2px; }
 .task-edit textarea, .task-edit input[type="text"] { font: inherit; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--fg); }
+/* the session relay's composer and turn chip (§G.2, P.5) */
+.transcript .t-turn { margin-left: auto; color: #9ca3af; }
+.transcript .t-compose { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.transcript .t-compose:empty { display: none; }
+.transcript .t-compose textarea { width: 100%; box-sizing: border-box; background: #111827; color: #e5e7eb; border: 1px solid #4b5563; border-radius: 4px; font-family: var(--mono); font-size: 12px; padding: 6px; }
+.transcript .t-compose-row { display: flex; gap: 6px; align-items: center; font-family: system-ui, sans-serif; }
+.transcript .t-compose .action { color: #e5e7eb; border-color: #4b5563; }

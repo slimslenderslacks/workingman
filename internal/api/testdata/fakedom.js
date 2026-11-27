@@ -137,10 +137,10 @@ const byClass = (c) => (e) => e.className.split(/\s+/).includes(c);
 // routes maps an API path to a function returning its JSON body; raw(u),
 // when set, may answer a request first with a whole response ({ok, status,
 // headers, text}). It returns the page's main element, the requests made,
-// the EventSource, settle() (let promises and queued timers run; skip
+// the EventSource, the WebSockets opened, settle() (let promises and queued timers run; skip
 // lets a timer function through only when it returns false), navigate()
 // and start() (fire DOMContentLoaded).
-function boot({ webDir, scripts, url, routes, raw, skip }) {
+function boot({ webDir, scripts, url, routes, raw, skip, noWebSocket }) {
   const body = new Element("body");
   const main = new Element("main");
   main.setAttribute("id", "main");
@@ -176,6 +176,12 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
     },
     get href() {
       return loc.href;
+    },
+    get host() {
+      return loc.host;
+    },
+    get protocol() {
+      return loc.protocol;
     },
     origin: loc.origin,
   };
@@ -228,10 +234,54 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
   }
   EventSource.CLOSED = 2;
 
+  // WebSocket is the session relay's socket (watch.js). The test plays the
+  // server: open(), message(obj), close() / refuse(); sent holds what the
+  // page sent, parsed.
+  const sockets = [];
+  class WebSocket {
+    constructor(u, protocols) {
+      this.url = u;
+      this.protocols = protocols;
+      this.readyState = 0;
+      this.sent = [];
+      this.closed = null;
+      sockets.push(this);
+    }
+    send(data) {
+      if (this.readyState !== 1) throw new Error("WebSocket is not open");
+      this.sent.push(JSON.parse(data));
+    }
+    close(code, reason) {
+      if (this.readyState === 3) return;
+      this.closed = { code, reason, by: "page" };
+      this.readyState = 3;
+    }
+    // ---- the server's side ----
+    open() {
+      this.readyState = 1;
+      if (this.onopen) this.onopen({});
+    }
+    message(m) {
+      if (this.readyState === 0) this.open();
+      if (this.onmessage) this.onmessage({ data: JSON.stringify(m) });
+    }
+    serverClose(code) {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      this.closed = { code: code || 1000, by: "server" };
+      if (this.onclose) this.onclose({ code: code || 1000 });
+    }
+    // refuse is a refused upgrade: the browser reports a close without
+    // ever opening.
+    refuse() {
+      this.serverClose(1006);
+    }
+  }
+
   const timers = [];
   const popListeners = [];
   const ctx = vm.createContext({
-    document, location, history, fetch, EventSource, URL, URLSearchParams, Node, console, Date, Math, JSON, Promise, Map, Set,
+    document, location, history, fetch, EventSource, WebSocket: noWebSocket ? undefined : WebSocket, URL, URLSearchParams, Node, console, Date, Math, JSON, Promise, Map, Set,
     Uint8Array, Array, crypto: { getRandomValues: (b) => require("node:crypto").getRandomValues(b) },
     setTimeout: (fn) => (timers.push(fn), timers.length),
     clearTimeout: () => {},
@@ -257,6 +307,7 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
     main,
     requests,
     es,
+    sockets,
     settle,
     get location() {
       return loc;

@@ -6,9 +6,10 @@
 // Writes, for a session with the write scope (P.4): "Queue intake" links to
 // the project's intake form (intake.js); on a task's card, Open in my
 // terminal, Retry…, Edit task… and Keep sandbox are task actions
-// (taskactions.js), sent with the task's etag as If-Match. Watch, Prompt
-// and the in-sandbox shell stay disabled and name the TUI command that
-// does them today.
+// (taskactions.js), sent with the task's etag as If-Match. Watch and
+// Prompt (P.5) link to the session's watch page, and the card's transcript
+// is read live over the session relay (watch.js). The in-sandbox shell
+// stays disabled and names the TUI command that does it today.
 "use strict";
 
 (function () {

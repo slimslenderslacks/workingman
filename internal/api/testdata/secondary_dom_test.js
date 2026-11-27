@@ -208,7 +208,8 @@ const hrefs = () => main.findAll((e) => e.tagName === "A").map((a) => a.getAttri
   assert.match(text, /one-shot task session · read-only \(observe\)/);
   assert.ok(transcriptReqs.some((s) => s.includes("after=0")), "the full view reads from the start");
   labels = checkButtons("watch");
-  assert.ok(labels.includes("Watch (ACP)") && labels.includes("Prompt (persistent only)"));
+  // The page is Watch; without the attach scope it polls, as in P.3.
+  assert.ok(!labels.includes("Watch (ACP)") && labels.includes("Prompt (persistent only)"));
   assert.ok(hrefs().includes("/projects/p_0.gui-api/tasks/session-relay"), "the watch page links to the sandbox card");
 
   // More output arrives, then the session ends: the wrapper deletes the

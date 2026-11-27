@@ -10,10 +10,11 @@
 "use strict";
 
 (function (factory) {
-  const wl = factory();
-  if (typeof module === "object" && module.exports) module.exports = wl;
-  else window.wm.wl = wl;
-})(function () {
+  // Watch and Prompt share graph.js's sessionControls with the project
+  // view; under node it is required from beside this file.
+  if (typeof module === "object" && module.exports) module.exports = factory(require("./graph.js").sessionControls);
+  else window.wm.wl = factory(window.wm.pv.sessionControls);
+})(function (sessionControls) {
   // KNOWN_MCPS are catalog servers the GUI knows by name (planning.tmpl
   // names them). The API cannot list the gateway's catalog, so a card
   // draws these, when not granted, as the visible absences of §G.0
@@ -252,19 +253,16 @@
 
   // ---- actions ---------------------------------------------------------------
 
-  // cardActions are the card header's buttons: watch, open in a terminal,
-  // and the in-browser shell (§G.2). With a task (t), Open in my terminal is
-  // its open-session (§A.4.6), which needs its worktree, and Retry… is
-  // offered when the task can be retried; Watch, Prompt and the shell wait
-  // for later phases and stay disabled with their TUI command.
+  // cardActions are the card header's buttons: watch, prompt, open in a
+  // terminal, and the in-browser shell (§G.2). Watch and Prompt are links
+  // to the session's watch page (graph.js sessionControls, P.5). With a
+  // task (t), Open in my terminal is its open-session (§A.4.6), which needs
+  // its worktree, and Retry… is offered when the task can be retried; the
+  // shell waits for a later phase and stays disabled with its TUI command.
   function cardActions(session, sandbox, t) {
-    const live = !!(session && session.acp && session.acp.attachable);
     const noTree = t && !t.worktree ? "the task has no worktree yet; use the project's Open session" : "";
     const out = [
-      { label: "Watch (ACP)", command: "a (the TUI's ACP session tabs)", refusal: live ? "" : "no live ACP session in this sandbox" },
-      session && session.persistent
-        ? { label: "Prompt", command: "a, then i (the TUI's ACP tab)", refusal: "" }
-        : { label: "Prompt (persistent only)", command: "a, then i (the TUI's ACP tab)", refusal: "persistent sessions only: " + ((session && session.kind) || "this") + " sessions are one-shot" },
+      ...sessionControls(session, "in this sandbox"),
       t
         ? { label: "Open in my terminal", command: ":session (from the Tasks pane)", action: "open-session", refusal: noTree, tab: true }
         : { label: "Open in my terminal", command: ":session (from the Tasks pane)", refusal: "" },

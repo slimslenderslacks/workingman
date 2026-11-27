@@ -2687,8 +2687,8 @@ produces a `412` instead of a lost update.
 
 ### P.5 Session attach
 
-**Status: the relay is implemented; the GUI's Watch and Prompt controls are
-not yet.** What was built:
+**Status: implemented.** What was built, in two slices (the relay; then the
+GUI's Watch and Prompt controls and live transcripts over it):
 
 - **The relay** is `GET /api/v1/sessions/{sid}/acp`
   (`internal/api/relay.go`, `relay_ws.go`; WebSockets by
@@ -2726,6 +2726,61 @@ not yet.** What was built:
   clients, one-shot lifetime, observe and interactive rules, auth, shutdown)
   and `internal/daemon/api_relay_test.go` (end to end over a unix socket and
   a fake hub).
+
+The second slice, **the GUI side (§G.2)**:
+
+- **Live transcripts over the relay.** `wm.transcriptView`
+  (`internal/api/web/watch.js`), the one transcript panel of the project
+  view's selected-task strip, the sandbox card and the session watch page,
+  now attaches to `GET /sessions/{sid}/acp` (`workingman.acp.v1`,
+  `mode=observe`) whenever the session is live (`acp.attachable`), the login
+  has the `attach` scope and the browser has WebSockets; the upgrade carries
+  `?csrf=` (`wm.wsURL`, `internal/api/web/app.js`). A preview still starts
+  near the end of `stream.log` (`replay=after:<offset>`), the watch page
+  from the start. Frames are drawn as they arrive, with a turn chip from the
+  relay's `turn` messages. A dropped connection (`too_slow`, a daemon
+  restart) re-attaches with `replay=after:<last offset>`, so nothing is
+  missed or repeated. Where the view cannot attach (no attach scope, a
+  refused upgrade, no live session yet) it polls `/transcript` as in P.3,
+  and a session that becomes attachable later moves the view onto the
+  relay from where polling got to. The P.3 polling remains only for those
+  cases. On `ended` (or `session.ended`) the view keeps what it loaded and
+  says "session ended — transcript lost", as before; leaving the page
+  closes the socket, which is what lets the relay drop its upstream.
+- **Watch** is now a link to the session's watch page (`/sessions/{sid}`)
+  on the strip, the card and the Sandboxes rows, enabled for a live ACP
+  session and the `attach` scope (`wm.pv.sessionControls`,
+  `internal/api/web/graph.js`, shared by `wm.wl.cardActions`). On the watch
+  page itself the view is the watch.
+- **Prompt** links to `/sessions/{sid}?prompt=1`, enabled only for a live
+  persistent session a human may type into (wolf, workingman, sleepy-head;
+  step-up is refused with "the escalation path", as the relay refuses it)
+  and the `interact` scope. The page then attaches with
+  `mode=interactive` and shows a composer: **Send** writes
+  `{"t":"prompt","text"}` and is enabled only while the turn is idle;
+  **Cancel turn** writes `{"t":"cancel"}` and only while a turn runs. Those
+  two are all the page sends. A sent prompt is shown in the transcript as
+  "you (from this page)", since `stream.log` holds only the agent's frames
+  (`wm.tx.entries`, `internal/api/web/transcript.js`). Relay `error`
+  messages (a `conflict` while a turn runs) show by the composer. A refused
+  interactive upgrade drops back to observe. "Observe only" returns to the
+  read-only watch.
+- **Lifetime.** The GUI adds nothing to the relay's rules: for a one-shot
+  session the relay alone decides when to connect and leave, so a browser
+  can watch a task session from start to finish without changing when it
+  ends; the GUI never sends the opening prompt.
+- **Tests**: `internal/api/testdata/relay_dom_test.js`, over a fake
+  `WebSocket` added to `testdata/fakedom.js`, renders the strip, the card
+  and the watch page against a scripted relay: the URL, subprotocol, mode,
+  `csrf` and `replay` the page asks for; live frames and turns drawn;
+  `ended` labelling the transcript lost with no reconnect; one connection
+  across card redraws and closed on navigation; resume after `too_slow`
+  with no gap or repeat; fallback to polling on a refused upgrade, without
+  the attach scope and without WebSockets; Prompt sending only `prompt` and
+  `cancel`, Send and Cancel following the turn, a `conflict` shown, a
+  refused interactive attach falling back to observe, and no composer
+  without the `interact` scope or for step-up. `workload_test.js`,
+  `secondary_dom_test.js` and `TestStaticBundleServed` follow the change.
 
 **Scope: M.**
 
@@ -2767,7 +2822,7 @@ Each of these is independent and needs its own decision:
 | P.2 (**done**) | read API + SSE on a unix socket, `orch status --api` | M | `internal/api` (listener, handlers, `events.go` hub, `client.go`), `internal/daemon` (`api*.go`, `api_events.go` publisher), `internal/sbx` (`listcache.go`), `cmd/orch` (`api.go`, `status.go`) | a listener (read-only, token) |
 | P.3 (**done**) | read-only GUI on loopback: project view, sandbox card, Sandboxes, agents map, timeline, PRs, transcripts | M–L | `internal/api/web/` (bundle), `internal/api` (`web.go`, `login.go`), `cmd/orch` (`gui.go`), `internal/daemon` (`api_projects.go`, `api_sessions.go`, `api_audit.go`), `internal/scheduler` (`Next`) | browser threats (§A.6.3) |
 | P.4 (**done**) | write actions except archive: intake and new project, project actions, inbox answers, task retry R1, `save-sandbox`, `PATCH` task, host tabs | M | `internal/api` (`writes.go`), `internal/control` (`create.go`, `catchup.go`, `options.go`, `task.go`), `internal/daemon` (`api_writes.go`, `api_tasks.go`), `internal/project` and `internal/task` (`UpdateIf`), `internal/postoffice` (`ViaGUI`), `internal/api/web/` (`intake.js`, `inbox.js`, `taskactions.js`) | writes; lost updates guarded by etags under the per-path lock |
-| P.5 (relay **done**; GUI controls pending) | session relay | M | `internal/api` (`relay.go`, `relay_ws.go`), `internal/daemon` (`api_relay.go`), `internal/acpchat`, `internal/acpclient` (`OnFrame`) | session lifetime; prompting into live agents |
+| P.5 (**done**) | session relay; Watch and Prompt in the GUI, live transcripts over the relay | M | `internal/api` (`relay.go`, `relay_ws.go`), `internal/daemon` (`api_relay.go`), `internal/acpchat`, `internal/acpclient` (`OnFrame`), `internal/api/web/` (`watch.js`, `transcript.js`, `graph.js` `sessionControls`) | session lifetime; prompting into live agents |
 | P.6 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |
 
 ---

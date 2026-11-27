@@ -31,6 +31,7 @@ func TestStaticBundleServed(t *testing.T) {
 		{"/projects/p_0.demo/tasks/build", "text/html", `<script src="/agents.js"`},
 		{"/transcript.js", "javascript", "wm.tx"},
 		{"/watch.js", "javascript", "transcriptView"},
+		{"/watch.js", "javascript", SubprotocolACP},
 		{"/secondary.js", "javascript", "wm.sv"},
 		{"/timeline.js", "javascript", "audit"},
 		{"/pulls.js", "javascript", "pull requests"},
@@ -182,6 +183,9 @@ func TestProjectViewModel(t *testing.T) {
 		// keep sandbox and the task edit with the task's etag, a 412 and a
 		// 422 shown, and nothing sent without the write scope.
 		{"task_actions_dom_test.js", dir},
+		// Session attach (P.5): Watch and Prompt, and the live
+		// transcripts over the session relay, against a fake WebSocket.
+		{"relay_dom_test.js", dir},
 	} {
 		out, err := exec.Command(node, filepath.Join("testdata", tc[0]), tc[1]).CombinedOutput()
 		if err != nil {
