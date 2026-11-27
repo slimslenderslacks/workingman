@@ -280,6 +280,22 @@
     };
   }
 
+  // intakeTasks is a request's planned-tasks line (R.4 Q12): each task with
+  // a link and whether the link is recorded (the task's source: {kind:
+  // intake}) or inferred (the planning run that processed the request
+  // created it), and a note for a processed request with neither.
+  function intakeTasks(r, projectId) {
+    const items = ((r && r.tasks) || []).map((t) => ({
+      name: t.name,
+      inferred: t.mapping === "inferred",
+      href: "/projects/" + enc(projectId) + "/tasks/" + enc(t.name),
+    }));
+    let note = "";
+    if (!items.length && r && r.state === "processed") note = "no task records this request, and the planning run that processed it is not known (a daemon restart forgets it); see the timeline";
+    else if (items.some((t) => t.inferred)) note = "inferred: the planner did not record source: {kind: intake}, so these are the tasks the planning run that processed it created";
+    return { items, note };
+  }
+
   // ---- inbox (§A.4.5, §G.5) -------------------------------------------------
 
   // sender renders a message's sender as the TUI does (postoffice
@@ -353,7 +369,7 @@
 
   return {
     HIGHLIGHT, FAMILIES, family, taskOf, row, matches, Timeline, rung, until, fixTask, safeURL, pullCard, pullsNote,
-    intakeHint, intakeNameError, projectNameError, intakeGroups,
+    intakeHint, intakeNameError, projectNameError, intakeGroups, intakeTasks,
     sender, closedText, inboxItem, inboxOrder,
   };
 });

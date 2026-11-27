@@ -27,7 +27,8 @@ function fixture(scopes) {
   const intake = [
     { project: "p_0.gui-api", name: "add-card", file: "add-card.md", state: "pending", created_at: "2026-11-26T10:00:00Z", etag: '"in-aaaa"' },
     { project: "p_0.gui-api", name: "blank", file: "blank.md", state: "empty", created_at: "2026-11-26T09:00:00Z", etag: '"in-bbbb"' },
-    { project: "p_0.gui-api", name: "old", file: "old.processed", state: "processed", created_at: "2026-11-25T10:00:00Z", etag: '"in-cccc"' },
+    { project: "p_0.gui-api", name: "old", file: "old.processed", state: "processed", created_at: "2026-11-25T10:00:00Z", etag: '"in-cccc"',
+      tasks: [{ name: "card-api", mapping: "recorded" }, { name: "card-gui", mapping: "inferred" }] },
   ];
   const state = { project, intake, failNextPost: false, withdraw412: false };
   const routes = {
@@ -105,6 +106,11 @@ const input = (main, aria) => main.find((e) => e.getAttribute("aria-label") === 
   assert.match(text, /add-card\.md/);
   assert.match(text, /Processed \(1\)/);
   assert.match(text, /old\.processed/);
+  // A processed request links to its tasks, marking an inferred link.
+  assert.ok(linkTo(main, "/projects/p_0.gui-api/tasks/card-api"), "no link to the recorded task");
+  assert.ok(linkTo(main, "/projects/p_0.gui-api/tasks/card-gui"), "no link to the inferred task");
+  assert.match(text, /planned tasks: card-api, card-gui \(inferred\)/);
+  assert.match(text, /did not record source/);
   // A blank request cannot be withdrawn (there is nothing for the planner
   // to take), a pending one can.
   assert.deepEqual(buttons(main).filter((b) => label(b) === "Withdraw").length, 1);

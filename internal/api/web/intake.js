@@ -4,7 +4,9 @@
 // <project>/intake/<name>.md (POST /projects/{id}/intake), with a hint
 // about what the daemon will do with it, the pending requests with a
 // best-effort Withdraw (DELETE …/intake/{name}, If-Match the request's
-// etag), and the processed ones. The new-project form writes
+// etag), and the processed ones with the tasks planned from each (recorded
+// on the task, or inferred from the planning run; R.4 Q12). The new-project
+// form writes
 // <root>/<name>/project.md (POST /projects). Each submit carries an
 // Idempotency-Key kept until it succeeds, so a resend is done once. The
 // model is secondary.js (wm.sv).
@@ -104,6 +106,15 @@
     function row(r, canWithdraw) {
       const facts = [r.state, r.created_at ? new Date(r.created_at).toLocaleString() : ""].filter(Boolean).join(" · ");
       const out = h("li", { class: "intake-row" }, h("code", {}, r.file), " ", h("span", { class: "muted small" }, facts));
+      const tk = sv.intakeTasks(r, id);
+      if (tk.items.length) {
+        out.append(
+          " ",
+          h("span", { class: "small intake-tasks" }, "→ planned tasks: ",
+            tk.items.flatMap((t, i) => [i ? ", " : "", wm.link(t.href, t.name), t.inferred ? h("span", { class: "muted", title: "inferred from the planning run, not recorded on the task" }, " (inferred)") : ""]))
+        );
+      }
+      if (tk.note) out.append(h("div", { class: "muted small" }, tk.note));
       if (canWithdraw) {
         const b = wm.writeAction("Withdraw", "rename intake/" + r.file + " to " + r.name + ".withdrawn", {
           title: "best-effort: the planner may take it first",
@@ -145,7 +156,7 @@
           g.processed.length
             ? h("ul", { class: "intake-list" }, g.processed.map((r) => row(r, false)))
             : h("p", { class: "muted small" }, "none yet"),
-          h("p", { class: "muted small" }, "A processed request does not record which tasks it produced (R.4 Q12); see the planning run in the timeline.")
+          h("p", { class: "muted small" }, "A request's tasks are the ones whose source records it (source: {kind: intake}); for a request no task records, they are inferred from the planning run that processed it (R.4 Q12).")
         );
       } catch (e) {
         pending.replaceChildren(wm.errorNotice(e));

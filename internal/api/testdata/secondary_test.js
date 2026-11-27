@@ -160,6 +160,23 @@ test("intake: hints follow the daemon's routing; names are checked as the server
   assert.deepEqual(g.processed.map((r) => r.name), ["b"]);
 });
 
+test("intake: a request's tasks, recorded or inferred (R.4 Q12)", () => {
+  let tk = sv.intakeTasks({ state: "processed", tasks: [{ name: "svg-card", mapping: "recorded" }] }, "p_0.gui-api");
+  assert.deepEqual(tk.items, [{ name: "svg-card", inferred: false, href: "/projects/p_0.gui-api/tasks/svg-card" }]);
+  assert.equal(tk.note, "");
+  tk = sv.intakeTasks({ state: "processed", tasks: [{ name: "relay api", mapping: "inferred" }] }, "p_0.gui-api");
+  assert.ok(tk.items[0].inferred);
+  assert.equal(tk.items[0].href, "/projects/p_0.gui-api/tasks/relay%20api");
+  assert.match(tk.note, /did not record source/);
+  tk = sv.intakeTasks({ state: "processed", tasks: [] }, "p_0.gui-api");
+  assert.deepEqual(tk.items, []);
+  assert.match(tk.note, /not known/);
+  // Pending: nothing planned yet, nothing to say. An older API with no tasks
+  // field reads the same.
+  assert.deepEqual(sv.intakeTasks({ state: "pending", tasks: [] }, "p"), { items: [], note: "" });
+  assert.deepEqual(sv.intakeTasks({ state: "pending" }, "p"), { items: [], note: "" });
+});
+
 test("inbox: senders as the TUI shows them, closings, order", () => {
   assert.equal(sv.sender({ agent: "task", task: "fix-ci", sandbox: "x", project: "/o/workingman-messaging/project.yaml" }), "task fix-ci (workingman-messaging)");
   assert.equal(sv.sender({ agent: "step-up", sandbox: "step-up" }), "step-up");

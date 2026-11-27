@@ -150,6 +150,9 @@ type apiModel struct {
 	projects []ProjectSnapshot
 	sessions []SessionSnapshot
 	ids      map[string]int // project id -> index in projects
+	// links caches intakeLinks per project path: every task resource of a
+	// project consults it.
+	links map[string]intakeLinks
 }
 
 // model builds the live snapshot model (projects with their live blocks, the
@@ -158,7 +161,7 @@ type apiModel struct {
 // first one by path keeps the id.
 func (d *Daemon) model() *apiModel {
 	snap := d.buildSnapshotN(true, 1)
-	m := &apiModel{d: d, projects: snap.Projects, sessions: snap.Sessions, ids: map[string]int{}}
+	m := &apiModel{d: d, projects: snap.Projects, sessions: snap.Sessions, ids: map[string]int{}, links: map[string]intakeLinks{}}
 	for i, p := range m.projects {
 		id := m.id(p)
 		if _, dup := m.ids[id]; !dup {
@@ -376,12 +379,15 @@ type APIPolicyRule struct {
 
 // APITaskSource is the PR signal a review-created task addresses, or, with
 // kind "intake", the intake request (IntakeRequest.Name) a planned task came
-// from. PR is 0 for an intake source.
+// from. PR is 0 for an intake source. Inferred is set on an intake source the
+// task file does not record: the API took it from the planning run that
+// processed the request (see intakeLinks). A PR source never has it.
 type APITaskSource struct {
-	Kind string `json:"kind"`
-	Ref  string `json:"ref"`
-	Repo string `json:"repo,omitempty"`
-	PR   int    `json:"pr"`
+	Kind     string `json:"kind"`
+	Ref      string `json:"ref"`
+	Repo     string `json:"repo,omitempty"`
+	PR       int    `json:"pr"`
+	Inferred bool   `json:"inferred,omitempty"`
 }
 
 // APIIntegration is a task's full integration: block.
@@ -496,6 +502,8 @@ func (m *apiModel) task(p *ProjectSnapshot, ts TaskSnapshot) TaskResource {
 			}
 			if src := tf.Source; src != nil {
 				r.Source = &APITaskSource{Kind: src.Kind, Ref: src.Ref, Repo: src.Repo, PR: src.PR}
+			} else if ref := m.intakeLinks(p).inferred[ts.Name]; ref != "" {
+				r.Source = &APITaskSource{Kind: task.SourceKindIntake, Ref: ref, Inferred: true}
 			}
 			if in := tf.Integration; in != nil && r.Integration != nil {
 				r.Integration.Onto = repoCommits(in.Onto)
@@ -654,24 +662,102 @@ func (s apiSource) Graph(_ context.Context, id string) (any, error) {
 // ---------------------------------------------------------------------------
 
 // IntakeRequest is an intake/<name>.md file (§A.1.4). Body is set only on
-// GET /projects/{id}/intake/{name}.
+// GET /projects/{id}/intake/{name}. Tasks are the tasks planned from it (see
+// intakeLinks), in task-file order.
 type IntakeRequest struct {
-	Project   string    `json:"project"`
-	Name      string    `json:"name"`
-	File      string    `json:"file"`
-	State     string    `json:"state"`
-	CreatedAt time.Time `json:"created_at"`
-	ETag      string    `json:"etag,omitempty"`
-	Body      *string   `json:"body,omitempty"`
+	Project   string       `json:"project"`
+	Name      string       `json:"name"`
+	File      string       `json:"file"`
+	State     string       `json:"state"`
+	CreatedAt time.Time    `json:"created_at"`
+	ETag      string       `json:"etag,omitempty"`
+	Body      *string      `json:"body,omitempty"`
+	Tasks     []IntakeTask `json:"tasks"`
+}
+
+// IntakeTask is a task planned from an intake request. Mapping says where the
+// link comes from: "recorded" (the task file's `source: {kind: intake}`) or
+// "inferred" (the planning run that processed the request created it).
+type IntakeTask struct {
+	Name    string `json:"name"`
+	Mapping string `json:"mapping"`
+}
+
+// The IntakeTask mappings.
+const (
+	IntakeMappingRecorded = "recorded"
+	IntakeMappingInferred = "inferred"
+)
+
+// intakeLinks is a project's intake -> tasks mapping (R.4 Q12): byRequest
+// maps a request name to its tasks, and inferred maps a task with no source
+// of its own to the one request it was inferred from.
+type intakeLinks struct {
+	byRequest map[string][]IntakeTask
+	inferred  map[string]string
+}
+
+// intakeLinks builds p's intake -> tasks mapping. The recorded back-reference
+// wins: a request any task records gets exactly the tasks that record it. A
+// request no task records falls back to the inference, the tasks that appeared
+// during the planning run that processed it (Daemon.inferredIntake), keeping
+// only tasks with no source at all — a task that records another request, or a
+// PR signal, is not reattributed. A task inferred for more than one request (a
+// run that processed several) is listed under each, but gets no inferred
+// source on its own resource, since which one it serves is unknown.
+func (m *apiModel) intakeLinks(p *ProjectSnapshot) intakeLinks {
+	if l, ok := m.links[p.Path]; ok {
+		return l
+	}
+	l := intakeLinks{byRequest: map[string][]IntakeTask{}, inferred: map[string]string{}}
+	sourceless := map[string]bool{}
+	for _, ts := range p.Tasks {
+		if ts.path == "" {
+			continue
+		}
+		tf, _, err := m.d.apiFiles.tasks.get(ts.path)
+		if err != nil || tf.Name == "" {
+			continue // a seed is the human's, not the planner's
+		}
+		if ref := tf.IntakeRef(); ref != "" {
+			l.byRequest[ref] = append(l.byRequest[ref], IntakeTask{Name: ts.Name, Mapping: IntakeMappingRecorded})
+		} else if tf.Source == nil {
+			sourceless[ts.Name] = true
+		}
+	}
+	guess := m.d.inferredIntake(p.Path)
+	count := map[string]int{}
+	for ref, names := range guess {
+		if _, recorded := l.byRequest[ref]; recorded {
+			continue
+		}
+		for _, ts := range p.Tasks {
+			if sourceless[ts.Name] && slices.Contains(names, ts.Name) {
+				l.byRequest[ref] = append(l.byRequest[ref], IntakeTask{Name: ts.Name, Mapping: IntakeMappingInferred})
+				l.inferred[ts.Name] = ref
+				count[ts.Name]++
+			}
+		}
+	}
+	for name, n := range count {
+		if n > 1 {
+			delete(l.inferred, name)
+		}
+	}
+	m.links[p.Path] = l
+	return l
 }
 
 // intakeExts maps an intake file extension to its state (a blank .md is
 // "empty").
 var intakeExts = map[string]string{".md": api.IntakePending, ".processed": api.IntakeProcessed}
 
-// intakeRequests reads a project's intake/ directory, sorted by name.
-func (d *Daemon) intakeRequests(projectID, projectPath string, withBody bool, only string) []IntakeRequest {
-	dir := filepath.Join(filepath.Dir(projectPath), "intake")
+// intakeRequests reads a project's intake/ directory, sorted by name, with
+// each request's tasks.
+func (m *apiModel) intakeRequests(p *ProjectSnapshot, withBody bool, only string) []IntakeRequest {
+	d, projectID := m.d, m.id(*p)
+	links := m.intakeLinks(p)
+	dir := filepath.Join(filepath.Dir(p.Path), "intake")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -694,7 +780,8 @@ func (d *Daemon) intakeRequests(projectID, projectPath string, withBody bool, on
 		if state == api.IntakePending && strings.TrimSpace(body) == "" {
 			state = api.IntakeEmpty
 		}
-		r := IntakeRequest{Project: projectID, Name: name, File: e.Name(), State: state, ETag: resourceETag("in", tag)}
+		r := IntakeRequest{Project: projectID, Name: name, File: e.Name(), State: state, ETag: resourceETag("in", tag),
+			Tasks: append([]IntakeTask{}, links.byRequest[name]...)}
 		if info, err := e.Info(); err == nil {
 			r.CreatedAt = info.ModTime().UTC()
 		}
@@ -714,7 +801,7 @@ func (s apiSource) Intake(_ context.Context, id, state string) ([]any, error) {
 		return nil, err
 	}
 	var out []any
-	for _, r := range s.d.intakeRequests(id, p.Path, false, "") {
+	for _, r := range m.intakeRequests(p, false, "") {
 		if state != "" && state != "all" && r.State != state {
 			continue
 		}
@@ -733,7 +820,7 @@ func (s apiSource) IntakeRequest(_ context.Context, id, name string) (any, error
 	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
 		return nil, fmt.Errorf("%w: no intake request %q", api.ErrNotFound, name)
 	}
-	reqs := s.d.intakeRequests(id, p.Path, true, name)
+	reqs := m.intakeRequests(p, true, name)
 	if len(reqs) == 0 {
 		return nil, fmt.Errorf("%w: project %s has no intake request %q", api.ErrNotFound, id, name)
 	}

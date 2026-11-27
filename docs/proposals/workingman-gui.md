@@ -432,6 +432,12 @@ Notes:
   `failed`/`blocked`).
 - A planning seed (blank name) appears under its filename stem with
   `"seed": true`, as the snapshot does.
+- `source` is the task file's `source:` block as written: a PR signal
+  (`{kind: pr-comment|pr-check|pr-push, ref, repo, pr}`, unchanged) or the
+  intake back-reference `{kind: "intake", ref: <request>, pr: 0}` (R.4 Q12).
+  A planned task with no `source:` that the planning run which processed a
+  request created gets that request's intake source with `"inferred": true`
+  (see §A.1.4); `inferred` is absent everywhere else.
 
 #### A.1.3 Session (and its sandbox)
 
@@ -521,13 +527,24 @@ Notes:
   "state": "pending",
   "created_at": "2026-11-25T05:02:00-05:00",
   "body": "Please add SVG wireframes for the project graph …",
-  "etag": "\"in-77c0\""
+  "etag": "\"in-77c0\"",
+  "tasks": [{"name": "svg-card", "mapping": "recorded"}]
 }
 ```
 
 `state` is `pending` (`*.md`, non-blank), `empty` (blank `*.md`; the daemon
 logs `intake_empty` and ignores it) or `processed` (renamed to `*.processed`
 by the planner, `planning.tmpl:143-147`). `created_at` is the file's mtime.
+
+`tasks` (implemented with R.4 Q12) are the tasks planned from the request,
+never `null`. When any task records `source: {kind: intake, ref: <name>}`,
+they are exactly those tasks, with `"mapping": "recorded"`. Otherwise the API
+falls back to inference: the tasks that appeared in `tasks/` during the
+planning run that renamed this file to `.processed`, keeping only tasks with
+no `source:` of their own, with `"mapping": "inferred"`. The daemon notes
+that run in memory (`endPlanning`), so a request processed before the
+current daemon started has no inferred tasks. A run that processed several
+requests lists its new tasks under each of them.
 
 #### A.1.5 Audit event
 
@@ -1686,7 +1703,9 @@ design.
   is the tasks' `source: {kind: intake, ref: <name>}` (R.4 Q12), `ref`
   being the request's `name` here. The planner records it best-effort, so a
   request with no tagged task falls back to the planning run that renamed
-  the file. The same form at root level creates
+  the file. The pane draws `IntakeRequest.tasks` (§A.1.4) as "→ planned
+  tasks: a, b (inferred)", each linked to its sandbox card, and the card's
+  "chosen by" and source lines say "(inferred)" too. The same form at root level creates
   a new project by writing `project.md` (`POST /projects`).
 - **Timeline.** The audit stream (`GET /audit?since=`, SSE `types=audit`),
   filterable by project and event family (survey §13). The events that
@@ -1850,6 +1869,13 @@ Other sections cite them as `R.4 Qn`.
   so the same name is used before and after the `.processed` rename and it
   matches `IntakeRequest.name`. It is best-effort, and no daemon logic depends
   on it. Only `pr-*` kinds count as PR fix tasks (`Source.IsPR`).
+  *Implemented (P.6):* the schema field (`task.SourceKindIntake`,
+  `Task.IntakeRef`, `task.IntakeRefFor`, a lenient `source:` decoder), the
+  planner instruction (`planning.tmpl`, with each pending file's `ref`
+  shown), and the API/GUI fallback: `IntakeRequest.tasks` with a
+  `recorded`/`inferred` mapping, an inferred intake source on an untagged
+  task (`"inferred": true`, PR sources unchanged), and the intake pane and
+  sandbox card showing which is which (§A.1.2, §A.1.4, §G.5).
 
 ---
 
@@ -2807,7 +2833,16 @@ without changing when it ends.
 
 ### P.6 Optional follow-ups
 
-Each of these is independent and needs its own decision:
+Each of these is independent and needs its own decision. *Decided:* the
+operator took up intake back-references (R.4 Q12), now **implemented**
+(see R.4 Q12 for what was built). The TUI on the event bus (§A.7 item 2) is
+deferred as GitHub issue
+[slimslenderslacks/workingman#34](https://github.com/slimslenderslacks/workingman/issues/34),
+and `orch tui --api` (§A.7 item 3) as
+[#35](https://github.com/slimslenderslacks/workingman/issues/35). The
+others (the in-browser PTY, archive from the GUI, transcript retention, the
+`rev:` counter and the capability review gate) are not being pursued for
+now.
 
 - **In-browser PTY** (`/sandboxes/{name}/pty`, `--api-pty`, `pty` scope;
   §A.5.3).
@@ -2815,8 +2850,9 @@ Each of these is independent and needs its own decision:
   §A.4.2).
 - **TUI on the event bus** (§A.7 item 2) and **`orch tui --api`** (§A.7 item
   3), which make "launchd daemon + TUI or GUI on demand" a first-class setup.
-- **Transcript retention** (R.4 Q4), **intake back-references** (R.4 Q12),
-  **`rev:` counter** (R.4 Q6).
+  *Deferred:* #34 and #35.
+- **Transcript retention** (R.4 Q4), **intake back-references** (R.4 Q12,
+  *implemented*), **`rev:` counter** (R.4 Q6).
 - **Capability review gate** (R.4 Q7). This is the largest one
   and is a change to how workloads are created, not to the GUI.
 
@@ -2830,7 +2866,7 @@ Each of these is independent and needs its own decision:
 | P.3 (**done**) | read-only GUI on loopback: project view, sandbox card, Sandboxes, agents map, timeline, PRs, transcripts | M–L | `internal/api/web/` (bundle), `internal/api` (`web.go`, `login.go`), `cmd/orch` (`gui.go`), `internal/daemon` (`api_projects.go`, `api_sessions.go`, `api_audit.go`), `internal/scheduler` (`Next`) | browser threats (§A.6.3) |
 | P.4 (**done**) | write actions except archive: intake and new project, project actions, inbox answers, task retry R1, `save-sandbox`, `PATCH` task, host tabs | M | `internal/api` (`writes.go`), `internal/control` (`create.go`, `catchup.go`, `options.go`, `task.go`), `internal/daemon` (`api_writes.go`, `api_tasks.go`), `internal/project` and `internal/task` (`UpdateIf`), `internal/postoffice` (`ViaGUI`), `internal/api/web/` (`intake.js`, `inbox.js`, `taskactions.js`) | writes; lost updates guarded by etags under the per-path lock |
 | P.5 (**done**) | session relay; Watch and Prompt in the GUI, live transcripts over the relay | M | `internal/api` (`relay.go`, `relay_ws.go`), `internal/daemon` (`api_relay.go`), `internal/acpchat`, `internal/acpclient` (`OnFrame`), `internal/api/web/` (`watch.js`, `transcript.js`, `graph.js` `sessionControls`) | session lifetime; prompting into live agents |
-| P.6 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |
+| P.6 | intake back-references (**done**); TUI on the event bus and `orch tui --api` deferred (#34, #35); PTY, archive, retention, `rev:`, capability gate not pursued for now | S | `internal/task` (`SourceKindIntake`), `internal/prompts` (`planning.tmpl`), `internal/daemon` (`api_projects.go` `intakeLinks`, `dispatch.go` `endPlanning`), `internal/api/web/` (`intake.js`, `secondary.js`, `workload.js`) | none: best-effort, read-only |
 
 ---
 

@@ -669,6 +669,7 @@ func (d *Daemon) planningBlocker(projectPath string, replan bool) (string, bool)
 // lifetime, so a dispatch landing while the worktree is still being provisioned
 // is deduped too.
 func (d *Daemon) beginPlanning(projectPath string, offered []string) bool {
+	before := planningTaskNames(projectPath)
 	d.planningMu.Lock()
 	defer d.planningMu.Unlock()
 	if d.planningBusy[projectPath] {
@@ -676,7 +677,18 @@ func (d *Daemon) beginPlanning(projectPath string, offered []string) bool {
 	}
 	d.planningBusy[projectPath] = true
 	d.planningOffered[projectPath] = offered
+	d.planningBefore[projectPath] = before
 	return true
+}
+
+// planningTaskNames is the names of the tasks in projectPath's tasks/ dir, for
+// the intake inference (planningBefore).
+func planningTaskNames(projectPath string) []string {
+	var names []string
+	for _, t := range loadTasksLenient(filepath.Join(filepath.Dir(projectPath), "tasks")) {
+		names = append(names, t.Name)
+	}
+	return names
 }
 
 // endPlanning releases projectPath's planning slot and returns the intake files
@@ -684,16 +696,39 @@ func (d *Daemon) beginPlanning(projectPath string, offered []string) bool {
 // stay recorded as offered so unofferedIntake keeps ignoring them; everything
 // the run did process is dropped, so a later file reusing the name counts as
 // new.
+//
+// It also records, for the API, which tasks the run left behind for each
+// request it processed (planningPlanned): the fallback intake -> tasks mapping
+// for tasks the planner did not tag (see inferredIntake).
 func (d *Daemon) endPlanning(projectPath string) []string {
 	pending := pendingIntakeFiles(filepath.Dir(projectPath))
+	after := planningTaskNames(projectPath)
 	d.planningMu.Lock()
 	defer d.planningMu.Unlock()
 	delete(d.planningBusy, projectPath)
+	before := d.planningBefore[projectPath]
+	delete(d.planningBefore, projectPath)
 	var leftover []string
 	for _, f := range d.planningOffered[projectPath] {
 		if slices.Contains(pending, f) {
 			leftover = append(leftover, f)
+			continue
 		}
+		// Processed means renamed to .processed: a withdrawn request (or
+		// one a human deleted) produced nothing.
+		if _, err := os.Stat(strings.TrimSuffix(f, filepath.Ext(f)) + ".processed"); err != nil {
+			continue
+		}
+		var added []string
+		for _, n := range after {
+			if !slices.Contains(before, n) {
+				added = append(added, n)
+			}
+		}
+		if d.planningPlanned[projectPath] == nil {
+			d.planningPlanned[projectPath] = map[string][]string{}
+		}
+		d.planningPlanned[projectPath][task.IntakeRefFor(f)] = added
 	}
 	if len(leftover) == 0 {
 		delete(d.planningOffered, projectPath)
@@ -701,6 +736,20 @@ func (d *Daemon) endPlanning(projectPath string) []string {
 		d.planningOffered[projectPath] = leftover
 	}
 	return leftover
+}
+
+// inferredIntake is the intake -> tasks mapping the planning runs that
+// processed projectPath's requests left behind (planningPlanned): request
+// name -> the tasks that appeared during that run. A run that processed
+// several requests gives each of them all its new tasks. It is a copy.
+func (d *Daemon) inferredIntake(projectPath string) map[string][]string {
+	d.planningMu.Lock()
+	defer d.planningMu.Unlock()
+	out := map[string][]string{}
+	for ref, names := range d.planningPlanned[projectPath] {
+		out[ref] = slices.Clone(names)
+	}
+	return out
 }
 
 // planningInFlight reports whether a planner is dispatched for projectPath.

@@ -211,7 +211,7 @@ func (p *eventPublisher) build(ctx context.Context) *eventState {
 			redactStrings(&t)
 			st.add(st.tasks, &st.order.tasks, id+"/"+t.Name, t)
 		}
-		for _, r := range d.intakeRequests(id, pr.Path, false, "") {
+		for _, r := range m.intakeRequests(pr, false, "") {
 			key := id + "/" + r.Name
 			redactStrings(&r)
 			if _, dup := st.intake[key]; dup {

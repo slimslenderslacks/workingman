@@ -74,6 +74,16 @@ type Daemon struct {
 	// which must not relaunch planning in a loop. Kept after the run ends; the
 	// next launch overwrites it.
 	planningOffered map[string][]string // keyed by project file path
+	// planningBefore (also guarded by planningMu) is the task names a project
+	// had when its in-flight planning run began, and planningPlanned what the
+	// runs that processed each intake request left behind: request name (as
+	// task.IntakeRefFor gives it) -> the task names that appeared during that
+	// run. It is the API's inferred intake -> tasks mapping, the fallback for
+	// tasks the planner did not tag with an intake source (R.4 Q12). In
+	// memory only: a restart forgets it, and a reused request name overwrites
+	// it. See endPlanning and inferredIntake.
+	planningBefore  map[string][]string            // keyed by project file path
+	planningPlanned map[string]map[string][]string // keyed by project file path
 
 	// cleanupMu guards cleanupInFlight, the set of projects whose archive
 	// (cleanup) agent has been dispatched and whose `cleanup: true` request
@@ -375,6 +385,8 @@ func New(roots []string, a *audit.Logger, opts ...Option) (*Daemon, error) {
 		projectFailures:    map[string]int{},
 		planningBusy:       map[string]bool{},
 		planningOffered:    map[string][]string{},
+		planningBefore:     map[string][]string{},
+		planningPlanned:    map[string]map[string][]string{},
 		cleanupInFlight:    map[string]bool{},
 		reviewFixCycles:    map[string]int{},
 		reviewErrors:       map[string]int{},
