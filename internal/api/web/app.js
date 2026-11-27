@@ -139,7 +139,8 @@
   };
 
   // can reports whether the session holds a scope (§A.6.2): "write" for the
-  // project and task actions, intake and new projects.
+  // project and task actions, intake and new projects; "answer" for the
+  // inbox.
   wm.can = (scope) => !!(wm.session && (wm.session.scopes || []).includes(scope));
 
   // writeAction is an enabled write control: a button that runs fn, or a
@@ -150,6 +151,22 @@
     if (!wm.can("write") || o.refusal) return wm.disabledAction(label, tuiCommand, o.refusal, o.danger);
     if (o.href) return h("a", { href: o.href, "data-link": true, class: "action action-link" + (o.danger ? " danger" : "") }, label);
     return h("button", { class: "action" + (o.danger ? " danger" : ""), type: "button", title: o.title || "", onclick: o.onclick }, label);
+  };
+
+  // projectAction runs a project action (POST /projects/{id}/actions/{a},
+  // §A.4.2) with the project's etag as If-Match, so a write that landed
+  // since the GUI loaded the project is a 412, not a lost update. body is
+  // {} except for wolf's {reason}. It resolves to the response; a refusal
+  // rejects with the APIError, whose current (412, 409) is the project as
+  // it is now.
+  wm.projectAction = (project, action, body) =>
+    wm.api.post("/projects/" + encodeURIComponent(project.id) + "/actions/" + action, body || {}, { ifMatch: project.etag });
+
+  // actionError is a refused write's status-line text.
+  wm.actionError = (e) => {
+    if (e && e.status === 412) return "the project changed since it was loaded (" + e.message + "); it is reloaded: check it and try again";
+    if (e instanceof APIError) return e.status + " " + (e.code || "") + ": " + e.message;
+    return String((e && e.message) || e);
   };
 
   // ---- event stream ------------------------------------------------------
@@ -393,7 +410,7 @@
   // list and sandbox card (§G.2, §G.3) in sandboxes.js, the agents map
   // (§G.4) in agents.js, the transcript view and session watch (§G.2) in
   // watch.js, the timeline and pull requests (§G.5) in timeline.js and
-  // pulls.js. The inbox stays a placeholder until its answers arrive (P.4).
+  // pulls.js, the inbox (§G.5) in inbox.js.
 
   // liveList renders a list endpoint as a table and refetches it when one
   // of the given event types arrives (debounced).
@@ -432,15 +449,6 @@
     };
   }
   wm.liveList = liveList;
-
-  wm.screen("/inbox", (_, main) =>
-    liveList(main, "Inbox", "/messages", ["message.created", "message.closed"], [
-      ["from", (m) => (m.from && (m.from.name || m.from.kind)) || ""],
-      ["subject", (m) => m.subject],
-      ["state", (m) => wm.status(m.state)],
-      ["", () => wm.disabledAction("answer", "the TUI inbox")],
-    ])
-  );
 
   // Inbox badge: open operator requests.
   async function refreshInbox() {

@@ -42,6 +42,20 @@ func (f *fakeActions) WithdrawIntake(_ context.Context, w WriteRequest, project,
 	return f.record("withdraw "+project+" "+name, w)
 }
 
+func (f *fakeActions) ProjectAction(_ context.Context, w WriteRequest, project, action string, req ProjectActionRequest) (WriteResult, error) {
+	return f.record(fmt.Sprintf("action %s %s %q", project, action, req.Reason), w)
+}
+
+func (f *fakeActions) AnswerMessage(_ context.Context, w WriteRequest, id string, req AnswerRequest) (WriteResult, error) {
+	return f.record(fmt.Sprintf("answer %s %q %q", id, req.Option, req.Response), w)
+}
+
+func (f *fakeActions) DismissMessage(_ context.Context, w WriteRequest, id string) (WriteResult, error) {
+	return f.record("dismiss "+id, w)
+}
+
+var _ Actions = (*fakeActions)(nil)
+
 func (f *fakeActions) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

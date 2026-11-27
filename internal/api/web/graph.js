@@ -312,21 +312,25 @@
   // projectActions lists the header's buttons (§G.1, §A.4.7). Each carries
   // the TUI command that does it today and, when that command would refuse
   // right now, the TUI's own refusal text (internal/control). An action
-  // with href is enabled (P.4): a link to its form; the rest are disabled.
+  // with `action` is a project action the API serves (POST
+  // /projects/{id}/actions/{action}, P.4), one with href a link to its form;
+  // the rest stay disabled. archive is left out (R.4 Q11).
   function projectActions(p) {
     const name = p.work_stream;
     const status = p.status || "";
+    const flags = p.flags || {};
     const out = [];
     if (status === "stopped") {
-      out.push({ label: "Start", command: ":start", refusal: "" });
+      out.push({ label: "Start", command: ":start", action: "start", refusal: "" });
     } else {
-      out.push({ label: "Stop", command: ":stop", refusal: status === "" ? `${name} has no status yet to stop` : "" });
+      out.push({ label: "Stop", command: ":stop", action: "stop", refusal: status === "" ? `${name} has no status yet to stop` : "" });
     }
-    out.push({ label: (p.live && p.live.wolf_in_flight) ? "Wolf (in flight)" : "Wolf…", command: ":wolf", refusal: "", danger: true });
-    const watching = p.flags && p.flags.watching_pr;
+    out.push({ label: (p.live && p.live.wolf_in_flight) ? "Wolf (in flight)" : "Wolf…", command: ":wolf", action: "wolf", refusal: "", danger: true });
+    const watching = flags.watching_pr;
     out.push({
       label: watching ? "Poll PR now" : "Review",
       command: ":review",
+      action: "review",
       refusal: status === "idle" ? "" : `review starts on an idle work stream or kicks one already watching a PR (this one is "${status}")`,
     });
     out.push({
@@ -335,8 +339,43 @@
       refusal: status === "stopped" ? "the project is stopped, and queuing intake would flip it to ready; start it first" : status === "" ? "the project agent has not filled in this project yet" : "",
       href: "/projects/" + encodeURIComponent(p.id) + "/intake",
     });
+    out.push({
+      label: flags.cleanup ? "Cleanup (requested)" : "Cleanup",
+      command: ":cleanup",
+      action: "cleanup",
+      refusal: flags.archive ? `${name} is already cleaned up — run :archive` : "",
+    });
+    out.push(flags.hidden ? { label: "Show", command: ":show", action: "show", refusal: "" } : { label: "Hide", command: ":hide", action: "hide", refusal: "" });
+    if (p.cron) out.push({ label: "Catch up", command: "orch catchup " + (p.path || "<project.yaml>"), action: "catchup", refusal: "" });
     out.push({ label: "Open shell ▾", command: ":orch or :workspace", refusal: "" });
     return out;
+  }
+
+  // actionDone is the status line after a project action succeeded: what
+  // was written and what to watch for. res is the API's response.
+  function actionDone(action, res) {
+    const r = res || {};
+    if (r.noop) {
+      return {
+        review: "a review kick is already waiting for the daemon",
+        cleanup: "cleanup is already requested",
+        hide: "already hidden",
+        show: "not hidden",
+        catchup: "a catch-up request is already waiting for the daemon",
+      }[action] || "nothing to do";
+    }
+    const did = {
+      stop: "stopped: the daemon closes the project's sessions",
+      start: "started: back to " + ((r.project && r.project.status) || "its status"),
+      wolf: "blocked: the daemon launches the wolf",
+      review: r.mode === "kick" ? "review_now set: the review agent runs now" : "review set: the daemon watches the PR",
+      cleanup: "cleanup set: the archive agent runs once nothing is in flight",
+      hide: "hidden from the gallery (display only)",
+      show: "shown in the gallery again",
+      catchup: "catch-up requested: the schedule fires once if it is behind",
+    }[action] || action;
+    const expect = (r.expect || []).join(", ");
+    return expect ? did + " · watch for " + expect : did;
   }
 
   // taskActions lists the selected-task strip's buttons (§G.1, §G.2).
@@ -551,6 +590,7 @@
     integrationText,
     lane,
     projectActions,
+    actionDone,
     taskActions,
     policySummary,
     transcriptLines,

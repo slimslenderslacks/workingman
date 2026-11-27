@@ -35,6 +35,8 @@ func TestStaticBundleServed(t *testing.T) {
 		{"/timeline.js", "javascript", "audit"},
 		{"/pulls.js", "javascript", "pull requests"},
 		{"/intake.js", "javascript", "Idempotency-Key"},
+		{"/inbox.js", "javascript", "approve all"},
+		{"/inbox", "text/html", `<script src="/inbox.js"`},
 		{"/new-project", "text/html", `<script src="/intake.js"`},
 		{"/projects/p_0.demo/intake", "text/html", `<script src="/intake.js"`},
 		{"/timeline", "text/html", `<script src="/timeline.js"`},
@@ -171,6 +173,10 @@ func TestProjectViewModel(t *testing.T) {
 		// from the fake DOM with the write scope, and nothing sent
 		// without it.
 		{"intake_dom_test.js", dir},
+		// The project actions and the inbox answers (P.4, second slice):
+		// If-Match from the project's etag, a 412 and a lost 409 shown,
+		// and nothing sent without the write or answer scope.
+		{"actions_dom_test.js", dir},
 	} {
 		out, err := exec.Command(node, filepath.Join("testdata", tc[0]), tc[1]).CombinedOutput()
 		if err != nil {
@@ -201,5 +207,12 @@ func TestProjectViewRefusalText(t *testing.T) {
 	}
 	if !bytes.Contains(js, []byte("has no status yet to stop")) {
 		t.Errorf("graph.js does not show the :stop refusal")
+	}
+	cleanup, err := os.ReadFile(filepath.Join("..", "control", "cleanup.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refusal := "is already cleaned up — run :archive"; !bytes.Contains(cleanup, []byte(refusal)) || !bytes.Contains(js, []byte(refusal)) {
+		t.Errorf("the :cleanup refusal %q is not in both internal/control/cleanup.go and graph.js", refusal)
 	}
 }

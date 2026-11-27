@@ -561,11 +561,30 @@ func SaveAs(path string, p *Project, by Writer) error {
 // editors) don't take the lock and can still race it. fn must not save or
 // update the same path itself: the lock is not reentrant.
 func Update(path string, by Writer, fn func(*Project) bool) error {
+	return UpdateIf(path, by, nil, fn)
+}
+
+// UpdateIf is Update with a check: under the write lock, check runs on the
+// file's bytes before they are parsed, and an error from it is returned
+// without fn running or anything being written. The API's If-Match is such a
+// check (docs/proposals/workingman-gui.md §A.4.1): it compares the bytes'
+// hash with the etag the client last saw, so a write that landed since is a
+// refusal, not a lost update. A nil check is Update.
+func UpdateIf(path string, by Writer, check func(data []byte) error, fn func(*Project) bool) error {
 	if !by.Valid() {
 		return fmt.Errorf("invalid writer %q", by)
 	}
 	defer pathlock.Lock(path)()
-	p, err := Load(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if check != nil {
+		if err := check(data); err != nil {
+			return err
+		}
+	}
+	p, err := Parse(path, data)
 	if err != nil {
 		return err
 	}

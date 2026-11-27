@@ -41,6 +41,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 		http.MethodGet:    s.handleIntakeRequest,
 		http.MethodDelete: s.write("withdraw_intake", ScopeWrite, s.handleWithdrawIntake),
 	}))
+	mux.HandleFunc(p+"/projects/{id}/actions/{action}", s.methods(map[string]http.HandlerFunc{
+		http.MethodPost: s.projectActionHandler(),
+	}))
 	mux.HandleFunc(p+"/projects/{id}/pulls", s.get(s.handlePulls))
 	mux.HandleFunc(p+"/projects/{id}/audit", s.get(s.handleProjectAudit))
 	mux.HandleFunc(p+"/sessions", s.get(s.handleSessions))
@@ -50,6 +53,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc(p+"/sandboxes", s.get(s.handleSandboxes))
 	mux.HandleFunc(p+"/audit", s.get(s.handleAudit))
 	mux.HandleFunc(p+"/messages", s.get(s.handleMessages))
+	mux.HandleFunc(p+"/messages/{id}/answer", s.methods(map[string]http.HandlerFunc{
+		http.MethodPost: s.write("answer", ScopeAnswer, s.handleAnswerMessage),
+	}))
+	mux.HandleFunc(p+"/messages/{id}/dismiss", s.methods(map[string]http.HandlerFunc{
+		http.MethodPost: s.write("dismiss", ScopeAnswer, s.handleDismissMessage),
+	}))
 	mux.HandleFunc(p+"/agents", s.get(s.handleAgents))
 	mux.HandleFunc(p+"/events", s.get(s.handleEvents))
 }

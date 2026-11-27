@@ -154,7 +154,11 @@ test("lane: queue head first, landed newest first, base, failures", () => {
 test("actions: all labelled with their TUI command; refusals match the TUI", () => {
   const { st } = ctxOf(fixture());
   const acts = pv.projectActions(st.project);
-  assert.deepEqual(acts.map((a) => a.label), ["Stop", "Wolf…", "Review", "Queue intake", "Open shell ▾"]);
+  assert.deepEqual(acts.map((a) => a.label), ["Stop", "Wolf…", "Review", "Queue intake", "Cleanup", "Hide", "Open shell ▾"]);
+  // The project actions the API serves name their endpoint; archive is not
+  // among them (R.4 Q11), and the shells stay TUI-only.
+  assert.deepEqual(acts.filter((a) => a.action).map((a) => a.action), ["stop", "wolf", "review", "cleanup", "hide"]);
+  assert.ok(!acts.some((a) => a.action === "archive" || /archive/i.test(a.label)));
   for (const a of acts) assert.ok(a.command, a.label + " has no command");
   assert.equal(acts[0].command, ":stop");
   const review = acts.find((a) => a.command === ":review");
@@ -164,6 +168,17 @@ test("actions: all labelled with their TUI command; refusals match the TUI", () 
   assert.equal(stopped[0].command, ":start");
   const idle = pv.projectActions(Object.assign({}, st.project, { status: "idle" }));
   assert.equal(idle.find((a) => a.command === ":review").refusal, "");
+  // Hidden → Show; a cron → Catch up; archive: true → cleanup refused with
+  // the TUI's text; a pending cleanup says so.
+  const more = pv.projectActions(Object.assign({}, st.project, { cron: "@every 1h", path: "/o/gui-api/project.yaml", flags: { hidden: true, archive: true, cleanup: true } }));
+  assert.ok(more.some((a) => a.action === "show" && a.label === "Show") && !more.some((a) => a.action === "hide"));
+  assert.equal(more.find((a) => a.action === "catchup").command, "orch catchup /o/gui-api/project.yaml");
+  const cl = more.find((a) => a.action === "cleanup");
+  assert.equal(cl.label, "Cleanup (requested)");
+  assert.equal(cl.refusal, "gui-api is already cleaned up — run :archive");
+  assert.equal(pv.actionDone("review", { mode: "kick", expect: ["project.updated"] }), "review_now set: the review agent runs now · watch for project.updated");
+  assert.equal(pv.actionDone("cleanup", { noop: true }), "cleanup is already requested");
+  assert.match(pv.actionDone("start", { project: { status: "working" } }), /back to working/);
 
   const relay = st.tasks.get("session-relay");
   const ta = pv.taskActions(relay, st.sessions.get("task-session-relay"));

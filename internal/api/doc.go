@@ -71,11 +71,18 @@
 // to 404 and [ErrUnavailable] to 503; the resources themselves come from
 // [Resources].
 //
-// Write endpoints (§A.4.3, the create-only actions): POST /projects (seed a
-// work stream's project.md), POST /projects/{id}/intake (queue an intake
-// request) and DELETE /projects/{id}/intake/{name} (withdraw a pending one).
-// They need the write scope (403 without it; the bearer token has every
-// scope) and are done by the source's [Actions]. Every write follows §A.4.1:
+// Write endpoints, done by the source's [Actions]: the create-only actions
+// of §A.4.3, POST /projects (seed a work stream's project.md), POST
+// /projects/{id}/intake (queue an intake request) and DELETE
+// /projects/{id}/intake/{name} (withdraw a pending one); the project
+// actions of §A.4.2, POST /projects/{id}/actions/{action} for each of
+// [ProjectActions] (stop, start, wolf, review, cleanup, hide, show,
+// catchup; not archive, which stays in the TUI), where those
+// [IfMatchRequired] lists are a 428 without If-Match; and the inbox
+// answers of §A.4.5, POST /messages/{id}/answer and /dismiss. The project
+// and intake writes need the write scope, the inbox answers the answer
+// scope (403 without it; the bearer token has every scope). Every write
+// follows §A.4.1:
 // a JSON body with no unknown fields; If-Match, checked by the action
 // against the resource's etag ([MatchETag]; 412 with the current resource on
 // a mismatch); an optional Idempotency-Key, under which the first response is
@@ -83,7 +90,8 @@
 // for another request; a 5xx is not kept); 202 with the written resource and
 // its ETag, or 200 with "noop": true; errors in the shape above plus
 // "current", with codes bad_request, not_found, conflict, invalid_state,
-// precondition_failed, forbidden and unavailable; and an api_write (or
+// precondition_failed, precondition_required, forbidden and unavailable;
+// and an api_write (or
 // api_write_refused) audit line with the action, path, etags and client.
 //
 // # Key types
@@ -94,9 +102,10 @@
 //   - [Source] — what the server reads, [Resources] included; implemented
 //     by internal/daemon.
 //   - [Actions], [WriteRequest], [WriteResult] — the write actions, which
-//     the daemon's source implements too; [ErrInvalid], [ErrConflict],
-//     [ErrInvalidState], [ErrPreconditionFailed] and [WithCurrent] pick a
-//     write's error response.
+//     the daemon's source implements too; [ProjectActionRequest] and
+//     [AnswerRequest] are their bodies; [ErrInvalid], [ErrConflict],
+//     [ErrInvalidState], [ErrPreconditionFailed], [ErrPreconditionRequired]
+//     and [WithCurrent] pick a write's error response.
 //   - [ProjectQuery], [AuditQuery], [SessionQuery], ... — the parsed query
 //     parameters handed to [Resources].
 //   - [EnsureToken], [ReadToken], [TokenPath] — the token file.

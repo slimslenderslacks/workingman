@@ -160,3 +160,41 @@ func TestUpdateErrors(t *testing.T) {
 		t.Error("invalid writer: want error")
 	}
 }
+
+func TestUpdateIfCheckSeesBytesAndCanRefuse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := Save(path, &Project{Description: "d", Status: StatusIdle}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := errors.New("stale")
+	ran := false
+	err = UpdateIf(path, WriterAgent, func(data []byte) error {
+		if string(data) != string(before) {
+			t.Errorf("check saw %q, want the file's bytes %q", data, before)
+		}
+		return refused
+	}, func(p *Project) bool {
+		ran = true
+		p.Cleanup = true
+		return true
+	})
+	if !errors.Is(err, refused) || ran {
+		t.Fatalf("UpdateIf = %v (fn ran: %v), want the check's error and no fn", err, ran)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Errorf("a refused check rewrote the file: %q", after)
+	}
+	if err := UpdateIf(path, WriterAgent, func([]byte) error { return nil }, func(p *Project) bool {
+		p.Cleanup = true
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := Load(path); !p.Cleanup || p.UpdatedBy != WriterAgent {
+		t.Errorf("after a passing check: %+v", p)
+	}
+}

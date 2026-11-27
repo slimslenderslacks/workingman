@@ -201,7 +201,9 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
     try {
       v = r(parsed, init || {});
     } catch (e) {
-      return { ok: false, status: e.status || 500, headers: new Map(), text: async () => JSON.stringify({ error: { code: e.code || "internal", message: e.message } }) };
+      // A thrown error's current (a 412's or 409's resource) goes in the
+      // body, as the server sends it.
+      return { ok: false, status: e.status || 500, headers: new Map(), text: async () => JSON.stringify({ error: { code: e.code || "internal", message: e.message, current: e.current } }) };
     }
     return { ok: true, status: 200, headers: new Map(), text: async () => JSON.stringify(v) };
   }
@@ -272,7 +274,7 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
 }
 
 // SCRIPTS is the bundle in index.html's order.
-const SCRIPTS = ["app.js", "graph.js", "projects.js", "workload.js", "sandboxes.js", "agents.js", "transcript.js", "watch.js", "secondary.js", "timeline.js", "pulls.js", "intake.js"];
+const SCRIPTS = ["app.js", "graph.js", "projects.js", "workload.js", "sandboxes.js", "agents.js", "transcript.js", "watch.js", "secondary.js", "timeline.js", "pulls.js", "intake.js", "inbox.js"];
 
 // buttons lists el's buttons that stand for a write action (every one but
 // the local ones, such as Save transcript, which only save in the

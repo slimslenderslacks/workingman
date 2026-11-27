@@ -2,7 +2,6 @@ package control
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/slimslenderslacks/work/internal/project"
 )
@@ -31,19 +30,26 @@ import (
 // working/blocked/ready project would interrupt live work. The second return
 // value reports whether this was an immediate kick (true) or a loop start
 // (false) so the caller can word its confirmation accordingly.
-func Review(projectPath string) (name string, kicked bool, err error) {
+//
+// opts may add a [Check], and [ReportNoop]: a kick whose review_now is
+// already set (the daemon has not run it yet) is then left as is.
+func Review(projectPath string, opts ...Option) (name string, kicked bool, err error) {
 	if projectPath == "" {
 		return "", false, errors.New("no project selected")
 	}
+	o := collect(opts)
 	var refusal error
-	err = project.Update(projectPath, project.WriterAgent, func(p *project.Project) bool {
+	err = o.update(projectPath, project.WriterAgent, func(p *project.Project) bool {
 		if p.Status != project.StatusIdle {
-			refusal = fmt.Errorf("review starts on an idle work stream or kicks one already watching a PR (this one is %q)", p.Status)
+			refusal = refuse(ErrState, "review starts on an idle work stream or kicks one already watching a PR (this one is %q)", p.Status)
 			return false
 		}
 		if p.WatchingPR() {
-			p.ReviewNow = true
 			kicked = true
+			if p.ReviewNow && o.noopNow() {
+				return false
+			}
+			p.ReviewNow = true
 		} else {
 			p.Review = true
 		}

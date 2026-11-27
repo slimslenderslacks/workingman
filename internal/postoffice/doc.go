@@ -13,7 +13,7 @@
 //	                       daemon's Step-Up executor creating its
 //	                       notifications with Put
 //	outbox/<id>.json       the terminal claim; created by whoever closes the
-//	                       message first (TUI, Dispatcher, post-office)
+//	                       message first (TUI, GUI, Dispatcher, post-office)
 //	done/<day>/<id>.json   the inbox record plus its resolution; written only
 //	                       by post-office; <day> is the UTC date in the id
 //	deliveries/<id>.json   the Dispatcher's per-channel send records
@@ -71,7 +71,8 @@
 // [Outbound], and the ConversationIndex) and
 // [github.com/slimslenderslacks/work/internal/audit] for redaction.
 // cmd/post-office writes the inbox, finalises, expires and prunes; the
-// daemon's Dispatcher and the TUI read the inbox and call Claim; the router
+// daemon's Dispatcher and the TUI read the inbox and call Claim; the daemon's
+// API calls Claim for the GUI's answers (Via [ViaGUI]); the router
 // (internal/router) calls Claim for answers from a channel. cmd/orch starts
 // the Dispatcher with the channels. Who may call what is in each method's
 // comment.

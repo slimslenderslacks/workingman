@@ -280,6 +280,72 @@
     };
   }
 
+  // ---- inbox (§A.4.5, §G.5) -------------------------------------------------
+
+  // sender renders a message's sender as the TUI does (postoffice
+  // Sender.Display): "task fix-ci (workingman-messaging)", "step-up".
+  function sender(from) {
+    const f = from || {};
+    const project = f.project ? String(f.project).split("/").slice(-2, -1)[0] || "" : "";
+    const agent = f.agent || f.sandbox || "";
+    if (f.task && project) return agent + " " + f.task + " (" + project + ")";
+    if (f.task) return agent + " " + f.task;
+    if (agent === "workingman") return "workingman agent";
+    if (project) return agent + " (" + project + ")";
+    return agent;
+  }
+
+  // closedText says how a closed message was closed: "answered via slack:
+  // deny". It is what the TUI's reply line shows.
+  function closedText(res) {
+    if (!res) return "";
+    const via = res.responder && res.responder.via;
+    const head = res.outcome + (via ? " via " + via : "");
+    if (res.outcome === "answered") return head + ": " + (res.option || res.response || "");
+    if (res.outcome === "cancelled" && res.reason) return head + " — " + res.reason;
+    return head;
+  }
+
+  // inboxItem is one inbox row's model: who asked, whether it can be
+  // answered from here, and how. m is a GET /messages item; now is ms.
+  // A step-up request is flagged: its body is the exact CHANGE line the
+  // executor will apply, so it is drawn verbatim and there is no "approve
+  // all" (§A.4.5).
+  function inboxItem(m, now) {
+    const open = m.state === "open";
+    const expired = !!m.expired || (m.expires_at && Date.parse(m.expires_at) <= now);
+    const request = m.kind === "request";
+    let refusal = "";
+    if (!open) refusal = "closed: " + closedText(m.resolution);
+    else if (expired) refusal = "this message has expired";
+    return {
+      id: m.id,
+      from: sender(m.from),
+      subject: m.subject || "",
+      body: m.body || "",
+      kind: m.kind,
+      stepUp: !!(m.from && (m.from.agent === "step-up" || m.from.sandbox === "step-up")),
+      sandbox: (m.from && m.from.sandbox) || "",
+      options: request ? (m.options || []).slice() : [],
+      canReply: request,
+      canDismiss: !request,
+      open: open && !expired,
+      refusal,
+      closed: closedText(m.resolution),
+      expires: m.expires_at ? until(m.expires_at, now) : "",
+    };
+  }
+
+  // inboxOrder sorts like the TUI inbox: open first, then newest first.
+  function inboxOrder(items) {
+    return (items || []).slice().sort((a, b) => {
+      const ao = a.state === "open" ? 0 : 1;
+      const bo = b.state === "open" ? 0 : 1;
+      if (ao !== bo) return ao - bo;
+      return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+    });
+  }
+
   function clip(text, n) {
     text = String(text === undefined || text === null ? "" : text);
     return text.length > n ? text.slice(0, n - 1) + "…" : text;
@@ -288,5 +354,6 @@
   return {
     HIGHLIGHT, FAMILIES, family, taskOf, row, matches, Timeline, rung, until, fixTask, safeURL, pullCard, pullsNote,
     intakeHint, intakeNameError, projectNameError, intakeGroups,
+    sender, closedText, inboxItem, inboxOrder,
   };
 });

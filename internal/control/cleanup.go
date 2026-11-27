@@ -2,7 +2,6 @@ package control
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/slimslenderslacks/work/internal/project"
 )
@@ -22,15 +21,22 @@ import (
 // best find nothing to commit, and the user's next step is `:archive`, not
 // another cleanup. Re-requesting a cleanup that is already in flight is
 // harmless — the flag is simply still set, and the daemon dedups the dispatch.
-func Cleanup(projectPath string) (string, error) {
+//
+// opts may add a [Check], and [ReportNoop]: a request already in flight is
+// then left as is instead of rewritten.
+func Cleanup(projectPath string, opts ...Option) (string, error) {
 	if projectPath == "" {
 		return "", errors.New("no work stream selected")
 	}
 	name := DisplayName(projectPath)
+	o := collect(opts)
 	var refusal error
-	err := project.Update(projectPath, project.WriterAgent, func(p *project.Project) bool {
+	err := o.update(projectPath, project.WriterAgent, func(p *project.Project) bool {
 		if p.Archive {
-			refusal = fmt.Errorf("%s is already cleaned up — run :archive", name)
+			refusal = refuse(ErrState, "%s is already cleaned up — run :archive", name)
+			return false
+		}
+		if p.Cleanup && o.noopNow() {
 			return false
 		}
 		p.Cleanup = true

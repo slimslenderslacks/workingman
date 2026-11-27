@@ -4,7 +4,9 @@
 // budgets. The GUI never calls GitHub; it links out. The model is
 // secondary.js (wm.sv).
 //
-// Read-only: "Poll now" is drawn disabled with its TUI command (P.3).
+// "Poll now" is the project view's :review (P.4): enabled on an idle
+// project for a session with the write scope, else drawn disabled with its
+// TUI command.
 "use strict";
 
 (function () {
@@ -54,14 +56,30 @@
     const now = Date.now();
     // The project view's :review button, with the TUI's refusal text.
     const review = wm.pv.projectActions(project).find((a) => a.command === ":review");
-    const poll = wm.disabledAction("Poll now", review.command, review.refusal);
+    const note = h("span", { class: "small" });
+    const poll = wm.writeAction("Poll now", review.command, Object.assign({}, review, {
+      title: ":review in the TUI",
+      onclick: async (ev) => {
+        const b = ev && ev.target;
+        if (b) b.setAttribute("disabled", "");
+        try {
+          const res = await wm.projectAction(project, "review", {});
+          note.className = "small ok";
+          note.textContent = " " + wm.pv.actionDone("review", res);
+        } catch (e) {
+          note.className = "small error";
+          note.textContent = " " + wm.actionError(e);
+          if (b) b.removeAttribute("disabled");
+        }
+      },
+    }));
     const cards = pulls.map((pr) => drawCard(sv.pullCard(pr, tasks, now), project.id));
     return h("div", { class: "pulls" },
       h("div", { class: "crumbs muted small" }, wm.link("/projects", "Projects"), " / ", wm.link("/projects/" + enc(project.id), project.work_stream), " / pull requests"),
       h("div", { class: "page-head" },
         h("h1", {}, "Pull requests · ", project.work_stream),
         h("span", { class: "muted small" }, "GET /api/v1/projects/{id}/pulls · pr.updated")),
-      h("div", { class: "actions" }, poll, h("span", { class: "muted small" }, " enabled only on idle; writes review_now: true")),
+      h("div", { class: "actions" }, poll, h("span", { class: "muted small" }, " enabled only on idle; writes review_now: true"), note),
       ...(cards.length ? cards : [h("p", { class: "notice" }, sv.pullsNote(project))]),
       h("p", { class: "muted small" },
         "The GUI never calls GitHub itself: the state is project.yaml pull_requests[] plus the daemon's review_poll. ",

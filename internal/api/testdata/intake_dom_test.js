@@ -87,12 +87,13 @@ const input = (main, aria) => main.find((e) => e.getAttribute("aria-label") === 
   await settle();
 
   // The project view: Queue intake and + New project are links to their
-  // forms; the other actions stay disabled.
+  // forms; the project actions are buttons (actions_dom_test.js drives
+  // them); the shells stay disabled.
   const qi = linkTo(main, "/projects/p_0.gui-api/intake");
   assert.ok(qi && qi.textContent === "Queue intake", "Queue intake is not a link to the intake form");
   assert.ok(linkTo(main, "/new-project"), "+ New project is not a link");
-  for (const b of buttons(main)) assert.ok(b.disabled, label(b) + " is enabled");
-  assert.ok(byLabel(main, "Stop"), "Stop is still drawn, disabled");
+  assert.ok(byLabel(main, "Open shell ▾").disabled, "Open shell is enabled");
+  assert.ok(byLabel(main, "Stop") && !byLabel(main, "Stop").disabled, "Stop is not enabled with the write scope");
 
   // ---- the intake pane ----
   await page.navigate("/projects/p_0.gui-api/intake");

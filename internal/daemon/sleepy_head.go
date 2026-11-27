@@ -11,6 +11,7 @@ import (
 
 	"github.com/slimslenderslacks/work/internal/agent"
 	"github.com/slimslenderslacks/work/internal/channels"
+	"github.com/slimslenderslacks/work/internal/control"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/prompts"
 	"github.com/slimslenderslacks/work/internal/runner"
@@ -38,7 +39,7 @@ import (
 const (
 	// CatchupMarker is the file, created beside a project.yaml, that asks the
 	// daemon to fire that project's cron callback once immediately.
-	CatchupMarker = "catchup-request"
+	CatchupMarker = control.CatchupMarker
 
 	// sleepyHeadSessionKey is the session-map key of the (single) sleepy-head
 	// agent. Like the workingman agent it belongs to no project.

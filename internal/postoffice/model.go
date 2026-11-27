@@ -56,6 +56,7 @@ const (
 	ResponderAgent    = "agent"
 
 	ViaTUI      = "tui"
+	ViaGUI      = "gui" // the browser GUI, through the daemon's API
 	ViaSlack    = "slack"
 	ViaSignal   = "signal"
 	ViaWhatsApp = "whatsapp"
@@ -268,7 +269,7 @@ func firstLine(s string, n int) string {
 // Responder says who closed a request with an answer (§2.7).
 type Responder struct {
 	Kind string `json:"kind"`           // operator | agent
-	Via  string `json:"via"`            // tui | slack | signal | whatsapp | step-up
+	Via  string `json:"via"`            // tui | gui | slack | signal | whatsapp | step-up
 	Name string `json:"name,omitempty"` // display name, when the channel knows it
 	// Chat is the channel chat the answer came from, so the Dispatcher can
 	// skip that delivery when it sends closing notes (§5.2).

@@ -160,6 +160,40 @@ test("intake: hints follow the daemon's routing; names are checked as the server
   assert.deepEqual(g.processed.map((r) => r.name), ["b"]);
 });
 
+test("inbox: senders as the TUI shows them, closings, order", () => {
+  assert.equal(sv.sender({ agent: "task", task: "fix-ci", sandbox: "x", project: "/o/workingman-messaging/project.yaml" }), "task fix-ci (workingman-messaging)");
+  assert.equal(sv.sender({ agent: "step-up", sandbox: "step-up" }), "step-up");
+  assert.equal(sv.sender({ agent: "workingman", sandbox: "workingman-agent" }), "workingman agent");
+  assert.equal(sv.sender({ sandbox: "orphan" }), "orphan");
+  assert.equal(sv.closedText({ outcome: "answered", option: "deny", response: "deny", responder: { via: "slack" } }), "answered via slack: deny");
+  assert.equal(sv.closedText({ outcome: "answered", response: "use staging", responder: { via: "gui" } }), "answered via gui: use staging");
+  assert.equal(sv.closedText({ outcome: "cancelled", reason: "not needed" }), "cancelled — not needed");
+  assert.equal(sv.closedText({ outcome: "expired" }), "expired");
+  assert.equal(sv.closedText(null), "");
+
+  const now = Date.parse("2026-11-26T12:00:00Z");
+  const req = { id: "m1", kind: "request", state: "open", from: { agent: "step-up", sandbox: "step-up" }, subject: "allow?", body: "CHANGE: x", options: ["approve", "deny"], expires_at: "2026-11-26T13:00:00Z", created_at: "2026-11-26T11:00:00Z" };
+  let it = sv.inboxItem(req, now);
+  assert.ok(it.open && it.canReply && !it.canDismiss && it.stepUp);
+  assert.deepEqual(it.options, ["approve", "deny"]);
+  assert.equal(it.expires, "in 1h00");
+  it = sv.inboxItem(Object.assign({}, req, { expires_at: "2026-11-26T11:59:00Z" }), now);
+  assert.ok(!it.open);
+  assert.equal(it.refusal, "this message has expired");
+  it = sv.inboxItem({ id: "m2", kind: "notification", state: "open", from: { agent: "workingman" }, options: [] }, now);
+  assert.ok(it.open && it.canDismiss && !it.canReply && !it.stepUp);
+  it = sv.inboxItem(Object.assign({}, req, { state: "closed", resolution: { outcome: "answered", option: "approve", responder: { via: "tui" } } }), now);
+  assert.ok(!it.open);
+  assert.equal(it.refusal, "closed: answered via tui: approve");
+
+  const order = sv.inboxOrder([
+    { id: "old-closed", state: "closed", created_at: "2026-11-26T09:00:00Z" },
+    { id: "old-open", state: "open", created_at: "2026-11-26T08:00:00Z" },
+    { id: "new-open", state: "open", created_at: "2026-11-26T10:00:00Z" },
+  ]);
+  assert.deepEqual(order.map((m) => m.id), ["new-open", "old-open", "old-closed"]);
+});
+
 let failed = 0;
 for (const t of tests) {
   try {

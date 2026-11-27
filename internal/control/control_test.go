@@ -70,12 +70,12 @@ func TestDisplayName(t *testing.T) {
 
 func TestEmptyPathIsRefused(t *testing.T) {
 	for name, fn := range map[string]func(string) (string, error){
-		"Stop":       Stop,
-		"Start":      Start,
-		"SummonWolf": SummonWolf,
-		"Cleanup":    Cleanup,
-		"Hide":       Hide,
-		"Show":       Show,
+		"Stop":       func(p string) (string, error) { return Stop(p) },
+		"Start":      func(p string) (string, error) { return Start(p) },
+		"SummonWolf": func(p string) (string, error) { return SummonWolf(p) },
+		"Cleanup":    func(p string) (string, error) { return Cleanup(p) },
+		"Hide":       func(p string) (string, error) { return Hide(p) },
+		"Show":       func(p string) (string, error) { return Show(p) },
 		"Review": func(p string) (string, error) {
 			n, _, err := Review(p)
 			return n, err

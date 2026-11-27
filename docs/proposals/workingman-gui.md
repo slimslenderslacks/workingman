@@ -2399,10 +2399,12 @@ data with no write scope granted.
 
 ### P.4 Write actions
 
-**Status: first slice implemented** (the write rules of §A.4.1, the
-`write`/`answer` scopes, CSRF and `Content-Type` on every non-`GET`, and the
-create-only actions of §A.4.3). The rest of the phase, from inbox answers
-on, is not. What was built:
+**Status: first two slices implemented.** The first: the write rules of
+§A.4.1, the `write`/`answer` scopes, CSRF and `Content-Type` on every
+non-`GET`, and the create-only actions of §A.4.3. The second: inbox
+answers (§A.4.5) and the project actions of §A.4.2 except `archive`. Task
+retry, `save-sandbox` and `PATCH` task are not built yet. What the first
+slice built:
 
 - **Writes go through `internal/control`.** `control.NewProject` makes
   `<root>/<name>/` and writes `project.md`; `control.QueueIntake` writes
@@ -2473,10 +2475,73 @@ on, is not. What was built:
   checks) is in `secondary.js`; `intake_dom_test.js` drives both forms in
   the fake DOM, including a read-only session that sends nothing.
 
-What the rest of the phase still needs: everything from inbox answers on,
-in the order below. "A concurrent TUI write produces a `412`" can only be
-shown once a read-modify-write action (`stop`, task edits) exists; this
-slice's one If-Match action is withdraw.
+What the second slice built:
+
+- **Inbox answers.** `POST /api/v1/messages/{id}/answer` `{"option"}` or
+  `{"response"}` (exactly one) and `POST …/dismiss` → `202 {"message",
+  "write", "expect": ["message.closed"]}`. Each is one
+  `postoffice.Store.Claim` with `Responder{kind: operator, via: "gui"}`,
+  the same call the TUI inbox makes; `postoffice.ViaGUI = "gui"` is the
+  only schema addition. An option must be one of the request's own
+  (`400` otherwise) and is sent as both `option` and `response`, as the
+  TUI's `1`-`9` keys send it, so Step-Up's `option == "approve"` check
+  holds. A request is answered and a notification dismissed (`409
+  invalid_state` the other way round); a message to an agent, or one
+  pruned, is `404`. The first claim wins: a message already closed, here
+  or by the TUI or a channel, is `409 conflict` with the message and its
+  winning resolution in `error.current`. These need the `answer` scope, not
+  `write`.
+- **Project actions.** `POST /api/v1/projects/{id}/actions/{action}` for
+  `stop`, `start`, `wolf`, `review`, `cleanup`, `hide`, `show` and
+  `catchup` → `202 {"project", "write": {"path", "fields"}, "expect"}` with
+  the project's new etag as `ETag`, `"mode": "start"|"kick"` for review,
+  or `200 "noop": true`. Each calls the TUI's own function in
+  `internal/control`, so the preconditions and refusal text are the TUI's
+  (`409 invalid_state`, with the project in `error.current`). `archive`
+  is a `404` that says to use `:archive` (R.4 Q11).
+- **If-Match, under the lock.** `control` actions take options the TUI
+  does not pass. `Check` runs on project.yaml's bytes inside
+  `project.UpdateIf`, which holds the per-path lock from the read to the
+  rename, so the API compares the etag with the bytes the action then
+  mutates. `stop`, `start`, `wolf` and `review` read and write fields the
+  daemon or an agent also writes: without `If-Match` they are `428
+  precondition_required`. `cleanup`, `hide`, `show` and `catchup` check it
+  when it is sent. A TUI `:cleanup` (or a hand edit) between the GUI's read
+  and its `stop` is a `412` with the project as it is now; this is the
+  phase's "concurrent TUI write" criterion, tested end to end.
+- **No-ops.** `ReportNoop` makes `cleanup` on a project already asking for
+  it, `hide` on a hidden one, `show` on a shown one, and a `review` kick
+  whose `review_now` is still pending answer `200 "noop": true` with no
+  write (§A.4.1's idempotency by construction). The TUI keeps its
+  refusals for those cases.
+- **wolf.** `{"reason"}` (at most 500 bytes; only wolf takes one) becomes
+  `blocked_reason` when the project has none. With no reason, the default is
+  `control.SummonReasonGUI`, the TUI's text with "via the GUI" in it. An
+  existing diagnosis is kept, as in the TUI.
+- **catchup.** `control.RequestCatchup` creates `<project>/catchup-request`,
+  the marker `orch catchup` writes, with the hard-link create the intake
+  writer uses. A marker still waiting for the daemon is a `200` no-op, and
+  a project without `cron` is `409 invalid_state`. The daemon's
+  `handleCatchup` is unchanged; whether anything fires is in the audit log
+  (`catchup_fired` or `catchup_skipped`).
+- **GUI.** The project header's Stop/Start, Wolf…, Review (Poll PR now),
+  Cleanup, Hide/Show and Catch up (cron projects only) are enabled for a
+  session with `write`. They send the project's etag as `If-Match`, redraw
+  from the response, and show what to watch for. On a `412` they take
+  `error.current` and say the project changed. Wolf… opens a confirm row
+  with an optional reason, or shows the `blocked_reason` it will keep. The
+  pull-request view's Poll now is the same `review`. `web/inbox.js`
+  replaces the inbox placeholder. Open messages come first, and each
+  message's body is in a monospace block. A step-up request is flagged
+  ("approving lets Step-Up apply exactly the CHANGE line below") and
+  answered one at a time, with no "approve all". Each request has its option
+  buttons and a free-text reply, and each notification has Dismiss. A lost
+  race shows the winning answer. Without `answer`, the inbox controls are
+  disabled with their TUI keys. Open shell, the task strip's buttons and
+  archive stay disabled. `actions_dom_test.js` drives both in the fake DOM.
+
+What the rest of the phase still needs: task retry R1 and `save-sandbox`
+(§A.4.4), then `PATCH` task with the `taskgraph.Load` check.
 
 **Scope: M.**
 

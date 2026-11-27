@@ -27,9 +27,10 @@ import (
 
 // Error codes of the write endpoints (§A.4.1).
 const (
-	CodePreconditionFailed = "precondition_failed"
-	CodeConflict           = "conflict"
-	CodeInvalidState       = "invalid_state"
+	CodePreconditionFailed   = "precondition_failed"
+	CodePreconditionRequired = "precondition_required"
+	CodeConflict             = "conflict"
+	CodeInvalidState         = "invalid_state"
 )
 
 // Errors an [Actions] method returns to pick the response status, beside
@@ -48,6 +49,9 @@ var (
 	// ErrPreconditionFailed is a 412: If-Match names an etag the resource
 	// no longer has.
 	ErrPreconditionFailed = errors.New("precondition failed")
+	// ErrPreconditionRequired is a 428: the action reads a field the daemon
+	// or an agent may also write, so it needs If-Match.
+	ErrPreconditionRequired = errors.New("precondition required")
 )
 
 // currentError carries the resource as it is now with a write's error, for
@@ -106,6 +110,52 @@ type QueueIntakeRequest struct {
 	Body string `json:"body"`
 }
 
+// Project actions (§A.4.2): POST /projects/{id}/actions/{action}. archive is
+// left out on purpose (R.4 Q11): it is the one destructive action, and stays
+// in the TUI.
+const (
+	ActionStop    = "stop"
+	ActionStart   = "start"
+	ActionWolf    = "wolf"
+	ActionReview  = "review"
+	ActionCleanup = "cleanup"
+	ActionHide    = "hide"
+	ActionShow    = "show"
+	ActionCatchup = "catchup"
+)
+
+// ProjectActions are the project actions the API serves, in the order of
+// §A.4.2's table.
+var ProjectActions = []string{ActionStop, ActionStart, ActionWolf, ActionReview, ActionCleanup, ActionHide, ActionShow, ActionCatchup}
+
+// IfMatchRequired reports whether a project action needs If-Match (§A.4.1):
+// those that read and then write a field the daemon or an agent also writes.
+// The others take it when sent.
+func IfMatchRequired(action string) bool {
+	switch action {
+	case ActionStop, ActionStart, ActionWolf, ActionReview:
+		return true
+	}
+	return false
+}
+
+// MaxWolfReason bounds a wolf action's reason.
+const MaxWolfReason = 500
+
+// ProjectActionRequest is a project action's body: {} for every action but
+// wolf, which may carry the blocked_reason to write when the project has
+// none.
+type ProjectActionRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// AnswerRequest is the POST /messages/{id}/answer body (§A.4.5): one of the
+// request's options, or a free-text response.
+type AnswerRequest struct {
+	Option   string `json:"option,omitempty"`
+	Response string `json:"response,omitempty"`
+}
+
 // WriteRequest is what every write action gets beside its own arguments.
 type WriteRequest struct {
 	// IfMatch is the If-Match header ("" when absent): the etag the client
@@ -126,6 +176,13 @@ type Actions interface {
 	QueueIntake(ctx context.Context, w WriteRequest, project string, req QueueIntakeRequest) (WriteResult, error)
 	// WithdrawIntake withdraws a pending intake request.
 	WithdrawIntake(ctx context.Context, w WriteRequest, project, name string) (WriteResult, error)
+	// ProjectAction runs one of [ProjectActions] on a project's
+	// project.yaml (or, for catchup, beside it).
+	ProjectAction(ctx context.Context, w WriteRequest, project, action string, req ProjectActionRequest) (WriteResult, error)
+	// AnswerMessage answers an operator request in post-office.
+	AnswerMessage(ctx context.Context, w WriteRequest, id string, req AnswerRequest) (WriteResult, error)
+	// DismissMessage dismisses an operator notification in post-office.
+	DismissMessage(ctx context.Context, w WriteRequest, id string) (WriteResult, error)
 }
 
 // MatchETag reports whether an If-Match header admits a resource whose etag
@@ -253,6 +310,8 @@ func writeErrStatus(err error) (int, string) {
 		return http.StatusNotFound, CodeNotFound
 	case errors.Is(err, ErrPreconditionFailed):
 		return http.StatusPreconditionFailed, CodePreconditionFailed
+	case errors.Is(err, ErrPreconditionRequired):
+		return http.StatusPreconditionRequired, CodePreconditionRequired
 	case errors.Is(err, ErrConflict):
 		return http.StatusConflict, CodeConflict
 	case errors.Is(err, ErrInvalidState):
@@ -541,4 +600,76 @@ func (s *Server) handleWithdrawIntake(r *http.Request, w WriteRequest) (WriteRes
 		return WriteResult{}, err
 	}
 	return act.WithdrawIntake(r.Context(), w, r.PathValue("id"), r.PathValue("name"))
+}
+
+// projectActionHandler serves POST /projects/{id}/actions/{action}: one
+// write handler per action, so each is audited and replayed under its own
+// name. An action the API does not serve (archive among them) is a 404.
+func (s *Server) projectActionHandler() http.HandlerFunc {
+	hs := map[string]http.HandlerFunc{}
+	for _, a := range ProjectActions {
+		hs[a] = s.write(a, ScopeWrite, func(r *http.Request, w WriteRequest) (WriteResult, error) {
+			return s.handleProjectAction(r, w, a)
+		})
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		a := r.PathValue("action")
+		h, ok := hs[a]
+		if !ok {
+			msg := "no project action " + strconv.Quote(a) + "; the API serves " + strings.Join(ProjectActions, ", ")
+			if a == "archive" {
+				msg = "archive is not served by the API: it is destructive and multi-step; run :archive in the TUI"
+			}
+			writeError(w, http.StatusNotFound, CodeNotFound, msg)
+			return
+		}
+		h(w, r)
+	}
+}
+
+func (s *Server) handleProjectAction(r *http.Request, w WriteRequest, action string) (WriteResult, error) {
+	act := s.actions()
+	if act == nil {
+		return WriteResult{}, fmt.Errorf("%w: this API serves no writes", ErrUnavailable)
+	}
+	var req ProjectActionRequest
+	if err := decodeBody(r, &req); err != nil {
+		return WriteResult{}, err
+	}
+	switch {
+	case req.Reason != "" && action != ActionWolf:
+		return WriteResult{}, fmt.Errorf("%w: only wolf takes a reason", ErrInvalid)
+	case len(req.Reason) > MaxWolfReason:
+		return WriteResult{}, fmt.Errorf("%w: the reason is longer than %d bytes", ErrInvalid, MaxWolfReason)
+	case IfMatchRequired(action) && strings.TrimSpace(w.IfMatch) == "":
+		return WriteResult{}, fmt.Errorf("%w: %s reads and writes fields the daemon also writes; send If-Match with the project's etag", ErrPreconditionRequired, action)
+	}
+	return act.ProjectAction(r.Context(), w, r.PathValue("id"), action, req)
+}
+
+func (s *Server) handleAnswerMessage(r *http.Request, w WriteRequest) (WriteResult, error) {
+	act := s.actions()
+	if act == nil {
+		return WriteResult{}, fmt.Errorf("%w: this API serves no writes", ErrUnavailable)
+	}
+	var req AnswerRequest
+	if err := decodeBody(r, &req); err != nil {
+		return WriteResult{}, err
+	}
+	if (strings.TrimSpace(req.Option) == "") == (strings.TrimSpace(req.Response) == "") {
+		return WriteResult{}, fmt.Errorf("%w: send one of option or response", ErrInvalid)
+	}
+	return act.AnswerMessage(r.Context(), w, r.PathValue("id"), req)
+}
+
+func (s *Server) handleDismissMessage(r *http.Request, w WriteRequest) (WriteResult, error) {
+	act := s.actions()
+	if act == nil {
+		return WriteResult{}, fmt.Errorf("%w: this API serves no writes", ErrUnavailable)
+	}
+	var req struct{}
+	if err := decodeBody(r, &req); err != nil {
+		return WriteResult{}, err
+	}
+	return act.DismissMessage(r.Context(), w, r.PathValue("id"))
 }

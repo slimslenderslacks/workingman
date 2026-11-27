@@ -2,7 +2,6 @@ package control
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/slimslenderslacks/work/internal/project"
 )
@@ -22,31 +21,37 @@ import (
 //
 // Hiding an already-hidden stream is refused rather than rewritten: it would
 // be a no-op file write whose only effect is a misleading "hid X"
-// confirmation.
-func Hide(projectPath string) (string, error) {
-	return setHide(projectPath, true)
+// confirmation. With [ReportNoop] it is reported instead; opts may also add a
+// [Check].
+func Hide(projectPath string, opts ...Option) (string, error) {
+	return setHide(projectPath, true, opts)
 }
 
 // Show clears `hide:`, putting the work stream back in the gallery. Like Hide
-// it writes as `daemon`, and showing a stream that is not hidden is refused.
-func Show(projectPath string) (string, error) {
-	return setHide(projectPath, false)
+// it writes as `daemon`, and showing a stream that is not hidden is refused
+// (or, with [ReportNoop], reported).
+func Show(projectPath string, opts ...Option) (string, error) {
+	return setHide(projectPath, false, opts)
 }
 
 // setHide is the shared body of Hide/Show: load, refuse the no-op, flip the
 // flag, save.
-func setHide(projectPath string, hide bool) (string, error) {
+func setHide(projectPath string, hide bool, opts []Option) (string, error) {
 	if projectPath == "" {
 		return "", errors.New("no work stream selected")
 	}
 	name := DisplayName(projectPath)
+	o := collect(opts)
 	var refusal error
-	err := project.Update(projectPath, project.WriterDaemon, func(p *project.Project) bool {
+	err := o.update(projectPath, project.WriterDaemon, func(p *project.Project) bool {
 		if p.Hide == hide {
+			if o.noopNow() {
+				return false
+			}
 			if hide {
-				refusal = fmt.Errorf("%s is already hidden", name)
+				refusal = refuse(ErrState, "%s is already hidden", name)
 			} else {
-				refusal = fmt.Errorf("%s is not hidden", name)
+				refusal = refuse(ErrState, "%s is not hidden", name)
 			}
 			return false
 		}

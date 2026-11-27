@@ -2,7 +2,6 @@ package control
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/slimslenderslacks/work/internal/project"
 )
@@ -19,19 +18,20 @@ import (
 //
 // A project that is already stopped is refused: re-stopping would overwrite
 // StoppedFrom with `stopped` itself, losing the status Start should restore.
-func Stop(projectPath string) (string, error) {
+// opts may add a [Check].
+func Stop(projectPath string, opts ...Option) (string, error) {
 	if projectPath == "" {
 		return "", errors.New("no work stream selected")
 	}
 	name := DisplayName(projectPath)
 	var refusal error
-	err := project.Update(projectPath, project.WriterAgent, func(p *project.Project) bool {
+	err := collect(opts).update(projectPath, project.WriterAgent, func(p *project.Project) bool {
 		if p.Unpopulated() {
-			refusal = fmt.Errorf("%s has no status yet to stop", name)
+			refusal = refuse(ErrState, "%s has no status yet to stop", name)
 			return false
 		}
 		if p.Status == project.StatusStopped {
-			refusal = fmt.Errorf("%s is already stopped", name)
+			refusal = refuse(ErrState, "%s is already stopped", name)
 			return false
 		}
 		p.StoppedFrom = p.Status
@@ -56,15 +56,16 @@ func Stop(projectPath string) (string, error) {
 // nothing further if `done`).
 //
 // Refused on anything but a stopped project — there is nothing to resume.
-func Start(projectPath string) (string, error) {
+// opts may add a [Check].
+func Start(projectPath string, opts ...Option) (string, error) {
 	if projectPath == "" {
 		return "", errors.New("no work stream selected")
 	}
 	name := DisplayName(projectPath)
 	var refusal error
-	err := project.Update(projectPath, project.WriterAgent, func(p *project.Project) bool {
+	err := collect(opts).update(projectPath, project.WriterAgent, func(p *project.Project) bool {
 		if p.Status != project.StatusStopped {
-			refusal = fmt.Errorf("%s is not stopped (status %q)", name, p.Status)
+			refusal = refuse(ErrState, "%s is not stopped (status %q)", name, p.Status)
 			return false
 		}
 		// StoppedFrom should always be set by Stop, but a hand-edited file

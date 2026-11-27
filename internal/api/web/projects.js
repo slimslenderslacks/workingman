@@ -3,9 +3,12 @@
 // commit-queue lane and selected-task strip. The model is graph.js (wm.pv);
 // this file fetches, subscribes and draws.
 //
-// Writes: "+ New project" and "Queue intake" open their forms (intake.js)
-// for a session with the write scope (P.4). Every other action button is
-// drawn disabled and names the TUI command that does it today.
+// Writes (P.4), for a session with the write scope: "+ New project" and
+// "Queue intake" open their forms (intake.js); the header's Stop/Start,
+// Wolf…, Review, Cleanup, Hide/Show and Catch up are project actions
+// (POST /projects/{id}/actions/{action}) sent with the project's etag as
+// If-Match. The task strip's buttons, archive and the shells stay disabled
+// and name the TUI command that does them today.
 "use strict";
 
 (function () {
@@ -146,6 +149,11 @@
     let selected = new URLSearchParams(location.search).get("task") || "";
     const pending = []; // events that arrive while loading
     const header = h("div", { class: "pv-header" });
+    // actionNote is the last action's outcome; wolfOpen shows the wolf's
+    // confirm row. Both outlive a redraw of the header.
+    const actionNote = h("p", { class: "small action-note" });
+    let wolfOpen = false;
+    const wolfReason = h("input", { type: "text", "aria-label": "wolf reason", placeholder: "optional: what do you need help with?", maxlength: 500 });
     const banner = h("div");
     const graphBox = h("div", { class: "graph-scroll" });
     const laneBox = h("div", { class: "lane" });
@@ -212,13 +220,63 @@
           wm.status(p.status),
           h("span", { class: "muted small meta" }, meta.map(([k, v], i) => [i ? " · " : "", k ? [k, " "] : null, v]))
         ),
-        h("div", { class: "actions" }, pv.projectActions(p).map((a) => (a.href ? wm.writeAction(a.label, a.command, a) : wm.disabledAction(a.label, a.command, a.refusal, a.danger))))
+        h("div", { class: "actions" }, pv.projectActions(p).map(actionButton)),
+        ...(wolfOpen ? [wolfConfirm(p)] : []),
+        actionNote
       );
       const notes = [];
       if (p.blocked_reason) notes.push(h("p", { class: "notice error" }, "blocked: ", p.blocked_reason));
       if (p.load_error) notes.push(h("p", { class: "notice error" }, "project.yaml: ", p.load_error));
       for (const e of (state.graph && state.graph.errors) || []) notes.push(h("p", { class: "notice warn" }, "task graph: ", e));
       banner.replaceChildren(...notes);
+    }
+
+    // actionButton draws one header action: a link to its form, a project
+    // action the API serves, or the disabled button with its TUI command.
+    function actionButton(a) {
+      if (a.href) return wm.writeAction(a.label, a.command, a);
+      if (!a.action) return wm.disabledAction(a.label, a.command, a.refusal, a.danger);
+      const o = Object.assign({}, a, { title: a.command + " in the TUI" });
+      o.onclick = a.action === "wolf" ? () => ((wolfOpen = !wolfOpen), drawHeader()) : (ev) => run(a.action, {}, ev && ev.target);
+      return wm.writeAction(a.label, a.command, o);
+    }
+
+    // wolfConfirm is Wolf…'s confirm row: the wolf interrupts work, so it is
+    // two clicks, with an optional reason for a project that has none.
+    function wolfConfirm(p) {
+      const keeps = p.status === "blocked" && p.blocked_reason;
+      return h("div", { class: "wolf-confirm notice warn small" },
+        "Summon the wolf: blocks ", p.work_stream, " (status: blocked) and the daemon launches the wolf agent. ",
+        keeps ? "Its blocked_reason is kept: " : "Reason, written as blocked_reason: ",
+        keeps ? h("code", {}, p.blocked_reason) : wolfReason, " ",
+        h("button", { class: "action danger", type: "button", onclick: (ev) => run("wolf", keeps ? {} : { reason: wolfReason.value.trim() }, ev && ev.target) }, "Summon wolf"), " ",
+        h("button", { class: "action", type: "button", onclick: () => ((wolfOpen = false), drawHeader()) }, "Cancel")
+      );
+    }
+
+    // run sends a project action; the response is the project as its file
+    // now is, the daemon's reaction follows on the stream. A 412 or 409
+    // carries the project as it is now, which replaces the stale one.
+    async function run(action, body, button) {
+      if (button) button.setAttribute("disabled", "");
+      actionNote.className = "small muted action-note";
+      actionNote.textContent = action + ": sending…";
+      try {
+        const res = await wm.projectAction(state.project, action, body);
+        if (res && res.project && res.project.id) Object.assign(state.project, res.project);
+        if (action === "wolf") {
+          wolfOpen = false;
+          wolfReason.value = "";
+        }
+        actionNote.className = "small ok action-note";
+        actionNote.textContent = action + ": " + pv.actionDone(action, res);
+      } catch (e) {
+        if (e.current && e.current.id) Object.assign(state.project, e.current);
+        actionNote.className = "small error action-note";
+        actionNote.textContent = action + ": " + wm.actionError(e);
+        if (e.status === 412) refetchGraph();
+      }
+      drawHeader();
     }
 
     function drawGraph() {
