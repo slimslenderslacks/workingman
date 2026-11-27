@@ -136,6 +136,13 @@
 //     snapshot model plus the file fields the snapshot leaves out, read
 //     through api_files.go's caches (keyed on mtime and size), and the
 //     sandboxes come from a cached `sbx ls` (sbx.ListCache).
+//   - api_tasks.go: the API's task writes (§A.4.4) and host tabs
+//     (§A.4.6). Retry (option R1: the task back to ready, then a
+//     project.yaml nudge, or an unblock when the project's blocked_reason
+//     names that task alone), save-sandbox and the task edit go through
+//     internal/control with If-Match checked on the task file under its
+//     lock; open-session and open-shell call the Open* functions behind the
+//     TUI's :session, :orch and :workspace.
 //   - api_events.go: the event stream's publisher (§A.3.2). It hooks
 //     markSnapshotDirty (and a 2 s tick), rebuilds the resource model,
 //     diffs it per resource against the previous pass and publishes

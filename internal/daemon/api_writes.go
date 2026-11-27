@@ -191,7 +191,7 @@ var projectActionExpect = map[string][]string{
 	api.ActionCatchup: {"audit"},
 }
 
-func (s apiSource) ProjectAction(_ context.Context, w api.WriteRequest, id, action string, req api.ProjectActionRequest) (api.WriteResult, error) {
+func (s apiSource) ProjectAction(ctx context.Context, w api.WriteRequest, id, action string, req api.ProjectActionRequest) (api.WriteResult, error) {
 	m := s.d.model()
 	p, err := m.project(id)
 	if err != nil {
@@ -242,6 +242,9 @@ func (s apiSource) ProjectAction(_ context.Context, w api.WriteRequest, id, acti
 		res.Write.Fields = map[string]any{"hide": hide, "updated_by": "daemon"}
 	case api.ActionCatchup:
 		return s.catchup(id, path, w)
+	case api.ActionOpenSession, api.ActionOpenShell:
+		// Not a file write: a tab in the daemon's terminal (§A.4.6).
+		return s.projectTab(ctx, path, action, req.Where)
 	default:
 		return api.WriteResult{}, fmt.Errorf("%w: no project action %q", api.ErrNotFound, action)
 	}

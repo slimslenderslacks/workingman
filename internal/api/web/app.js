@@ -134,6 +134,7 @@
     login: (code) => request("POST", "/session", { code }),
     logout: () => request("DELETE", "/session"),
     post: (path, body, opts) => write("POST", path, body === undefined ? {} : body, opts),
+    patch: (path, body, opts) => write("PATCH", path, body, opts),
     del: (path, opts) => write("DELETE", path, undefined, opts),
     idemKey,
   };
@@ -162,9 +163,18 @@
   wm.projectAction = (project, action, body) =>
     wm.api.post("/projects/" + encodeURIComponent(project.id) + "/actions/" + action, body || {}, { ifMatch: project.etag });
 
-  // actionError is a refused write's status-line text.
-  wm.actionError = (e) => {
-    if (e && e.status === 412) return "the project changed since it was loaded (" + e.message + "); it is reloaded: check it and try again";
+  // taskAction runs a task action (POST …/tasks/{name}/actions/{a},
+  // §A.4.4, §A.4.6) with the task's etag as If-Match; editTask sends a
+  // merge-patch of its inputs (PATCH …/tasks/{name}) the same way. A 412 or
+  // 409 rejects with the task as it is now in current.
+  const taskPath = (task) => "/projects/" + encodeURIComponent(task.project) + "/tasks/" + encodeURIComponent(task.name);
+  wm.taskAction = (task, action, body) => wm.api.post(taskPath(task) + "/actions/" + action, body || {}, { ifMatch: task.etag });
+  wm.editTask = (task, patch) => wm.api.patch(taskPath(task), patch, { ifMatch: task.etag });
+
+  // actionError is a refused write's status-line text; what names the
+  // resource a 412 is about ("project" when not given).
+  wm.actionError = (e, what) => {
+    if (e && e.status === 412) return "the " + (what || "project") + " changed since it was loaded (" + e.message + "); it is reloaded: check it and try again";
     if (e instanceof APIError) return e.status + " " + (e.code || "") + ": " + e.message;
     return String((e && e.message) || e);
   };

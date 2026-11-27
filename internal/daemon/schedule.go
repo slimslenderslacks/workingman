@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/slimslenderslacks/work/internal/control"
 	"github.com/slimslenderslacks/work/internal/project"
 	"github.com/slimslenderslacks/work/internal/prompts"
 	"github.com/slimslenderslacks/work/internal/task"
@@ -553,7 +554,7 @@ func stuckReason(g *taskgraph.Graph) string {
 			stuck = append(stuck, fmt.Sprintf("%s (%s)", t.Name, t.Status))
 		}
 	}
-	reason := "no ready tasks remain but project is not fully committed"
+	reason := control.StuckReasonPrefix
 	if len(stuck) > 0 {
 		reason += ": " + strings.Join(stuck, ", ")
 	}

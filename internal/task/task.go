@@ -454,8 +454,26 @@ func Parse(path string, data []byte) (*Task, error) {
 // task file can't lose each other's change. fn must not save or update the
 // same path itself: the lock is not reentrant.
 func Update(path string, fn func(*Task) bool) error {
+	return UpdateIf(path, nil, fn)
+}
+
+// UpdateIf is Update with a check: under the write lock, check runs on the
+// file's bytes before they are parsed, and an error from it is returned
+// without fn running or anything being written. The API's If-Match on a task
+// is such a check (docs/proposals/workingman-gui.md §A.4.1). A nil check is
+// Update.
+func UpdateIf(path string, check func(data []byte) error, fn func(*Task) bool) error {
 	defer pathlock.Lock(path)()
-	t, err := Load(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if check != nil {
+		if err := check(data); err != nil {
+			return err
+		}
+	}
+	t, err := Parse(path, data)
 	if err != nil {
 		return err
 	}

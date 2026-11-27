@@ -1036,6 +1036,11 @@ with `If-Match: <task etag>` and body `{"reset_attempts": true, "note": "optiona
   checkbox for the wolf's other option, "reset worktree to the project branch"
   (`git reset --hard <branch>`). That runs a command, not a file write, so it is
   deferred to a later phase.
+- *As built (P.4):* R1, in `control.RetryTask`. The retry is also refused
+  while the task has a live session. When the project changes between the
+  task write and the project write, the dispatch is deferred rather than
+  forced. The reset-worktree checkbox is not shown, because the reset is not
+  built. `note` goes to the `api_task_retry` audit line. See §P.4.
 
 **Option R2: a daemon-side retry.** The API calls an exported
 `Daemon.RetryTask(path)`. That function does `resetForRetry` (with an optional
@@ -1048,7 +1053,7 @@ Other task endpoints:
 
 | Endpoint | Body | Write | Notes |
 |---|---|---|---|
-| `PATCH /api/v1/projects/{id}/tasks/{name}` | JSON merge-patch of **`description`, `depends_on`, `touches`, `areas`** only | `tasks/<name>.yaml` via `task.Save` | `If-Match` required. Only allowed on `ready`/`failed`/`blocked`, never on `running`. The server runs `taskgraph.Load` on the result and refuses (`422`) if the edit would create a cycle or an unknown dependency. A file that does that would otherwise block the project with `taskgraph_error`. |
+| `PATCH /api/v1/projects/{id}/tasks/{name}` | JSON merge-patch of **`description`, `depends_on`, `touches`, `areas`** only | `tasks/<name>.yaml` via `task.UpdateIf` | `If-Match` required. Only allowed on `ready`/`failed`/`blocked`, never on `running`. The server runs `taskgraph.Load` on the result and refuses (`422`) if the edit would create a cycle or an unknown dependency. A file that does that would otherwise block the project with `taskgraph_error`. *As built:* also `422` for a touches glob or areas tag the scheduler would treat as exclusive. |
 | `POST …/tasks/{name}/actions/save-sandbox` | `{"save": true}` | `save_sandbox: true/false` | keep the sandbox for inspection |
 | `POST …/tasks` | `{"description": "…"}` | `tasks/<stem>.yaml` with blank `name` (a **seed**), then the project dispatch nudge | the planner names and fits it, the same as a human-added seed (survey §4.4). Prefer intake for anything non-trivial. |
 
@@ -1093,6 +1098,11 @@ equivalents:
 These open a tab in the user's terminal on the same machine. That is useful
 when the GUI runs in a browser on that machine. The GUI should label them
 "opens in your terminal". In-browser terminals are §A.5.3.
+
+*As built (P.4):* the endpoints call exactly these functions, so no
+host-side change was needed. A tab that is already open is focused and
+answers `200 "noop": true`. A task without a worktree has no tabs of its own
+(`409`). The project's tabs are the shared tree.
 
 #### A.4.7 Summary: action → endpoint → file
 
@@ -2399,12 +2409,16 @@ data with no write scope granted.
 
 ### P.4 Write actions
 
-**Status: first two slices implemented.** The first: the write rules of
-§A.4.1, the `write`/`answer` scopes, CSRF and `Content-Type` on every
-non-`GET`, and the create-only actions of §A.4.3. The second: inbox
-answers (§A.4.5) and the project actions of §A.4.2 except `archive`. Task
-retry, `save-sandbox` and `PATCH` task are not built yet. What the first
-slice built:
+**Status: implemented.** Every row of §A.4.7 except `archive` works from
+the GUI. It shipped in three slices. The first: the write rules of §A.4.1,
+the `write`/`answer` scopes, CSRF and `Content-Type` on every non-`GET`, and
+the create-only actions of §A.4.3. The second: inbox answers (§A.4.5) and
+the project actions of §A.4.2 except `archive`. The third: task retry R1,
+`save-sandbox` and `PATCH` task (§A.4.4), and the host-tab helpers
+(§A.4.6). A concurrent write is a `412`, not a lost update, for project
+actions and for task writes alike, and both are tested end to end.
+
+What the first slice built:
 
 - **Writes go through `internal/control`.** `control.NewProject` makes
   `<root>/<name>/` and writes `project.md`; `control.QueueIntake` writes
@@ -2540,8 +2554,114 @@ What the second slice built:
   disabled with their TUI keys. Open shell, the task strip's buttons and
   archive stay disabled. `actions_dom_test.js` drives both in the fake DOM.
 
-What the rest of the phase still needs: task retry R1 and `save-sandbox`
-(§A.4.4), then `PATCH` task with the `taskgraph.Load` check.
+What the third slice built:
+
+- **Task retry, R1** (§A.4.4, R.4 Q2). `control.RetryTask`
+  (`internal/control/task.go`) is the wolf's "re-run it" path. It is
+  write 1, `tasks/<name>.yaml`: `status: ready`, `failure_reason` and
+  `blocked_reason` cleared, and `attempts: 0` with `reset_attempts`. Then
+  comes write 2, `project.yaml` as agent, chosen by the project's status.
+  `working` gets a re-save with no field changed (the nudge), so the daemon
+  schedules the task. `blocked` gets `status: working` and `blocked_reason`
+  cleared, but only when `control.RetryUnblocks` finds the reason names this
+  task alone: `task "<name>" …` as the daemon writes it, or the stuck-graph
+  reason listing only this task, never with a `; also: …` suffix. Any other
+  status gets no project write (`"dispatch": "deferred"`, with why). The
+  retry is refused (`409 invalid_state`, the task in `error.current`), and
+  nothing is written, in these cases:
+  - a task that is not failed or blocked (or ready with an `integration`
+    report);
+  - a stopped project;
+  - a block that covers more than this task ("summon the wolf");
+  - a task with a live session;
+  - a task the commit agent is integrating.
+
+  The project's state is read again under its lock for write 2. A project
+  that changed in between is left as it is and the dispatch is deferred. The
+  worktree is reused as is: worktree reset stays out of this phase. The
+  stuck-graph reason's prefix moved to `control.StuckReasonPrefix`, so the
+  daemon (`schedule.go: stuckReason`) and the rule share one string.
+- **Endpoints** (`internal/api/writes.go`, `internal/daemon/api_tasks.go`).
+  `POST /api/v1/projects/{id}/tasks/{name}/actions/{action}`:
+  - `retry` takes `{"reset_attempts", "note"?}` and needs `If-Match`
+    (`428` without it). It returns `202 {"task", "dispatch":
+    "nudged"|"unblocked"|"deferred", "dispatch_reason"?, "write",
+    "project_write"?, "expect"}` and logs `api_task_retry` with the dispatch
+    and the note.
+  - `save-sandbox` takes `{"save": true|false}` and checks `If-Match` when it
+    is sent. It answers `200 "noop": true` when the flag already has that
+    value.
+
+  Each action is audited as `task_<action>`, under its own name.
+- **`PATCH /api/v1/projects/{id}/tasks/{name}`** is a JSON merge-patch of
+  `description`, `depends_on`, `touches` and `areas` (`api.TaskPatch`). Any
+  other field is a `400`, so the fields agents and the daemon own cannot be
+  written through it. `"touches": null` removes the hint. `If-Match` is
+  required. `control.EditTask` runs only on a ready, failed or blocked task
+  (`409` otherwise). It copies the project's task files into a temp
+  `<work-stream>/tasks`, with the edit in place, and runs `taskgraph.Load`
+  on them. An unknown dependency, a cycle, or a touches glob or areas tag the
+  scheduler would treat as exclusive is a `422 unprocessable`, with the task
+  in `error.current` and `taskgraph`'s own text (paths are the real ones).
+  It is not a file that blocks the project with a `taskgraph_error`. An edit
+  that changes nothing is a `200` no-op.
+- **If-Match on a task, under its lock.** `task.UpdateIf`
+  (`internal/task/task.go`) is `task.Update` with a check on the file's bytes
+  under the per-path lock, as `project.UpdateIf` is for projects. The
+  task's etag (`"tk-…"`) is the hash of those bytes. A write that landed since
+  the GUI's read is a `412` with the task as it is now. That write can come
+  from the TUI, an agent, the daemon or a hand edit, and the refusal holds
+  for retry, edit and save-sandbox alike
+  (`TestAPITaskConcurrentWriteIs412`).
+- **Host tabs (§A.4.6).** No host-side change was needed. The endpoints call
+  the daemon's own `OpenInteractiveSession`, `OpenOrchDirTab`,
+  `OpenWorkspaceDirTab`, `OpenTaskSession` and `OpenTaskWorktreeDirTab`, the
+  functions behind the TUI's `:session`, `:orch` and `:workspace`:
+  - `POST …/projects/{id}/actions/open-session`;
+  - `POST …/projects/{id}/actions/open-shell` with `{"where": "orch" |
+    "workspace"}`;
+  - `POST …/tasks/{name}/actions/open-session` and `open-shell`, in the
+    task's worktree (`409` when it has none).
+
+  They answer `202 {"kind", "target", "note"}`. An already-open tab is
+  focused and answers `200 "noop": true` with `already_open`. Any other
+  failure (no workspace yet, a missing directory) is `409` with the daemon's
+  text. They need the `write` scope, like the rest. They write no file, but
+  they start a sandboxed claude.
+- **GUI.** `web/taskactions.js` (`wm.taskControls`) holds a task's controls
+  for both the project view's selected-task strip and the sandbox card:
+  - **Retry…** opens a confirm row with "reset attempts" (checked by
+    default), an optional note, and what the retry does to the project. The
+    text comes from `pv.retryHint`, which mirrors `control.RetryUnblocks`:
+    unblocks it, nudges it, or the refusal.
+  - **Keep sandbox ☐/☑** toggles `save_sandbox`.
+  - **Edit task…** is a form over the four inputs that sends only the
+    fields that changed.
+  - **Open in my terminal** and **Shell: worktree** are the task's tabs.
+
+  The project header's "Open shell ▾" became **Open session**, **Shell:
+  orch dir** and **Shell: workspace**. Their tooltip says "opens in your
+  terminal". Every task write sends the task's etag as `If-Match`. On a
+  `412` it takes `error.current` and says the task changed. A `422` shows
+  the task-graph refusal and keeps the form open. Without `write`, each
+  control stays disabled with its TUI command. Watch, Prompt (P.5), the
+  in-sandbox shell (P.6) and `archive` stay disabled.
+  `task_actions_dom_test.js` drives all of this in the fake DOM, including a
+  read-only session that sends nothing.
+- **Tests.** In `internal/control/task_test.go`: the unblock rule, the
+  nudge, a deferred retry, the refusals, and the edit's graph checks
+  (cycle, unknown dependency, bad glob and tag). `task.UpdateIf`'s check is
+  tested too. In `internal/api/actions_test.go`: the routes, If-Match and
+  body rules over a fake `Actions`. In `internal/daemon/api_tasks_test.go`:
+  end to end on real files, covering retry unblocking a project, the
+  refusals, the `412`s, save-sandbox, the edit's `422`, and the host tabs
+  over a recording terminal launcher. Then `graph_test.js`, the
+  `workload_test.js` model, and the DOM test above.
+
+**Not in this phase,** as planned: `archive` (R.4 Q11), the in-browser
+PTY, and the task worktree reset. A retry reuses the worktree as it is.
+Option R2 (`Daemon.RetryTask`) was not built. R1's nudge works with the
+daemon unchanged, so R.4 Q2 stays "revisit after use".
 
 **Scope: M.**
 
@@ -2606,7 +2726,7 @@ Each of these is independent and needs its own decision:
 | P.1 (**done**) | daemon-side priming | S–M | `internal/daemon` (`priming.go`), `internal/session`, `internal/tui` (`acpwatch.go`), `internal/runner` | the daemon prompts agents; a double prompt is guarded by the `prompt_count` compare-and-set |
 | P.2 (**done**) | read API + SSE on a unix socket, `orch status --api` | M | `internal/api` (listener, handlers, `events.go` hub, `client.go`), `internal/daemon` (`api*.go`, `api_events.go` publisher), `internal/sbx` (`listcache.go`), `cmd/orch` (`api.go`, `status.go`) | a listener (read-only, token) |
 | P.3 (**done**) | read-only GUI on loopback: project view, sandbox card, Sandboxes, agents map, timeline, PRs, transcripts | M–L | `internal/api/web/` (bundle), `internal/api` (`web.go`, `login.go`), `cmd/orch` (`gui.go`), `internal/daemon` (`api_projects.go`, `api_sessions.go`, `api_audit.go`), `internal/scheduler` (`Next`) | browser threats (§A.6.3) |
-| P.4 | write actions except archive | M | `internal/api`, `internal/control`, `internal/postoffice` | writes; lost updates guarded by etags |
+| P.4 (**done**) | write actions except archive: intake and new project, project actions, inbox answers, task retry R1, `save-sandbox`, `PATCH` task, host tabs | M | `internal/api` (`writes.go`), `internal/control` (`create.go`, `catchup.go`, `options.go`, `task.go`), `internal/daemon` (`api_writes.go`, `api_tasks.go`), `internal/project` and `internal/task` (`UpdateIf`), `internal/postoffice` (`ViaGUI`), `internal/api/web/` (`intake.js`, `inbox.js`, `taskactions.js`) | writes; lost updates guarded by etags under the per-path lock |
 | P.5 | session relay | M | `internal/api` relay, `internal/acpchat` | session lifetime; prompting into live agents |
 | P.6 | PTY, archive, TUI on API, retention, capability gate | varies | varies | each judged separately |
 

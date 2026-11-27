@@ -7,8 +7,11 @@
 // "Queue intake" open their forms (intake.js); the header's Stop/Start,
 // Wolf…, Review, Cleanup, Hide/Show and Catch up are project actions
 // (POST /projects/{id}/actions/{action}) sent with the project's etag as
-// If-Match. The task strip's buttons, archive and the shells stay disabled
-// and name the TUI command that does them today.
+// If-Match; Open session and the two shells open host tabs (§A.4.6). The
+// selected-task strip's Retry…, Keep sandbox, Edit task… and its host tabs
+// are task actions (taskactions.js), sent with the task's etag. archive, and
+// Watch and Prompt (the session relay, P.5), stay disabled and name the TUI
+// command that does them today.
 "use strict";
 
 (function () {
@@ -159,6 +162,11 @@
     const laneBox = h("div", { class: "lane" });
     const strip = h("div", { class: "strip" });
     let transcript = null;
+    // The selected task's controls (taskactions.js): a write's response, or
+    // a 412's current, replaces the task in state.
+    const tc = wm.taskControls((t) => {
+      if (state) state.tasks.set(t.name, Object.assign(state.tasks.get(t.name) || {}, t));
+    }, () => drawStrip());
 
     const load = async () => {
       const [p, tasks, graph, sessions] = await Promise.all([
@@ -236,8 +244,8 @@
     function actionButton(a) {
       if (a.href) return wm.writeAction(a.label, a.command, a);
       if (!a.action) return wm.disabledAction(a.label, a.command, a.refusal, a.danger);
-      const o = Object.assign({}, a, { title: a.command + " in the TUI" });
-      o.onclick = a.action === "wolf" ? () => ((wolfOpen = !wolfOpen), drawHeader()) : (ev) => run(a.action, {}, ev && ev.target);
+      const o = Object.assign({}, a, { title: a.tab ? pv.TAB_NOTE : a.command + " in the TUI" });
+      o.onclick = a.action === "wolf" ? () => ((wolfOpen = !wolfOpen), drawHeader()) : (ev) => run(a.action, a.body || {}, ev && ev.target);
       return wm.writeAction(a.label, a.command, o);
     }
 
@@ -269,7 +277,7 @@
           wolfReason.value = "";
         }
         actionNote.className = "small ok action-note";
-        actionNote.textContent = action + ": " + pv.actionDone(action, res);
+        actionNote.textContent = (action === "open-shell" ? "shell " + body.where : action) + ": " + pv.actionDone(action, res);
       } catch (e) {
         if (e.current && e.current.id) Object.assign(state.project, e.current);
         actionNote.className = "small error action-note";
@@ -391,11 +399,13 @@
     function drawStrip() {
       const t = selected && state.tasks.get(selected);
       if (!t) {
+        tc.set(null, null, null);
         stopTranscript();
         strip.replaceChildren(h("p", { class: "muted pad" }, "Select a task in the graph to see its sandbox."));
         return;
       }
       const sess = t.session ? state.sessions.get(t.session) : null;
+      tc.set(t, state.project, sess);
       const c = t.capabilities || {};
       const sb = sess && sess.sandbox;
       const gw = sess && sess.gateway;
@@ -424,8 +434,11 @@
         row("network", h("code", {}, pv.policySummary(c.policies))),
         row("output", h("code", {}, output)),
         h("div", { class: "actions" },
-          pv.taskActions(t, sess).map((a) => wm.disabledAction(a.label, a.command, a.refusal)),
-          wm.link("/projects/" + enc(state.project.id) + "/tasks/" + enc(t.name), "Full sandbox card ▸"))
+          pv.taskActions(t, sess, state.project).map(tc.button),
+          t.seed ? null : tc.keep(),
+          wm.wl.inputActions(t).filter((a) => a.action === "edit").map(tc.button),
+          wm.link("/projects/" + enc(state.project.id) + "/tasks/" + enc(t.name), "Full sandbox card ▸")),
+        tc.panel()
       );
       const reason = t.failure_reason || t.blocked_reason;
       strip.replaceChildren(

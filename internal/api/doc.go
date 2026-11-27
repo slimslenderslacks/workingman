@@ -78,11 +78,18 @@
 // actions of §A.4.2, POST /projects/{id}/actions/{action} for each of
 // [ProjectActions] (stop, start, wolf, review, cleanup, hide, show,
 // catchup; not archive, which stays in the TUI), where those
-// [IfMatchRequired] lists are a 428 without If-Match; and the inbox
-// answers of §A.4.5, POST /messages/{id}/answer and /dismiss. The project
-// and intake writes need the write scope, the inbox answers the answer
-// scope (403 without it; the bearer token has every scope). Every write
-// follows §A.4.1:
+// [IfMatchRequired] lists are a 428 without If-Match; the task actions of
+// §A.4.4, POST /projects/{id}/tasks/{name}/actions/{action} for retry
+// (If-Match required) and save-sandbox, and PATCH
+// /projects/{id}/tasks/{name}, a merge-patch of description, depends_on,
+// touches and areas only ([TaskPatch]; If-Match required, 422 when the edit
+// would break the task graph); the host tabs of §A.4.6, open-session and
+// open-shell ({"where": "orch"|"workspace"}) on a project and on a task,
+// which open a tab in the daemon's terminal and write nothing; and the
+// inbox answers of §A.4.5, POST /messages/{id}/answer and /dismiss. The
+// project, task and intake writes need the write scope, the inbox answers
+// the answer scope (403 without it; the bearer token has every scope).
+// Every write follows §A.4.1:
 // a JSON body with no unknown fields; If-Match, checked by the action
 // against the resource's etag ([MatchETag]; 412 with the current resource on
 // a mismatch); an optional Idempotency-Key, under which the first response is
@@ -90,7 +97,8 @@
 // for another request; a 5xx is not kept); 202 with the written resource and
 // its ETag, or 200 with "noop": true; errors in the shape above plus
 // "current", with codes bad_request, not_found, conflict, invalid_state,
-// precondition_failed, precondition_required, forbidden and unavailable;
+// precondition_failed, precondition_required, unprocessable, forbidden and
+// unavailable;
 // and an api_write (or
 // api_write_refused) audit line with the action, path, etags and client.
 //
@@ -102,10 +110,12 @@
 //   - [Source] — what the server reads, [Resources] included; implemented
 //     by internal/daemon.
 //   - [Actions], [WriteRequest], [WriteResult] — the write actions, which
-//     the daemon's source implements too; [ProjectActionRequest] and
-//     [AnswerRequest] are their bodies; [ErrInvalid], [ErrConflict],
-//     [ErrInvalidState], [ErrPreconditionFailed], [ErrPreconditionRequired]
-//     and [WithCurrent] pick a write's error response.
+//     the daemon's source implements too; [ProjectActionRequest],
+//     [TaskActionRequest], [TaskPatch] and [AnswerRequest] are their
+//     bodies, [ProjectActions] and [TaskActions] the actions served;
+//     [ErrInvalid], [ErrConflict], [ErrInvalidState], [ErrPreconditionFailed],
+//     [ErrPreconditionRequired], [ErrUnprocessable] and [WithCurrent] pick a
+//     write's error response.
 //   - [ProjectQuery], [AuditQuery], [SessionQuery], ... — the parsed query
 //     parameters handed to [Resources].
 //   - [EnsureToken], [ReadToken], [TokenPath] — the token file.

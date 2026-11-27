@@ -253,21 +253,31 @@
   // ---- actions ---------------------------------------------------------------
 
   // cardActions are the card header's buttons: watch, open in a terminal,
-  // and the in-browser shell (§G.2), each disabled with its TUI command.
-  function cardActions(session, sandbox) {
+  // and the in-browser shell (§G.2). With a task (t), Open in my terminal is
+  // its open-session (§A.4.6), which needs its worktree, and Retry… is
+  // offered when the task can be retried; Watch, Prompt and the shell wait
+  // for later phases and stay disabled with their TUI command.
+  function cardActions(session, sandbox, t) {
     const live = !!(session && session.acp && session.acp.attachable);
-    return [
+    const noTree = t && !t.worktree ? "the task has no worktree yet; use the project's Open session" : "";
+    const out = [
       { label: "Watch (ACP)", command: "a (the TUI's ACP session tabs)", refusal: live ? "" : "no live ACP session in this sandbox" },
       session && session.persistent
         ? { label: "Prompt", command: "a, then i (the TUI's ACP tab)", refusal: "" }
         : { label: "Prompt (persistent only)", command: "a, then i (the TUI's ACP tab)", refusal: "persistent sessions only: " + ((session && session.kind) || "this") + " sessions are one-shot" },
-      { label: "Open in my terminal", command: ":session (from the Tasks pane)", refusal: "" },
+      t
+        ? { label: "Open in my terminal", command: ":session (from the Tasks pane)", action: "open-session", refusal: noTree, tab: true }
+        : { label: "Open in my terminal", command: ":session (from the Tasks pane)", refusal: "" },
       {
         label: "Shell in sandbox (pty scope)",
         command: "sbx exec -it " + (sandbox || "<sandbox>") + " bash",
         refusal: sandbox === "workingman-agent" || sandbox === "step-up" ? "never for workingman-agent or step-up" : "needs --api-pty and the pty scope (§A.5.3, P.6)",
       },
     ];
+    if (t && (t.status === "failed" || t.status === "blocked" || (t.status === "ready" && t.integration))) {
+      out.push({ label: "Retry…", command: ":wolf, then ask it to re-run the task", action: "retry", refusal: "", confirm: true });
+    }
+    return out;
   }
 
   // inputActions are the ways to change a task's inputs (§A.4.4).
@@ -275,7 +285,12 @@
     const running = t.status === "running";
     return [
       { label: "Queue intake", command: "drop a .md file into the project's intake/ directory", refusal: "", href: "/projects/" + encodeURIComponent(t.project) + "/intake" },
-      { label: "Edit task…", command: "edit tasks/" + t.name + ".yaml (description, depends_on, touches, areas)", refusal: running ? "the task is running: its inputs cannot change now" : "" },
+      {
+        label: "Edit task…",
+        command: "edit tasks/" + t.name + ".yaml (description, depends_on, touches, areas)",
+        action: "edit",
+        refusal: running ? "the task is running: its inputs cannot change now" : t.status === "success" || t.status === "committed" ? "the task's work is done (" + t.status + "): queue intake instead" : "",
+      },
     ];
   }
 
@@ -368,7 +383,7 @@
           }
         : null,
       outputNote: !t && facts ? facts.output : "",
-      actions: cardActions(s, name),
+      actions: cardActions(s, name, t),
       inputActions: t ? inputActions(t) : [],
     };
   }

@@ -1,6 +1,7 @@
 package task
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -378,5 +379,31 @@ func TestUpdateSkipsUnchanged(t *testing.T) {
 	data, _ := os.ReadFile(dst)
 	if string(data) != raw {
 		t.Errorf("file rewritten on a no-op Update:\n%s", data)
+	}
+}
+
+// UpdateIf's check sees the bytes under the lock and stops the write.
+func TestUpdateIfCheck(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "x.yaml")
+	raw := "name: x\nstatus: failed\n"
+	if err := writeRaw(dst, raw); err != nil {
+		t.Fatalf("writeRaw: %v", err)
+	}
+	refused := errors.New("stale")
+	ran := false
+	err := UpdateIf(dst, func(data []byte) error {
+		if string(data) != raw {
+			t.Errorf("check saw %q", data)
+		}
+		return refused
+	}, func(*Task) bool { ran = true; return true })
+	if err != refused || ran {
+		t.Errorf("err = %v, fn ran = %v", err, ran)
+	}
+	if err := UpdateIf(dst, func([]byte) error { return nil }, func(tk *Task) bool { tk.Status = StatusReady; return true }); err != nil {
+		t.Fatal(err)
+	}
+	if tk, _ := Load(dst); tk.Status != StatusReady {
+		t.Errorf("status = %q", tk.Status)
 	}
 }

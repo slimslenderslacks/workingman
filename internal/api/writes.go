@@ -31,6 +31,7 @@ const (
 	CodePreconditionRequired = "precondition_required"
 	CodeConflict             = "conflict"
 	CodeInvalidState         = "invalid_state"
+	CodeUnprocessable        = "unprocessable"
 )
 
 // Errors an [Actions] method returns to pick the response status, beside
@@ -52,6 +53,9 @@ var (
 	// ErrPreconditionRequired is a 428: the action reads a field the daemon
 	// or an agent may also write, so it needs If-Match.
 	ErrPreconditionRequired = errors.New("precondition required")
+	// ErrUnprocessable is a 422: the edit is well-formed but its result
+	// would not load (a task edit that breaks the task graph).
+	ErrUnprocessable = errors.New("unprocessable")
 )
 
 // currentError carries the resource as it is now with a write's error, for
@@ -124,9 +128,111 @@ const (
 	ActionCatchup = "catchup"
 )
 
+// The interactive helpers (§A.4.6), on a project and on a task: they open a
+// tab in the terminal the daemon runs in, not a file write.
+const (
+	ActionOpenSession = "open-session"
+	ActionOpenShell   = "open-shell"
+)
+
 // ProjectActions are the project actions the API serves, in the order of
-// §A.4.2's table.
-var ProjectActions = []string{ActionStop, ActionStart, ActionWolf, ActionReview, ActionCleanup, ActionHide, ActionShow, ActionCatchup}
+// §A.4.2's table, then the host-tab helpers of §A.4.6.
+var ProjectActions = []string{ActionStop, ActionStart, ActionWolf, ActionReview, ActionCleanup, ActionHide, ActionShow, ActionCatchup, ActionOpenSession, ActionOpenShell}
+
+// Shells a project's open-shell opens (§A.4.6): a host shell in its orch
+// directory (`:orch`) or at the root of its workspace (`:workspace`).
+const (
+	ShellOrch      = "orch"
+	ShellWorkspace = "workspace"
+)
+
+// Task actions (§A.4.4, §A.4.6): POST /projects/{id}/tasks/{name}/actions/{action}.
+const (
+	ActionRetry       = "retry"
+	ActionSaveSandbox = "save-sandbox"
+)
+
+// TaskActions are the task actions the API serves.
+var TaskActions = []string{ActionRetry, ActionSaveSandbox, ActionOpenSession, ActionOpenShell}
+
+// TaskIfMatchRequired reports whether a task action needs If-Match: retry
+// reads the status, attempts and reasons the daemon and the task agent
+// write. save-sandbox takes it when sent; the host tabs write nothing.
+func TaskIfMatchRequired(action string) bool { return action == ActionRetry }
+
+// MaxRetryNote bounds a retry's note.
+const MaxRetryNote = 500
+
+// TaskActionRequest is a task action's body: {"reset_attempts", "note"} for
+// retry, {"save"} for save-sandbox, {} for the host tabs.
+type TaskActionRequest struct {
+	ResetAttempts bool   `json:"reset_attempts,omitempty"`
+	Note          string `json:"note,omitempty"`
+	Save          *bool  `json:"save,omitempty"`
+}
+
+// TaskPatch is the PATCH /projects/{id}/tasks/{name} body (§A.4.4): a JSON
+// merge-patch of a task's inputs, description, depends_on, touches and
+// areas, and nothing else. A field left out is left as is; "touches": null
+// removes the hint, "areas": null clears the tags.
+type TaskPatch struct {
+	Description *string
+	DependsOn   *[]string
+	// TouchesSet says touches is in the patch; Touches is then nil for null.
+	TouchesSet bool
+	Touches    *[]string
+	Areas      *[]string
+}
+
+// UnmarshalJSON reads a merge-patch, refusing any field but the four inputs.
+func (p *TaskPatch) UnmarshalJSON(data []byte) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	null := func(raw json.RawMessage) bool { return string(bytes.TrimSpace(raw)) == "null" }
+	for k, raw := range m {
+		var err error
+		switch k {
+		case "description":
+			if null(raw) {
+				return errors.New("description cannot be null")
+			}
+			p.Description = new(string)
+			err = json.Unmarshal(raw, p.Description)
+		case "depends_on":
+			v := []string{}
+			if !null(raw) {
+				err = json.Unmarshal(raw, &v)
+			}
+			p.DependsOn = &v
+		case "touches":
+			p.TouchesSet = true
+			if !null(raw) {
+				v := []string{}
+				err = json.Unmarshal(raw, &v)
+				p.Touches = &v
+			}
+		case "areas":
+			v := []string{}
+			if !null(raw) {
+				err = json.Unmarshal(raw, &v)
+			}
+			p.Areas = &v
+		default:
+			return fmt.Errorf("unknown field %q: a task edit changes only description, depends_on, touches and areas", k)
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %v", k, err)
+		}
+	}
+	return nil
+}
+
+// Empty reports whether the patch names no field.
+func (p TaskPatch) Empty() bool {
+	return p.Description == nil && p.DependsOn == nil && !p.TouchesSet && p.Areas == nil
+}
 
 // IfMatchRequired reports whether a project action needs If-Match (§A.4.1):
 // those that read and then write a field the daemon or an agent also writes.
@@ -144,9 +250,10 @@ const MaxWolfReason = 500
 
 // ProjectActionRequest is a project action's body: {} for every action but
 // wolf, which may carry the blocked_reason to write when the project has
-// none.
+// none, and open-shell, which says where ([ShellOrch] or [ShellWorkspace]).
 type ProjectActionRequest struct {
 	Reason string `json:"reason,omitempty"`
+	Where  string `json:"where,omitempty"`
 }
 
 // AnswerRequest is the POST /messages/{id}/answer body (§A.4.5): one of the
@@ -183,6 +290,11 @@ type Actions interface {
 	AnswerMessage(ctx context.Context, w WriteRequest, id string, req AnswerRequest) (WriteResult, error)
 	// DismissMessage dismisses an operator notification in post-office.
 	DismissMessage(ctx context.Context, w WriteRequest, id string) (WriteResult, error)
+	// TaskAction runs one of [TaskActions] on a task's file (retry also
+	// writes its project's), or opens a host tab for it.
+	TaskAction(ctx context.Context, w WriteRequest, project, task, action string, req TaskActionRequest) (WriteResult, error)
+	// EditTask applies a merge-patch to a task's inputs.
+	EditTask(ctx context.Context, w WriteRequest, project, task string, patch TaskPatch) (WriteResult, error)
 }
 
 // MatchETag reports whether an If-Match header admits a resource whose etag
@@ -316,6 +428,8 @@ func writeErrStatus(err error) (int, string) {
 		return http.StatusConflict, CodeConflict
 	case errors.Is(err, ErrInvalidState):
 		return http.StatusConflict, CodeInvalidState
+	case errors.Is(err, ErrUnprocessable):
+		return http.StatusUnprocessableEntity, CodeUnprocessable
 	case errors.Is(err, ErrUnavailable):
 		return http.StatusServiceUnavailable, CodeUnavailable
 	}
@@ -639,6 +753,10 @@ func (s *Server) handleProjectAction(r *http.Request, w WriteRequest, action str
 	switch {
 	case req.Reason != "" && action != ActionWolf:
 		return WriteResult{}, fmt.Errorf("%w: only wolf takes a reason", ErrInvalid)
+	case req.Where != "" && action != ActionOpenShell:
+		return WriteResult{}, fmt.Errorf("%w: only open-shell takes where", ErrInvalid)
+	case action == ActionOpenShell && req.Where != ShellOrch && req.Where != ShellWorkspace:
+		return WriteResult{}, fmt.Errorf("%w: open-shell needs where: %q or %q", ErrInvalid, ShellOrch, ShellWorkspace)
 	case len(req.Reason) > MaxWolfReason:
 		return WriteResult{}, fmt.Errorf("%w: the reason is longer than %d bytes", ErrInvalid, MaxWolfReason)
 	case IfMatchRequired(action) && strings.TrimSpace(w.IfMatch) == "":
@@ -672,4 +790,68 @@ func (s *Server) handleDismissMessage(r *http.Request, w WriteRequest) (WriteRes
 		return WriteResult{}, err
 	}
 	return act.DismissMessage(r.Context(), w, r.PathValue("id"))
+}
+
+// taskActionHandler serves POST /projects/{id}/tasks/{name}/actions/{action},
+// one write handler per action, as projectActionHandler does.
+func (s *Server) taskActionHandler() http.HandlerFunc {
+	hs := map[string]http.HandlerFunc{}
+	for _, a := range TaskActions {
+		hs[a] = s.write("task_"+a, ScopeWrite, func(r *http.Request, w WriteRequest) (WriteResult, error) {
+			return s.handleTaskAction(r, w, a)
+		})
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		a := r.PathValue("action")
+		h, ok := hs[a]
+		if !ok {
+			writeError(w, http.StatusNotFound, CodeNotFound, "no task action "+strconv.Quote(a)+"; the API serves "+strings.Join(TaskActions, ", "))
+			return
+		}
+		h(w, r)
+	}
+}
+
+func (s *Server) handleTaskAction(r *http.Request, w WriteRequest, action string) (WriteResult, error) {
+	act := s.actions()
+	if act == nil {
+		return WriteResult{}, fmt.Errorf("%w: this API serves no writes", ErrUnavailable)
+	}
+	var req TaskActionRequest
+	if err := decodeBody(r, &req); err != nil {
+		return WriteResult{}, err
+	}
+	switch {
+	case action != ActionRetry && (req.ResetAttempts || req.Note != ""):
+		return WriteResult{}, fmt.Errorf("%w: only retry takes reset_attempts and note", ErrInvalid)
+	case len(req.Note) > MaxRetryNote:
+		return WriteResult{}, fmt.Errorf("%w: the note is longer than %d bytes", ErrInvalid, MaxRetryNote)
+	case action != ActionSaveSandbox && req.Save != nil:
+		return WriteResult{}, fmt.Errorf("%w: only save-sandbox takes save", ErrInvalid)
+	case action == ActionSaveSandbox && req.Save == nil:
+		return WriteResult{}, fmt.Errorf("%w: save-sandbox needs save: true or false", ErrInvalid)
+	case TaskIfMatchRequired(action) && strings.TrimSpace(w.IfMatch) == "":
+		return WriteResult{}, fmt.Errorf("%w: %s reads and writes fields the daemon also writes; send If-Match with the task's etag", ErrPreconditionRequired, action)
+	}
+	return act.TaskAction(r.Context(), w, r.PathValue("id"), r.PathValue("name"), action, req)
+}
+
+// handleEditTask serves PATCH /projects/{id}/tasks/{name}. If-Match is
+// required: the edit replaces fields the planner and the wolf also write.
+func (s *Server) handleEditTask(r *http.Request, w WriteRequest) (WriteResult, error) {
+	act := s.actions()
+	if act == nil {
+		return WriteResult{}, fmt.Errorf("%w: this API serves no writes", ErrUnavailable)
+	}
+	var patch TaskPatch
+	if err := decodeBody(r, &patch); err != nil {
+		return WriteResult{}, err
+	}
+	switch {
+	case patch.Empty():
+		return WriteResult{}, fmt.Errorf("%w: the patch names no field; send description, depends_on, touches or areas", ErrInvalid)
+	case strings.TrimSpace(w.IfMatch) == "":
+		return WriteResult{}, fmt.Errorf("%w: a task edit needs If-Match with the task's etag", ErrPreconditionRequired)
+	}
+	return act.EditTask(r.Context(), w, r.PathValue("id"), r.PathValue("name"), patch)
 }

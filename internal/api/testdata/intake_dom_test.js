@@ -88,11 +88,11 @@ const input = (main, aria) => main.find((e) => e.getAttribute("aria-label") === 
 
   // The project view: Queue intake and + New project are links to their
   // forms; the project actions are buttons (actions_dom_test.js drives
-  // them); the shells stay disabled.
+  // them), and so are the host tabs.
   const qi = linkTo(main, "/projects/p_0.gui-api/intake");
   assert.ok(qi && qi.textContent === "Queue intake", "Queue intake is not a link to the intake form");
   assert.ok(linkTo(main, "/new-project"), "+ New project is not a link");
-  assert.ok(byLabel(main, "Open shell ▾").disabled, "Open shell is enabled");
+  assert.ok(byLabel(main, "Shell: orch dir") && !byLabel(main, "Shell: orch dir").disabled, "Shell: orch dir is not enabled");
   assert.ok(byLabel(main, "Stop") && !byLabel(main, "Stop").disabled, "Stop is not enabled with the write scope");
 
   // ---- the intake pane ----

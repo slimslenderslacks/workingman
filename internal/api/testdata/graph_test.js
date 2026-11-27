@@ -154,10 +154,15 @@ test("lane: queue head first, landed newest first, base, failures", () => {
 test("actions: all labelled with their TUI command; refusals match the TUI", () => {
   const { st } = ctxOf(fixture());
   const acts = pv.projectActions(st.project);
-  assert.deepEqual(acts.map((a) => a.label), ["Stop", "Wolf…", "Review", "Queue intake", "Cleanup", "Hide", "Open shell ▾"]);
+  assert.deepEqual(acts.map((a) => a.label), ["Stop", "Wolf…", "Review", "Queue intake", "Cleanup", "Hide", "Open session", "Shell: orch dir", "Shell: workspace"]);
   // The project actions the API serves name their endpoint; archive is not
-  // among them (R.4 Q11), and the shells stay TUI-only.
-  assert.deepEqual(acts.filter((a) => a.action).map((a) => a.action), ["stop", "wolf", "review", "cleanup", "hide"]);
+  // among them (R.4 Q11). The host tabs (§A.4.6) say where they open.
+  assert.deepEqual(acts.filter((a) => a.action).map((a) => a.action), ["stop", "wolf", "review", "cleanup", "hide", "open-session", "open-shell", "open-shell"]);
+  assert.deepEqual(acts.filter((a) => a.action === "open-shell").map((a) => a.body.where), ["orch", "workspace"]);
+  assert.ok(acts.filter((a) => a.action && a.action.startsWith("open-")).every((a) => a.tab));
+  const unfilled = pv.projectActions(Object.assign({}, st.project, { status: "" }));
+  assert.equal(unfilled.find((a) => a.label === "Open session").refusal, "the project agent has not filled in this project yet");
+  assert.equal(unfilled.find((a) => a.label === "Shell: orch dir").refusal, "");
   assert.ok(!acts.some((a) => a.action === "archive" || /archive/i.test(a.label)));
   for (const a of acts) assert.ok(a.command, a.label + " has no command");
   assert.equal(acts[0].command, ":stop");
@@ -185,10 +190,41 @@ test("actions: all labelled with their TUI command; refusals match the TUI", () 
   assert.equal(ta[0].label, "Watch (ACP)");
   assert.equal(ta[0].refusal, "");
   assert.ok(ta.find((a) => a.label === "Prompt (persistent only)").refusal.startsWith("persistent sessions only"));
-  assert.ok(!ta.some((a) => a.label === "Retry"));
-  const failed = pv.taskActions(st.tasks.get("auth-token"), null);
-  assert.ok(failed.some((a) => a.label === "Retry"));
+  assert.ok(!ta.some((a) => a.action === "retry"));
+  assert.deepEqual(ta.filter((a) => a.action).map((a) => a.action), ["open-session", "open-shell"]);
+  const failed = pv.taskActions(st.tasks.get("auth-token"), null, st.project);
+  assert.ok(failed.some((a) => a.label === "Retry…" && a.action === "retry" && a.confirm));
   assert.equal(failed[0].refusal, "no live ACP session for this task");
+});
+
+test("retry: the R1 rules, as the server applies them", () => {
+  const { st } = ctxOf(fixture());
+  const t = { name: "auth-token", status: "failed", attempts: 3, worktree: "/wt" };
+  assert.ok(pv.retryable(t));
+  assert.ok(pv.retryable({ name: "x", status: "ready", integration: { result: "conflict" } }));
+  for (const s of ["ready", "running", "success", "committed"]) assert.ok(!pv.retryable({ name: "x", status: s }), s);
+  assert.ok(!pv.retryable({ name: "", seed: true, status: "failed" }));
+  // blocked_reason: this task alone, as control.RetryUnblocks.
+  assert.ok(pv.retryUnblocks('task "auth-token" failed after 3 attempts: go test failed', "auth-token"));
+  assert.ok(pv.retryUnblocks("no ready tasks remain but project is not fully committed: auth-token (failed)", "auth-token"));
+  assert.ok(!pv.retryUnblocks('task "auth-token" failed after 3 attempts; also: task "x" reported blocked: y', "auth-token"));
+  assert.ok(!pv.retryUnblocks('task "auth-token-2" failed after 3 attempts', "auth-token"));
+  assert.ok(!pv.retryUnblocks("summoned manually by the user via the GUI", "auth-token"));
+  const p = st.project;
+  assert.match(pv.retryHint(t, Object.assign({}, p, { status: "working" })).effect, /schedules the task now/);
+  assert.match(pv.retryHint(t, Object.assign({}, p, { status: "blocked", blocked_reason: 'task "auth-token" failed after 3 attempts' })).effect, /^unblocks/);
+  assert.match(pv.retryHint(t, Object.assign({}, p, { status: "blocked", blocked_reason: "needs a human" })).refusal, /summon the wolf/);
+  assert.match(pv.retryHint(t, Object.assign({}, p, { status: "stopped" })).refusal, /is stopped: start it/);
+  assert.match(pv.retryHint(t, Object.assign({}, p, { status: "idle" })).effect, /waits for the project's next dispatch/);
+  assert.match(pv.retryHint(t, Object.assign({}, p, { status: "working", live: { integrating: "auth-token" } })).refusal, /commit agent is integrating/);
+  assert.match(pv.retryHint(t, p, { id: "task-auth-token" }).refusal, /live session/);
+  // A task with no worktree has no tab of its own.
+  const noTree = pv.taskActions({ name: "x", status: "ready" }, null, p);
+  assert.match(noTree.find((a) => a.action === "open-session").refusal, /no worktree/);
+  assert.match(pv.actionDone("retry", { dispatch: "unblocked", task: { attempts: 0 }, expect: ["task.status", "project.status"] }), /ready again \(attempts 0\); the project is unblocked · watch for task\.status, project\.status/);
+  assert.match(pv.actionDone("retry", { dispatch: "deferred", dispatch_reason: "gui-api is idle; the task waits for its next dispatch", task: { attempts: 3 } }), /attempts 3\); gui-api is idle/);
+  assert.equal(pv.actionDone("open-shell", { note: "opened orch in a new tab" }), "opened orch in a new tab");
+  assert.match(pv.actionDone("save-sandbox", { write: { fields: { save_sandbox: true } } }), /^save_sandbox set/);
 });
 
 test("apply patches state from stream events", () => {

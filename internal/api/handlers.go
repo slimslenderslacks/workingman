@@ -31,7 +31,13 @@ func (s *Server) routes(mux *http.ServeMux) {
 	}))
 	mux.HandleFunc(p+"/projects/{id}", s.get(s.handleProject))
 	mux.HandleFunc(p+"/projects/{id}/tasks", s.get(s.handleTasks))
-	mux.HandleFunc(p+"/projects/{id}/tasks/{name}", s.get(s.handleTask))
+	mux.HandleFunc(p+"/projects/{id}/tasks/{name}", s.methods(map[string]http.HandlerFunc{
+		http.MethodGet:   s.handleTask,
+		http.MethodPatch: s.write("edit_task", ScopeWrite, s.handleEditTask),
+	}))
+	mux.HandleFunc(p+"/projects/{id}/tasks/{name}/actions/{action}", s.methods(map[string]http.HandlerFunc{
+		http.MethodPost: s.taskActionHandler(),
+	}))
 	mux.HandleFunc(p+"/projects/{id}/graph", s.get(s.handleGraph))
 	mux.HandleFunc(p+"/projects/{id}/intake", s.methods(map[string]http.HandlerFunc{
 		http.MethodGet:  s.handleIntake,

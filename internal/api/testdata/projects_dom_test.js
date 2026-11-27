@@ -94,7 +94,7 @@ const send = (ev) => page.es.source.send(ev);
     assert.match(b.getAttribute("title"), /in the TUI: /, b.textContent);
   }
   const labels = buttons.map((b) => b.childNodes[0].textContent);
-  for (const l of ["Stop", "Wolf…", "Review", "Queue intake", "Open shell ▾", "Watch (ACP)", "Open in my terminal", "Prompt (persistent only)"]) {
+  for (const l of ["Stop", "Wolf…", "Review", "Queue intake", "Open session", "Shell: orch dir", "Shell: workspace", "Watch (ACP)", "Open in my terminal", "Shell: worktree", "Prompt (persistent only)", "Keep sandbox ☐", "Edit task…"]) {
     assert.ok(labels.includes(l), "missing button " + l + " in " + labels.join(", "));
   }
   // The strip links to the task's full sandbox card (§G.3).

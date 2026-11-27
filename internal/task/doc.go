@@ -20,6 +20,8 @@
 // truncate) an over-long name; repairing names is taskgraph.Load's job.
 // [Save] and [Update] hold the in-process write lock for the file's path
 // (internal/pathlock), so in-process writers of one task file are serialized.
+// [UpdateIf] is Update with a check on the file's bytes under that lock: the
+// GUI API's If-Match on a task.
 //
 // # Key types
 //

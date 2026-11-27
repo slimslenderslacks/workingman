@@ -274,7 +274,7 @@ function boot({ webDir, scripts, url, routes, raw, skip }) {
 }
 
 // SCRIPTS is the bundle in index.html's order.
-const SCRIPTS = ["app.js", "graph.js", "projects.js", "workload.js", "sandboxes.js", "agents.js", "transcript.js", "watch.js", "secondary.js", "timeline.js", "pulls.js", "intake.js", "inbox.js"];
+const SCRIPTS = ["app.js", "graph.js", "taskactions.js", "projects.js", "workload.js", "sandboxes.js", "agents.js", "transcript.js", "watch.js", "secondary.js", "timeline.js", "pulls.js", "intake.js", "inbox.js"];
 
 // buttons lists el's buttons that stand for a write action (every one but
 // the local ones, such as Save transcript, which only save in the

@@ -35,6 +35,7 @@ func TestStaticBundleServed(t *testing.T) {
 		{"/timeline.js", "javascript", "audit"},
 		{"/pulls.js", "javascript", "pull requests"},
 		{"/intake.js", "javascript", "Idempotency-Key"},
+		{"/taskactions.js", "javascript", "wm.taskControls"},
 		{"/inbox.js", "javascript", "approve all"},
 		{"/inbox", "text/html", `<script src="/inbox.js"`},
 		{"/new-project", "text/html", `<script src="/intake.js"`},
@@ -177,6 +178,10 @@ func TestProjectViewModel(t *testing.T) {
 		// If-Match from the project's etag, a 412 and a lost 409 shown,
 		// and nothing sent without the write or answer scope.
 		{"actions_dom_test.js", dir},
+		// The task actions and the host tabs (P.4, last slice): retry,
+		// keep sandbox and the task edit with the task's etag, a 412 and a
+		// 422 shown, and nothing sent without the write scope.
+		{"task_actions_dom_test.js", dir},
 	} {
 		out, err := exec.Command(node, filepath.Join("testdata", tc[0]), tc[1]).CombinedOutput()
 		if err != nil {

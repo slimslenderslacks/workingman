@@ -108,7 +108,10 @@ function page(scopes, url) {
   // Review refuses on a working project, with the TUI's words.
   assert.ok(byLabel(main, "Review").disabled);
   assert.match(byLabel(main, "Review").getAttribute("title"), /^review starts on an idle work stream/);
-  assert.ok(byLabel(main, "Open shell ▾").disabled, "the shells are enabled");
+  for (const l of ["Open session", "Shell: orch dir", "Shell: workspace"]) {
+    assert.ok(byLabel(main, l) && !byLabel(main, l).disabled, l + " is not enabled");
+    assert.match(byLabel(main, l).getAttribute("title"), /opens in your terminal/);
+  }
   assert.ok(!buttons(main).some((b) => /archive/i.test(label(b))), "archive is offered");
 
   byLabel(main, "Stop").dispatch("click");
@@ -219,7 +222,7 @@ function page(scopes, url) {
   const ro = page(["read"], "http://127.0.0.1:7078/projects/p_0.gui-api");
   ro.start();
   await ro.settle();
-  for (const l of ["Stop", "Wolf…", "Cleanup", "Hide"]) {
+  for (const l of ["Stop", "Wolf…", "Cleanup", "Hide", "Open session", "Shell: orch dir"]) {
     const btn = byLabel(ro.main, l);
     assert.ok(btn && btn.disabled, "read-only: " + l + " is enabled");
     btn.dispatch("click");

@@ -313,8 +313,9 @@
   // the TUI command that does it today and, when that command would refuse
   // right now, the TUI's own refusal text (internal/control). An action
   // with `action` is a project action the API serves (POST
-  // /projects/{id}/actions/{action}, P.4), one with href a link to its form;
-  // the rest stay disabled. archive is left out (R.4 Q11).
+  // /projects/{id}/actions/{action}, P.4) with `body` when it takes one,
+  // one with href a link to its form. archive is left out (R.4 Q11). The
+  // host tabs (§A.4.6) open in the terminal the daemon runs in.
   function projectActions(p) {
     const name = p.work_stream;
     const status = p.status || "";
@@ -347,14 +348,23 @@
     });
     out.push(flags.hidden ? { label: "Show", command: ":show", action: "show", refusal: "" } : { label: "Hide", command: ":hide", action: "hide", refusal: "" });
     if (p.cron) out.push({ label: "Catch up", command: "orch catchup " + (p.path || "<project.yaml>"), action: "catchup", refusal: "" });
-    out.push({ label: "Open shell ▾", command: ":orch or :workspace", refusal: "" });
+    const unfilled = status === "" ? "the project agent has not filled in this project yet" : "";
+    out.push({ label: "Open session", command: ":session", action: "open-session", refusal: unfilled, tab: true });
+    out.push({ label: "Shell: orch dir", command: ":orch", action: "open-shell", body: { where: "orch" }, refusal: "", tab: true });
+    out.push({ label: "Shell: workspace", command: ":workspace", action: "open-shell", body: { where: "workspace" }, refusal: unfilled, tab: true });
     return out;
   }
+
+  // TAB_NOTE is how a host-tab button says where it opens (§A.4.6).
+  const TAB_NOTE = "opens in your terminal (a new tab of the terminal the daemon runs in)";
 
   // actionDone is the status line after a project action succeeded: what
   // was written and what to watch for. res is the API's response.
   function actionDone(action, res) {
     const r = res || {};
+    if (r.note && (action === "open-session" || action === "open-shell")) return r.note;
+    if (action === "retry") return retryDone(r);
+    if (action === "save-sandbox") return r.noop ? "save_sandbox already had that value" : (r.write && r.write.fields && r.write.fields.save_sandbox ? "save_sandbox set: the sandbox is kept when its agent exits" : "save_sandbox cleared: the sandbox is removed when its agent succeeds");
     if (r.noop) {
       return {
         review: "a review kick is already waiting for the daemon",
@@ -379,22 +389,91 @@
   }
 
   // taskActions lists the selected-task strip's buttons (§G.1, §G.2).
-  // session is the task's live session resource, if any.
-  function taskActions(t, session) {
+  // session is the task's live session resource, if any; project the
+  // task's project. One with `action` is a task action the API serves
+  // (POST …/tasks/{name}/actions/{action}); Watch and Prompt wait for the
+  // session relay (P.5).
+  function taskActions(t, session, project) {
     const live = !!(session && session.acp && session.acp.attachable);
+    const noTree = t && !t.worktree ? "the task has no worktree yet; use the project's Open session / Shell: workspace" : "";
     const out = [
       { label: "Watch (ACP)", command: "a (the TUI's ACP session tabs)", refusal: live ? "" : "no live ACP session for this task" },
-      { label: "Open in my terminal", command: ":session (from the Tasks pane)", refusal: "" },
+      { label: "Open in my terminal", command: ":session (from the Tasks pane)", action: "open-session", refusal: noTree, tab: true },
+      { label: "Shell: worktree", command: ":workspace (from the Tasks pane)", action: "open-shell", refusal: noTree, tab: true },
     ];
     if (session && session.persistent) {
       out.push({ label: "Prompt", command: "a, then i (the TUI's ACP tab)", refusal: "" });
     } else {
       out.push({ label: "Prompt (persistent only)", command: "a, then i (the TUI's ACP tab)", refusal: "persistent sessions only: task sessions are one-shot" });
     }
-    if (t && (t.status === "failed" || t.status === "blocked")) {
-      out.push({ label: "Retry", command: ":wolf, then ask it to re-run the task", refusal: "" });
-    }
+    const retry = retryAction(t, project, session);
+    if (retry) out.push(retry);
     return out;
+  }
+
+  // retryAction is the Retry… button for a task that can be retried, else
+  // null. It opens a confirm row (confirm) before it sends anything.
+  function retryAction(t, project, session) {
+    if (!t || !retryable(t)) return null;
+    return { label: "Retry…", command: ":wolf, then ask it to re-run the task", action: "retry", refusal: retryHint(t, project || {}, session).refusal, confirm: true };
+  }
+
+  // retryable mirrors control.Retryable: failed or blocked, or ready with an
+  // integration report (a conflict re-run that is stuck).
+  function retryable(t) {
+    return !!t.name && !t.seed && (t.status === "failed" || t.status === "blocked" || (t.status === "ready" && !!t.integration));
+  }
+
+  const STUCK = "no ready tasks remain but project is not fully committed";
+
+  // retryUnblocks mirrors control.RetryUnblocks: a blocked_reason the
+  // retry of task name may clear names that task and nothing else.
+  function retryUnblocks(reason, name) {
+    reason = String(reason || "").trim();
+    if (!reason || reason.includes("; also: ")) return false;
+    if (reason.includes("task " + JSON.stringify(name))) return true;
+    if (reason.startsWith(STUCK + ": ")) {
+      const rest = reason.slice(STUCK.length + 2);
+      return rest === name + " (failed)" || rest === name + " (blocked)";
+    }
+    return false;
+  }
+
+  // retryHint is what a retry would do to the project (§A.4.4, R1): its
+  // refusal when the server would refuse, else the effect to show in the
+  // confirm row. The server decides; this only explains.
+  function retryHint(t, p, session) {
+    const name = p.work_stream || "the project";
+    const live = p.live || {};
+    if (live.integrating === t.name) return { refusal: "the commit agent is integrating task " + t.name + "; wait for it to finish", effect: "" };
+    if (session) return { refusal: "task " + t.name + " has a live session; it is not done yet", effect: "" };
+    switch (p.status) {
+      case "stopped":
+        return { refusal: name + " is stopped: start it before retrying a task", effect: "" };
+      case "blocked":
+        if (!retryUnblocks(p.blocked_reason, t.name)) {
+          return { refusal: name + " is blocked for more than task " + t.name + " (" + JSON.stringify(p.blocked_reason || "") + "): summon the wolf to untangle it", effect: "" };
+        }
+        return { refusal: "", effect: "unblocks " + name + " (status: working, blocked_reason cleared): its block names this task alone" };
+      case "working":
+        return { refusal: "", effect: "re-saves project.yaml so the daemon schedules the task now" };
+      default:
+        return { refusal: "", effect: name + " is " + (p.status || "not filled in yet") + ": the task waits for the project's next dispatch" };
+    }
+  }
+
+  // retryDone is the status line after a retry.
+  function retryDone(r) {
+    const t = r.task || {};
+    const what = "ready again (attempts " + (t.attempts || 0) + ")";
+    switch (r.dispatch) {
+      case "unblocked":
+        return what + "; the project is unblocked · watch for " + (r.expect || []).join(", ");
+      case "nudged":
+        return what + "; the daemon schedules it · watch for " + (r.expect || []).join(", ");
+      default:
+        return what + "; " + (r.dispatch_reason || "it waits for the project's next dispatch");
+    }
   }
 
   // policySummary is a task's network policy as the sandbox sees it: the
@@ -592,6 +671,11 @@
     projectActions,
     actionDone,
     taskActions,
+    retryable,
+    retryAction,
+    retryUnblocks,
+    retryHint,
+    TAB_NOTE,
     policySummary,
     transcriptLines,
     newState,

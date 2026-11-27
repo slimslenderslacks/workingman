@@ -1,8 +1,8 @@
 // Package control holds the write actions that steer a work stream through its
 // files: stop/start, summon the wolf, review, cleanup, hide/show and archive
-// on project.yaml, the catch-up marker beside it, and the create-only new
-// project and intake, each with its precondition and its user-facing refusal
-// text.
+// on project.yaml, the catch-up marker beside it, the create-only new
+// project and intake, and the task actions on tasks/<name>.yaml, each with
+// its precondition and its user-facing refusal text.
 //
 // Role: shared (TUI today; the GUI API later)
 //
@@ -34,6 +34,19 @@
 // and [WolfReason] replaces [SummonReason]. [RequestCatchup] creates the
 // catch-up marker `orch catchup` writes, never rewriting a pending one.
 //
+// The task actions (§A.4.4) are read-modify-writes of one task file through
+// task.UpdateIf, which runs a check (the API's If-Match) on the file's bytes
+// under its lock. [RetryTask] is the wolf's "re-run it" path (option R1): the
+// task back to ready with its reasons cleared (and, on request, its attempts),
+// then a project.yaml write so the daemon notices — a re-save as agent on a
+// working project, or status working with blocked_reason cleared on one
+// blocked by that task alone ([RetryUnblocks]); a block that covers more is
+// refused for the wolf. [SaveSandbox] sets save_sandbox. [EditTask] applies a
+// merge-patch of description, depends_on, touches and areas, only on a ready,
+// failed or blocked task, and loads the task graph with the edit in place
+// (taskgraph.Load) first: an edit that would leave it unloadable, or give the
+// task a hint the scheduler cannot read, is refused with [ErrGraph].
+//
 // A refused action returns an error whose text is meant for the user (the TUI
 // shows it on its status line) and leaves the file untouched. The project-file
 // actions' refusals wrap [ErrState]. Keeping the
@@ -53,14 +66,18 @@
 //     behind the API's POST /projects and /projects/{id}/intake (§A.4.3);
 //     [ValidProjectName], [ValidIntakeName], [ProjectNameWarning],
 //     [DefaultIntakeName] — their name rules.
+//   - [RetryTask], [Retry], [RetryResult], [Retryable], [RetryUnblocks] —
+//     task retry R1 (§A.4.4); [SaveSandbox]; [EditTask], [TaskEdit],
+//     [EditableStatus] — the task edit, checked with taskgraph.Load.
 //   - [WorkspaceRemover] — the part of workspace.Manager that [Archive] needs.
 //   - [DisplayName], [BackupRoot] — the names used in confirmations.
 //
 // # Collaborators
 //
-// Uses internal/project for the file, internal/pathlock for the in-process
-// write lock, internal/sbx for the sandbox-name budget and internal/worktree
-// for the archive's task-worktree teardown. Used by internal/tui and
+// Uses internal/project and internal/task for the files, internal/taskgraph
+// to validate a task edit, internal/pathlock for the in-process write lock,
+// internal/sbx for the sandbox-name budget and internal/worktree for the
+// archive's task-worktree teardown. Used by internal/tui and
 // internal/daemon (the API's writes). See docs/proposals/workingman-gui.md
-// §A.4.1, §A.4.2, §A.4.3 and §A.7.
+// §A.4.1, §A.4.2, §A.4.3, §A.4.4 and §A.7.
 package control

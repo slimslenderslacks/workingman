@@ -88,6 +88,9 @@ test("card: the wireframe's three columns from live resources", () => {
   assert.equal(c.output.touches, "");
   // Actions: every one carries a TUI command; the shell needs the pty scope.
   assert.deepEqual(c.actions.map((a) => a.label), ["Watch (ACP)", "Prompt (persistent only)", "Open in my terminal", "Shell in sandbox (pty scope)"]);
+  // On a task's card Open in my terminal is its open-session (§A.4.6).
+  assert.equal(c.actions[2].action, "open-session");
+  assert.equal(c.inputActions.find((a) => a.label === "Edit task…").action, "edit");
   for (const a of c.actions) assert.ok(a.command, a.label);
   assert.equal(c.actions[0].refusal, "");
   assert.match(c.actions[1].refusal, /^persistent sessions only: task sessions are one-shot/);

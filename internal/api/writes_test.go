@@ -54,6 +54,35 @@ func (f *fakeActions) DismissMessage(_ context.Context, w WriteRequest, id strin
 	return f.record("dismiss "+id, w)
 }
 
+func (f *fakeActions) TaskAction(_ context.Context, w WriteRequest, project, task, action string, req TaskActionRequest) (WriteResult, error) {
+	save := "-"
+	if req.Save != nil {
+		save = fmt.Sprint(*req.Save)
+	}
+	return f.record(fmt.Sprintf("task %s %s %s reset=%v note=%q save=%s", project, task, action, req.ResetAttempts, req.Note, save), w)
+}
+
+func (f *fakeActions) EditTask(_ context.Context, w WriteRequest, project, task string, p TaskPatch) (WriteResult, error) {
+	call := "edit " + project + " " + task
+	if p.Description != nil {
+		call += fmt.Sprintf(" description=%q", *p.Description)
+	}
+	if p.DependsOn != nil {
+		call += fmt.Sprintf(" depends_on=%q", *p.DependsOn)
+	}
+	if p.TouchesSet {
+		if p.Touches == nil {
+			call += " touches=null"
+		} else {
+			call += fmt.Sprintf(" touches=%q", *p.Touches)
+		}
+	}
+	if p.Areas != nil {
+		call += fmt.Sprintf(" areas=%q", *p.Areas)
+	}
+	return f.record(call, w)
+}
+
 var _ Actions = (*fakeActions)(nil)
 
 func (f *fakeActions) callCount() int {

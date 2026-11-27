@@ -3,9 +3,12 @@
 // sandbox side, and the sandbox card, inputs → capabilities → output. The
 // model is workload.js (wm.wl); this file fetches, subscribes and draws.
 //
-// Writes: "Queue intake" links to the project's intake form (intake.js)
-// for a session with the write scope (P.4). Every other action button is
-// drawn disabled and names the TUI command that does it today.
+// Writes, for a session with the write scope (P.4): "Queue intake" links to
+// the project's intake form (intake.js); on a task's card, Open in my
+// terminal, Retry…, Edit task… and Keep sandbox are task actions
+// (taskactions.js), sent with the task's etag as If-Match. Watch, Prompt
+// and the in-sandbox shell stay disabled and name the TUI command that
+// does them today.
 "use strict";
 
 (function () {
@@ -37,6 +40,9 @@
   // that may be missing (sbx ls down, a session's prompt files gone).
   const maybe = (p) => p.then((v) => v, () => null);
 
+
+  // action draws a list row's button: a link to a form, or disabled. A
+  // card's buttons go through its task controls (taskactions.js) instead.
   const action = (a) => (a.href ? wm.writeAction(a.label, a.command, a) : wm.disabledAction(a.label, a.command, a.refusal, a.danger));
 
   function taskHref(project, task) {
@@ -217,10 +223,16 @@
       }
       return transcript;
     };
+    // The task's controls (taskactions.js) outlive redraws; a write
+    // reloads the card, which takes the task as its file now is.
+    let last = null;
+    const redraw = () => last && box.replaceChildren(drawCard(last, transcriptFor(last.session), tc));
+    const tc = wm.taskControls(() => draw(), redraw);
     const draw = async () => {
       try {
-        const r = await load();
-        box.replaceChildren(drawCard(r, transcriptFor(r.session)));
+        last = await load();
+        tc.set(last.task, last.project, last.session);
+        redraw();
       } catch (e) {
         box.replaceChildren(wm.errorNotice(e));
       }
@@ -234,7 +246,7 @@
     };
   }
 
-  function drawCard({ c, task, project, session }, transcript) {
+  function drawCard({ c, task, project, session }, transcript, tc) {
     const name = c.name || c.sandboxFallback;
     const crumbs = [wm.link("/projects", "Projects"), " / "];
     if (project) crumbs.push(wm.link("/projects/" + enc(project.id), project.work_stream), " / ");
@@ -254,14 +266,15 @@
           c.header.session ? "session " + c.header.session : "no live session",
           c.header.started ? "started " + clock(c.header.started) : "",
           c.sbxDown ? "sbx ls unavailable" : ""].filter(Boolean).join(" · ")),
-      h("div", { class: "actions" }, c.actions.map(action))
+      h("div", { class: "actions" }, c.actions.map(tc.button)),
+      ...(tc.open === "retry" ? tc.panel() : [])
     );
     const cols = h("div", { class: "card-cols" },
-      column("in", "① INPUTS", "what the workload was asked to do", inputs(c, task)),
+      column("in", "① INPUTS", "what the workload was asked to do", inputs(c, task, tc)),
       h("div", { class: "card-arrow", "aria-hidden": "true" }, "→"),
       column("caps", "② CAPABILITIES", "everything this sandbox can reach — nothing else", capabilities(c)),
       h("div", { class: "card-arrow", "aria-hidden": "true" }, "→"),
-      column("out", "③ OUTPUT", "what leaves the sandbox", output(c, task, project))
+      column("out", "③ OUTPUT", "what leaves the sandbox", output(c, task, project, tc))
     );
     const tr = h("section", { class: "card-transcript" },
       h("h2", {}, "Transcript"),
@@ -278,7 +291,7 @@
   const kv = (k, ...v) => h("div", { class: "kv" }, h("span", { class: "k" }, k), h("span", { class: "v" }, ...v));
   const block = (title, src, ...body) => h("div", { class: "cblock" }, h("h3", {}, title, src ? h("span", { class: "src" }, src) : null), ...body);
 
-  function inputs(c, task) {
+  function inputs(c, task, tc) {
     const out = [];
     const p = c.inputs.prompt;
     if (p) {
@@ -310,8 +323,9 @@
       h("div", { class: "muted small" }, "(nothing else from the host is visible)")));
     if (c.inputActions.length) {
       out.push(h("div", { class: "cnote small" },
-        "Inputs are read-only in the GUI. To change them, queue intake (the planner re-plans) or edit description / depends_on / touches / areas while the task is not running (§A.4.4).",
-        h("div", { class: "actions" }, c.inputActions.map(action))));
+        "To change the inputs, queue intake (the planner re-plans) or edit description / depends_on / touches / areas while the task is ready, failed or blocked (§A.4.4). Capabilities are not editable here: they come from planning or step-up.",
+        h("div", { class: "actions" }, c.inputActions.map(tc.button)),
+        ...(tc.open === "edit" ? tc.panel() : [])));
     }
     return out;
   }
@@ -343,7 +357,7 @@
     return [h("div", { class: "boundary" }, out)];
   }
 
-  function output(c, task, project) {
+  function output(c, task, project, tc) {
     const o = c.output;
     if (!o) {
       return [block("Output", "", h("p", { class: "small" }, c.outputNote || "not a task workload: no branch or commit queue"))];
@@ -362,7 +376,8 @@
       o.summary ? h("p", { class: "small" }, o.summary) : null,
       o.created.length ? h("div", { class: "muted small" }, "created: " + o.created.join(", ")) : null));
     out.push(block("Sandbox after exit", "", h("div", { class: "small" }, o.after.rule), h("div", { class: "small" }, o.after.now),
-      h("div", { class: "actions" }, wm.disabledAction("Keep sandbox " + (o.after.keep ? "☑" : "☐"), "edit save_sandbox in tasks/" + task.name + ".yaml"))));
+      h("div", { class: "actions" }, tc.keep()),
+      tc.open ? null : tc.panel()));
     out.push(o.touches ? h("div", { class: "notice warn small" }, o.touches) : h("div", { class: "muted small cnote" }, "touches_actual is compared to touches after landing: touches_exceeded would show here as a warning."));
     return out;
   }
